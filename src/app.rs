@@ -20,6 +20,9 @@ pub struct AppState {
     pub modal: Option<ActiveModal>,
     /// Cross-session message broker (Phase 4): groups, conversations, queues.
     pub broker: crate::comms::Broker,
+    /// Last human key/paste forwarded to a pane. Injections wait out a short
+    /// debounce after typing so they never interleave with user input.
+    pub last_human_input: Option<std::time::Instant>,
 }
 
 /// One modal session: the queued request plus its tuirealm state.
@@ -38,6 +41,7 @@ impl AppState {
             pending_hooks: std::collections::VecDeque::new(),
             modal: None,
             broker: crate::comms::Broker::new(),
+            last_human_input: None,
         }
     }
 
@@ -83,7 +87,57 @@ impl AppState {
             .and_then(|id| self.manager.get(id))
             .map(|rec| rec.name.clone())
             .unwrap_or_else(|| "-".to_string());
-        format!("{active} | {n} {noun} | prefix Ctrl-b (q quit, c new, n/p switch)")
+        let group = self
+            .manager
+            .active()
+            .and_then(|id| self.broker.primary_group(id))
+            .map(|g| format!(" | group:{g}"))
+            .unwrap_or_default();
+        format!("{active} | {n} {noun} | prefix Ctrl-b (q quit, c new, n/p switch, g peers){group}")
+    }
+
+    /// Record human typing: injections debounce until it settles.
+    pub fn note_human_input(&mut self) {
+        self.last_human_input = Some(std::time::Instant::now());
+    }
+
+    /// Deliver due injections into idle, non-recently-typed panes. Targets
+    /// whose hook activity is Thinking/ToolUse/Waiting keep waiting, as do
+    /// panes the human just typed into.
+    pub fn settle_comms(&mut self) {
+        use crate::session::Activity;
+        let now = std::time::Instant::now();
+        self.broker.tick(now);
+        let settled = self.last_human_input.is_none_or(|t| {
+            now.duration_since(t) >= crate::comms::INJECT_DEBOUNCE
+        });
+        if !settled {
+            return;
+        }
+        let order = self.manager.order().to_vec();
+        for id in order {
+            if self.broker.queued(id) == 0 {
+                continue;
+            }
+            let idle = self.manager.get(id).is_some_and(|rec| {
+                matches!(rec.activity, Activity::Idle | Activity::Stopped)
+            });
+            if !idle {
+                continue;
+            }
+            let due = self.broker.take_due(id, usize::MAX);
+            for inj in due {
+                let block = format!(
+                    "\n[forge {} from {}]: {}\n",
+                    inj.kind.label(),
+                    inj.from,
+                    inj.text
+                );
+                if self.manager.pane_write(id, block.as_bytes()).is_ok() {
+                    self.dirty = true;
+                }
+            }
+        }
     }
 
     /// Cycle the active session; wraps around. No-op when empty.
@@ -242,7 +296,29 @@ impl AppState {
         match ev {
             AppEvent::Tick => {}
             AppEvent::Shutdown => self.should_quit = true,
-            AppEvent::SessionOutput { .. } | AppEvent::SessionExited { .. } => {
+            AppEvent::SessionOutput { .. } => {
+                self.dirty = true;
+            }
+            AppEvent::SessionExited { id, .. } => {
+                // An exit fails every conversation touching it; sources of
+                // open asks/tells are notified through the broker queue.
+                self.broker.target_exited(&self.manager, id);
+                self.dirty = true;
+            }
+            AppEvent::CommsRequest(req) => {
+                // The broker answers at once; the verdict goes straight back
+                // to `mcp-serve`. Failures stay single-line JSON, escaped.
+                let now = std::time::Instant::now();
+                let line =
+                    match self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now)
+                    {
+                        Ok(result) => format!("{{\"ok\":true,\"result\":{result}}}\n"),
+                        Err(e) => format!(
+                            "{{\"ok\":false,\"error\":{}}}\n",
+                            crate::mcp::escape_json(&e)
+                        ),
+                    };
+                let _ = req.reply.send(line);
                 self.dirty = true;
             }
             AppEvent::Resize(rows, cols) => {
@@ -407,6 +483,177 @@ mod tests {
         let logged = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(logged.lines().count(), 2);
         let _ = std::fs::remove_file(&audit);
+    }
+
+    #[test]
+    fn comms_ask_flows_through_apply_and_replies() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "ask".to_string(),
+            args: r#"{"target":"b","text":"ready?"}"#.to_string(),
+            reply: reply_tx,
+        }));
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""ok":true"#), "line: {line:?}");
+        assert!(line.contains(r#""conversation":""#), "line: {line:?}");
+        assert!(line.ends_with('\n'));
+        assert_eq!(s.broker.queued(b), 1);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn comms_rejections_are_single_line_json() {
+        let mut s = AppState::new();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: "f".repeat(32),
+            tool: "ask".to_string(),
+            args: "{}".to_string(),
+            reply: reply_tx,
+        }));
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""ok":false"#), "line: {line:?}");
+        assert!(!line.trim_end().contains('\n'), "one line: {line:?}");
+    }
+
+    #[test]
+    fn session_exit_fails_open_conversations() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "ask".to_string(),
+            args: r#"{"target":"b","text":"q?"}"#.to_string(),
+            reply: reply_tx,
+        }));
+        assert!(s.manager.kill(b));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                s.apply(AppEvent::from_pty(ev.0, ev.1));
+            }
+            let exited = s.manager.get(b).is_none_or(|rec| !rec.state.is_live());
+            if exited || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let due = s.broker.take_due(a, 10);
+        assert_eq!(due.len(), 1, "source learns the failure");
+        assert!(matches!(
+            due[0].kind,
+            crate::comms::InjectKind::Failed
+        ));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn settle_comms_delivers_to_idle_panes_only() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        // Busy target: the injection waits.
+        assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell".to_string(),
+            args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
+            reply: reply_tx,
+        }));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "busy target waits");
+        // Idle target: delivered into the pane.
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                s.apply(AppEvent::from_pty(ev.0, ev.1));
+            }
+            if s.manager.screen_text(b).is_some_and(|t| t.contains("hello-b")) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "injection never reached the pane"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn settle_comms_holds_during_human_typing() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell".to_string(),
+            args: r#"{"target":"b","text":"wait"}"#.to_string(),
+            reply: reply_tx,
+        }));
+        s.note_human_input();
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "fresh typing debounces delivery");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
     }
 
     #[test]

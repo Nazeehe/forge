@@ -157,13 +157,20 @@ pulled per-slice as needed.
 - Gate tests: relay-never-blocks; block-wins; audit-0600-enforced;
   hostile-display-safe.
 
-## Phase 4 — Comms core — STATUS: TODO
+## Phase 4 — Comms core — STATUS: DONE
 
-- [ ] `mcp-serve` (newline JSON-RPC 2.0, MCP 2025-03-26, dynamic init context).
-- [ ] Run-ID auth + group ACL + pressure cap 5; idle/debounce injection.
-- [ ] Tools: `ask/send_response/tell/ack/list_sessions`; exit-fails-conversation.
-- Gate tests: no-group-no-transfer; forged/stale-run-ID rejected; pressure-cap;
-  target-exit-determinism. Manual: two live sessions ask/tell.
+- [x] 4a `mcp-serve` (newline JSON-RPC 2.0, MCP 2025-03-26; hand-rolled
+      parser, no new deps) with stdio serving and IPC bridge.
+- [x] 4b Broker: run-ID auth + group ACL + pressure cap 5 (queued +
+      delivered-awaiting-response, counted once); conversations with UUIDs.
+- [x] 4c Tools `ask/send_response/tell/ack/list_sessions`; exit-fails-
+      conversation; idle/debounce injection into panes; pane env
+      (`FORGE_RUN_ID/SESSION_NAME/SESSION_CWD`); `Ctrl-b g` peers toggle.
+      Dynamic project/memory init context deferred to Phase 5; per-session
+      route file only matters for remote (Phase 7).
+- Gate tests: no-group-no-transfer; forged/stale-run-ID rejected;
+  pressure-cap; target-exit-determinism. Manual: two live sessions
+  ask/tell/ack plus live no-group refusal — all passed.
 
 ## Phase 5 — Projects, tasks, walkthrough, timers, recovery — STATUS: TODO
 

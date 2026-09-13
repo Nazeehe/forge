@@ -15,6 +15,8 @@ use crate::session::{SessionId, SessionManager};
 pub const PRESSURE_CAP: usize = 5;
 /// Silence after an ack before the one courtesy reminder goes out.
 pub const COURTESY_GRACE: Duration = Duration::from_secs(30);
+/// Human typing holds injections for this long after the last key/paste.
+pub const INJECT_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// What a queued injection is. Decided clicks/keys elsewhere consume these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +28,21 @@ pub enum InjectKind {
     Ack,
     Failed,
     Reminder,
+}
+
+impl InjectKind {
+    /// Human-facing label for the pane-delivered block.
+    pub fn label(self) -> &'static str {
+        match self {
+            InjectKind::Ask => "ask",
+            InjectKind::Response => "response",
+            InjectKind::Tell => "tell",
+            InjectKind::FollowUp => "tell (follow-up)",
+            InjectKind::Ack => "ack",
+            InjectKind::Failed => "failed",
+            InjectKind::Reminder => "reminder",
+        }
+    }
 }
 
 /// One queued prompt for a session, delivered when it is idle/debounced.
@@ -114,6 +131,12 @@ impl Broker {
             entry.push(group.to_string());
         }
         Ok(())
+    }
+
+    pub fn is_member(&self, id: SessionId, group: &str) -> bool {
+        self.groups
+            .get(group)
+            .is_some_and(|g| g.members.contains(&id))
     }
 
     pub fn leave(&mut self, id: SessionId, group: &str) -> bool {

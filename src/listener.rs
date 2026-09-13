@@ -24,11 +24,12 @@ pub const MAX_PENDING_HOOKS: usize = 128;
 /// handler threads once policy exists.
 pub const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// First-line routing: hook records go to the loop, everything else
-/// (MCP, framed visual/file traffic) is deferred to its own phase.
+/// First-line routing: hook records and comms calls go to the loop;
+/// framed visual/file traffic is deferred to its own phase.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Route {
     Hook { hook: String },
+    Comms,
     Other,
 }
 
@@ -43,9 +44,25 @@ pub struct HookRequest {
     pub reply: std::sync::mpsc::Sender<String>,
 }
 
-/// Classify one header line. Hook envelopes carry a top-level `hook` string
-/// field (see `relay::record_line`); anything else is another protocol.
+/// One comms tool call for the broker (4c). Always synchronous: the loop
+/// answers at once and the handler relays the one-line verdict.
+#[derive(Debug)]
+pub struct CommsRequest {
+    pub run_id: String,
+    pub tool: String,
+    pub args: String,
+    pub reply: std::sync::mpsc::Sender<String>,
+}
+
+/// Classify one header line. Comms envelopes match first on their parsed
+/// top-level `kind` so a hook body mentioning comms can never misroute;
+/// hook envelopes then match as before.
 pub fn classify(line: &[u8]) -> Route {
+    if let Ok(text) = std::str::from_utf8(line) {
+        if crate::mcp::top_str(text, "kind").as_deref() == Some("comms") {
+            return Route::Comms;
+        }
+    }
     if let Some(hook) = crate::relay::hook_name(line) {
         // `hook_name` also matches nested fields; require the envelope shape
         // so a JSON-RPC body mentioning hooks cannot misroute.
@@ -225,10 +242,20 @@ fn handle_conn<S: std::io::Read + std::io::Write>(
         Ok(line) => line,
         Err(_) => return,
     };
-    let Route::Hook { hook } = classify(&line) else {
-        return;
-    };
-    let body = String::from_utf8_lossy(&line).into_owned();
+    match classify(&line) {
+        Route::Hook { hook } => handle_hook(conn, &line, hook, tx),
+        Route::Comms => handle_comms(conn, &line, tx),
+        Route::Other => {}
+    }
+}
+
+fn handle_hook<S: std::io::Read + std::io::Write>(
+    mut conn: S,
+    line: &[u8],
+    hook: String,
+    tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
+) {
+    let body = String::from_utf8_lossy(line).into_owned();
     let sync = crate::relay::is_sync_hook(&hook);
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     if tx
@@ -248,6 +275,43 @@ fn handle_conn<S: std::io::Read + std::io::Write>(
     if let Ok(decision) = reply_rx.recv_timeout(REPLY_WAIT) {
         use std::io::Write;
         let mut bytes = decision.into_bytes();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        let _ = conn.write_all(&bytes);
+    }
+}
+
+/// Deliver one comms call to the broker and relay its one-line verdict.
+/// Malformed records are dropped: the caller's own timeout reports them.
+fn handle_comms<S: std::io::Read + std::io::Write>(
+    mut conn: S,
+    line: &[u8],
+    tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
+) {
+    let text = String::from_utf8_lossy(line).into_owned();
+    let (Some(run_id), Some(tool)) = (
+        crate::mcp::top_str(&text, "run_id"),
+        crate::mcp::top_str(&text, "tool"),
+    ) else {
+        return;
+    };
+    let args = crate::mcp::top_raw(&text, "args").unwrap_or("{}").to_string();
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    if tx
+        .send(crate::event::AppEvent::CommsRequest(CommsRequest {
+            run_id,
+            tool,
+            args,
+            reply: reply_tx,
+        }))
+        .is_err()
+    {
+        return;
+    }
+    if let Ok(verdict) = reply_rx.recv_timeout(REPLY_WAIT) {
+        use std::io::Write;
+        let mut bytes = verdict.into_bytes();
         if !bytes.ends_with(b"\n") {
             bytes.push(b'\n');
         }
@@ -293,7 +357,7 @@ mod tests {
     fn header_routes_hooks_and_defers_the_rest() {
         match classify(b"{\"v\":1,\"hook\":\"PreToolUse\",\"body\":{}}\n") {
             Route::Hook { hook } => assert_eq!(hook, "PreToolUse"),
-            Route::Other => panic!("hook misrouted"),
+            Route::Other | Route::Comms => panic!("hook misrouted"),
         }
         assert!(matches!(
             classify(b"{\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n"),
@@ -407,6 +471,63 @@ mod tests {
         let mut buf = [0u8; 1];
         use std::io::Read;
         assert!(matches!(conn.read(&mut buf), Ok(0)), "handler closed promptly");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn classify_routes_comms_envelopes() {
+        assert!(matches!(
+            classify(b"{\"v\":1,\"kind\":\"comms\",\"run_id\":\"x\",\"tool\":\"ask\",\"args\":{}}\n"),
+            Route::Comms
+        ));
+        // A hook body mentioning comms must not misroute.
+        assert!(matches!(
+            classify(b"{\"v\":1,\"hook\":\"PreToolUse\",\"body\":{\"tool\":\"Bash\",\"text\":\"kind comms\"}}\n"),
+            Route::Hook { .. }
+        ));
+        assert!(matches!(classify(b"garbage\n"), Route::Other));
+    }
+
+    #[test]
+    fn comms_record_reaches_the_loop_with_a_reply_path() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-listen-test-{}-comms.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _guard = spawn_unix(&path, tx, 8).unwrap();
+        let mut conn = UnixStream::connect(&path).unwrap();
+        conn.write_all(b"{\"v\":1,\"kind\":\"comms\",\"run_id\":\"abc\",\"tool\":\"list_sessions\",\"args\":{}}\n")
+            .unwrap();
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("comms event arrives");
+        match event {
+            crate::event::AppEvent::CommsRequest(req) => {
+                assert_eq!(req.run_id, "abc");
+                assert_eq!(req.tool, "list_sessions");
+                assert_eq!(req.args, "{}");
+                req.reply.send("{\"ok\":true,\"result\":{}}\n".to_string()).unwrap();
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+        let mut out = Vec::new();
+        let mut byte = [0u8; 1];
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        loop {
+            match conn.read(&mut byte) {
+                Ok(1) => {
+                    out.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(out, b"{\"ok\":true,\"result\":{}}\n");
         let _ = std::fs::remove_file(&path);
     }
 

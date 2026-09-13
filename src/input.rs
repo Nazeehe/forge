@@ -15,6 +15,10 @@ pub enum UserCommand {
     NewSession,
     /// Focus session by zero-based order index (`Ctrl-b 1` is index 0).
     SelectSession(usize),
+    /// Toggle the active session in/out of the shared `peers` group (4c).
+    /// Full group management arrives with its own phase; this covers the
+    /// manual ask/tell gate with one key.
+    TogglePeerGroup,
 }
 
 /// Encode a forwarded key as PTY input bytes (xterm-style). `app_cursor`
@@ -286,6 +290,7 @@ impl InputRouter {
                     KeyCode::Char('n') => RoutedKey::Command(UserCommand::NextSession),
                     KeyCode::Char('p') => RoutedKey::Command(UserCommand::PrevSession),
                     KeyCode::Char('c') => RoutedKey::Command(UserCommand::NewSession),
+                    KeyCode::Char('g') => RoutedKey::Command(UserCommand::TogglePeerGroup),
                     KeyCode::Char(d @ '1'..='9') => {
                         RoutedKey::Command(UserCommand::SelectSession(d as usize - '1' as usize))
                     }
@@ -368,6 +373,12 @@ mod tests {
 
         assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
         assert_eq!(r.feed(key(KeyCode::Char('q'))), RoutedKey::Command(UserCommand::Quit));
+
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('g'))),
+            RoutedKey::Command(UserCommand::TogglePeerGroup)
+        );
     }
 
     #[test]

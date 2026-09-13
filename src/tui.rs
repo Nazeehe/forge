@@ -174,7 +174,9 @@ fn loop_until_quit(
                         if let Some(active) = state.manager.active() {
                             let bracketed = state.manager.bracketed_paste(active);
                             let bytes = input::paste_bytes(&text, bracketed);
-                            let _ = state.manager.pane_write(active, &bytes);
+                            if state.manager.pane_write(active, &bytes).is_ok() {
+                                state.note_human_input();
+                            }
                         }
                     }
                 }
@@ -193,6 +195,7 @@ fn loop_until_quit(
         }
         state.settle_hooks(policy, audit_path);
         state.open_modal_if_needed();
+        state.settle_comms();
         if state.dirty {
             let views = state.views();
             let status = state.status_text();
@@ -231,7 +234,9 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             if let Some(active) = state.manager.active() {
                 let app_cursor = state.manager.app_cursor(active);
                 if let Some(bytes) = input::encode_key(&k, app_cursor) {
-                    let _ = state.manager.pane_write(active, &bytes);
+                    if state.manager.pane_write(active, &bytes).is_ok() {
+                        state.note_human_input();
+                    }
                 }
             }
         }
@@ -256,6 +261,16 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
                     fit_active_pane(state);
                 }
                 state.dirty = true;
+            }
+            UserCommand::TogglePeerGroup => {
+                if let Some(active) = state.manager.active() {
+                    if state.broker.is_member(active, "peers") {
+                        state.broker.leave(active, "peers");
+                    } else {
+                        let _ = state.broker.join(&state.manager, active, "peers");
+                    }
+                    state.dirty = true;
+                }
             }
         },
         RoutedKey::PrefixPending | RoutedKey::Cancelled => {

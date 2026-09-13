@@ -19,6 +19,9 @@ pub enum AppEvent {
     /// permission modal (3c/3d) send the one-line decision through `reply`;
     /// dropping it leaves the relay to time out fail-open.
     HookRequest(crate::listener::HookRequest),
+    /// A comms tool call from `mcp-serve`. The broker answers at once; the
+    /// one-line verdict travels back through `reply`.
+    CommsRequest(crate::listener::CommsRequest),
     Shutdown,
 }
 

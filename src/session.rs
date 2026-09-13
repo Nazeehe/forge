@@ -104,7 +104,23 @@ impl SessionManager {
         run_id: crate::ids::RunId,
     ) -> std::io::Result<SessionId> {
         let id = SessionId::fresh();
-        let pane = crate::pty::PtyPane::spawn(id, cmd, cwd, 24, 80, self.pty_tx.clone())?;
+        // Harnesses discover the broker through these: the run ID proves
+        // authority, the endpoint inherits the listener socket.
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        let run_str = run_id.as_str().to_string();
+        let pane = crate::pty::PtyPane::spawn_with_env(
+            id,
+            cmd,
+            cwd,
+            24,
+            80,
+            self.pty_tx.clone(),
+            &[
+                ("FORGE_RUN_ID", run_str.as_str()),
+                ("FORGE_SESSION_NAME", name),
+                ("FORGE_SESSION_CWD", cwd_str.as_str()),
+            ],
+        )?;
         // Run IDs are minted fresh per launch so collisions should not happen;
         // if one ever does, the previous holder loses the binding (fail-safe:
         // a run ID never resolves to two sessions).
@@ -130,6 +146,17 @@ impl SessionManager {
     }
 
     /// Replace a session's run ID, revoking the old value.
+    /// Mark a session's hook activity (Idle/Stopped gates injections).
+    pub fn set_activity(&mut self, id: SessionId, activity: Activity) -> bool {
+        match self.sessions.get_mut(&id) {
+            None => false,
+            Some(rec) => {
+                rec.activity = activity;
+                true
+            }
+        }
+    }
+
     pub fn rebind(&mut self, id: SessionId, run_id: crate::ids::RunId) -> bool {
         match self.sessions.get_mut(&id) {
             None => false,

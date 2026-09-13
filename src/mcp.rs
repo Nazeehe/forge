@@ -270,6 +270,24 @@ fn object_fields(line: &str) -> Option<Vec<(String, Span)>> {
     }
 }
 
+/// Raw JSON span of a top-level object field, for pass-through values.
+pub(crate) fn top_raw<'t>(line: &'t str, name: &str) -> Option<&'t str> {
+    let trimmed = line.trim();
+    let fields = object_fields(trimmed)?;
+    let (_, span) = fields.iter().find(|(k, _)| k == name)?;
+    Some(&trimmed[span.start..span.end])
+}
+
+/// Decoded string value of a top-level object field.
+pub(crate) fn top_str(line: &str, name: &str) -> Option<String> {
+    let raw = top_raw(line, name)?;
+    let mut s = Scanner {
+        b: raw.as_bytes(),
+        i: 0,
+    };
+    s.string()
+}
+
 fn field<'t>(fields: &'t [(String, Span)], line: &'t str, name: &str) -> Option<&'t str> {
     fields
         .iter()
@@ -452,7 +470,9 @@ pub fn handle_line(
 }
 
 /// Resolve the broker endpoint: an explicit flag wins, otherwise the
-/// inherited environment. (4c adds the per-session route file override.)
+/// inherited environment. A per-session route file supersedes stale
+/// inheritance only for remote sessions (Phase 7); locally the inherited
+/// endpoint is always fresh because panes spawn after the listener.
 pub fn resolve_endpoint(explicit: Option<&str>) -> Option<String> {
     if let Some(p) = explicit.filter(|p| !p.is_empty()) {
         return Some(p.to_string());

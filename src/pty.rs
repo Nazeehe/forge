@@ -115,6 +115,20 @@ impl PtyPane {
         cols: u16,
         tx: Sender<(SessionId, PtyEvent)>,
     ) -> io::Result<Self> {
+        Self::spawn_with_env(id, shell_cmd, cwd, rows, cols, tx, &[])
+    }
+
+    /// Spawn with extra child environment entries. The parent environment
+    /// (including `FORGE_IPC_ENDPOINT`) is always inherited.
+    pub fn spawn_with_env(
+        id: SessionId,
+        shell_cmd: &str,
+        cwd: &Path,
+        rows: u16,
+        cols: u16,
+        tx: Sender<(SessionId, PtyEvent)>,
+        extra_env: &[(&str, &str)],
+    ) -> io::Result<Self> {
         let system = native_pty_system();
         let pair = system
             .openpty(PtySize {
@@ -128,6 +142,9 @@ impl PtyPane {
         cmd.arg("-c");
         cmd.arg(shell_cmd);
         cmd.cwd(cwd);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         if let Some(term) = advertised_term(std::env::var("TERM").ok().as_deref()) {
             cmd.env("TERM", term);
         }
