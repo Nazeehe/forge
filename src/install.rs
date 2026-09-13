@@ -141,7 +141,14 @@ pub fn install_one_hooks(
             };
             let ours = hook_command(forge_bin);
             let mut added = 0;
-            for event in ["PreToolUse", "PermissionRequest"] {
+            // Stop is the turn-end edge: it parks the session at Stopped,
+            // which is what lets queued peer replies deliver. Without it
+            // every session wedges at ToolUse after its first tool call.
+            // UserPromptSubmit is the turn-start edge: without it a freshly
+            // prompted session still looks Stopped while it generates, so
+            // injections land mid-turn where Enter is eaten and the text
+            // sits as an unsubmitted draft.
+            for event in ["PreToolUse", "PermissionRequest", "Stop", "UserPromptSubmit"] {
                 let hooks = obj_mut(&mut v, "hooks");
                 let slot = hooks
                     .entry(event.to_string())
@@ -175,43 +182,57 @@ pub fn install_one_hooks(
             }
         }
         "codex" => {
-            // Best-effort: the hooks engine reads hooks.json (event names and
-            // matcher/timeout fields observed in the 0.154 binary), but the
-            // discovery path is unconfirmed and firing needs API auth, so the
-            // first live session must confirm pickup. The file is inert:
-            // codex loads config cleanly with it present.
+            // Grounded in codex-cli 0.154: hooks.json is `{"hooks":
+            // {Event: [{matcher, hooks: [{type, command, timeout}]}]}}`.
+            // Anything else (including a flat array) fails the whole file
+            // with "failed to parse hooks config". Verified live: a
+            // UserPromptSubmit entry fires its command with the hook JSON
+            // on stdin. Commands run WITHOUT a shell, so no metacharacters.
+            // Event names are PascalCase; `matcher: ""` matches everything.
             let path = codex_home(home).join("hooks.json");
             let mut v = match read_json(&path) {
                 Ok(v) => v,
                 Err(e) => return Outcome::error(harness, e),
             };
+            // A non-object `hooks` value is rejected wholesale by codex
+            // (this includes the flat array our own pre-5d installer
+            // wrote), so reset it rather than preserve breakage.
+            if !v.get("hooks").is_some_and(|h| h.is_object()) {
+                v["hooks"] = serde_json::Value::Object(Default::default());
+            }
             let ours = hook_command(forge_bin);
-            match v.get("hooks") {
-                None => {
-                    v["hooks"] = serde_json::Value::Array(Vec::new());
-                }
-                Some(h) if h.is_array() => {}
-                Some(_) => {
+            let mut added = 0;
+            // Stop is the turn-end edge: it parks the session at Stopped,
+            // which is what lets queued peer replies deliver. Without it
+            // every session wedges at Thinking/ToolUse after boot.
+            // UserPromptSubmit is the turn-start edge: without it a freshly
+            // prompted session still looks Stopped while it generates, so
+            // injections land mid-turn where Enter is eaten and the text
+            // sits as an unsubmitted draft.
+            for event in ["SessionStart", "PreToolUse", "Stop", "UserPromptSubmit"] {
+                let slot = v["hooks"]
+                    .as_object_mut()
+                    .expect("hooks just normalized to object")
+                    .entry(event.to_string())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                if !slot.is_array() {
                     return Outcome::error(
                         harness,
-                        format!("{} has a non-array hooks value; refusing to clobber", path.display()),
+                        format!("{event} is not an array in {}", path.display()),
                     );
                 }
-            }
-            let arr = v["hooks"].as_array().cloned().unwrap_or_default();
-            let mut arr = arr;
-            let mut added = 0;
-            for event in ["pre_tool_use", "session_start"] {
-                let present = arr.iter().any(|e| {
-                    e.get("command").and_then(|c| c.as_str()) == Some(&ours)
-                        && e.get("event_name").and_then(|c| c.as_str()) == Some(event)
+                let groups = slot.as_array_mut().expect("just checked array");
+                let present = groups.iter().any(|g| {
+                    g.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()) == Some(&ours)
+                        })
+                    })
                 });
                 if !present {
-                    arr.push(serde_json::json!({
-                        "event_name": event,
-                        "matcher": ".*",
-                        "command": ours,
-                        "timeoutSec": 10,
+                    groups.push(serde_json::json!({
+                        "matcher": "",
+                        "hooks": [{"type": "command", "command": ours, "timeout": 10}],
                     }));
                     added += 1;
                 }
@@ -219,7 +240,6 @@ pub fn install_one_hooks(
             if added == 0 {
                 return Outcome::unchanged(harness, format!("already in {}", path.display()));
             }
-            v["hooks"] = serde_json::Value::Array(arr);
             match write_json(&path, &v) {
                 Ok(()) => Outcome::installed(harness, path.display().to_string()),
                 Err(e) => Outcome::error(harness, e),
@@ -276,34 +296,66 @@ pub fn uninstall_one_hooks(home: &std::path::Path, harness: &str) -> Outcome {
         }
         "codex" => {
             let path = codex_home(home).join("hooks.json");
-            let v = match read_json(&path) {
+            let mut v = match read_json(&path) {
                 Ok(v) => v,
                 Err(e) => return Outcome::error(harness, e),
             };
-            let arr = v
-                .get("hooks")
-                .and_then(|h| h.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if !arr.iter().any(|e| {
-                e.get("command").and_then(|c| c.as_str()).is_some_and(is_ours)
-            }) {
+            // Drop our handlers wherever they sit: current 3-level groups
+            // and the flat pre-5d array shape. Empty groups and events go
+            // with them; foreign entries are kept.
+            let mut dropped = 0;
+            if let Some(obj) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+                let mut dead_events = Vec::new();
+                for (event, slot) in obj.iter_mut() {
+                    let Some(groups) = slot.as_array_mut() else {
+                        continue;
+                    };
+                    let mut dead_groups = Vec::new();
+                    for (gi, g) in groups.iter_mut().enumerate() {
+                        if let Some(hs) = g.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                            let before = hs.len();
+                            hs.retain(|h| {
+                                !h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(is_ours)
+                            });
+                            dropped += before - hs.len();
+                            if hs.is_empty() {
+                                dead_groups.push(gi);
+                            }
+                        }
+                    }
+                    for gi in dead_groups.into_iter().rev() {
+                        groups.remove(gi);
+                    }
+                    if groups.is_empty() {
+                        dead_events.push(event.clone());
+                    }
+                }
+                for event in dead_events {
+                    obj.remove(&event);
+                }
+            } else if let Some(arr) = v.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                let before = arr.len();
+                arr.retain(|e| {
+                    !e.get("command").and_then(|c| c.as_str()).is_some_and(is_ours)
+                });
+                dropped += before - arr.len();
+            }
+            if dropped == 0 {
                 return Outcome::unchanged(harness, "nothing to remove".to_string());
             }
-            let kept: Vec<_> = arr
-                .into_iter()
-                .filter(|e| {
-                    !e.get("command").and_then(|c| c.as_str()).is_some_and(is_ours)
-                })
-                .collect();
-            if kept.is_empty() {
+            let hooks_empty = v.get("hooks").is_some_and(|h| {
+                h.as_object().is_some_and(|o| o.is_empty())
+                    || h.as_array().is_some_and(|a| a.is_empty())
+            });
+            let only_hooks = v.as_object().is_some_and(|o| o.len() == 1 && o.contains_key("hooks"));
+            if hooks_empty && only_hooks {
                 match std::fs::remove_file(&path) {
                     Ok(()) => Outcome::removed(harness, path.display().to_string()),
                     Err(e) => Outcome::error(harness, format!("cannot remove {}: {e}", path.display())),
                 }
             } else {
-                let mut v = v;
-                v["hooks"] = serde_json::Value::Array(kept);
                 match write_json(&path, &v) {
                     Ok(()) => Outcome::removed(harness, path.display().to_string()),
                     Err(e) => Outcome::error(harness, e),
@@ -341,13 +393,21 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
             }
         }
         // Codex owns config.toml comments, so registration shells out to the
-        // CLI itself (verified offline against 0.154).
+        // CLI itself (verified offline against 0.154). `mcp add` has no
+        // env-passthrough flag, so the `env_vars` allowlist below is patched
+        // in textually afterwards; without it codex scrubs FORGE_* from MCP
+        // servers (verified live: "no comms route" until allowlisted).
         "codex" => {
             let bin = crate::harness::Harness::Codex.spec().resolve_binary();
-            if run_codex_mcp_add(&bin, "forge", forge_bin) {
-                Outcome::installed(harness, "codex mcp add forge".to_string())
-            } else {
-                Outcome::error(harness, format!("`{bin} mcp add forge` failed"))
+            if !run_codex_mcp_add(&bin, "forge", forge_bin) {
+                return Outcome::error(harness, format!("`{bin} mcp add forge` failed"));
+            }
+            match ensure_codex_mcp_env(home) {
+                Ok(()) => Outcome::installed(harness, "codex mcp add forge".to_string()),
+                Err(e) => Outcome::error(
+                    harness,
+                    format!("forge MCP registered but env passthrough failed: {e}"),
+                ),
             }
         }
         // Best-effort opencode format; pickup confirmed at first live muse run.
@@ -401,6 +461,39 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
         }
         other => Outcome::error(harness, format!("unknown harness {other:?}")),
     }
+}
+
+/// Allowlist the two env vars forge's MCP server needs through codex's
+/// scrubbed MCP environment. Line-based (never a TOML rewrite) so codex's
+/// comments survive; idempotent. `mcp remove` drops the whole section, so
+/// uninstall needs no counterpart.
+fn ensure_codex_mcp_env(home: &std::path::Path) -> Result<(), String> {
+    const WANT: &str = r#"env_vars = ["FORGE_IPC_ENDPOINT", "FORGE_RUN_ID"]"#;
+    const HEADER: &str = "[mcp_servers.forge]";
+    let path = codex_home(home).join("config.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut lines: Vec<&str> = text.lines().collect();
+    let Some(start) = lines.iter().position(|l| l.trim() == HEADER) else {
+        return Err(format!("{HEADER} missing in {}", path.display()));
+    };
+    let end = lines
+        .iter()
+        .skip(start + 1)
+        .position(|l| l.trim().starts_with('['))
+        .map(|i| start + 1 + i)
+        .unwrap_or(lines.len());
+    if lines[start + 1..end].iter().any(|l| l.trim().starts_with("env_vars")) {
+        return Ok(());
+    }
+    lines.insert(start + 1, WANT);
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    crate::fs_atomic::write_atomic(&path, out.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(())
 }
 
 /// Unregister the forge MCP server for one harness.
@@ -483,7 +576,9 @@ on stdio):
   once and the answer arrives asynchronously. Only sessions sharing a
   communication group can exchange messages.
 - `tell_session(target, message)` informs a peer; acknowledge with
-  `ack_message(conversation_id)`.
+  `ack_message(conversation_id)`. Either party can keep talking on the
+  returned `conversation_id` via
+  `tell_session(target, message, conversation_id)`.
 - `send_response(conversation_id, message)` answers a question addressed to
   this session.
 "#;
@@ -665,15 +760,23 @@ mod tests {
 
     /// Pin codex paths to the scratch home even when the developer exports
     /// CODEX_HOME. Restores on drop so panics cannot leak env changes.
+    /// Holding the lock serializes every CODEX_HOME toucher: the variable
+    /// is process-global, so parallel setters would otherwise cross-read.
     struct ClearCodexHome {
         saved: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl ClearCodexHome {
         fn pin() -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let saved = std::env::var("CODEX_HOME").ok();
             std::env::remove_var("CODEX_HOME");
-            ClearCodexHome { saved }
+            ClearCodexHome {
+                saved,
+                _lock: lock,
+            }
         }
     }
 
@@ -706,7 +809,7 @@ mod tests {
         // Second install adds no duplicate.
         install_one_hooks(&home, "claude", FORGE_BIN);
         let text = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-        assert_eq!(text.matches("hook-relay").count(), 2, "pre+permission: {text}");
+        assert_eq!(text.matches("hook-relay").count(), 4, "pre+permission+stop+submit: {text}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -759,7 +862,31 @@ mod tests {
         let out = install_one_hooks(&home, "codex", FORGE_BIN);
         assert!(out.installed, "out: {out:?}");
         let text = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
-        assert!(text.contains("hook-relay"), "added: {text}");
+        // Pin the live-grounded schema (codex-cli 0.154 rejects anything
+        // else with "failed to parse hooks config"): an object keyed by
+        // PascalCase event, matcher groups, typed command handlers.
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(v["hooks"].is_object(), "3-level map: {text}");
+        for event in ["SessionStart", "PreToolUse", "Stop", "UserPromptSubmit"] {
+            let groups = v["hooks"][event]
+                .as_array()
+                .unwrap_or_else(|| panic!("{event} groups: {text}"));
+            assert_eq!(groups.len(), 1, "{event}: {text}");
+            assert_eq!(groups[0]["matcher"], serde_json::Value::String(String::new()));
+            let hs = groups[0]["hooks"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{event} handlers: {text}"));
+            assert_eq!(hs.len(), 1);
+            assert_eq!(hs[0]["type"], serde_json::Value::String("command".to_string()));
+            assert!(
+                hs[0]["command"].as_str().is_some_and(|c| c.contains("hook-relay")),
+                "added: {text}"
+            );
+            assert!(hs[0]["timeout"].is_number(), "numeric timeout: {text}");
+        }
+        // Second install adds no duplicate.
+        let out = install_one_hooks(&home, "codex", FORGE_BIN);
+        assert!(!out.installed, "idempotent: {out:?}");
         let out = uninstall_one_hooks(&home, "codex");
         assert!(out.removed, "out: {out:?}");
         assert!(!home.join(".codex/hooks.json").exists());
@@ -773,12 +900,36 @@ mod tests {
         std::fs::create_dir_all(home.join(".codex")).unwrap();
         std::fs::write(
             home.join(".codex/hooks.json"),
-            r#"{"hooks": [{"matcher": ".*", "command": "/usr/bin/other-hook"}]}"#,
+            r#"{"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/bin/other-hook", "timeout": 5}]}]}}"#,
         )
         .unwrap();
+        let out = install_one_hooks(&home, "codex", FORGE_BIN);
+        assert!(out.installed, "out: {out:?}");
         let out = uninstall_one_hooks(&home, "codex");
-        assert!(!out.removed, "out: {out:?}");
-        assert!(home.join(".codex/hooks.json").exists());
+        assert!(out.removed, "out: {out:?}");
+        let text = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
+        assert!(text.contains("/usr/bin/other-hook"), "foreign kept: {text}");
+        assert!(!text.contains("hook-relay"), "ours gone: {text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_hooks_install_migrates_legacy_flat_array() {
+        let _pin = ClearCodexHome::pin();
+        let home = scratch_home();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        // The pre-5d installer wrote a flat array codex rejects wholesale.
+        std::fs::write(
+            home.join(".codex/hooks.json"),
+            r#"{"hooks": [{"event_name": "session_start", "matcher": ".*", "command": "/tmp/forge-under-test hook-relay", "timeoutSec": 10}]}"#,
+        )
+        .unwrap();
+        let out = install_one_hooks(&home, "codex", FORGE_BIN);
+        assert!(out.installed, "out: {out:?}");
+        let text = std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(v["hooks"].is_object(), "migrated to map: {text}");
+        assert!(v["hooks"]["SessionStart"].is_array(), "event present: {text}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -862,6 +1013,51 @@ mod tests {
     }
 
     #[test]
+    fn codex_mcp_env_passthrough_is_idempotent_and_comment_safe() {
+        let _pin = ClearCodexHome::pin();
+        let home = scratch_home();
+        let dir = home.join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# codex owns this file\n[mcp_servers.forge]\ncommand = \"/bin/forge\"\nargs = [\"mcp-serve\"]\n\n[other]\nkeep = true\n",
+        )
+        .unwrap();
+        // Pin codex_home() at this scratch dir via CODEX_HOME.
+        std::env::set_var("CODEX_HOME", &dir);
+        let out = ensure_codex_mcp_env(&home);
+        std::env::remove_var("CODEX_HOME");
+        assert!(out.is_ok(), "out: {out:?}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# codex owns this file"), "comments kept: {text}");
+        assert!(
+            text.contains(r#"env_vars = ["FORGE_IPC_ENDPOINT", "FORGE_RUN_ID"]"#),
+            "allowlisted: {text}"
+        );
+        assert!(text.contains("[other]"), "neighbor kept: {text}");
+        // Second run adds no duplicate.
+        std::env::set_var("CODEX_HOME", &dir);
+        let out = ensure_codex_mcp_env(&home);
+        std::env::remove_var("CODEX_HOME");
+        assert!(out.is_ok(), "out: {out:?}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("env_vars").count(), 1, "once: {text}");
+        let _ = std::fs::remove_dir_all(&home);
+        // Missing section errors instead of inventing config. Same test
+        // body: CODEX_HOME is process-global, so concurrent setters race.
+        let home = scratch_home();
+        let dir = home.join(".codex");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), "# empty\n").unwrap();
+        std::env::set_var("CODEX_HOME", &dir);
+        let out = ensure_codex_mcp_env(&home);
+        std::env::remove_var("CODEX_HOME");
+        assert!(out.is_err(), "out: {out:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn gemini_mcp_round_trips_hooks_skip() {
         let home = scratch_home();
         let out = install_one_mcp(&home, "gemini", FORGE_BIN);
@@ -882,9 +1078,15 @@ mod tests {
     fn per_harness_installer_composes_all_three() {
         let _pin = ClearCodexHome::pin();
         let home = scratch_home();
-        // codex MCP shells out; point it at a fake binary.
+        // codex MCP shells out; point it at a fake binary. The fake mimics
+        // `mcp add` by writing the section; the installer must then patch
+        // the env passthrough into it.
         let fake = home.join("codex");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nmkdir -p \"$CODEX_HOME\"\nprintf '[mcp_servers.forge]\\ncommand = \"fake\"\\nargs = [\"mcp-serve\"]\\n' >> \"$CODEX_HOME/config.toml\"\nexit 0\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -892,11 +1094,16 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(&fake, perms).unwrap();
         }
+        let codex_dir = home.join(".codex");
+        std::env::set_var("CODEX_HOME", &codex_dir);
         std::env::set_var("CODEX_BIN", &fake);
         let outs = install_one(&home, "codex", FORGE_BIN);
         std::env::remove_var("CODEX_BIN");
+        std::env::remove_var("CODEX_HOME");
         assert_eq!(outs.len(), 3);
         assert!(outs.iter().all(|o| o.error.is_none()), "outs: {outs:?}");
+        let text = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+        assert!(text.contains("env_vars"), "passthrough patched: {text}");
         let outs = install_one(&home, "metamate", FORGE_BIN);
         assert_eq!(outs.len(), 3);
         assert!(outs.iter().all(|o| o.error.is_none()), "outs: {outs:?}");

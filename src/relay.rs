@@ -88,20 +88,22 @@ fn unescape_json_string(s: &str) -> String {
     out
 }
 
-/// Build the single newline record: a tiny envelope carrying the route plus
-/// the raw stdin body. Literal CR/LF bytes cannot occur inside valid JSON
-/// strings, so stripping them keeps the body intact while guaranteeing one
-/// line on the wire.
-pub fn record_line(input: &[u8], hook: Option<&str>) -> Vec<u8> {
+/// Build the single newline record: a tiny envelope carrying the route, the
+/// sender's run ID (empty when unset), plus the raw stdin body. Literal
+/// CR/LF bytes cannot occur inside valid JSON strings, so stripping them
+/// keeps the body intact while guaranteeing one line on the wire.
+pub fn record_line(input: &[u8], hook: Option<&str>, run_id: &str) -> Vec<u8> {
     let body: Vec<u8> = input
         .iter()
         .copied()
         .filter(|b| *b != b'\n' && *b != b'\r')
         .collect();
     let hook = hook.unwrap_or("");
-    let mut line = Vec::with_capacity(body.len() + hook.len() + 32);
+    let mut line = Vec::with_capacity(body.len() + hook.len() + run_id.len() + 48);
     line.extend_from_slice(b"{\"v\":1,\"hook\":\"");
     line.extend_from_slice(hook.replace('\\', "\\\\").replace('"', "\\\"").as_bytes());
+    line.extend_from_slice(b"\",\"run_id\":\"");
+    line.extend_from_slice(run_id.replace('\\', "\\\\").replace('"', "\\\"").as_bytes());
     line.extend_from_slice(b"\",\"body\":");
     if body.is_empty() {
         line.extend_from_slice(b"null");
@@ -127,7 +129,10 @@ pub fn run(
         return 0;
     };
     let hook = hook_name(stdin_bytes);
-    let record = record_line(stdin_bytes, hook.as_deref());
+    // Hook children inherit this from the session pane (session.rs); it
+    // attributes the record to its session for activity tracking.
+    let run_id = std::env::var("FORGE_RUN_ID").unwrap_or_default();
+    let record = record_line(stdin_bytes, hook.as_deref(), &run_id);
     let mut conn = match std::os::unix::net::UnixStream::connect(path) {
         Ok(conn) => conn,
         Err(_) => return 0,
@@ -219,7 +224,7 @@ mod tests {
 
     #[test]
     fn record_is_one_line_envelope() {
-        let line = record_line(br#"{"hook_event_name":"Stop"}"#, Some("Stop"));
+        let line = record_line(br#"{"hook_event_name":"Stop"}"#, Some("Stop"), "run-1");
         assert_eq!(
             line.iter().filter(|b| **b == b'\n').count(),
             1,
@@ -228,6 +233,7 @@ mod tests {
         assert!(line.ends_with(b"\n"), "newline terminated");
         let text = String::from_utf8(line).unwrap();
         assert!(text.contains(r#""hook":"Stop""#), "route inside: {text:?}");
+        assert!(text.contains(r#""run_id":"run-1""#), "attribution inside: {text:?}");
         assert!(text.contains(r#"hook_event_name"#), "body inside");
     }
 

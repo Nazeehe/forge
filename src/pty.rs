@@ -85,11 +85,20 @@ fn map_color(color: vt100::Color) -> CellColor {
     }
 }
 
+/// Shared child-stdin handle: human input (`write_all`) and terminal
+/// query replies (reader thread) serialize through one lock.
+type WriterCell = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
+/// Cursor-position request: the one device query forge answers (Phase 2.5
+/// seed). Capability-probing CLIs (muse) block on it at boot; the vendored
+/// parser consumes it, so the reader must reply or they die.
+const DSR_CPR: &[u8; 4] = b"\x1b[6n";
+
 pub struct PtyPane {
     id: SessionId,
     rows: u16,
     cols: u16,
-    writer: Option<Box<dyn Write + Send>>,
+    writer: WriterCell,
     master: Option<Box<dyn MasterPty + Send>>,
     child: ChildCell,
     screen: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
@@ -97,6 +106,10 @@ pub struct PtyPane {
 }
 
 fn lock_child(cell: &ChildCell) -> MutexGuard<'_, Box<dyn portable_pty::Child + Send + Sync>> {
+    cell.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock_writer(cell: &WriterCell) -> MutexGuard<'_, Option<Box<dyn Write + Send>>> {
     cell.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -152,19 +165,28 @@ impl PtyPane {
         // The slave side must be closed in this process so EOF propagates.
         drop(pair.slave);
         let reader = pair.master.try_clone_reader().map_err(pty_error)?;
-        let writer = pair.master.take_writer().map_err(pty_error)?;
+        let writer: WriterCell = Arc::new(Mutex::new(Some(
+            pair.master.take_writer().map_err(pty_error)?,
+        )));
         let child: ChildCell = Arc::new(Mutex::new(child));
         let screen = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(
             rows, cols, 1000,
         )));
         // Reap promptly so short-lived commands never linger as zombies: the
         // reader observes EOF first, then waits for the status.
-        let handle = Self::spawn_reader(id, reader, Arc::clone(&child), Arc::clone(&screen), tx);
+        let handle = Self::spawn_reader(
+            id,
+            reader,
+            Arc::clone(&child),
+            Arc::clone(&screen),
+            tx,
+            Arc::clone(&writer),
+        );
         Ok(PtyPane {
             id,
             rows,
             cols,
-            writer: Some(writer),
+            writer,
             master: Some(pair.master),
             child,
             screen,
@@ -181,7 +203,7 @@ impl PtyPane {
     }
 
     pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        match self.writer.as_mut() {
+        match lock_writer(&self.writer).as_mut() {
             Some(w) => w.write_all(bytes),
             None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "pane is closed")),
         }
@@ -303,7 +325,7 @@ impl PtyPane {
     /// sleeping harness) would never see EOF without the kill.
     pub fn close(&mut self) {
         let _ = lock_child(&self.child).kill();
-        self.writer = None;
+        lock_writer(&self.writer).take();
         self.master = None;
     }
 
@@ -313,14 +335,19 @@ impl PtyPane {
         child: ChildCell,
         screen: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
         tx: Sender<(SessionId, PtyEvent)>,
+        writer: WriterCell,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let mut buf = [0u8; READ_BUF];
+            // Tail of the previous chunk: a query split across reads must
+            // still match.
+            let mut carry = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
                         lock_screen(&screen).process(&buf[..n]);
+                        Self::answer_device_queries(&screen, &writer, &mut carry, &buf[..n]);
                         if tx.send((id, PtyEvent::Output(buf[..n].to_vec()))).is_err() {
                             break;
                         }
@@ -334,6 +361,35 @@ impl PtyPane {
                 .map(|status| status.exit_code() as i32);
             let _ = tx.send((id, PtyEvent::Exited(code)));
         })
+    }
+
+    /// Answer cursor-position requests seen in child output. The reply goes
+    /// to child stdin (never to the event channel); positions are 1-based
+    /// per ECMA-48 while the parser tracks 0-based.
+    fn answer_device_queries(
+        screen: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
+        writer: &WriterCell,
+        carry: &mut Vec<u8>,
+        chunk: &[u8],
+    ) {
+        carry.extend_from_slice(chunk);
+        let queries = carry.windows(DSR_CPR.len()).filter(|w| *w == DSR_CPR).count();
+        let keep = carry.len().min(DSR_CPR.len() - 1);
+        carry.drain(..carry.len() - keep);
+        if queries == 0 {
+            return;
+        }
+        let (row, col) = lock_screen(screen).screen().cursor_position();
+        let reply = format!("\x1b[{};{}R", row as u32 + 1, col as u32 + 1);
+        for _ in 0..queries {
+            let mut guard = lock_writer(writer);
+            if let Some(w) = guard.as_mut() {
+                let _ = w.write_all(reply.as_bytes());
+                let _ = w.flush();
+            } else {
+                break;
+            }
+        }
     }
 }
 
@@ -414,6 +470,43 @@ mod tests {
                 Err(_) => panic!("timed out waiting for echo, got: {seen:?}"),
             }
         }
+        pane.close();
+    }
+
+    #[test]
+    fn cursor_position_query_is_answered() {
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        // Raw mode: the reply must arrive as input bytes, not line-buffered.
+        // Cursor starts at the origin, so the report is exactly 6 bytes.
+        let mut pane = PtyPane::spawn(
+            id,
+            "stty raw -echo; printf '\\033[6n'; head -c 6; printf 'DONE\\n'",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        let mut seen = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok((_, PtyEvent::Output(b))) => {
+                    seen.extend_from_slice(&b);
+                    if seen.windows(4).any(|w| w == b"DONE") {
+                        break;
+                    }
+                }
+                Ok((_, PtyEvent::Exited(_))) => panic!("query reader exited early: {seen:?}"),
+                Err(_) => panic!("cursor report never arrived: {seen:?}"),
+            }
+        }
+        assert!(
+            seen.windows(6).any(|w| w == b"\x1b[1;1R"),
+            "origin report in output: {seen:?}"
+        );
         pane.close();
     }
 

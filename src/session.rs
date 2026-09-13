@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(u64);
 
 impl SessionId {
@@ -52,8 +52,39 @@ pub enum Activity {
     Stopped,
 }
 
+/// Hook event to session activity: tool gates mark ToolUse (which holds
+/// broker injections), session edges mark Thinking, user-wait marks
+/// Waiting, and the stop edge parks at Stopped. Unknown hooks leave the
+/// current activity untouched (`None`).
+pub fn activity_for_hook(hook: &str) -> Option<Activity> {
+    match hook {
+        "PreToolUse" | "PostToolUse" | "PermissionRequest" | "BeforeTool" | "AfterTool" => {
+            Some(Activity::ToolUse)
+        }
+        "SessionStart" | "UserPromptSubmit" => Some(Activity::Thinking),
+        "Notification" => Some(Activity::Waiting),
+        "Stop" | "SessionEnd" => Some(Activity::Stopped),
+        _ => None,
+    }
+}
+
+/// One tab inside a session: the agent CLI or the human terminal.
+/// Tab 0 is primary and decides session liveness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabKind {
+    Agent,
+    Terminal,
+}
+
+/// One tab: its kind plus its pane while alive. The terminal tab starts
+/// panelless and spawns lazily on first switch.
+pub struct Tab {
+    pub kind: TabKind,
+    pane: Option<crate::pty::PtyPane>,
+}
+
 /// One session: identity, human-facing metadata, lifecycle, live run
-/// capability, and its pane while alive. Exited sessions keep their record
+/// capability, and its tabs while alive. Exited sessions keep their record
 /// (and exit code) until explicitly removed.
 pub struct SessionRecord {
     pub id: SessionId,
@@ -62,13 +93,22 @@ pub struct SessionRecord {
     pub state: SessionState,
     pub activity: Activity,
     pub run_id: crate::ids::RunId,
-    /// Agent CLI behind the pane (`shell`, `claude`, `codex`, `muse`).
+    /// Agent CLI behind the agent tab (`shell`, `claude`, `codex`, `muse`).
     pub cli_tool: String,
+    pub tabs: Vec<Tab>,
+    pub active_tab: usize,
     pub exit_code: Option<i32>,
-    pane: Option<crate::pty::PtyPane>,
+    /// Sidebar stats: spawn instant plus hook/settlement counters. A tool
+    /// hook (Pre/PostToolUse, PermissionRequest, Before/AfterTool) counts
+    /// one call; every Allow/Deny verdict counts once.
+    pub spawned_at: std::time::Instant,
+    pub tool_calls: u32,
+    pub approvals: u32,
+    pub denials: u32,
 }
 
-/// Ordering, active selection, run-ID index, and pane-event channel.
+/// Ordering, active selection, run-ID index, and pane-event channels: the
+/// primary channel carries tab-0 panes, the aux channel every later tab.
 pub struct SessionManager {
     order: Vec<SessionId>,
     sessions: std::collections::HashMap<SessionId, SessionRecord>,
@@ -76,11 +116,14 @@ pub struct SessionManager {
     run_index: std::collections::HashMap<String, SessionId>,
     pty_tx: std::sync::mpsc::Sender<(SessionId, crate::pty::PtyEvent)>,
     pty_rx: std::sync::mpsc::Receiver<(SessionId, crate::pty::PtyEvent)>,
+    aux_tx: std::sync::mpsc::Sender<(SessionId, crate::pty::PtyEvent)>,
+    aux_rx: std::sync::mpsc::Receiver<(SessionId, crate::pty::PtyEvent)>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         let (pty_tx, pty_rx) = std::sync::mpsc::channel();
+        let (aux_tx, aux_rx) = std::sync::mpsc::channel();
         SessionManager {
             order: Vec::new(),
             sessions: std::collections::HashMap::new(),
@@ -88,43 +131,55 @@ impl SessionManager {
             run_index: std::collections::HashMap::new(),
             pty_tx,
             pty_rx,
+            aux_tx,
+            aux_rx,
         }
     }
 
-    /// Raw pane events for the main loop (translated to `AppEvent` there).
-    pub fn pty_events(&self) -> &std::sync::mpsc::Receiver<(SessionId, crate::pty::PtyEvent)> {
-        &self.pty_rx
-    }
-
-    /// Spawn `shell -c cmd` as a new running session and select it when it
-    /// is the first. Duplicate names are allowed here; callers validate.
-    pub fn spawn(
-        &mut self,
+    /// Spawn one pane, wiring the harness environment and the right event
+    /// channel: tab 0 reports on the primary channel, later tabs on aux.
+    fn spawn_pane(
+        &self,
+        id: SessionId,
         name: &str,
         cwd: &std::path::Path,
         cmd: &str,
-        run_id: crate::ids::RunId,
+        run_id: &str,
         cli_tool: &str,
-    ) -> std::io::Result<SessionId> {
-        let id = SessionId::fresh();
+        tab: usize,
+    ) -> std::io::Result<crate::pty::PtyPane> {
         // Harnesses discover the broker through these: the run ID proves
         // authority, the endpoint inherits the listener socket.
-        let cwd_str = cwd.to_string_lossy().into_owned();
-        let run_str = run_id.as_str().to_string();
-        let pane = crate::pty::PtyPane::spawn_with_env(
+        let tx = if tab == 0 {
+            self.pty_tx.clone()
+        } else {
+            self.aux_tx.clone()
+        };
+        crate::pty::PtyPane::spawn_with_env(
             id,
             cmd,
             cwd,
             24,
             80,
-            self.pty_tx.clone(),
+            tx,
             &[
-                ("FORGE_RUN_ID", run_str.as_str()),
+                ("FORGE_RUN_ID", run_id),
                 ("FORGE_SESSION_NAME", name),
-                ("FORGE_SESSION_CWD", cwd_str.as_str()),
+                ("FORGE_SESSION_CWD", cwd.to_string_lossy().as_ref()),
                 ("FORGE_CLI_TOOL", cli_tool),
             ],
-        )?;
+        )
+    }
+
+    fn insert_record(
+        &mut self,
+        id: SessionId,
+        name: &str,
+        cwd: &std::path::Path,
+        run_id: crate::ids::RunId,
+        cli_tool: &str,
+        tabs: Vec<Tab>,
+    ) {
         // Run IDs are minted fresh per launch so collisions should not happen;
         // if one ever does, the previous holder loses the binding (fail-safe:
         // a run ID never resolves to two sessions).
@@ -143,11 +198,171 @@ impl SessionManager {
                 activity: Activity::Idle,
                 run_id,
                 cli_tool: cli_tool.to_string(),
+                tabs,
+                active_tab: 0,
                 exit_code: None,
-                pane: Some(pane),
+                spawned_at: std::time::Instant::now(),
+                tool_calls: 0,
+                approvals: 0,
+                denials: 0,
             },
         );
+    }
+
+    /// Spawn `shell -c cmd` as a new single-tab session and select it when
+    /// it is the first. Duplicate names are allowed here; callers validate.
+    pub fn spawn(
+        &mut self,
+        name: &str,
+        cwd: &std::path::Path,
+        cmd: &str,
+        run_id: crate::ids::RunId,
+        cli_tool: &str,
+    ) -> std::io::Result<SessionId> {
+        let id = SessionId::fresh();
+        let run_str = run_id.as_str().to_string();
+        let pane = self.spawn_pane(id, name, cwd, cmd, &run_str, cli_tool, 0)?;
+        let tabs = vec![Tab {
+            kind: TabKind::Terminal,
+            pane: Some(pane),
+        }];
+        self.insert_record(id, name, cwd, run_id, cli_tool, tabs);
         Ok(id)
+    }
+
+    /// Spawn an agent session: the CLI on tab 0, a panelless terminal tab
+    /// waiting for its first switch. Tab 0 decides session liveness.
+    pub fn spawn_agent(
+        &mut self,
+        name: &str,
+        cwd: &std::path::Path,
+        cmd: &str,
+        run_id: crate::ids::RunId,
+        cli_tool: &str,
+    ) -> std::io::Result<SessionId> {
+        let id = SessionId::fresh();
+        let run_str = run_id.as_str().to_string();
+        let pane = self.spawn_pane(id, name, cwd, cmd, &run_str, cli_tool, 0)?;
+        let tabs = vec![
+            Tab {
+                kind: TabKind::Agent,
+                pane: Some(pane),
+            },
+            Tab {
+                kind: TabKind::Terminal,
+                pane: None,
+            },
+        ];
+        self.insert_record(id, name, cwd, run_id, cli_tool, tabs);
+        Ok(id)
+    }
+
+    /// Show one tab directly (top-bar clicks), lazily spawning the
+    /// terminal pane on first view. False for unknown sessions, single-tab
+    /// sessions, out-of-range tabs, and the already-visible tab.
+    pub fn select_tab(&mut self, id: SessionId, index: usize) -> bool {
+        let spawn_lazy = match self.sessions.get(&id) {
+            None => return false,
+            Some(rec) if rec.tabs.len() < 2 => return false,
+            Some(rec) if index >= rec.tabs.len() || index == rec.active_tab => return false,
+            Some(rec) => rec.tabs[index].pane.is_none(),
+        };
+        if spawn_lazy {
+            let (name, cwd, run) = match self.sessions.get(&id) {
+                Some(rec) => (
+                    rec.name.clone(),
+                    rec.cwd.clone(),
+                    rec.run_id.as_str().to_string(),
+                ),
+                None => return false,
+            };
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+            let pane = match self.spawn_pane(
+                id,
+                &name,
+                &cwd,
+                &format!("exec {shell} -i"),
+                &run,
+                "shell",
+                index,
+            ) {
+                Ok(pane) => pane,
+                Err(_) => return false,
+            };
+            if let Some(rec) = self.sessions.get_mut(&id) {
+                rec.tabs[index].pane = Some(pane);
+            }
+        }
+        if let Some(rec) = self.sessions.get_mut(&id) {
+            rec.active_tab = index;
+        }
+        true
+    }
+
+    /// Cycle the active tab, lazily spawning the terminal pane on first
+    /// switch. No-op for single-tab sessions.
+    pub fn switch_tab(&mut self, id: SessionId) -> bool {
+        let (next, spawn_lazy) = match self.sessions.get(&id) {
+            None => return false,
+            Some(rec) if rec.tabs.len() < 2 => return false,
+            Some(rec) => {
+                let next = (rec.active_tab + 1) % rec.tabs.len();
+                (next, rec.tabs[next].pane.is_none())
+            }
+        };
+        if spawn_lazy {
+            let (name, cwd, run) = match self.sessions.get(&id) {
+                Some(rec) => (
+                    rec.name.clone(),
+                    rec.cwd.clone(),
+                    rec.run_id.as_str().to_string(),
+                ),
+                None => return false,
+            };
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+            let pane = match self.spawn_pane(
+                id,
+                &name,
+                &cwd,
+                &format!("exec {shell} -i"),
+                &run,
+                "shell",
+                next,
+            ) {
+                Ok(pane) => pane,
+                Err(_) => return false,
+            };
+            if let Some(rec) = self.sessions.get_mut(&id) {
+                rec.tabs[next].pane = Some(pane);
+            }
+        }
+        if let Some(rec) = self.sessions.get_mut(&id) {
+            rec.active_tab = next;
+        }
+        true
+    }
+
+    /// Kind of the visible tab, if any.
+    pub fn active_tab_kind(&self, id: SessionId) -> Option<TabKind> {
+        let rec = self.sessions.get(&id)?;
+        rec.tabs.get(rec.active_tab).map(|t| t.kind)
+    }
+
+    /// Tab count (1 for plain shells, 2 for agent sessions).
+    pub fn tab_count(&self, id: SessionId) -> usize {
+        self.sessions.get(&id).map(|rec| rec.tabs.len()).unwrap_or(0)
+    }
+
+    /// The visible pane, if it has one.
+    fn active_pane(&self, id: SessionId) -> Option<&crate::pty::PtyPane> {
+        let rec = self.sessions.get(&id)?;
+        rec.tabs.get(rec.active_tab)?.pane.as_ref()
+    }
+
+    fn active_pane_mut(&mut self, id: SessionId) -> Option<&mut crate::pty::PtyPane> {
+        let rec = self.sessions.get_mut(&id)?;
+        let tab = rec.active_tab;
+        rec.tabs.get_mut(tab)?.pane.as_mut()
     }
 
     /// Replace a session's run ID, revoking the old value.
@@ -157,6 +372,37 @@ impl SessionManager {
             None => false,
             Some(rec) => {
                 rec.activity = activity;
+                true
+            }
+        }
+    }
+
+    /// Count one tool call for the sidebar stats. False when unknown.
+    pub fn note_tool_call(&mut self, id: SessionId) -> bool {
+        match self.sessions.get_mut(&id) {
+            None => false,
+            Some(rec) => {
+                rec.tool_calls = rec.tool_calls.saturating_add(1);
+                true
+            }
+        }
+    }
+
+    /// Count one policy verdict for the sidebar stats. Ask leaves both
+    /// counters alone. False when unknown.
+    pub fn note_verdict(&mut self, id: SessionId, decision: crate::policy::Decision) -> bool {
+        match self.sessions.get_mut(&id) {
+            None => false,
+            Some(rec) => {
+                match decision {
+                    crate::policy::Decision::Allow => {
+                        rec.approvals = rec.approvals.saturating_add(1)
+                    }
+                    crate::policy::Decision::Deny => {
+                        rec.denials = rec.denials.saturating_add(1)
+                    }
+                    crate::policy::Decision::Ask => {}
+                }
                 true
             }
         }
@@ -184,28 +430,32 @@ impl SessionManager {
         }
     }
 
-    /// Kill the pane; the record is retained and marked exited once the
-    /// reader reports back through [`SessionManager::drain_pty`].
+    /// Kill every tab pane; the record is retained and marked exited once
+    /// the primary reader reports back through [`SessionManager::drain_pty`].
     pub fn kill(&mut self, id: SessionId) -> bool {
         match self.sessions.get_mut(&id) {
             None => false,
             Some(rec) => {
-                if let Some(pane) = rec.pane.as_mut() {
-                    pane.close();
+                for tab in rec.tabs.iter_mut() {
+                    if let Some(pane) = tab.pane.as_mut() {
+                        pane.close();
+                    }
                 }
                 true
             }
         }
     }
 
-    /// Delete a record entirely, closing its pane first when still alive.
+    /// Delete a record entirely, closing its panes first when still alive.
     pub fn remove(&mut self, id: SessionId) -> bool {
         let mut rec = match self.sessions.remove(&id) {
             None => return false,
             Some(rec) => rec,
         };
-        if let Some(mut pane) = rec.pane.take() {
-            pane.close();
+        for tab in rec.tabs.iter_mut() {
+            if let Some(mut pane) = tab.pane.take() {
+                pane.close();
+            }
         }
         if self.run_index.get(rec.run_id.as_str()) == Some(&id) {
             self.run_index.remove(rec.run_id.as_str());
@@ -236,128 +486,172 @@ impl SessionManager {
         true
     }
 
-    /// Current PTY dimensions of a session's live pane, if it has one.
+    /// Current PTY dimensions of the visible tab, if it has a live pane.
     pub fn pane_size(&self, id: SessionId) -> Option<(u16, u16)> {
-        self.sessions.get(&id)?.pane.as_ref().map(|pane| pane.size())
+        self.active_pane(id).map(|pane| pane.size())
     }
 
-    /// Visible cursor of a session's live pane as 0-based (row, col), or
-    /// `None` when hidden or the pane is gone.
+    /// Visible cursor of the visible tab as 0-based (row, col), or `None`
+    /// when hidden or the pane is gone.
     pub fn cursor(&self, id: SessionId) -> Option<(u16, u16)> {
-        self.sessions.get(&id)?.pane.as_ref().and_then(|pane| pane.cursor())
+        self.active_pane(id).and_then(|pane| pane.cursor())
     }
 
-    /// The pane's requested mouse protocol mode; disabled when gone.
+    /// The visible tab's requested mouse protocol mode; disabled when gone.
     pub fn mouse_mode(&self, id: SessionId) -> vt100::MouseProtocolMode {
-        self.sessions
-            .get(&id)
-            .and_then(|rec| rec.pane.as_ref())
+        self.active_pane(id)
             .map(|pane| pane.mouse_mode())
             .unwrap_or(vt100::MouseProtocolMode::None)
     }
 
-    /// Whether the pane's application requested bracketed paste; false gone.
+    /// Whether the visible tab requested bracketed paste; false when gone.
     pub fn bracketed_paste(&self, id: SessionId) -> bool {
-        self.sessions
-            .get(&id)
-            .and_then(|rec| rec.pane.as_ref())
+        self.active_pane(id)
             .is_some_and(|pane| pane.bracketed_paste())
     }
 
-    /// The pane's requested mouse encoding; default when gone.
+    /// The visible tab's requested mouse encoding; default when gone.
     pub fn mouse_encoding(&self, id: SessionId) -> vt100::MouseProtocolEncoding {
-        self.sessions
-            .get(&id)
-            .and_then(|rec| rec.pane.as_ref())
+        self.active_pane(id)
             .map(|pane| pane.mouse_encoding())
             .unwrap_or(vt100::MouseProtocolEncoding::Default)
     }
 
-    /// Whether the pane's application wants SS3 application-cursor arrows.
+    /// Whether the visible tab wants SS3 application-cursor arrows.
     /// False when the pane is gone (normal CSI arrows then).
     pub fn app_cursor(&self, id: SessionId) -> bool {
-        self.sessions
-            .get(&id)
-            .and_then(|rec| rec.pane.as_ref())
+        self.active_pane(id)
             .is_some_and(|pane| pane.application_cursor())
     }
 
-    /// Styled screen rows of a session's live pane; empty when gone.
+    /// Styled screen rows of the visible tab; empty when gone.
     pub fn styled_rows(&self, id: SessionId) -> Vec<Vec<crate::pty::FormattedCell>> {
-        self.sessions
-            .get(&id)
-            .and_then(|rec| rec.pane.as_ref())
+        self.active_pane(id)
             .map(|pane| pane.styled_rows())
             .unwrap_or_default()
     }
 
     pub fn resize(&mut self, id: SessionId, rows: u16, cols: u16) -> std::io::Result<()> {
-        match self.sessions.get_mut(&id) {
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no such session",
-            )),
-            Some(rec) => match rec.pane.as_mut() {
-                Some(pane) => pane.resize(rows, cols),
-                None => Err(std::io::Error::new(
+        match self.active_pane_mut(id) {
+            None => Err(if self.sessions.contains_key(&id) {
+                std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "session has no live pane",
-                )),
-            },
+                )
+            } else {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no such session")
+            }),
+            Some(pane) => pane.resize(rows, cols),
         }
     }
 
     /// Non-blocking drain of pane events; applies exit transitions
-    /// (state, code, run revocation, pane release) and returns what arrived.
-    pub fn drain_pty(&mut self) -> Vec<(SessionId, crate::pty::PtyEvent)> {
+    /// (state, code, run revocation, pane release) and returns what arrived
+    /// as `(session, tab, event)`. Tab 0 decides session liveness; a later
+    /// tab exiting only releases its own pane.
+    pub fn drain_pty(&mut self) -> Vec<(SessionId, usize, crate::pty::PtyEvent)> {
         self.drain_pty_max(usize::MAX)
     }
 
     /// Bounded drain: at most `max` events per call so a flooding PTY can
-    /// never starve input handling or rendering.
-    pub fn drain_pty_max(&mut self, max: usize) -> Vec<(SessionId, crate::pty::PtyEvent)> {
+    /// never starve input handling or rendering. Primary tabs drain first;
+    /// background terminal tabs share the remainder.
+    pub fn drain_pty_max(
+        &mut self,
+        max: usize,
+    ) -> Vec<(SessionId, usize, crate::pty::PtyEvent)> {
         let mut out = Vec::new();
         while out.len() < max {
             let Ok((id, ev)) = self.pty_rx.try_recv() else {
                 break;
             };
-            if let crate::pty::PtyEvent::Exited(code) = &ev {
-                if let Some(rec) = self.sessions.get_mut(&id) {
-                    rec.state = SessionState::Exited(*code);
-                    rec.exit_code = *code;
-                    rec.pane = None;
-                    let run = rec.run_id.as_str().to_string();
-                    self.run_index.remove(&run);
-                }
-            }
-            out.push((id, ev));
+            self.apply_exit(id, 0, &ev);
+            out.push((id, 0, ev));
+        }
+        while out.len() < max {
+            let Ok((id, ev)) = self.aux_rx.try_recv() else {
+                break;
+            };
+            self.apply_exit(id, 1, &ev);
+            out.push((id, 1, ev));
         }
         out
     }
 
-    /// Visible screen text of a live pane, if it still has one.
-    pub fn screen_text(&self, id: SessionId) -> Option<String> {
-        self.sessions
-            .get(&id)?
-            .pane
-            .as_ref()
-            .map(|pane| pane.screen_text())
+    /// Fold one exit into record state. Primary-tab exits end the session
+    /// (revoking the run binding and reaping sibling panes); later-tab
+    /// exits only release that tab's pane.
+    fn apply_exit(&mut self, id: SessionId, tab: usize, ev: &crate::pty::PtyEvent) {
+        let crate::pty::PtyEvent::Exited(code) = ev else {
+            return;
+        };
+        let Some(rec) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        if tab == 0 {
+            rec.state = SessionState::Exited(*code);
+            rec.exit_code = *code;
+            let run = rec.run_id.as_str().to_string();
+            self.run_index.remove(&run);
+        }
+        if let Some(slot) = rec.tabs.get_mut(tab) {
+            slot.pane = None;
+        }
+        if tab == 0 {
+            // Reap siblings: a dead primary leaves no session behind.
+            if let Some(rec) = self.sessions.get_mut(&id) {
+                for (i, slot) in rec.tabs.iter_mut().enumerate() {
+                    if i != 0 {
+                        if let Some(mut pane) = slot.pane.take() {
+                            pane.close();
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    /// Write bytes to a live pane's child.
+    /// Visible screen text of the visible tab, if it still has one.
+    pub fn screen_text(&self, id: SessionId) -> Option<String> {
+        self.active_pane(id).map(|pane| pane.screen_text())
+    }
+
+    /// Write bytes to the visible tab's child.
     pub fn pane_write(&mut self, id: SessionId, bytes: &[u8]) -> std::io::Result<()> {
-        match self.sessions.get_mut(&id) {
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "no such session",
-            )),
-            Some(rec) => match rec.pane.as_mut() {
-                Some(pane) => pane.write_all(bytes),
-                None => Err(std::io::Error::new(
+        match self.active_pane_mut(id) {
+            None => Err(if self.sessions.contains_key(&id) {
+                std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "session has no live pane",
-                )),
-            },
+                )
+            } else {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no such session")
+            }),
+            Some(pane) => pane.write_all(bytes),
+        }
+    }
+
+    /// Write bytes to the agent tab when one exists, else the visible tab.
+    /// Broker injections always reach the agent, never a human shell.
+    pub fn inject_write(&mut self, id: SessionId, bytes: &[u8]) -> std::io::Result<()> {
+        let missing = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "session has no live pane",
+        );
+        let Some(rec) = self.sessions.get_mut(&id) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such session",
+            ));
+        };
+        let agent = rec
+            .tabs
+            .iter()
+            .position(|t| t.kind == TabKind::Agent && t.pane.is_some());
+        let tab = agent.unwrap_or(rec.active_tab);
+        match rec.tabs.get_mut(tab).and_then(|t| t.pane.as_mut()) {
+            Some(pane) => pane.write_all(bytes),
+            None => Err(missing),
         }
     }
 
@@ -408,6 +702,27 @@ mod tests {
         assert_eq!(Activity::default(), Activity::Idle);
     }
 
+    #[test]
+    fn hook_events_map_to_activity() {
+        assert_eq!(activity_for_hook("PreToolUse"), Some(Activity::ToolUse));
+        assert_eq!(activity_for_hook("PostToolUse"), Some(Activity::ToolUse));
+        assert_eq!(
+            activity_for_hook("PermissionRequest"),
+            Some(Activity::ToolUse)
+        );
+        assert_eq!(activity_for_hook("BeforeTool"), Some(Activity::ToolUse));
+        assert_eq!(activity_for_hook("AfterTool"), Some(Activity::ToolUse));
+        assert_eq!(activity_for_hook("SessionStart"), Some(Activity::Thinking));
+        assert_eq!(
+            activity_for_hook("UserPromptSubmit"),
+            Some(Activity::Thinking)
+        );
+        assert_eq!(activity_for_hook("Notification"), Some(Activity::Waiting));
+        assert_eq!(activity_for_hook("Stop"), Some(Activity::Stopped));
+        assert_eq!(activity_for_hook("SessionEnd"), Some(Activity::Stopped));
+        assert_eq!(activity_for_hook("Bogus"), None);
+    }
+
     use crate::ids::RunId;
     use crate::pty::PtyEvent;
     use std::time::{Duration, Instant};
@@ -419,7 +734,7 @@ mod tests {
     fn poll_exit(m: &mut SessionManager, id: SessionId) -> Option<i32> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            for (eid, ev) in m.drain_pty() {
+            for (eid, _tab, ev) in m.drain_pty() {
                 if eid == id {
                     if let PtyEvent::Exited(code) = ev {
                         return code;
@@ -494,7 +809,16 @@ mod tests {
         assert!(first.len() <= 100, "drain capped, took {}", first.len());
         // The flood continues: a second capped drain still finds events,
         // proving the first call left the rest queued instead of dropping.
-        let second = m.drain_pty_max(100);
+        // Poll briefly: under load the reader thread may not have refilled
+        // the channel between two back-to-back drains.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let second = loop {
+            let drained = m.drain_pty_max(100);
+            if !drained.is_empty() || Instant::now() > deadline {
+                break drained;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
         assert!(!second.is_empty());
         assert!(m.remove(id));
     }
@@ -510,7 +834,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut seen = Vec::new();
         loop {
-            for (_, ev) in m.drain_pty() {
+            for (_, _, ev) in m.drain_pty() {
                 if let PtyEvent::Output(b) = ev {
                     seen.extend_from_slice(&b);
                 }
@@ -559,6 +883,124 @@ mod tests {
         let rec = m.get(id).unwrap();
         assert_eq!(rec.state, SessionState::Exited(Some(7)));
         assert_eq!(rec.exit_code, Some(7));
+        assert!(m.remove(id));
+    }
+
+    #[test]
+    fn select_tab_targets_directly_with_lazy_spawn() {
+        let mut m = SessionManager::new();
+        let id = m
+            .spawn_agent("agent", &workdir(), "exec cat", RunId::generate(), "codex")
+            .unwrap();
+        assert!(m.select_tab(id, 1));
+        assert_eq!(m.active_tab_kind(id), Some(TabKind::Terminal));
+        assert!(!m.select_tab(id, 1), "already visible is a no-op");
+        assert!(!m.select_tab(id, 7), "out of range");
+        assert!(!m.select_tab(SessionId::fresh(), 0));
+        assert!(m.select_tab(id, 0));
+        assert_eq!(m.active_tab_kind(id), Some(TabKind::Agent));
+        let solo = m
+            .spawn("s", &workdir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        assert!(!m.select_tab(solo, 0), "single-tab refuses");
+        assert!(m.remove(id));
+        assert!(m.remove(solo));
+    }
+
+    #[test]
+    fn agent_session_opens_dual_tabs_with_lazy_terminal() {
+        let mut m = SessionManager::new();
+        let id = m
+            .spawn_agent("agent", &workdir(), "exec cat", RunId::generate(), "codex")
+            .unwrap();
+        assert_eq!(m.tab_count(id), 2);
+        assert_eq!(m.active_tab_kind(id), Some(TabKind::Agent));
+        // Single-tab shells refuse to cycle.
+        let solo = m
+            .spawn("s", &workdir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        assert_eq!(m.tab_count(solo), 1);
+        assert!(!m.switch_tab(solo));
+        assert!(!m.switch_tab(SessionId::fresh()));
+        // First switch lazily spawns the human shell at a live size.
+        assert!(m.switch_tab(id));
+        assert_eq!(m.active_tab_kind(id), Some(TabKind::Terminal));
+        assert!(m.pane_size(id).is_some());
+        // Cycling wraps back to the agent tab.
+        assert!(m.switch_tab(id));
+        assert_eq!(m.active_tab_kind(id), Some(TabKind::Agent));
+        assert!(m.remove(id));
+        assert!(m.remove(solo));
+    }
+
+    #[test]
+    fn inject_write_reaches_agent_behind_terminal_tab() {
+        let mut m = SessionManager::new();
+        let id = m
+            .spawn_agent("a", &workdir(), "exec cat", RunId::generate(), "codex")
+            .unwrap();
+        assert!(m.switch_tab(id)); // now looking at the human shell
+        m.inject_write(id, b"to-agent\n").unwrap();
+        assert!(m.inject_write(SessionId::fresh(), b"x").is_err());
+        // Cycle back to the agent tab and read its screen: cat echoed it.
+        assert!(m.switch_tab(id));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(text) = m.screen_text(id) {
+                if text.contains("to-agent") {
+                    break;
+                }
+            }
+            if Instant::now() > deadline {
+                panic!("injection never reached the agent tab");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(m.remove(id));
+    }
+
+    #[test]
+    fn terminal_tab_exit_keeps_session_alive() {
+        let mut m = SessionManager::new();
+        let run = RunId::generate();
+        let id = m
+            .spawn_agent("a", &workdir(), "exec cat", run.clone(), "codex")
+            .unwrap();
+        assert!(m.switch_tab(id));
+        // Close only the human shell; the agent tab keeps the session live.
+        m.pane_write(id, b"exit\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let aux_gone = m.drain_pty().iter().any(|(eid, tab, ev)| {
+                *eid == id && *tab == 1 && matches!(ev, PtyEvent::Exited(_))
+            });
+            if aux_gone {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("terminal tab never exited");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let rec = m.get(id).expect("session survives its terminal tab");
+        assert!(rec.state.is_live());
+        assert_eq!(m.lookup_run(run.as_str()), Some(id));
+        assert!(m.remove(id));
+    }
+
+    #[test]
+    fn primary_exit_ends_agent_session() {
+        let mut m = SessionManager::new();
+        let run = RunId::generate();
+        let id = m
+            .spawn_agent("a", &workdir(), "exit 3", run.clone(), "codex")
+            .unwrap();
+        assert!(m.switch_tab(id)); // lazy terminal beside a dying agent
+        assert_eq!(poll_exit(&mut m, id), Some(3));
+        let rec = m.get(id).unwrap();
+        assert_eq!(rec.state, SessionState::Exited(Some(3)));
+        assert_eq!(m.lookup_run(run.as_str()), None);
+        assert!(m.pane_size(id).is_none(), "visible agent pane released");
         assert!(m.remove(id));
     }
 }

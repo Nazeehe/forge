@@ -110,11 +110,13 @@ pub fn cursor_screen_pos(area: Rect, cursor: Option<(u16, u16)>) -> Option<Posit
     Some(Position::new(x, y))
 }
 
-/// Chrome geometry: one focused session fills the 80% main pane, the
-/// sidebar keeps 20%, and two bottom rows hold the session bar plus the
-/// status bar. Tiny terminals sacrifice chrome for content.
+/// Chrome geometry: one focused session fills the 80% main pane (with a
+/// one-row tab strip pinned to its top), the sidebar keeps 20%, and two
+/// bottom rows hold the session bar plus the status bar. Tiny terminals
+/// sacrifice chrome for content.
 pub struct ChromeAreas {
     pub main: Rect,
+    pub topbar: Rect,
     pub sidebar: Rect,
     pub session_bar: Rect,
     pub status: Rect,
@@ -123,93 +125,313 @@ pub struct ChromeAreas {
 pub fn chrome_areas(area: Rect) -> ChromeAreas {
     let (bar_h, status_h) = if area.height >= 3 { (1, 1) } else { (0, 0) };
     let content_h = area.height.saturating_sub(bar_h + status_h);
+    let topbar_h = if content_h > 4 { 1 } else { 0 };
     let main_w = area.width * 4 / 5;
     ChromeAreas {
-        main: Rect::new(area.x, area.y, main_w, content_h),
+        main: Rect::new(
+            area.x,
+            area.y + topbar_h,
+            main_w,
+            content_h.saturating_sub(topbar_h),
+        ),
+        topbar: Rect::new(area.x, area.y, main_w, topbar_h),
         sidebar: Rect::new(area.x + main_w, area.y, area.width.saturating_sub(main_w), content_h),
         session_bar: Rect::new(area.x, area.y + content_h, area.width, bar_h),
         status: Rect::new(area.x, area.y + content_h + bar_h, area.width, status_h),
     }
 }
 
-/// One session-bar entry: 1-based number plus title.
-#[derive(Clone, Debug)]
-pub struct SessionTab {
-    pub title: String,
-    pub live: bool,
-    pub focused: bool,
+/// One per-session tab: the agent CLI tab plus the human terminal tab.
+#[derive(Clone, Debug, Default)]
+pub struct TopTab {
+    pub label: String,
+    pub active: bool,
 }
 
-/// A laid-out session button: label plus area-relative column span.
-pub struct SessionButton {
+/// Per-session tab strip: empty when no session is focused.
+#[derive(Clone, Debug, Default)]
+pub struct TopBar {
+    pub tabs: Vec<TopTab>,
+}
+
+/// A laid-out top-bar button: area-relative column span.
+pub struct TopButton {
     pub index: usize,
-    pub label: String,
     pub start: u16,
     pub end: u16,
 }
 
-/// Lay session buttons left to right with two-space gaps, clipping at the
-/// bar edge instead of wrapping.
-pub fn layout_session_bar(bar: Rect, titles: &[String]) -> Vec<SessionButton> {
+/// Lay tab buttons left to right with two-space gaps, clipping at the edge.
+pub fn layout_topbar(bar: Rect, tabs: &[TopTab]) -> Vec<TopButton> {
     let mut buttons = Vec::new();
-    let mut col = bar.x;
+    let mut col = bar.x.saturating_add(1);
     let edge = bar.x + bar.width;
-    for (index, title) in titles.iter().enumerate() {
-        let label = format!("{} {title}", index + 1);
+    for (index, tab) in tabs.iter().enumerate() {
+        let label = format!("[{}]", tab.label);
         let end = col.saturating_add(label.len() as u16);
         if col >= edge || end > edge {
             break;
         }
-        buttons.push(SessionButton { index, label, start: col, end });
+        buttons.push(TopButton { index, start: col, end });
         col = end.saturating_add(2);
     }
     buttons
 }
 
 /// Button index under an area-relative column, if any.
-pub fn session_at(buttons: &[SessionButton], col: u16) -> Option<usize> {
+pub fn topbar_at(buttons: &[TopButton], col: u16) -> Option<usize> {
     buttons
         .iter()
         .find(|b| col >= b.start && col < b.end)
         .map(|b| b.index)
 }
 
-/// Sidebar content source: session list plus pending approvals and mode.
+/// One session-bar entry: 1-based number plus title, with the primary
+/// communication group (if any) and its stable palette index.
+#[derive(Clone, Debug)]
+pub struct SessionTab {
+    pub title: String,
+    pub live: bool,
+    pub focused: bool,
+    pub group: Option<String>,
+    pub group_color: Option<usize>,
+}
+
+/// Group-chip palette: named ANSI colors only (theme roles stay semantic),
+/// cycling forever so late groups still get a chip.
+pub fn group_palette(index: usize) -> Color {
+    const PALETTE: [Color; 8] = [
+        Color::Cyan,
+        Color::Magenta,
+        Color::Blue,
+        Color::LightCyan,
+        Color::LightMagenta,
+        Color::LightGreen,
+        Color::White,
+        Color::LightBlue,
+    ];
+    PALETTE[index % PALETTE.len()]
+}
+
+/// One rendered chunk of the sessions bar: literal text, its style, and the
+/// tab it selects when clicked (`None` for group headers, which never
+/// switch sessions).
+pub struct BarSegment {
+    pub text: String,
+    pub style: Style,
+    pub index: Option<usize>,
+}
+
+/// Build bar segments in manager order so `N` numbering (and `Ctrl-b N`)
+/// never shifts: consecutive tabs sharing a group get one colored
+/// `group:` header; a group split by outsiders repeats its header rather
+/// than reordering anyone.
+pub fn session_bar_segments(tabs: &[SessionTab]) -> Vec<BarSegment> {
+    let mut segments = Vec::new();
+    let mut prev_group: Option<&str> = None;
+    for (n, tab) in tabs.iter().enumerate() {
+        if let Some(group) = tab.group.as_deref() {
+            if prev_group != Some(group) {
+                segments.push(BarSegment {
+                    text: format!("{group}:"),
+                    style: Style::default()
+                        .fg(group_palette(tab.group_color.unwrap_or(0)))
+                        .add_modifier(Modifier::BOLD),
+                    index: None,
+                });
+            }
+        }
+        segments.push(BarSegment {
+            text: format!("{} {}", n + 1, tab.title),
+            style: if tab.focused {
+                Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow)
+            } else {
+                Style::default()
+            },
+            index: Some(n),
+        });
+        prev_group = tab.group.as_deref();
+    }
+    segments
+}
+
+/// A laid-out session button: label plus area-relative column span.
+/// Group headers lay out like buttons but carry no index, so clicks on
+/// them never switch sessions.
+pub struct SessionButton {
+    pub index: Option<usize>,
+    pub label: String,
+    pub start: u16,
+    pub end: u16,
+}
+
+/// Lay session segments left to right, clipping at the bar edge instead
+/// of wrapping. Buttons keep two-space gaps; a group header takes one
+/// trailing space so the run reads `group: 1 a 2 b`.
+pub fn layout_session_bar(bar: Rect, segments: &[BarSegment]) -> Vec<SessionButton> {
+    let mut buttons = Vec::new();
+    let mut col = bar.x;
+    let edge = bar.x + bar.width;
+    for segment in segments {
+        let end = col.saturating_add(segment.text.len() as u16);
+        if col >= edge || end > edge {
+            break;
+        }
+        let gap = if segment.index.is_none() { 1 } else { 2 };
+        buttons.push(SessionButton {
+            index: segment.index,
+            label: segment.text.clone(),
+            start: col,
+            end,
+        });
+        col = end.saturating_add(gap);
+    }
+    buttons
+}
+
+/// Button index under an area-relative column, if any. Group headers are
+/// skipped: clicking one selects nothing.
+pub fn session_at(buttons: &[SessionButton], col: u16) -> Option<usize> {
+    buttons
+        .iter()
+        .find(|b| col >= b.start && col < b.end)
+        .and_then(|b| b.index)
+}
+
+/// Sidebar content source: the focused session's detail plus stats,
+/// pending hooks, and the permission mode buttons.
+#[derive(Clone, Debug)]
+pub struct SessionDetail {
+    pub name: String,
+    pub cli_tool: String,
+    pub cwd: String,
+    pub state: String,
+    pub uptime_secs: u64,
+    pub tool_calls: u32,
+    pub approvals: u32,
+    pub denials: u32,
+}
+
 pub struct SidebarInfo {
-    pub sessions: Vec<SessionTab>,
+    pub session: Option<SessionDetail>,
     pub pending: usize,
+    /// "off" or "yolo": drives which settings button highlights.
     pub mode: &'static str,
 }
 
-/// Sidebar lines. Never blank: with no sessions it still guides.
-pub fn sidebar_lines(info: &SidebarInfo) -> Vec<String> {
-    let mut lines = vec!["Sessions".to_string()];
-    if info.sessions.is_empty() {
-        lines.push("  none yet".to_string());
-        lines.push("  Ctrl-b c creates one".to_string());
+/// Compact uptime: 45s, 3m, 2h, 1d 4h.
+pub fn format_uptime(secs: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    if secs < MINUTE {
+        format!("{secs}s")
+    } else if secs < HOUR {
+        format!("{}m", secs / MINUTE)
+    } else if secs < DAY {
+        format!("{}h", secs / HOUR)
+    } else {
+        format!("{}d {}h", secs / DAY, (secs % DAY) / HOUR)
     }
-    for (i, tab) in info.sessions.iter().enumerate() {
-        let (glyph, _) = if tab.live {
-            theme::status_glyph_running()
-        } else {
-            theme::status_glyph_exited()
-        };
-        let mark = if tab.focused { "▸" } else { " " };
-        lines.push(format!(
-            "{mark} {glyph} {} {}",
-            i + 1,
-            safe_text::encode_for_display(&tab.title)
-        ));
+}
+
+/// Fixed sidebar rows: detail block, stats, then the bottom settings row
+/// carrying the clickable mode buttons. Hit-testing assumes this layout.
+pub const SETTINGS_ROW: u16 = 11;
+
+/// Sidebar lines. Never blank: with no sessions it still guides. The
+/// active mode button renders highlighted.
+pub fn sidebar_lines(info: &SidebarInfo) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match &info.session {
+        None => {
+            lines.push(Line::from("Sessions"));
+            lines.push(Line::from("  none yet"));
+            lines.push(Line::from("  Ctrl-b c creates one"));
+        }
+        Some(detail) => {
+            lines.push(Line::from("Session"));
+            lines.push(Line::from(format!(
+                "  {}",
+                safe_text::encode_for_display(&detail.name)
+            )));
+            lines.push(Line::from(format!(
+                "  {} {}",
+                safe_text::encode_for_display(&detail.cli_tool),
+                safe_text::encode_for_display(&detail.state)
+            )));
+            lines.push(Line::from(format!(
+                "  {}",
+                safe_text::encode_for_display(&detail.cwd)
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Stats"));
+            lines.push(Line::from(format!(
+                "  Uptime {}",
+                format_uptime(detail.uptime_secs)
+            )));
+            lines.push(Line::from(format!("  Tools {}", detail.tool_calls)));
+            lines.push(Line::from(format!(
+                "  ✓ {} × {}",
+                detail.approvals, detail.denials
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from("Settings"));
+        }
     }
-    lines.push(String::new());
-    lines.push(format!("Pending: {}", info.pending));
-    lines.push(format!("Mode: {}", info.mode));
+    while lines.len() < SETTINGS_ROW as usize {
+        lines.push(Line::from(""));
+    }
+    let (off_style, yolo_style) = if info.mode == "yolo" {
+        (Style::default(), Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED))
+    } else {
+        (Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED), Style::default())
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("[Off]", off_style),
+        Span::raw(" "),
+        Span::styled("[Yolo]", yolo_style),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(format!("Pending: {}", info.pending)));
     lines
+}
+
+/// Click areas for the mode buttons, relative to the sidebar rect. Row is
+/// fixed by [`SETTINGS_ROW`]; columns match the rendered button spans.
+pub struct ModeButtons {
+    pub off: Rect,
+    pub yolo: Rect,
+}
+
+pub fn mode_button_areas(sidebar: Rect) -> ModeButtons {
+    let y = sidebar.y + SETTINGS_ROW;
+    ModeButtons {
+        off: Rect::new(sidebar.x + 2, y, 5, 1),
+        yolo: Rect::new(sidebar.x + 8, y, 6, 1),
+    }
+}
+
+/// Permission mode under a sidebar click, if any.
+pub fn mode_at(buttons: &ModeButtons, col: u16, row: u16) -> Option<&'static str> {
+    if row != buttons.off.y {
+        return None;
+    }
+    if col >= buttons.off.x && col < buttons.off.x + buttons.off.width {
+        Some("off")
+    } else if col >= buttons.yolo.x && col < buttons.yolo.x + buttons.yolo.width {
+        Some("yolo")
+    } else {
+        None
+    }
 }
 
 /// Chrome snapshots: session-bar tabs plus sidebar and status text.
 pub struct Chrome {
     pub tabs: Vec<SessionTab>,
+    pub topbar: TopBar,
+    pub detail: Option<SessionDetail>,
     pub pending: usize,
     pub mode: &'static str,
     pub status: String,
@@ -221,6 +443,25 @@ pub struct Chrome {
 /// outer terminal.
 pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome) {
     let areas = chrome_areas(area);
+    if areas.topbar.height > 0 {
+        let buttons = layout_topbar(areas.topbar, &chrome.topbar.tabs);
+        let mut spans = Vec::new();
+        for button in &buttons {
+            let tab = &chrome.topbar.tabs[button.index];
+            let style = if tab.active {
+                Style::default()
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                    .fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            if button.start > areas.topbar.x + 1 {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::styled(format!("[{}]", tab.label), style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), areas.topbar);
+    }
     let focused = panes.iter().find(|p| p.focused).or(panes.first());
     match focused {
         Some(view) => {
@@ -253,11 +494,11 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
     }
     if areas.sidebar.width > 0 && areas.sidebar.height > 0 {
         let info = SidebarInfo {
-            sessions: chrome.tabs.clone(),
+            session: chrome.detail.clone(),
             pending: chrome.pending,
             mode: chrome.mode,
         };
-        let side = Paragraph::new(sidebar_lines(&info).join("\n")).block(
+        let side = Paragraph::new(Text::from(sidebar_lines(&info))).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme::style(theme::Role::BorderUnfocused))
@@ -266,19 +507,18 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
         frame.render_widget(side, areas.sidebar);
     }
     if areas.session_bar.height > 0 {
-        let titles: Vec<String> = chrome.tabs.iter().map(|t| t.title.clone()).collect();
-        let buttons = layout_session_bar(areas.session_bar, &titles);
+        let segments = session_bar_segments(&chrome.tabs);
+        let buttons = layout_session_bar(areas.session_bar, &segments);
         let mut spans = Vec::new();
-        for button in &buttons {
-            let style = if chrome.tabs.get(button.index).is_some_and(|t| t.focused) {
-                Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow)
-            } else {
-                Style::default()
-            };
-            if button.start > areas.session_bar.x {
-                spans.push(Span::raw("  "));
+        // Gaps come from laid-out positions (headers take one space,
+        // buttons two), so clicks always land on what they see.
+        let mut col = areas.session_bar.x;
+        for (button, segment) in buttons.iter().zip(segments.iter()) {
+            for _ in col..button.start {
+                spans.push(Span::raw(" "));
             }
-            spans.push(Span::styled(button.label.clone(), style));
+            spans.push(Span::styled(button.label.clone(), segment.style));
+            col = button.end;
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), areas.session_bar);
     }
@@ -315,12 +555,14 @@ mod tests {
     #[test]
     fn chrome_splits_main_sidebar_and_bars() {
         let c = chrome_areas(Rect::new(0, 0, 80, 24));
-        assert_eq!(c.main, Rect::new(0, 0, 64, 22));
+        assert_eq!(c.topbar, Rect::new(0, 0, 64, 1));
+        assert_eq!(c.main, Rect::new(0, 1, 64, 21));
         assert_eq!(c.sidebar, Rect::new(64, 0, 16, 22));
         assert_eq!(c.session_bar, Rect::new(0, 22, 80, 1));
         assert_eq!(c.status, Rect::new(0, 23, 80, 1));
         let wide = chrome_areas(Rect::new(0, 0, 120, 40));
-        assert_eq!(wide.main, Rect::new(0, 0, 96, 38));
+        assert_eq!(wide.topbar, Rect::new(0, 0, 96, 1));
+        assert_eq!(wide.main, Rect::new(0, 1, 96, 37));
         assert_eq!(wide.sidebar, Rect::new(96, 0, 24, 38));
         // Tiny terminals keep content over chrome.
         let tiny = chrome_areas(Rect::new(0, 0, 80, 2));
@@ -328,10 +570,31 @@ mod tests {
         assert_eq!(tiny.status.height, 0);
     }
 
+    fn tab(title: &str, focused: bool) -> SessionTab {
+        SessionTab {
+            title: title.to_string(),
+            live: true,
+            focused,
+            group: None,
+            group_color: None,
+        }
+    }
+
+    fn grouped(title: &str, focused: bool, group: &str, color: usize) -> SessionTab {
+        SessionTab {
+            title: title.to_string(),
+            live: true,
+            focused,
+            group: Some(group.to_string()),
+            group_color: Some(color),
+        }
+    }
+
     #[test]
     fn session_bar_buttons_number_left_to_right() {
         let bar = Rect::new(0, 22, 80, 1);
-        let buttons = layout_session_bar(bar, &["shell-1".to_string(), "shell-2".to_string()]);
+        let segments = session_bar_segments(&[tab("shell-1", true), tab("shell-2", false)]);
+        let buttons = layout_session_bar(bar, &segments);
         assert_eq!(buttons.len(), 2);
         assert_eq!(buttons[0].label, "1 shell-1");
         assert_eq!((buttons[0].start, buttons[0].end), (0, 9));
@@ -344,29 +607,91 @@ mod tests {
         assert_eq!(session_at(&buttons, 11), Some(1));
         assert_eq!(session_at(&buttons, 79), None);
         // Overflow clips instead of wrapping.
-        let narrow = layout_session_bar(Rect::new(0, 0, 10, 1), &["shell-1".to_string(), "shell-2".to_string()]);
+        let narrow = layout_session_bar(
+            Rect::new(0, 0, 10, 1),
+            &session_bar_segments(&[tab("shell-1", true), tab("shell-2", false)]),
+        );
         assert_eq!(narrow.len(), 1);
     }
 
     #[test]
-    fn sidebar_lists_sessions_pending_and_mode() {
+    fn session_bar_groups_share_one_colored_header() {
+        let tabs = vec![
+            grouped("a1", true, "codex-proj", 0),
+            grouped("a2", false, "codex-proj", 0),
+            tab("solo", false),
+            grouped("b1", false, "other", 1),
+        ];
+        let segments = session_bar_segments(&tabs);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["codex-proj:", "1 a1", "2 a2", "3 solo", "other:", "4 b1"],
+            "one header per run, numbering never shifts"
+        );
+        // Headers are colored with the group palette, never clickable.
+        assert_eq!(segments[0].style.fg, Some(group_palette(0)));
+        assert_eq!(segments[0].index, None);
+        assert_eq!(segments[4].style.fg, Some(group_palette(1)));
+        assert_ne!(group_palette(0), group_palette(1));
+        // Focused session keeps the focus style.
+        assert_eq!(segments[1].style.fg, Some(Color::Yellow));
+        let bar = Rect::new(0, 22, 80, 1);
+        let buttons = layout_session_bar(bar, &segments);
+        assert_eq!(buttons.len(), segments.len());
+        // One trailing space after a header: `codex-proj: 1 a1`.
+        assert_eq!((buttons[0].start, buttons[0].end), (0, 11));
+        assert_eq!((buttons[1].start, buttons[1].end), (12, 16));
+        // Clicking the header selects nothing; clicking a member selects it.
+        assert_eq!(session_at(&buttons, buttons[0].start), None);
+        assert_eq!(session_at(&buttons, buttons[1].start), Some(0));
+        assert_eq!(session_at(&buttons, buttons[5].start), Some(3));
+        // Palette cycles instead of running out.
+        assert_eq!(group_palette(8), group_palette(0));
+    }
+
+    fn text_of(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn has(lines: &[Line], needle: &str) -> bool {
+        lines.iter().any(|l| text_of(l).contains(needle))
+    }
+
+    #[test]
+    fn sidebar_shows_focused_session_detail_and_mode() {
         let info = SidebarInfo {
-            sessions: vec![
-                SessionTab { title: "shell-1".to_string(), live: true, focused: true },
-                SessionTab { title: "old".to_string(), live: false, focused: false },
-            ],
+            session: Some(SessionDetail {
+                name: "shell-1".to_string(),
+                cli_tool: "shell".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                state: "running · Thinking".to_string(),
+                uptime_secs: 65,
+                tool_calls: 4,
+                approvals: 3,
+                denials: 1,
+            }),
             pending: 3,
-            mode: "safe-only",
+            mode: "off",
         };
         let lines = sidebar_lines(&info);
-        assert!(lines.iter().any(|l| l.contains("Sessions")), "header: {lines:?}");
-        assert!(lines.iter().any(|l| l.contains('▸') && l.contains("shell-1")), "focus: {lines:?}");
-        assert!(lines.iter().any(|l| l.contains('×') && l.contains("old")), "exited: {lines:?}");
-        assert!(lines.iter().any(|l| l.contains("Pending: 3")), "pending: {lines:?}");
-        assert!(lines.iter().any(|l| l.contains("safe-only")), "mode: {lines:?}");
+        assert!(has(&lines, "shell-1"), "name: {lines:?}");
+        assert!(has(&lines, "shell"), "tool: {lines:?}");
+        assert!(has(&lines, "/tmp/proj"), "cwd: {lines:?}");
+        assert!(has(&lines, "running"), "state: {lines:?}");
+        assert!(has(&lines, "1m"), "uptime: {lines:?}");
+        assert!(has(&lines, "4"), "calls: {lines:?}");
+        assert!(has(&lines, "Pending: 3"), "pending: {lines:?}");
+        assert!(has(&lines, "[Off]"), "off highlighted: {lines:?}");
+        assert!(has(&lines, "Yolo"), "yolo offered: {lines:?}");
+        assert!(!has(&lines, "safe-only"), "no third mode: {lines:?}");
+        // Yolo highlights instead when active.
+        let yolo = SidebarInfo { session: info.session.clone(), pending: 0, mode: "yolo" };
+        let yolo_lines = sidebar_lines(&yolo);
+        assert!(has(&yolo_lines, "[Yolo]"), "yolo highlighted: {yolo_lines:?}");
         // Never blank: empty state still guides.
-        let empty = sidebar_lines(&SidebarInfo { sessions: vec![], pending: 0, mode: "off" });
-        assert!(empty.iter().any(|l| l.contains("Ctrl-b c")), "guides: {empty:?}");
+        let empty = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off" });
+        assert!(has(&empty, "Ctrl-b c"), "guides: {empty:?}");
     }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
@@ -399,11 +724,20 @@ mod tests {
 
     fn chrome() -> Chrome {
         Chrome {
-            tabs: vec![SessionTab {
-                title: "sh".to_string(),
-                live: true,
-                focused: true,
-            }],
+            tabs: vec![tab("sh", true)],
+            topbar: TopBar {
+                tabs: vec![
+                    TopTab {
+                        label: "Shell".to_string(),
+                        active: true,
+                    },
+                    TopTab {
+                        label: "Terminal".to_string(),
+                        active: false,
+                    },
+                ],
+            },
+            detail: None,
             pending: 0,
             mode: "off",
             status: "status".to_string(),
@@ -411,15 +745,31 @@ mod tests {
     }
 
     #[test]
+    fn topbar_layout_clips_and_hit_tests() {
+        let bar = Rect::new(0, 0, 20, 1);
+        let tabs = vec![
+            TopTab { label: "Codex".to_string(), active: true },
+            TopTab { label: "Terminal".to_string(), active: false },
+        ];
+        let buttons = layout_topbar(bar, &tabs);
+        assert_eq!(buttons.len(), 2);
+        // "[Codex]" spans 1..8, gap, "[Terminal]" spans 10..20.
+        assert_eq!(topbar_at(&buttons, 1), Some(0));
+        assert_eq!(topbar_at(&buttons, 7), Some(0));
+        assert_eq!(topbar_at(&buttons, 8), None, "gap is dead");
+        assert_eq!(topbar_at(&buttons, 10), Some(1));
+        assert_eq!(topbar_at(&buttons, 0), None, "margin is dead");
+        // Narrow bar clips the second tab instead of wrapping.
+        let narrow = layout_topbar(Rect::new(0, 0, 12, 1), &tabs);
+        assert_eq!(narrow.len(), 1);
+    }
+
+    #[test]
     fn render_shows_titles_bodies_and_status() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut c = chrome();
-        c.tabs = vec![SessionTab {
-            title: "agent-1".to_string(),
-            live: true,
-            focused: true,
-        }];
+        c.tabs = vec![tab("agent-1", true)];
         c.status = "2 sessions | prefix Ctrl-b".to_string();
         terminal
             .draw(|f| render(f, area(), &[pane("agent-1", "hello out", true)], &c))
@@ -463,7 +813,7 @@ mod tests {
         terminal
             .draw(|f| render(f, area(), &[p], &chrome()))
             .unwrap();
-        terminal.backend_mut().assert_cursor_position(Position::new(6, 3));
+        terminal.backend_mut().assert_cursor_position(Position::new(6, 4));
     }
 
     #[test]
@@ -510,7 +860,7 @@ mod tests {
             .unwrap();
         let buf = terminal.backend().buffer();
         let w = buf.area.width as usize;
-        let cell = &buf.content[1 * w + 1];
+        let cell = &buf.content[2 * w + 1];
         assert_eq!(cell.symbol(), "R");
         assert_eq!(cell.fg, Color::Indexed(1));
     }
@@ -559,8 +909,8 @@ mod tests {
         let new = pane("new", "hi", true);
         let mut c = chrome();
         c.tabs = vec![
-            SessionTab { title: "old".to_string(), live: false, focused: false },
-            SessionTab { title: "new".to_string(), live: true, focused: true },
+            SessionTab { title: "old".to_string(), live: false, focused: false, group: None, group_color: None },
+            SessionTab { title: "new".to_string(), live: true, focused: true, group: None, group_color: None },
         ];
         terminal
             .draw(|f| render(f, area(), &[old, new], &c))

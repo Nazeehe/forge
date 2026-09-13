@@ -17,6 +17,12 @@ pub const PRESSURE_CAP: usize = 5;
 pub const COURTESY_GRACE: Duration = Duration::from_secs(30);
 /// Human typing holds injections for this long after the last key/paste.
 pub const INJECT_DEBOUNCE: Duration = Duration::from_secs(2);
+/// Beat between an injection body and its Enter: one input event at a
+/// time, like a human typing then pressing Enter. A burst ending in CR
+/// parses as one paste in some CLIs and the submit never fires.
+pub const INJECT_ENTER_DELAY: Duration = Duration::from_millis(150);
+/// The staged Enter byte.
+pub const INJECT_ENTER_CR: u8 = b'\r';
 
 /// What a queued injection is. Decided clicks/keys elsewhere consume these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +60,52 @@ pub struct Injection {
     pub text: String,
 }
 
+impl Injection {
+    /// Per-kind reply guidance: Ask takes `send_response`, Tell takes
+    /// `tell_session` follow-ups from either party, while terminal kinds
+    /// (Response, Ack, Reminder, Failed) carry none because replying to
+    /// them only errors.
+    fn guidance(&self) -> Option<String> {
+        match self.kind {
+            InjectKind::Ask => Some(format!(
+                "[forge: reply with send_response conversation_id {}]",
+                self.conv
+            )),
+            InjectKind::Tell | InjectKind::FollowUp => Some(format!(
+                "[forge: reply with tell_session target {} conversation_id {}]",
+                self.from, self.conv
+            )),
+            InjectKind::Response
+            | InjectKind::Ack
+            | InjectKind::Reminder
+            | InjectKind::Failed => None,
+        }
+    }
+
+    /// Pane body without the trailing CR: the staged Enter goes out on a
+    /// later settle tick (see [`INJECT_ENTER_DELAY`]), never in the same
+    /// burst as the text.
+    pub fn render_body(&self) -> Vec<u8> {
+        let mut out = format!("[forge {} from {}]: {}", self.kind.label(), self.from, self.text);
+        if let Some(guidance) = self.guidance() {
+            out.push('\n');
+            out.push_str(&guidance);
+        }
+        out.into_bytes()
+    }
+
+    /// Full pane sequence: body plus the staged Enter. Delivery writes
+    /// the body first and the CR on a later tick (human parity: type
+    /// text, press Enter — never one burst). No leading newline: one
+    /// would land as a junk blank line in the receiver's draft.
+    pub fn render(&self) -> Vec<u8> {
+        let mut body = self.render_body();
+        // Terminal Enter for raw-mode CLIs and canonical shells alike.
+        body.push(INJECT_ENTER_CR);
+        body
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConvKind {
     Ask,
@@ -84,6 +136,9 @@ struct Conv {
 
 struct Group {
     members: HashSet<SessionId>,
+    /// Palette index assigned at creation; drives the sessions-bar chip.
+    /// Stable for the group lifetime (never reused after delete).
+    color: usize,
 }
 
 /// Ephemeral ACLs, conversations, and per-session injection queues.
@@ -94,6 +149,9 @@ pub struct Broker {
     membership: HashMap<SessionId, Vec<String>>,
     convs: HashMap<String, Conv>,
     queue: HashMap<SessionId, VecDeque<Injection>>,
+    /// Monotonic palette cursor: each created group takes the next index,
+    /// deleted ones never hand theirs back (stable chips, no reuse).
+    next_color: usize,
 }
 
 impl Broker {
@@ -103,10 +161,33 @@ impl Broker {
             membership: HashMap::new(),
             convs: HashMap::new(),
             queue: HashMap::new(),
+            next_color: 0,
         }
     }
 
+    /// Create an empty group (for the human group dialog). Fails on
+    /// empty/duplicate names; creation assigns the next palette color.
+    pub fn create_group(&mut self, group: &str) -> Result<(), String> {
+        if group.is_empty() {
+            return Err("empty group name".to_string());
+        }
+        if self.groups.contains_key(group) {
+            return Err("group already exists".to_string());
+        }
+        let color = self.next_color;
+        self.next_color += 1;
+        self.groups.insert(
+            group.to_string(),
+            Group {
+                members: HashSet::new(),
+                color,
+            },
+        );
+        Ok(())
+    }
+
     /// Join a group, creating it when missing. The session must exist.
+    /// Creation assigns the next palette color to the group.
     pub fn join(
         &mut self,
         sessions: &SessionManager,
@@ -119,11 +200,20 @@ impl Broker {
         if group.is_empty() {
             return Err("empty group name".to_string());
         }
+        if !self.groups.contains_key(group) {
+            let color = self.next_color;
+            self.next_color += 1;
+            self.groups.insert(
+                group.to_string(),
+                Group {
+                    members: HashSet::new(),
+                    color,
+                },
+            );
+        }
         self.groups
-            .entry(group.to_string())
-            .or_insert(Group {
-                members: HashSet::new(),
-            })
+            .get_mut(group)
+            .expect("group just created")
             .members
             .insert(id);
         let entry = self.membership.entry(id).or_default();
@@ -155,6 +245,69 @@ impl Broker {
         self.membership
             .get(&id)
             .and_then(|entry| entry.first().map(String::as_str))
+    }
+
+    /// Palette index of a group, if it exists.
+    pub fn group_color(&self, group: &str) -> Option<usize> {
+        self.groups.get(group).map(|g| g.color)
+    }
+
+    /// All group names, sorted for a stable dialog.
+    pub fn group_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.groups.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Members of a group as sorted session IDs, empty when unknown.
+    pub fn group_members(&self, group: &str) -> Vec<SessionId> {
+        let mut members: Vec<SessionId> = self
+            .groups
+            .get(group)
+            .map(|g| g.members.iter().copied().collect())
+            .unwrap_or_default();
+        members.sort();
+        members
+    }
+
+    /// Rename a group, keeping its members, palette color, and every
+    /// member's primary-group order. Fails on empty/duplicate/unknown
+    /// names without touching anything.
+    pub fn rename_group(&mut self, from: &str, to: &str) -> Result<(), String> {
+        if to.is_empty() {
+            return Err("empty group name".to_string());
+        }
+        if from == to {
+            return Ok(());
+        }
+        if !self.groups.contains_key(from) {
+            return Err("unknown group".to_string());
+        }
+        if self.groups.contains_key(to) {
+            return Err("group already exists".to_string());
+        }
+        let group = self.groups.remove(from).expect("group exists");
+        for entry in self.membership.values_mut() {
+            for name in entry.iter_mut() {
+                if name == from {
+                    *name = to.to_string();
+                }
+            }
+        }
+        self.groups.insert(to.to_string(), group);
+        Ok(())
+    }
+
+    /// Delete a group outright, releasing every membership. True when the
+    /// group existed; colors of surviving groups never shift.
+    pub fn remove_group(&mut self, group: &str) -> bool {
+        if self.groups.remove(group).is_none() {
+            return false;
+        }
+        for entry in self.membership.values_mut() {
+            entry.retain(|g| g != group);
+        }
+        true
     }
 
     fn shared_group(&self, a: SessionId, b: SessionId) -> bool {
@@ -411,8 +564,10 @@ impl Broker {
             .ok_or_else(|| "tell needs text".to_string())?;
         if let Some(id) = Self::arg2(args, &["conversation_id", "conversation"]).filter(|s| !s.is_empty()) {
             // Informational follow-up on an existing conversation: delivered
-            // like a tell, but no new ack is expected.
-            let (source, target) = {
+            // like a tell, but no new ack is expected. Either party can
+            // follow up — this is the receiver's way back — delivering to
+            // the other side.
+            let peer = {
                 let conv = self
                     .convs
                     .get(&id)
@@ -423,24 +578,27 @@ impl Broker {
                 if conv.state != ConvState::Open {
                     return Err("conversation is closed".to_string());
                 }
-                if caller != conv.source {
-                    return Err("only the source follows up".to_string());
+                if caller == conv.source {
+                    conv.target
+                } else if caller == conv.target {
+                    conv.source
+                } else {
+                    return Err("only conversation parties can follow up".to_string());
                 }
-                (conv.source, conv.target)
             };
             let live = self.resolve_target(sessions, &target_name)?;
-            if live != target {
+            if live != peer {
                 return Err("follow-up target mismatch".to_string());
             }
-            if !self.shared_group(caller, target) {
+            if !self.shared_group(caller, peer) {
                 return Err("no shared group with target".to_string());
             }
-            if self.pressure(sessions, target) >= PRESSURE_CAP {
+            if self.pressure(sessions, peer) >= PRESSURE_CAP {
                 return Err(format!("pressure cap reached for {target_name:?}"));
             }
-            let from = self.names(sessions, source);
+            let from = self.names(sessions, caller);
             self.push(
-                target,
+                peer,
                 Injection {
                     conv: id.clone(),
                     kind: InjectKind::FollowUp,
@@ -784,6 +942,107 @@ mod tests {
     }
 
     #[test]
+    fn injection_render_submits_with_reply_guidance() {
+        // Ask: CR-terminated, send_response guidance naming the conv.
+        let ask = Injection {
+            conv: "conv-1".to_string(),
+            kind: InjectKind::Ask,
+            from: "a".to_string(),
+            text: "ready?".to_string(),
+        };
+        assert_eq!(
+            ask.render(),
+            b"[forge ask_session from a]: ready?\n[forge: reply with send_response conversation_id conv-1]\r"
+        );
+        // Tell: CR-terminated, tell_session guidance naming target + conv.
+        let tell = Injection {
+            conv: "conv-2".to_string(),
+            kind: InjectKind::Tell,
+            from: "a".to_string(),
+            text: "fyi".to_string(),
+        };
+        assert_eq!(
+            tell.render(),
+            b"[forge tell_session from a]: fyi\n[forge: reply with tell_session target a conversation_id conv-2]\r"
+        );
+        // Terminal kinds: CR-terminated, no guidance (replying errors).
+        for kind in [
+            InjectKind::Response,
+            InjectKind::Ack,
+            InjectKind::Reminder,
+            InjectKind::Failed,
+        ] {
+            let inj = Injection {
+                conv: "conv-3".to_string(),
+                kind,
+                from: "a".to_string(),
+                text: "note".to_string(),
+            };
+            let bytes = inj.render();
+            assert_eq!(bytes.last(), Some(&b'\r'), "enter: {kind:?}");
+            assert_ne!(bytes.first(), Some(&b'\n'), "no leading newline: {kind:?}");
+            assert!(
+                !bytes.windows(8).any(|w| w == b"reply wi"),
+                "no guidance: {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tell_target_can_follow_up_back_to_source() {
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
+            .unwrap();
+        let conv = json_field(&res, "conversation").unwrap();
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
+        // The receiver talks back on the same conversation by naming the
+        // source as target; the injection lands at the source, from b.
+        let r = p
+            .call(
+                &p.run_b.clone(),
+                "tell_session",
+                &format!(r#"{{"target":"a","message":"back","conversation_id":"{conv}"}}"#),
+            )
+            .expect("target follows up");
+        assert!(r.contains("followup"), "res: {r}");
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::FollowUp));
+        assert_eq!(due[0].from, "b");
+        assert_eq!(due[0].conv, conv);
+        // Rendered guidance points back at b with the same conversation.
+        let bytes = due[0].render();
+        assert!(
+            bytes.windows(9).any(|w| w == b"target b "),
+            "guidance: {bytes:?}"
+        );
+        assert!(bytes.ends_with(b"\r"), "enter: {bytes:?}");
+        // Outsiders still cannot ride the conversation, even in-group.
+        let c = p
+            .state
+            .manager
+            .spawn(
+                "c",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                crate::ids::RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        p.state.broker.join(&p.state.manager, c, "peers").unwrap();
+        let run_c = p.state.manager.get(c).unwrap().run_id.to_string();
+        let err = p
+            .call(
+                &run_c,
+                "tell_session",
+                &format!(r#"{{"target":"a","message":"hijack","conversation_id":"{conv}"}}"#),
+            )
+            .expect_err("outsider follow-up rejected");
+        assert!(err.contains("parties"), "err: {err}");
+    }
+
+    #[test]
     fn tell_followed_by_ack_notifies_source() {
         let mut p = live_pair().grouped();
         let res = p
@@ -892,7 +1151,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             for ev in p.state.manager.drain_pty_max(100) {
-                p.state.apply(AppEvent::from_pty(ev.0, ev.1));
+                p.state.apply(AppEvent::from_pty(ev.0, ev.2));
             }
             let exited = p
                 .state
@@ -913,6 +1172,55 @@ mod tests {
             .call(&p.run_b.clone(), "list_sessions", "{}")
             .expect_err("exited run ID is stale");
         assert!(err.contains("run ID"), "err: {err}");
+    }
+
+    #[test]
+    fn group_colors_assign_monotonically_and_survive_delete() {
+        let mut p = live_pair();
+        assert!(p.state.broker.join(&p.state.manager, p.a, "alpha").is_ok());
+        assert!(p.state.broker.join(&p.state.manager, p.b, "alpha").is_ok());
+        assert!(p.state.broker.join(&p.state.manager, p.a, "beta").is_ok());
+        assert_eq!(p.state.broker.group_color("alpha"), Some(0));
+        assert_eq!(p.state.broker.group_color("beta"), Some(1));
+        assert_eq!(p.state.broker.group_color("missing"), None);
+        assert_eq!(p.state.broker.group_names(), vec!["alpha".to_string(), "beta".to_string()]);
+        let mut members = p.state.broker.group_members("alpha");
+        members.sort();
+        assert_eq!(members, vec![p.a.min(p.b), p.a.max(p.b)]);
+        // Delete hands no color back: the next group takes 2, and alpha's
+        // ex-members lose the membership (primary falls back to beta).
+        assert!(p.state.broker.remove_group("alpha"));
+        assert!(!p.state.broker.remove_group("alpha"));
+        assert!(p.state.broker.join(&p.state.manager, p.b, "gamma").is_ok());
+        assert_eq!(p.state.broker.group_color("gamma"), Some(2));
+        assert_eq!(p.state.broker.primary_group(p.a), Some("beta"));
+        assert_eq!(p.state.broker.primary_group(p.b), Some("gamma"));
+    }
+
+    #[test]
+    fn create_and_rename_groups_keep_color_and_members() {
+        let mut p = live_pair();
+        assert!(p.state.broker.create_group("alpha").is_ok());
+        assert!(p.state.broker.create_group("alpha").is_err(), "duplicate");
+        assert!(p.state.broker.create_group("").is_err(), "empty");
+        // Empty group exists with a color but no members.
+        assert_eq!(p.state.broker.group_color("alpha"), Some(0));
+        assert!(p.state.broker.group_members("alpha").is_empty());
+        assert!(p.state.broker.join(&p.state.manager, p.a, "alpha").is_ok());
+        assert!(p.state.broker.join(&p.state.manager, p.a, "beta").is_ok());
+        assert!(p.state.broker.rename_group("alpha", "alpha-v2").is_ok());
+        assert_eq!(p.state.broker.group_color("alpha-v2"), Some(0), "color kept");
+        assert_eq!(p.state.broker.group_color("alpha"), None, "old name gone");
+        assert!(p.state.broker.is_member(p.a, "alpha-v2"));
+        assert_eq!(p.state.broker.primary_group(p.a), Some("alpha-v2"), "order kept");
+        // Failures leave everything untouched.
+        assert!(p.state.broker.rename_group("alpha-v2", "beta").is_err(), "duplicate");
+        assert!(p.state.broker.rename_group("alpha-v2", "").is_err(), "empty");
+        assert!(p.state.broker.rename_group("missing", "new").is_err(), "unknown");
+        assert!(p.state.broker.is_member(p.a, "alpha-v2"));
+        assert_eq!(p.state.broker.group_color("alpha-v2"), Some(0));
+        // Same-name rename is a no-op success.
+        assert!(p.state.broker.rename_group("alpha-v2", "alpha-v2").is_ok());
     }
 
     #[test]

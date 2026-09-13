@@ -5,7 +5,7 @@
 //! first line is read byte-at-a-time with no buffered prefetch, because
 //! binary traffic may follow it. Connections beyond the per-transport cap
 //! are closed immediately. Hook records arrive on the main loop as
-//! `AppEvent::HookRequest`; policy and the permission modal (3c/3d) reply
+//! `AppEvent::HookRequest`; policy replies every verdict immediately
 //! later, so an undecided synchronous hook simply waits out the relay's
 //! own timeout and fails open.
 
@@ -33,15 +33,22 @@ pub enum Route {
     Other,
 }
 
-/// One hook record awaiting a decision. Policy (3c) and the permission
-/// modal (3d) answer through `reply`; dropping it fails the relay open.
+/// One hook record awaiting a decision. Policy answers through `reply`;
+/// dropping it fails the relay open.
 /// Asynchronous hooks never wait: the handler closes right after delivery.
 #[derive(Debug)]
 pub struct HookRequest {
     pub hook: String,
     pub body: String,
+    /// Envelope sender for session attribution; empty when unset.
+    pub run_id: String,
     pub sync: bool,
     pub reply: std::sync::mpsc::Sender<String>,
+    /// Set by the connection handler when the caller stops waiting: the
+    /// verdict went out as a timeout-deny; a later settle reply to the
+    /// same request lands nowhere. Shared (not copied) with the queued
+    /// request.
+    pub timed_out: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One comms tool call for the broker (4c). Always synchronous: the loop
@@ -256,14 +263,18 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
     tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
 ) {
     let body = String::from_utf8_lossy(line).into_owned();
+    let run_id = crate::mcp::top_str(&body, "run_id").unwrap_or_default();
     let sync = crate::relay::is_sync_hook(&hook);
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if tx
         .send(crate::event::AppEvent::HookRequest(HookRequest {
             hook,
             body,
+            run_id,
             sync,
             reply: reply_tx,
+            timed_out: std::sync::Arc::clone(&timed_out),
         }))
         .is_err()
     {
@@ -272,7 +283,21 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
     if !sync {
         return;
     }
-    if let Ok(decision) = reply_rx.recv_timeout(REPLY_WAIT) {
+    let decision = match reply_rx.recv_timeout(REPLY_WAIT) {
+        Ok(decision) => decision,
+        // Operator timeout (listener alive, TUI silent): fail CLOSED so a
+        // wedged loop cannot silently allow. Infra failure (no listener
+        // at all) stays fail-open upstream. The queued request is flagged
+        // so any late reply is known-steered-nowhere.
+        Err(_) => {
+            timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::policy::decision_line(
+                crate::policy::Decision::Deny,
+                "operator timeout; denied",
+            )
+        }
+    };
+    {
         use std::io::Write;
         let mut bytes = decision.into_bytes();
         if !bytes.ends_with(b"\n") {
@@ -393,7 +418,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let _guard = spawn_unix(&path, tx, 8).unwrap();
         let mut conn = UnixStream::connect(&path).unwrap();
-        conn.write_all(b"{\"v\":1,\"hook\":\"PreToolUse\",\"body\":{\"tool\":\"Bash\"}}\n")
+        conn.write_all(b"{\"v\":1,\"hook\":\"PreToolUse\",\"run_id\":\"run-9\",\"body\":{\"tool\":\"Bash\"}}\n")
             .unwrap();
         let event = rx
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -401,6 +426,7 @@ mod tests {
         match event {
             crate::event::AppEvent::HookRequest(req) => {
                 assert_eq!(req.hook, "PreToolUse");
+                assert_eq!(req.run_id, "run-9", "envelope attributes the sender");
                 assert!(req.sync, "PreToolUse waits for a decision");
                 assert!(req.body.contains("Bash"), "body carried: {:?}", req.body);
                 req.reply.send("{\"decision\":\"allow\"}\n".to_string()).unwrap();
@@ -423,6 +449,52 @@ mod tests {
             }
         }
         assert_eq!(out, b"{\"decision\":\"allow\"}\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unanswered_sync_hook_fails_closed_with_deny() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "forge-listen-test-{}-timeout.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _guard = spawn_unix(&path, tx, 8).unwrap();
+        let mut conn = UnixStream::connect(&path).unwrap();
+        conn.write_all(b"{\"v\":1,\"hook\":\"PreToolUse\",\"body\":{\"tool\":\"Bash\"}}\n")
+            .unwrap();
+        // Never answer: the handler must deny on its own after REPLY_WAIT
+        // instead of leaving the caller hanging (or silently allowing).
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("hook event arrives");
+        let crate::event::AppEvent::HookRequest(req) = event else {
+            panic!("wrong event");
+        };
+        conn.set_read_timeout(Some(super::REPLY_WAIT + std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut out = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            use std::io::Read;
+            match conn.read(&mut byte) {
+                Ok(1) => {
+                    out.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(r#""decision":"deny""#), "fail closed: {text:?}");
+        assert!(
+            req.timed_out.load(std::sync::atomic::Ordering::SeqCst),
+            "queued request flagged stale"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

@@ -75,7 +75,7 @@ impl Default for Config {
             theme: "default".to_string(),
             prefix: "ctrl-b".to_string(),
             permission: PermissionConfig {
-                mode: PermissionMode::Off,
+                mode: PermissionMode::Yolo,
                 allow: Vec::new(),
                 block: Vec::new(),
             },
@@ -241,7 +241,7 @@ fn extract(raw: &toml::Table) -> Result<Config, ConfigError> {
     let empty = toml::Table::new();
     let perm = raw.get("permission").and_then(|v| v.as_table()).unwrap_or(&empty);
     let mode = match perm.get("mode").and_then(|v| v.as_str()) {
-        None => PermissionMode::Off,
+        None => PermissionMode::Yolo,
         Some(s) => PermissionMode::parse(s).ok_or_else(|| {
             ConfigError::BadValue(
                 "[permission.mode] must be off, safe-only, ai-assisted or yolo".to_string(),
@@ -352,7 +352,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.theme, "default");
         assert_eq!(c.prefix, "ctrl-b");
-        assert_eq!(c.permission.mode, PermissionMode::Off);
+        assert_eq!(c.permission.mode, PermissionMode::Yolo);
         assert!(c.permission.allow.is_empty() && c.permission.block.is_empty());
         assert_eq!(c.ai.provider, "openai");
         assert_eq!(c.ai.model, "gpt-4.1-mini");

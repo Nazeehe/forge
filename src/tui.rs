@@ -84,10 +84,12 @@ fn install_panic_hook() {
 
 /// Run the TUI until quit. Returns the process exit code. Without a terminal
 /// this fails cleanly instead of hanging. Invalid permission patterns fall
-/// back to Off (ask everything) rather than blocking startup.
+/// back to Off (every ask goes back to the harness) rather than blocking
+/// startup.
 pub fn run(
     state: &mut AppState,
-    permission: &crate::config::PermissionConfig,
+    loaded: &mut crate::config::LoadedConfig,
+    home: &std::path::Path,
     audit_path: &std::path::Path,
 ) -> i32 {
     let _guard = match TerminalGuard::setup() {
@@ -98,10 +100,11 @@ pub fn run(
         }
     };
     install_panic_hook();
+    state.permission_mode = loaded.config.permission.mode.clone();
     let mut policy = match crate::policy::Policy::new(
-        permission.mode.clone(),
-        &permission.allow,
-        &permission.block,
+        loaded.config.permission.mode.clone(),
+        &loaded.config.permission.allow,
+        &loaded.config.permission.block,
     ) {
         Ok(policy) => policy,
         Err(e) => {
@@ -131,7 +134,15 @@ pub fn run(
             return 1;
         }
     };
-    if let Err(e) = loop_until_quit(state, &mut terminal, ipc_rx, &mut policy, &audit_path) {
+    if let Err(e) = loop_until_quit(
+        state,
+        &mut terminal,
+        ipc_rx,
+        &mut policy,
+        &audit_path,
+        loaded,
+        home,
+    ) {
         eprintln!("error: main loop failed: {e}");
         return 1;
     }
@@ -144,6 +155,8 @@ fn loop_until_quit(
     ipc: std::sync::mpsc::Receiver<AppEvent>,
     policy: &mut crate::policy::Policy,
     audit_path: &std::path::Path,
+    loaded: &mut crate::config::LoadedConfig,
+    home: &std::path::Path,
 ) -> io::Result<()> {
     let mut router = InputRouter::new();
     let size = terminal.size()?;
@@ -151,33 +164,47 @@ fn loop_until_quit(
     fit_active_pane(state);
     let mut cursor_shown = true;
     while !state.should_quit {
+        // Live mode switches (sidebar buttons, `y` key) rebuild policy and
+        // persist the config; a failed save keeps the live mode and warns.
+        if state.permission_mode != policy.mode() {
+            let patterns = loaded.config.permission.clone();
+            match crate::policy::Policy::new(
+                state.permission_mode.clone(),
+                &patterns.allow,
+                &patterns.block,
+            ) {
+                Ok(next) => {
+                    *policy = next;
+                    loaded.config.permission.mode = state.permission_mode.clone();
+                    if let Err(e) = loaded.save_home(home) {
+                        eprintln!("warning: cannot persist permission mode: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warning: bad permission pattern ({e}); reverting mode");
+                    state.permission_mode = policy.mode().clone();
+                }
+            }
+        }
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
                 event::Event::Key(key) => {
-                    if state.modal.is_some() {
-                        let outcome = state.modal.as_mut().map(|m| m.modal.key(&key));
-                        match outcome {
-                            Some(crate::modal::ModalOutcome::Decided { allow }) => {
-                                state.decide_modal(allow, policy, audit_path);
-                            }
-                            _ => {
-                                state.dirty = true;
-                            }
-                        }
-                    } else if state.create_dialog.is_some() {
+                    if state.create_dialog.is_some() {
                         handle_dialog_key(state, key);
+                    } else if state.group_dialog.is_some() {
+                        handle_group_key(state, key);
                     } else {
                         handle_key(state, &mut router, key);
                     }
                 }
-                event::Event::Mouse(mev) => forward_mouse(state, mev, policy, audit_path),
+                event::Event::Mouse(mev) => forward_mouse(state, mev),
                 event::Event::Paste(text) => {
-                    if state.modal.is_none() && state.create_dialog.is_none() {
+                    if state.create_dialog.is_none() && state.group_dialog.is_none() {
                         if let Some(active) = state.manager.active() {
                             let bracketed = state.manager.bracketed_paste(active);
                             let bytes = input::paste_bytes(&text, bracketed);
                             if state.manager.pane_write(active, &bytes).is_ok() {
-                                state.note_human_input();
+                                state.note_human_input(active);
                             }
                         }
                     }
@@ -189,34 +216,39 @@ fn loop_until_quit(
                 _ => {}
             }
         }
-        for (id, ev) in state.manager.drain_pty_max(MAX_DRAIN) {
+        for (id, _tab, ev) in state.manager.drain_pty_max(MAX_DRAIN) {
             state.apply(AppEvent::from_pty(id, ev));
         }
         for ev in ipc.try_iter().take(MAX_DRAIN) {
             state.apply(ev);
         }
         state.settle_hooks(policy, audit_path);
-        state.open_modal_if_needed();
         state.settle_comms();
         if state.dirty {
             let views = state.views();
             let status = state.status_text();
+            let info = state.sidebar_info();
             let chrome = ui::Chrome {
                 tabs: state.tabs(),
+                topbar: state.topbar(),
+                detail: info.session,
                 pending: state.pending_hooks.len(),
                 mode: policy.mode().as_str(),
                 status,
             };
-            let cursor_visible =
-                state.modal.is_none() && views.iter().any(|v| v.focused && v.cursor.is_some());
+            let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
             terminal.draw(|f| {
                 let area = f.area();
                 ui::render(f, area, &views, &chrome);
                 if let Some(dialog) = state.create_dialog.as_mut() {
                     dialog.view(f, crate::create::create_area(area));
                 }
-                if let Some(active) = state.modal.as_mut() {
-                    active.modal.view(f, crate::modal::modal_area(area));
+                if state.group_dialog.is_some() {
+                    let ctx = state.group_ctx();
+                    let garea = crate::groups::group_area(area);
+                    if let Some(dialog) = state.group_dialog.as_ref() {
+                        dialog.view(f, garea, &ctx);
+                    }
                 }
             })?;
             if cursor_visible != cursor_shown {
@@ -240,7 +272,7 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
                 let app_cursor = state.manager.app_cursor(active);
                 if let Some(bytes) = input::encode_key(&k, app_cursor) {
                     if state.manager.pane_write(active, &bytes).is_ok() {
-                        state.note_human_input();
+                        state.note_human_input(active);
                     }
                 }
             }
@@ -260,6 +292,9 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             UserCommand::CreateSession => {
                 state.open_create_dialog();
             }
+            UserCommand::ManageGroups => {
+                state.open_group_dialog();
+            }
             UserCommand::SelectSession(index) => {
                 if state.select_session(index) {
                     fit_active_pane(state);
@@ -276,10 +311,40 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
                     state.dirty = true;
                 }
             }
+            UserCommand::SwitchTab => {
+                if let Some(active) = state.manager.active() {
+                    if state.manager.switch_tab(active) {
+                        // A lazily spawned terminal tab takes the main
+                        // area at once instead of keeping 24x80.
+                        fit_active_pane(state);
+                    }
+                    state.dirty = true;
+                }
+            }
+            UserCommand::TogglePermissionMode => {
+                state.toggle_permission_mode();
+            }
         },
         RoutedKey::PrefixPending | RoutedKey::Cancelled => {
             state.dirty = true;
         }
+    }
+}
+
+/// One group-dialog key: mutations apply to the broker and stay open,
+/// cancel closes, edits redraw.
+fn handle_group_key(state: &mut AppState, key: event::KeyEvent) {
+    let ctx = state.group_ctx();
+    let outcome = state.group_dialog.as_mut().map(|d| d.key(&key, &ctx));
+    match outcome {
+        Some(crate::groups::GroupOutcome::Closed) => {
+            state.group_dialog = None;
+            state.dirty = true;
+        }
+        Some(other) => {
+            state.apply_group(other);
+        }
+        None => {}
     }
 }
 
@@ -327,56 +392,71 @@ fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
 /// Route an outer mouse event: session-bar clicks switch sessions, the
 /// main area forwards to the active pane when it wants mouse reporting,
 /// and everything else (sidebar, status bar, borders) is chrome-owned.
-fn forward_mouse(
-    state: &mut AppState,
-    mev: event::MouseEvent,
-    policy: &mut crate::policy::Policy,
-    audit_path: &std::path::Path,
-) {
+fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     // An open dialog swallows all mouse input: keyboard-first by design,
     // clicks behind it must not refocus sessions mid-form.
-    if state.create_dialog.is_some() {
+    if state.create_dialog.is_some() || state.group_dialog.is_some() {
         return;
     }
-    // An open modal swallows all mouse input; clicks on its choice rows
-    // decide it, everything else is ignored.
-    if state.modal.is_some() {
-        if matches!(mev.kind, event::MouseEventKind::Down(_)) {
-            let (rows, cols) = state.term_size;
-            let marea = crate::modal::modal_area(ratatui::layout::Rect::new(0, 0, cols, rows));
-            if let Some((list_y, list_h)) = crate::modal::list_rows(marea) {
-                if mev.row >= list_y
-                    && mev.row < list_y + list_h
-                    && mev.column >= marea.x
-                    && mev.column < marea.x + marea.width
-                {
-                    let outcome = state
-                        .modal
-                        .as_mut()
-                        .map(|m| m.modal.click((mev.row - list_y) as usize));
-                    if let Some(crate::modal::ModalOutcome::Decided { allow }) = outcome {
-                        state.decide_modal(allow, policy, audit_path);
-                    } else {
-                        state.dirty = true;
+    let (rows, cols) = state.term_size;
+    let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    // Tab strip: click-to-activate like the sessions bar, hover ignored.
+    if areas.topbar.height > 0
+        && mev.row >= areas.topbar.y
+        && mev.row < areas.topbar.y + areas.topbar.height
+    {
+        let topbar = state.topbar();
+        let buttons = ui::layout_topbar(areas.topbar, &topbar.tabs);
+        if let Some(index) = ui::topbar_at(&buttons, mev.column) {
+            if matches!(mev.kind, event::MouseEventKind::Down(_)) {
+                if let Some(active) = state.manager.active() {
+                    if state.manager.select_tab(active, index) {
+                        fit_active_pane(state);
                     }
+                    state.dirty = true;
                 }
             }
         }
         return;
     }
-    let (rows, cols) = state.term_size;
-    let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    // Sidebar settings row: click-to-switch Off/Yolo like the bars; hover
+    // and drags must never flip the live permission mode.
+    if areas.sidebar.width > 0
+        && areas.sidebar.height > 0
+        && mev.column >= areas.sidebar.x
+        && mev.column < areas.sidebar.x + areas.sidebar.width
+        && mev.row >= areas.sidebar.y
+        && mev.row < areas.sidebar.y + areas.sidebar.height
+    {
+        if matches!(mev.kind, event::MouseEventKind::Down(_)) {
+            let buttons = ui::mode_button_areas(areas.sidebar);
+            match ui::mode_at(&buttons, mev.column, mev.row) {
+                Some("yolo") => {
+                    state.set_permission_mode(crate::config::PermissionMode::Yolo);
+                }
+                Some(_) => {
+                    state.set_permission_mode(crate::config::PermissionMode::Off);
+                }
+                None => {}
+            }
+        }
+        return;
+    }
     if mev.row >= areas.session_bar.y
         && mev.row < areas.session_bar.y + areas.session_bar.height
         && areas.session_bar.height > 0
     {
-        let titles: Vec<String> = state.tabs().into_iter().map(|t| t.title).collect();
-        let buttons = ui::layout_session_bar(areas.session_bar, &titles);
+        let segments = ui::session_bar_segments(&state.tabs());
+        let buttons = ui::layout_session_bar(areas.session_bar, &segments);
+        // Click-to-activate only: hover (Moved) and drags must never steal
+        // the session; pane mouse protocols still get every event below.
         if let Some(index) = ui::session_at(&buttons, mev.column) {
-            if state.select_session(index) {
-                fit_active_pane(state);
+            if matches!(mev.kind, event::MouseEventKind::Down(_)) {
+                if state.select_session(index) {
+                    fit_active_pane(state);
+                }
+                state.dirty = true;
             }
-            state.dirty = true;
         }
         return;
     }
@@ -424,8 +504,8 @@ mod tests {
         spawn_shell_cmd(&mut state, "exec sleep 30");
         let order = state.manager.order().to_vec();
         assert_eq!(order.len(), 1);
-        // 80x24 less session bar, status row, main-pane borders.
-        assert_eq!(state.manager.pane_size(order[0]), Some((20, 62)));
+        // 80x24 less top strip, session bar, status row, main-pane borders.
+        assert_eq!(state.manager.pane_size(order[0]), Some((19, 62)));
         spawn_shell_cmd(&mut state, "exec sleep 30");
         let order = state.manager.order().to_vec();
         assert_eq!(order.len(), 2);
@@ -434,7 +514,7 @@ mod tests {
         // ...then take the main area on selection.
         assert!(state.select_session(1));
         fit_active_pane(&mut state);
-        assert_eq!(state.manager.pane_size(order[1]), Some((20, 62)));
+        assert_eq!(state.manager.pane_size(order[1]), Some((19, 62)));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
     }
@@ -453,66 +533,132 @@ mod tests {
             row: 22,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        let mut policy =
-            crate::policy::Policy::new(crate::config::PermissionMode::Off, &[], &[]).unwrap();
-        forward_mouse(&mut state, click, &mut policy, std::path::Path::new(""));
+        forward_mouse(&mut state, click);
         let order = state.manager.order().to_vec();
         assert_eq!(state.manager.active(), Some(order[1]));
-        assert_eq!(state.manager.pane_size(order[1]), Some((20, 62)));
+        assert_eq!(state.manager.pane_size(order[1]), Some((19, 62)));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
     }
 
     #[test]
-    fn modal_click_decides_and_outside_click_ignored() {
+    fn topbar_click_selects_terminal_tab() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-        let audit = std::env::temp_dir().join(format!(
-            "forge-modal-click-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&audit);
-        let mut policy =
-            crate::policy::Policy::new(crate::config::PermissionMode::Off, &[], &[]).unwrap();
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        state.apply(AppEvent::HookRequest(crate::listener::HookRequest {
-            hook: "PreToolUse".to_string(),
-            body: r#"{"tool_name":"Bash","tool_input":{"command":"doom"}}"#.to_string(),
-            sync: true,
-            reply: reply_tx,
-        }));
-        state.settle_hooks(&mut policy, &audit);
-        assert!(state.open_modal_if_needed());
-        let click_at = |column: u16, row: u16| MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column,
-            row,
-            modifiers: crossterm::event::KeyModifiers::NONE,
-        };
-        // Click far from the modal: swallowed, modal stays open.
-        forward_mouse(&mut state, click_at(0, 0), &mut policy, &audit);
-        assert!(state.modal.is_some());
-        assert!(reply_rx
-            .recv_timeout(std::time::Duration::from_millis(50))
-            .is_err());
-        // Click the Deny choice row: modal decides deny and closes.
-        let marea = crate::modal::modal_area(ratatui::layout::Rect::new(0, 0, 80, 24));
-        let (list_y, _) = crate::modal::list_rows(marea).unwrap();
+        let id = state
+            .manager
+            .spawn_agent(
+                "a",
+                &std::env::temp_dir(),
+                "exec cat",
+                crate::ids::RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        // Top strip is row 0: "[Codex]" then "[Terminal]" from column 10.
+        let bar = state.topbar();
+        assert_eq!(bar.tabs.len(), 2);
+        assert!(bar.tabs[0].active);
         forward_mouse(
             &mut state,
-            click_at(marea.x + 2, list_y + 1),
-            &mut policy,
-            &audit,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 12,
+                row: 0,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
         );
-        assert!(state.modal.is_none());
-        let line = reply_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap();
-        assert!(line.contains(r#""decision":"deny""#), "line: {line:?}");
-        let logged = std::fs::read_to_string(&audit).unwrap();
-        assert_eq!(logged.lines().count(), 1, "audit: {logged:?}");
-        let _ = std::fs::remove_file(&audit);
+        let bar = state.topbar();
+        assert!(bar.tabs[1].active);
+        // Hover on the strip never switches back.
+        state.dirty = false;
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 3,
+                row: 0,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(state.topbar().tabs[1].active);
+        assert!(!state.dirty);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn session_bar_hover_never_switches_sessions() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let order = state.manager.order().to_vec();
+        assert_eq!(state.manager.active(), Some(order[0]));
+        state.dirty = false;
+        // Same coordinates as the click test, but a hover and a drag.
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Drag(MouseButton::Left),
+        ] {
+            forward_mouse(
+                &mut state,
+                MouseEvent {
+                    kind,
+                    column: 12,
+                    row: 22,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                },
+            );
+        }
+        assert_eq!(state.manager.active(), Some(order[0]));
+        assert!(!state.dirty, "hover leaves no work");
+        assert!(state.manager.remove(order[0]));
+        assert!(state.manager.remove(order[1]));
+    }
+
+    #[test]
+    fn sidebar_click_switches_mode_hover_ignored() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        // Sidebar is x=64..80; settings row is y=11, Off at x=66..71.
+        assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 67,
+                row: 11,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
+        // Hover over Yolo (x=72..78) must not flip it back.
+        state.dirty = false;
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 73,
+                row: 11,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
+        assert!(!state.dirty, "hover leaves no work");
+        // Click Yolo to return.
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 73,
+                row: 11,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
     }
 
     #[test]
@@ -528,6 +674,53 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
         );
         assert!(state.create_dialog.is_some());
+    }
+
+    #[test]
+    fn prefix_o_manages_groups_end_to_end() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let none = KeyModifiers::NONE;
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let order = state.manager.order().to_vec();
+        // Prefix o opens the group dialog.
+        let mut router = InputRouter::new();
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('o'), none));
+        assert!(state.group_dialog.is_some());
+        // n + typed name + Enter creates the group and stays open.
+        let gkey = |code| KeyEvent::new(code, none);
+        handle_group_key(&mut state, gkey(KeyCode::Char('n')));
+        for ch in "team".chars() {
+            handle_group_key(&mut state, gkey(KeyCode::Char(ch)));
+        }
+        handle_group_key(&mut state, gkey(KeyCode::Enter));
+        assert!(state.group_dialog.is_some(), "stays open for more");
+        assert!(state.broker.group_names().contains(&"team".to_string()));
+        // a + Space + Enter checks the lone session into the group.
+        handle_group_key(&mut state, gkey(KeyCode::Char('a')));
+        handle_group_key(&mut state, gkey(KeyCode::Char(' ')));
+        handle_group_key(&mut state, gkey(KeyCode::Enter));
+        assert!(state.broker.is_member(order[0], "team"));
+        assert_eq!(state.tabs()[0].group.as_deref(), Some("team"), "bar reflects it");
+        // Mouse is swallowed while open: sidebar click flips nothing.
+        state.dirty = false;
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 67,
+                row: 11,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+        assert!(!state.dirty, "swallowed clicks leave no work");
+        // Esc closes.
+        handle_group_key(&mut state, gkey(KeyCode::Esc));
+        assert!(state.group_dialog.is_none());
+        assert!(state.manager.remove(order[0]));
     }
 
     #[test]

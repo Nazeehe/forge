@@ -16,9 +16,18 @@ pub enum UserCommand {
     /// Focus session by zero-based order index (`Ctrl-b 1` is index 0).
     SelectSession(usize),
     /// Toggle the active session in/out of the shared `peers` group (4c).
-    /// Full group management arrives with its own phase; this covers the
+    /// Full group management lives in the group dialog; this covers the
     /// manual ask/tell gate with one key.
     TogglePeerGroup,
+    /// Open the keyboard-first group management dialog (new, members,
+    /// rename, delete).
+    ManageGroups,
+    /// Cycle the active session's visible tab (agent <-> terminal).
+    /// No-op for single-tab shell sessions.
+    SwitchTab,
+    /// Toggle the permission mode Off <-> Yolo (sidebar buttons set each
+    /// directly with the mouse).
+    TogglePermissionMode,
 }
 
 /// Encode a forwarded key as PTY input bytes (xterm-style). `app_cursor`
@@ -291,6 +300,9 @@ impl InputRouter {
                     KeyCode::Char('p') => RoutedKey::Command(UserCommand::PrevSession),
                     KeyCode::Char('c') => RoutedKey::Command(UserCommand::CreateSession),
                     KeyCode::Char('g') => RoutedKey::Command(UserCommand::TogglePeerGroup),
+                    KeyCode::Char('o') => RoutedKey::Command(UserCommand::ManageGroups),
+                    KeyCode::Char('t') => RoutedKey::Command(UserCommand::SwitchTab),
+                    KeyCode::Char('y') => RoutedKey::Command(UserCommand::TogglePermissionMode),
                     KeyCode::Char(d @ '1'..='9') => {
                         RoutedKey::Command(UserCommand::SelectSession(d as usize - '1' as usize))
                     }
@@ -378,6 +390,24 @@ mod tests {
         assert_eq!(
             r.feed(key(KeyCode::Char('g'))),
             RoutedKey::Command(UserCommand::TogglePeerGroup)
+        );
+
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('o'))),
+            RoutedKey::Command(UserCommand::ManageGroups)
+        );
+
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('t'))),
+            RoutedKey::Command(UserCommand::SwitchTab)
+        );
+
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('y'))),
+            RoutedKey::Command(UserCommand::TogglePermissionMode)
         );
     }
 

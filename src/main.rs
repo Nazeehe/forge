@@ -6,6 +6,7 @@ mod config;
 mod create;
 mod event;
 mod fs_atomic;
+mod groups;
 mod harness;
 mod ids;
 mod input;
@@ -13,7 +14,6 @@ mod install;
 mod listener;
 mod logging;
 mod mcp;
-mod modal;
 mod paths;
 mod policy;
 mod pty;
@@ -92,7 +92,7 @@ fn startup() -> i32 {
             return 1;
         }
     }
-    let loaded = match config::LoadedConfig::load_home(&home) {
+    let mut loaded = match config::LoadedConfig::load_home(&home) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("error: {e}");
@@ -125,7 +125,7 @@ fn startup() -> i32 {
         ));
     }
     let mut state = app::AppState::new();
-    tui::run(&mut state, &loaded.config.permission, &audit)
+    tui::run(&mut state, &mut loaded, &home, &audit)
 }
 
 fn main() {

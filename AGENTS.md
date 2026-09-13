@@ -55,8 +55,9 @@ Rules:
 ## 4. UI stack decision (locked)
 
 - `tuirealm 4` + `ratatui 0.30` + `crossterm 0.29`. Pinned in `Cargo.lock`.
-- `tui-realm` owns chrome: modals, dialogs, switcher, settings, permission
-  prompts — keyboard-first, mouse-clickable.
+- `tui-realm` owns chrome: dialogs, switcher, settings — keyboard-first,
+  mouse-clickable. No permission modal: yolo auto-approves, other modes
+  reply ask-for-the-harness so the CLI handles it natively.
 - The PTY grid and visual pane stay a **raw custom `ratatui` view** fed by
   portable-pty readers. Never force PTY painting through components.
 - Semantic theme APIs only (`src/theme.rs`). No inline RGB. Rounded borders,
