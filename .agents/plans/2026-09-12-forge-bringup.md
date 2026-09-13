@@ -182,7 +182,8 @@ pulled per-slice as needed.
       `<walkthrough-question>` injection; timers (`schedule_prompt`/
       `cancel_scheduled_prompt` + once/interval/daily).
 - [ ] TUI surface for tasks/walkthrough: views + prefix keys (blueprint
-      views 4-5; key letters locked with tests like the dispatcher map).
+      views 4-5; key letters locked with tests like the dispatcher map);
+      theme switching UI (cycle key + config persist).
 - [ ] Persistence: `forge.log`, `session_history.json`, `sessions/*.json`
       checkpoints (~2s coalesced capacity-one worker, signature-gated) +
       Save & Quit + crash recovery + startup triage (onboard vs recover
@@ -195,8 +196,11 @@ pulled per-slice as needed.
 - [ ] `terminal_exec/read/send` (Unix, one lease/session, supervisor reap).
 - [ ] `compact/start_session/status/message_user`, file offer/accept
       (1MiB/file, 4 pending, 4MiB staged, 5min TTL, 0600 no-overwrite).
-- [ ] Agent CLI hookup: `start_session(harness?)` launches `claude`/`codex`/
-      `muse` via the `cli_tool` registry; `install-hooks/uninstall-hooks`,
+- [ ] Agent CLI hookup: every session has an agent-CLI tab plus a terminal
+      tab (lazy human PTY, created on first switch); `start_session(harness?)`
+      launches `claude`/`codex`/`muse` via the `cli_tool` registry into the
+      agent tab; keys switch tabs within the focused session; checkpoints
+      record per-session tabs. `install-hooks/uninstall-hooks`,
       `install-mcp/uninstall-mcp`, `install-skills/uninstall-skills`
       (+ codex/gemini/metamate variants) register forge into each CLI;
       startup repairs registrations + refreshes bundled skills (`.new`
@@ -227,17 +231,12 @@ pulled per-slice as needed.
 
 ## Backlog — Deferred / needs-decision (from 2026-09-13 audit)
 
-- [ ] `clikan` Go module + `install-clikan-mcp` + kanban view: entirely
-      absent. Recommend explicit defer (forge-first rebuild) or a Phase 8.
-- [ ] Selection mode (char/line/block, Vim motion, copy,
-      ask-agent-about-selection): no TUI surface planned.
-- [ ] Prefix-hold (~500ms) shortcuts overlay; theme switching UI; manual
-      viewer; away state (pairs with 7b mobile).
-- [ ] Telemetry (blueprint: on-by-default reporting to internal endpoint):
-      needs a drop-or-stub decision for the rebuild.
-- [ ] Session model deviation (accepted so far): blueprint sessions hold
-      agent + lazy-human PTYs with tabs; rebuild uses one pane per session
-      under the user-approved 80/20 layout. Revisit only if asked.
+- [ ] `clikan` Go module + `install-clikan-mcp` + kanban view: confirmed
+      for a later build (post-7), forge-first until then.
+- Dropped 2026-09-13: selection mode/copy; telemetry reporting (local
+  `forge.log` logging stays and is already implemented).
+- [ ] Prefix-hold (~500ms) shortcuts overlay; manual viewer; away state
+      (pairs with 7b mobile).
 - [ ] `message_user` remote forwarding rides on 7b transports.
 
 ## Progress log
