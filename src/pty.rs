@@ -67,6 +67,16 @@ pub struct FormattedCell {
     pub format: CellFormat,
 }
 
+/// `TERM` to advertise when the inherited value cannot address the screen.
+/// Capable values pass through untouched; only missing or hopeless ones
+/// are replaced.
+fn advertised_term(current: Option<&str>) -> Option<&'static str> {
+    match current {
+        None | Some("") | Some("dumb") | Some("unknown") => Some("xterm-256color"),
+        _ => None,
+    }
+}
+
 fn map_color(color: vt100::Color) -> CellColor {
     match color {
         vt100::Color::Default => CellColor::Default,
@@ -118,6 +128,9 @@ impl PtyPane {
         cmd.arg("-c");
         cmd.arg(shell_cmd);
         cmd.cwd(cwd);
+        if let Some(term) = advertised_term(std::env::var("TERM").ok().as_deref()) {
+            cmd.env("TERM", term);
+        }
         let child = pair.slave.spawn_command(cmd).map_err(pty_error)?;
         // The slave side must be closed in this process so EOF propagates.
         drop(pair.slave);
@@ -226,6 +239,27 @@ impl PtyPane {
             out.pop();
         }
         out
+    }
+
+    /// Whether the application is using the alternate screen (`DECSET 1049`).
+    pub fn alternate_screen(&self) -> bool {
+        lock_screen(&self.screen).screen().alternate_screen()
+    }
+
+    /// Whether the application requested bracketed paste (`DECSET 2004`).
+    pub fn bracketed_paste(&self) -> bool {
+        lock_screen(&self.screen).screen().bracketed_paste()
+    }
+
+    /// The application's requested mouse protocol mode and encoding
+    /// (`DECSET 1000/1002/1003` + `1005/1006`).
+    pub fn mouse_mode(&self) -> vt100::MouseProtocolMode {
+        lock_screen(&self.screen).screen().mouse_protocol_mode()
+    }
+
+    /// See [`PtyPane::mouse_mode`].
+    pub fn mouse_encoding(&self) -> vt100::MouseProtocolEncoding {
+        lock_screen(&self.screen).screen().mouse_protocol_encoding()
     }
 
     /// Whether the application requested application-cursor keys (`DECCKM`):
@@ -497,6 +531,96 @@ mod tests {
             }
             if Instant::now() > deadline {
                 panic!("DECCKM never released");
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        pane.close();
+    }
+
+    #[test]
+    fn advertised_term_fills_only_unusable_values() {
+        assert_eq!(advertised_term(None), Some("xterm-256color"));
+        assert_eq!(advertised_term(Some("")), Some("xterm-256color"));
+        assert_eq!(advertised_term(Some("dumb")), Some("xterm-256color"));
+        assert_eq!(advertised_term(Some("unknown")), Some("xterm-256color"));
+        assert_eq!(advertised_term(Some("xterm-256color")), None);
+        assert_eq!(advertised_term(Some("tmux-256color")), None);
+    }
+
+    #[test]
+    fn alternate_screen_is_visible_and_isolated() {
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "printf 'MAIN'; printf '\\033[?1049hALTPAGE'; sleep 2; printf '\\033[?1049l'; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if pane.alternate_screen() && pane.screen_text().contains("ALTPAGE") {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "alt screen never engaged: {} / {:?}",
+                    pane.alternate_screen(),
+                    pane.screen_text()
+                );
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if !pane.alternate_screen() && pane.screen_text().contains("MAIN") {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "main screen never restored: {} / {:?}",
+                    pane.alternate_screen(),
+                    pane.screen_text()
+                );
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        pane.close();
+    }
+
+    #[test]
+    fn mouse_mode_tracks_private_modes() {
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "printf '\\033[?1000h\\033[?1006h'; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            // `?1000h` is press+release (VT200-style), not press-only.
+            if pane.mouse_mode() == vt100::MouseProtocolMode::PressRelease
+                && pane.mouse_encoding() == vt100::MouseProtocolEncoding::Sgr
+            {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "mouse mode never engaged: {:?}/{:?}",
+                    pane.mouse_mode(),
+                    pane.mouse_encoding()
+                );
             }
             while rx.try_recv().is_ok() {}
             std::thread::sleep(Duration::from_millis(5));

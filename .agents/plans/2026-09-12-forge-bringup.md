@@ -102,10 +102,13 @@ pulled per-slice as needed.
       numpad-distinct events). Live: Down scrolls `less`, Ctrl-C kills.
       Note: lazygit Files panel is a tree — single visible file means
       Up/Down only moves within tree rows, not between diffs.
-- [ ] Mouse: capture outer events, encode per the pane's requested
-      mode/encoding; chrome keeps events otherwise.
-- [ ] Bracketed paste wrap when the pane requests it.
-- [ ] Alt-screen audit + capable `TERM` advertised to children.
+- [x] Mouse: outer capture enabled; events inside the active pane encoded
+      per its requested mode/encoding (X10/SGR/UTF-8, motion gating);
+      chrome keeps the rest. Live: click bytes reach the child.
+- [x] Bracketed paste wrap when the pane requests it (live: markers in file).
+- [x] Alt-screen audit (isolated grids pinned by test; lazygit renders) +
+      capable `TERM` advertised when inherited is missing/dumb/unknown
+      (live: dumb parent → xterm-256color child).
 - Gate: lazygit/htop/vim live usable; key-table unit tests per chord class.
 
 ## Phase 3 — Hooks + permissions — STATUS: TODO

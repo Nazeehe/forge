@@ -41,7 +41,9 @@ impl TerminalGuard {
         crossterm::terminal::enable_raw_mode()?;
         crossterm::execute!(
             io::stdout(),
-            crossterm::terminal::EnterAlternateScreen
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture,
+            crossterm::event::EnableBracketedPaste,
         )?;
         Ok(TerminalGuard { active: true })
     }
@@ -66,6 +68,8 @@ pub fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         io::stdout(),
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen
     );
 }
@@ -116,6 +120,14 @@ fn loop_until_quit(
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
                 event::Event::Key(key) => handle_key(state, &mut router, key),
+                event::Event::Mouse(mev) => forward_mouse(state, mev),
+                event::Event::Paste(text) => {
+                    if let Some(active) = state.manager.active() {
+                        let bracketed = state.manager.bracketed_paste(active);
+                        let bytes = input::paste_bytes(&text, bracketed);
+                        let _ = state.manager.pane_write(active, &bytes);
+                    }
+                }
                 event::Event::Resize(cols, rows) => {
                     state.apply(AppEvent::Resize(rows, cols));
                     fit_panes(state, ratatui::layout::Rect::new(0, 0, cols, rows));
@@ -200,6 +212,43 @@ fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
         // 24x80 until the next outer resize.
         let (rows, cols) = state.term_size;
         fit_panes(state, ratatui::layout::Rect::new(0, 0, cols, rows));
+    }
+}
+
+/// Forward an outer mouse event to the active pane when it lands inside it
+/// and the pane requested mouse reporting. Chrome keeps everything else
+/// (borders, status bar, other panes) until the tuirealm host arrives.
+fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
+    let Some(active) = state.manager.active() else {
+        return;
+    };
+    let mode = state.manager.mouse_mode(active);
+    if mode == vt100::MouseProtocolMode::None {
+        return;
+    }
+    let (rows, cols) = state.term_size;
+    let term = ratatui::layout::Rect::new(0, 0, cols, rows);
+    let areas = ui::grid_areas(state.manager.len(), term);
+    let rect = state
+        .manager
+        .order()
+        .to_vec()
+        .into_iter()
+        .zip(areas.iter())
+        .find_map(|(id, area)| (id == active).then_some(*area));
+    let Some(rect) = rect else {
+        return;
+    };
+    let Some((col, row)) = ui::translate_mouse(rect, mev.column, mev.row) else {
+        return;
+    };
+    let pev = event::MouseEvent {
+        column: col,
+        row,
+        ..mev
+    };
+    if let Some(bytes) = input::encode_mouse(&pev, mode, state.manager.mouse_encoding(active)) {
+        let _ = state.manager.pane_write(active, &bytes);
     }
 }
 

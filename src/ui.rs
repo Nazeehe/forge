@@ -74,6 +74,21 @@ pub struct PaneView {
     pub cursor: Option<(u16, u16)>,
 }
 
+/// Translate outer 0-based mouse coordinates into 1-based pane-grid cells.
+/// `None` when the event lands on borders, the status bar, or outside the
+/// pane: chrome keeps those events.
+pub fn translate_mouse(area: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
+    if area.width < 3 || area.height < 3 {
+        return None;
+    }
+    let (ix, iy) = (area.x + 1, area.y + 1);
+    let (iw, ih) = (area.width - 2, area.height - 2);
+    if col < ix || row < iy || col >= ix + iw || row >= iy + ih {
+        return None;
+    }
+    Some((col - ix + 1, row - iy + 1))
+}
+
 /// Translate a terminal-grid cursor into outer-frame coordinates, clamped
 /// inside the pane's borders. `None` when the pane hides its cursor or the
 /// pane is too small for an inner area.
@@ -356,6 +371,18 @@ mod tests {
         let cell = &buf.content[1 * w + 1];
         assert_eq!(cell.symbol(), "R");
         assert_eq!(cell.fg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn mouse_translates_to_pane_cells() {
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(translate_mouse(area, 1, 1), Some((1, 1)));
+        assert_eq!(translate_mouse(area, 10, 5), Some((10, 5)));
+        // Borders and outside belong to chrome, not the pane.
+        assert_eq!(translate_mouse(area, 0, 0), None);
+        assert_eq!(translate_mouse(area, 79, 23), None);
+        assert_eq!(translate_mouse(area, 200, 200), None);
+        assert_eq!(translate_mouse(Rect::new(40, 0, 40, 24), 41, 1), Some((1, 1)));
     }
 
     #[test]

@@ -215,6 +215,32 @@ impl SessionManager {
         self.sessions.get(&id)?.pane.as_ref().and_then(|pane| pane.cursor())
     }
 
+    /// The pane's requested mouse protocol mode; disabled when gone.
+    pub fn mouse_mode(&self, id: SessionId) -> vt100::MouseProtocolMode {
+        self.sessions
+            .get(&id)
+            .and_then(|rec| rec.pane.as_ref())
+            .map(|pane| pane.mouse_mode())
+            .unwrap_or(vt100::MouseProtocolMode::None)
+    }
+
+    /// Whether the pane's application requested bracketed paste; false gone.
+    pub fn bracketed_paste(&self, id: SessionId) -> bool {
+        self.sessions
+            .get(&id)
+            .and_then(|rec| rec.pane.as_ref())
+            .is_some_and(|pane| pane.bracketed_paste())
+    }
+
+    /// The pane's requested mouse encoding; default when gone.
+    pub fn mouse_encoding(&self, id: SessionId) -> vt100::MouseProtocolEncoding {
+        self.sessions
+            .get(&id)
+            .and_then(|rec| rec.pane.as_ref())
+            .map(|pane| pane.mouse_encoding())
+            .unwrap_or(vt100::MouseProtocolEncoding::Default)
+    }
+
     /// Whether the pane's application wants SS3 application-cursor arrows.
     /// False when the pane is gone (normal CSI arrows then).
     pub fn app_cursor(&self, id: SessionId) -> bool {
