@@ -52,18 +52,22 @@
   legacy-dir-collision, corrupt-save, full-disk-error, hostile-text-safety,
   theme-no-inline-RGB.
 
-## Phase 2 — Terminal core, first pixels — STATUS: DOING (60 green: 56 unit + 4 integration)
+## Phase 2 — Terminal core, first pixels — STATUS: DONE, manually testable (78 green: 74 unit + 4 integration)
 
 - [x] `AppEvent` protocol (Send) + `from_pty` mapping + single-owner `AppState` reducer.
 - [x] `SessionManager` (order/active/run-index/rebind/retention) + `PtyPane`
       (portable-pty 0.8 reader/writer/resize/kill, shared-child reaping).
 - [x] Prefix `Ctrl-b` router v1 (forward/prefix/quit/next/prev/cancel).
-- [ ] vt100 screen parse + grid render 1×1→3×3, tabs skeleton.
-- [ ] Real main-loop (~16ms, drain cap, dirty render) + terminal setup/restore
-      (raw/alt-screen, panic hook) + `tuirealm` chrome host.
-- Gate tests so far: echo/exit-code/cat-echo PTYs, kill/exit retention,
-  run rebind+revocation, reorder/switch/remove, router map. Still open:
-  terminal-restore, flood-cannot-starve-input, grid render.
+- [x] vt100 screen parse + grid render, tabs skeleton (`ui::render_grid`).
+- [x] Real main-loop (~16ms, drain cap, dirty render) + terminal setup/restore
+      (raw/alt-screen, panic hook, Drop guard; clean `Ctrl-b q` exit 0
+      verified in live PTY).
+- [x] Key-forwarding fix: `encode_key` accepts SHIFT for `Char` keys
+      (terminals report uppercase/symbols as SHIFT+char); live PTY
+      `echo SMOKE-OK` renders on screen. Test:
+      `input::tests::shift_char_keys_encode_to_pty_bytes`.
+- [ ] `tuirealm` chrome host (buttons/mouse) — deferred to Phase 3+ chrome work.
+- Still open: flood-cannot-starve-input gate test.
 
 ## Phase 3 — Hooks + permissions — STATUS: TODO
 
