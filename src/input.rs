@@ -13,6 +13,8 @@ pub enum UserCommand {
     NextSession,
     PrevSession,
     NewSession,
+    /// Focus session by zero-based order index (`Ctrl-b 1` is index 0).
+    SelectSession(usize),
 }
 
 /// Encode a forwarded key as PTY input bytes (xterm-style). `app_cursor`
@@ -284,6 +286,9 @@ impl InputRouter {
                     KeyCode::Char('n') => RoutedKey::Command(UserCommand::NextSession),
                     KeyCode::Char('p') => RoutedKey::Command(UserCommand::PrevSession),
                     KeyCode::Char('c') => RoutedKey::Command(UserCommand::NewSession),
+                    KeyCode::Char(d @ '1'..='9') => {
+                        RoutedKey::Command(UserCommand::SelectSession(d as usize - '1' as usize))
+                    }
                     _ => RoutedKey::Forward(key),
                 }
             }
@@ -324,6 +329,24 @@ mod tests {
         let mut r = InputRouter::new();
         assert_eq!(r.feed(key(KeyCode::Char('a'))), RoutedKey::Forward(key(KeyCode::Char('a'))));
         assert_eq!(r.feed(key(KeyCode::Enter)), RoutedKey::Forward(key(KeyCode::Enter)));
+    }
+
+    #[test]
+    fn prefix_digits_select_sessions() {
+        let mut r = InputRouter::new();
+        for (digit, index) in [('1', 0), ('5', 4), ('9', 8)] {
+            assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+            assert_eq!(
+                r.feed(key(KeyCode::Char(digit))),
+                RoutedKey::Command(UserCommand::SelectSession(index))
+            );
+        }
+        // Zero is not a session: forwarded to the pane.
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('0'))),
+            RoutedKey::Forward(key(KeyCode::Char('0')))
+        );
     }
 
     #[test]

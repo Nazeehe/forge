@@ -20,7 +20,7 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             PermissionMode::Off => "off",
             PermissionMode::SafeOnly => "safe-only",

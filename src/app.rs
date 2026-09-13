@@ -89,6 +89,45 @@ impl AppState {
         self.manager.switch(order[next]);
     }
 
+    /// Focus session by order index (`Ctrl-b 1` is index 0). Returns false
+    /// when out of range, leaving focus untouched.
+    pub fn select_session(&mut self, index: usize) -> bool {
+        match self.manager.order().to_vec().get(index) {
+            Some(&id) => {
+                self.manager.switch(id);
+                self.dirty = true;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Session-bar tabs in order with live/focus flags.
+    pub fn tabs(&self) -> Vec<crate::ui::SessionTab> {
+        let active = self.manager.active();
+        self.manager
+            .order()
+            .to_vec()
+            .into_iter()
+            .filter_map(|id| {
+                self.manager.get(id).map(|rec| crate::ui::SessionTab {
+                    title: rec.name.clone(),
+                    live: rec.state.is_live(),
+                    focused: Some(id) == active,
+                })
+            })
+            .collect()
+    }
+
+    /// Sidebar content: session tabs plus pending approvals and mode.
+    pub fn sidebar_info(&self, mode: &'static str) -> crate::ui::SidebarInfo {
+        crate::ui::SidebarInfo {
+            sessions: self.tabs(),
+            pending: self.pending_hooks.len(),
+            mode,
+        }
+    }
+
     /// Run deterministic policy over queued hook requests. Allow/Deny reply
     /// immediately and are audited; Ask stays queued for the permission
     /// modal. Audit failures never block a decision.
@@ -306,6 +345,32 @@ mod tests {
         assert_eq!(s.manager.active(), Some(a));
         s.step_session(-1);
         assert_eq!(s.manager.active(), Some(b));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn select_session_focuses_by_index() {
+        let mut s = AppState::new();
+        assert!(!s.select_session(0), "empty: no-op");
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate())
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate())
+            .unwrap();
+        assert!(s.select_session(1));
+        assert_eq!(s.manager.active(), Some(b));
+        assert!(s.select_session(0));
+        assert_eq!(s.manager.active(), Some(a));
+        assert!(!s.select_session(9), "out of range keeps focus");
+        assert_eq!(s.manager.active(), Some(a));
+        let tabs = s.tabs();
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs[0].focused && !tabs[1].focused);
+        assert_eq!(s.sidebar_info("off").pending, 0);
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
     }

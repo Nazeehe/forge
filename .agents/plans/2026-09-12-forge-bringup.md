@@ -80,7 +80,22 @@
 - [ ] `tuirealm` chrome host (buttons/mouse) — deferred to Phase 3+ chrome work.
 - Still open: flood-cannot-starve-input gate test.
 
-## Phase 2.5 — Complete vt100 support — STATUS: DONE (106 green: 101 unit + 5 integration)
+## Phase 2.6 — Session layout model (80/20 + session bar) — STATUS: DONE (131 green: 126 unit + 5 integration)
+
+Correction: sessions must not tile the screen. One focused session fills
+the 80% main pane (20% sidebar stays); a bottom session bar holds one
+button per session, switched by click or `Ctrl-b` + number. Sidebar shows
+sessions + pending approvals + mode (never blank). Only the active pane is
+fitted; background panes refit on focus. Session bar is manual render +
+hit-test (tuirealm stays reserved for the permission modal).
+
+- [x] `chrome_areas` (main/sidebar/session-bar/status) + button layout +
+      hit-test + sidebar content builder.
+- [x] Render single focused session + chrome; digits in prefix mode;
+      click-to-switch; fit-active on spawn/switch/resize. The old tiling
+      grid is gone (deliberate model change).
+- Gate: live two sessions — `Ctrl-b 1` focuses, session-bar click switches
+  with refit, sidebar shows focus/pending/mode.
 
 Goal: full shell + full-screen app support (lazygit, htop, vim open/type/quit).
 Spec sources: VT100 User Guide on vt100.net (DEC core) + xterm ctlseqs on

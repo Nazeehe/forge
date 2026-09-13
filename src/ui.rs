@@ -110,92 +110,196 @@ pub fn cursor_screen_pos(area: Rect, cursor: Option<(u16, u16)>) -> Option<Posit
     Some(Position::new(x, y))
 }
 
-/// Split `area` for up to nine sessions, reserving the last row for the
-/// status bar: 1x1, 2x1, 2x2, 3x2, then 3x3. Extra sessions are not shown.
-pub fn grid_areas(count: usize, area: Rect) -> Vec<Rect> {
-    let (cols, rows) = grid_shape(count);
-    if cols == 0 || rows == 0 {
-        return Vec::new();
-    }
-    let grid_h = area.height.saturating_sub(1); // last row belongs to status
-    let (w, h) = (area.width / cols, grid_h / rows);
-    (0..count.min(9))
-        .map(|i| {
-            let i = i as u16;
-            Rect::new(area.x + (i % cols) * w, area.y + (i / cols) * h, w, h)
-        })
-        .collect()
+/// Chrome geometry: one focused session fills the 80% main pane, the
+/// sidebar keeps 20%, and two bottom rows hold the session bar plus the
+/// status bar. Tiny terminals sacrifice chrome for content.
+pub struct ChromeAreas {
+    pub main: Rect,
+    pub sidebar: Rect,
+    pub session_bar: Rect,
+    pub status: Rect,
 }
 
-/// Render the session grid plus a one-row status bar. Titles and bodies are
-/// untrusted PTY output, so both pass through display encoding: raw escape
-/// sequences must never reach the outer terminal.
-pub fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], status: &str) {
-    if panes.is_empty() {
-        let hint = Paragraph::new("No sessions yet — press Ctrl-b c to create one.\nCtrl-b q quits.")
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(theme::style(theme::Role::BorderUnfocused))
-                    .title(" forge "),
-            );
-        frame.render_widget(hint, area);
+pub fn chrome_areas(area: Rect) -> ChromeAreas {
+    let (bar_h, status_h) = if area.height >= 3 { (1, 1) } else { (0, 0) };
+    let content_h = area.height.saturating_sub(bar_h + status_h);
+    let main_w = area.width * 4 / 5;
+    ChromeAreas {
+        main: Rect::new(area.x, area.y, main_w, content_h),
+        sidebar: Rect::new(area.x + main_w, area.y, area.width.saturating_sub(main_w), content_h),
+        session_bar: Rect::new(area.x, area.y + content_h, area.width, bar_h),
+        status: Rect::new(area.x, area.y + content_h + bar_h, area.width, status_h),
     }
-    let areas = grid_areas(panes.len(), area);
-    // Ratatui places a single hardware cursor per frame: the focused pane
-    // owns it, since keyboard input goes there.
-    let mut focused_cursor = None;
-    for (view, rect) in panes.iter().zip(areas.iter()) {
-        if view.focused {
-            focused_cursor = cursor_screen_pos(*rect, view.cursor);
+}
+
+/// One session-bar entry: 1-based number plus title.
+#[derive(Clone, Debug)]
+pub struct SessionTab {
+    pub title: String,
+    pub live: bool,
+    pub focused: bool,
+}
+
+/// A laid-out session button: label plus area-relative column span.
+pub struct SessionButton {
+    pub index: usize,
+    pub label: String,
+    pub start: u16,
+    pub end: u16,
+}
+
+/// Lay session buttons left to right with two-space gaps, clipping at the
+/// bar edge instead of wrapping.
+pub fn layout_session_bar(bar: Rect, titles: &[String]) -> Vec<SessionButton> {
+    let mut buttons = Vec::new();
+    let mut col = bar.x;
+    let edge = bar.x + bar.width;
+    for (index, title) in titles.iter().enumerate() {
+        let label = format!("{} {title}", index + 1);
+        let end = col.saturating_add(label.len() as u16);
+        if col >= edge || end > edge {
+            break;
         }
-        let (glyph, _role) = if view.live {
+        buttons.push(SessionButton { index, label, start: col, end });
+        col = end.saturating_add(2);
+    }
+    buttons
+}
+
+/// Button index under an area-relative column, if any.
+pub fn session_at(buttons: &[SessionButton], col: u16) -> Option<usize> {
+    buttons
+        .iter()
+        .find(|b| col >= b.start && col < b.end)
+        .map(|b| b.index)
+}
+
+/// Sidebar content source: session list plus pending approvals and mode.
+pub struct SidebarInfo {
+    pub sessions: Vec<SessionTab>,
+    pub pending: usize,
+    pub mode: &'static str,
+}
+
+/// Sidebar lines. Never blank: with no sessions it still guides.
+pub fn sidebar_lines(info: &SidebarInfo) -> Vec<String> {
+    let mut lines = vec!["Sessions".to_string()];
+    if info.sessions.is_empty() {
+        lines.push("  none yet".to_string());
+        lines.push("  Ctrl-b c creates one".to_string());
+    }
+    for (i, tab) in info.sessions.iter().enumerate() {
+        let (glyph, _) = if tab.live {
             theme::status_glyph_running()
         } else {
             theme::status_glyph_exited()
         };
-        let border = if view.focused {
-            theme::Role::BorderFocused
-        } else {
-            theme::Role::BorderUnfocused
+        let mark = if tab.focused { "▸" } else { " " };
+        lines.push(format!(
+            "{mark} {glyph} {} {}",
+            i + 1,
+            safe_text::encode_for_display(&tab.title)
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!("Pending: {}", info.pending));
+    lines.push(format!("Mode: {}", info.mode));
+    lines
+}
+
+/// Chrome snapshots: session-bar tabs plus sidebar and status text.
+pub struct Chrome {
+    pub tabs: Vec<SessionTab>,
+    pub pending: usize,
+    pub mode: &'static str,
+    pub status: String,
+}
+
+/// Render one focused session in the main pane with sidebar, session bar,
+/// and status bar. Titles and bodies are untrusted PTY output, so both pass
+/// through display encoding: raw escape sequences must never reach the
+/// outer terminal.
+pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome) {
+    let areas = chrome_areas(area);
+    let focused = panes.iter().find(|p| p.focused).or(panes.first());
+    match focused {
+        Some(view) => {
+            let (glyph, _role) = if view.live {
+                theme::status_glyph_running()
+            } else {
+                theme::status_glyph_exited()
+            };
+            let title = format!("{} {} ", glyph, safe_text::encode_for_display(&view.title));
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme::style(theme::Role::BorderFocused))
+                .title(title);
+            frame.render_widget(Paragraph::new(pane_text(view)).block(block), areas.main);
+            if let Some(pos) = cursor_screen_pos(areas.main, view.cursor) {
+                frame.set_cursor_position(pos);
+            }
+        }
+        None => {
+            let hint =
+                Paragraph::new("No sessions yet — press Ctrl-b c to create one.\nCtrl-b q quits.")
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(theme::style(theme::Role::BorderUnfocused))
+                            .title(" forge "),
+                    );
+            frame.render_widget(hint, areas.main);
+        }
+    }
+    if areas.sidebar.width > 0 && areas.sidebar.height > 0 {
+        let info = SidebarInfo {
+            sessions: chrome.tabs.clone(),
+            pending: chrome.pending,
+            mode: chrome.mode,
         };
-        let title = format!("{} {} ", glyph, safe_text::encode_for_display(&view.title));
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(theme::style(border))
-            .title(title);
-        let text = Text::from(
-            view.lines
-                .iter()
-                .map(|line| {
-                    Line::from(
-                        line.iter()
-                            .map(|span| Span::styled(span.text.clone(), span.style))
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .collect::<Vec<_>>(),
+        let side = Paragraph::new(sidebar_lines(&info).join("\n")).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme::style(theme::Role::BorderUnfocused))
+                .title(" status "),
         );
-        frame.render_widget(Paragraph::new(text).block(block), *rect);
+        frame.render_widget(side, areas.sidebar);
     }
-    if let Some(pos) = focused_cursor {
-        frame.set_cursor_position(pos);
+    if areas.session_bar.height > 0 {
+        let titles: Vec<String> = chrome.tabs.iter().map(|t| t.title.clone()).collect();
+        let buttons = layout_session_bar(areas.session_bar, &titles);
+        let mut spans = Vec::new();
+        for button in &buttons {
+            let style = if chrome.tabs.get(button.index).is_some_and(|t| t.focused) {
+                Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            if button.start > areas.session_bar.x {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::styled(button.label.clone(), style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), areas.session_bar);
     }
-    if area.height > 0 {
-        let bar = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
-        frame.render_widget(Paragraph::new(status), bar);
+    if areas.status.height > 0 {
+        frame.render_widget(Paragraph::new(chrome.status.clone()), areas.status);
     }
 }
 
-fn grid_shape(count: usize) -> (u16, u16) {
-    match count {
-        0 => (0, 0),
-        1 => (1, 1),
-        2 => (2, 1),
-        3 | 4 => (2, 2),
-        5 | 6 => (3, 2),
-        _ => (3, 3),
-    }
+fn pane_text(view: &PaneView) -> Text<'static> {
+    Text::from(
+        view.lines
+            .iter()
+            .map(|line| {
+                Line::from(
+                    line.iter()
+                        .map(|span| Span::styled(span.text.clone(), span.style))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[cfg(test)]
@@ -209,34 +313,60 @@ mod tests {
     }
 
     #[test]
-    fn grid_scales_with_count() {
-        assert_eq!(grid_areas(0, area()), vec![]);
-        assert_eq!(grid_areas(1, area()).len(), 1);
-        let two = grid_areas(2, area());
-        assert_eq!(two.len(), 2);
-        assert_eq!(two[0].width, 40);
-        assert_eq!(two[1].x, 40);
-        let four = grid_areas(4, area());
-        assert_eq!(four.len(), 4);
-        assert_eq!((four[0].width, four[0].height), (40, 11));
-        assert_eq!(grid_areas(6, area()).len(), 6);
-        assert_eq!(grid_areas(9, area()).len(), 9);
-        // Beyond capacity the grid caps instead of overflowing.
-        assert_eq!(grid_areas(12, area()).len(), 9);
+    fn chrome_splits_main_sidebar_and_bars() {
+        let c = chrome_areas(Rect::new(0, 0, 80, 24));
+        assert_eq!(c.main, Rect::new(0, 0, 64, 22));
+        assert_eq!(c.sidebar, Rect::new(64, 0, 16, 22));
+        assert_eq!(c.session_bar, Rect::new(0, 22, 80, 1));
+        assert_eq!(c.status, Rect::new(0, 23, 80, 1));
+        let wide = chrome_areas(Rect::new(0, 0, 120, 40));
+        assert_eq!(wide.main, Rect::new(0, 0, 96, 38));
+        assert_eq!(wide.sidebar, Rect::new(96, 0, 24, 38));
+        // Tiny terminals keep content over chrome.
+        let tiny = chrome_areas(Rect::new(0, 0, 80, 2));
+        assert_eq!(tiny.main.height, 2);
+        assert_eq!(tiny.status.height, 0);
     }
 
     #[test]
-    fn grid_tiles_without_overlap() {
-        for n in 1..=9 {
-            let areas = grid_areas(n, area());
-            assert_eq!(areas.len(), n);
-            for (i, a) in areas.iter().enumerate() {
-                assert!(a.x + a.width <= 80 && a.y + a.height <= 24, "pane {i} fits");
-                for b in &areas[i + 1..] {
-                    assert!(!a.intersects(*b), "panes do not overlap");
-                }
-            }
-        }
+    fn session_bar_buttons_number_left_to_right() {
+        let bar = Rect::new(0, 22, 80, 1);
+        let buttons = layout_session_bar(bar, &["shell-1".to_string(), "shell-2".to_string()]);
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0].label, "1 shell-1");
+        assert_eq!((buttons[0].start, buttons[0].end), (0, 9));
+        assert_eq!(buttons[1].label, "2 shell-2");
+        assert_eq!((buttons[1].start, buttons[1].end), (11, 20));
+        // Hit-test lands on labels, not gaps or borders.
+        assert_eq!(session_at(&buttons, 0), Some(0));
+        assert_eq!(session_at(&buttons, 8), Some(0));
+        assert_eq!(session_at(&buttons, 9), None);
+        assert_eq!(session_at(&buttons, 11), Some(1));
+        assert_eq!(session_at(&buttons, 79), None);
+        // Overflow clips instead of wrapping.
+        let narrow = layout_session_bar(Rect::new(0, 0, 10, 1), &["shell-1".to_string(), "shell-2".to_string()]);
+        assert_eq!(narrow.len(), 1);
+    }
+
+    #[test]
+    fn sidebar_lists_sessions_pending_and_mode() {
+        let info = SidebarInfo {
+            sessions: vec![
+                SessionTab { title: "shell-1".to_string(), live: true, focused: true },
+                SessionTab { title: "old".to_string(), live: false, focused: false },
+            ],
+            pending: 3,
+            mode: "safe-only",
+        };
+        let lines = sidebar_lines(&info);
+        assert!(lines.iter().any(|l| l.contains("Sessions")), "header: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains('▸') && l.contains("shell-1")), "focus: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains('×') && l.contains("old")), "exited: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("Pending: 3")), "pending: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("safe-only")), "mode: {lines:?}");
+        // Never blank: empty state still guides.
+        let empty = sidebar_lines(&SidebarInfo { sessions: vec![], pending: 0, mode: "off" });
+        assert!(empty.iter().any(|l| l.contains("Ctrl-b c")), "guides: {empty:?}");
     }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
@@ -267,24 +397,38 @@ mod tests {
         }
     }
 
+    fn chrome() -> Chrome {
+        Chrome {
+            tabs: vec![SessionTab {
+                title: "sh".to_string(),
+                live: true,
+                focused: true,
+            }],
+            pending: 0,
+            mode: "off",
+            status: "status".to_string(),
+        }
+    }
+
     #[test]
     fn render_shows_titles_bodies_and_status() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut c = chrome();
+        c.tabs = vec![SessionTab {
+            title: "agent-1".to_string(),
+            live: true,
+            focused: true,
+        }];
+        c.status = "2 sessions | prefix Ctrl-b".to_string();
         terminal
-            .draw(|f| {
-                render_grid(
-                    f,
-                    area(),
-                    &[pane("agent-1", "hello out", true)],
-                    "2 sessions | prefix Ctrl-b",
-                )
-            })
+            .draw(|f| render(f, area(), &[pane("agent-1", "hello out", true)], &c))
             .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("agent-1"), "title visible");
         assert!(text.contains("hello out"), "body visible");
         assert!(text.contains("prefix Ctrl-b"), "status visible");
+        assert!(text.contains("1 agent-1"), "session button visible");
     }
 
     fn buffer_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
@@ -301,9 +445,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| {
-                render_grid(f, area(), &[pane("sh", "line1\nline2", true)], "status")
-            })
+            .draw(|f| render(f, area(), &[pane("sh", "line1\nline2", true)], &chrome()))
             .unwrap();
         let rows = buffer_rows(&terminal);
         let r1 = rows.iter().position(|r| r.contains("line1")).expect("line1 visible");
@@ -319,7 +461,7 @@ mod tests {
         let mut p = pane("sh", "hi", true);
         p.cursor = Some((2, 5));
         terminal
-            .draw(|f| render_grid(f, area(), &[p], "status"))
+            .draw(|f| render(f, area(), &[p], &chrome()))
             .unwrap();
         terminal.backend_mut().assert_cursor_position(Position::new(6, 3));
     }
@@ -364,7 +506,7 @@ mod tests {
             cursor: None,
         };
         terminal
-            .draw(|f| render_grid(f, area(), &[view], "status"))
+            .draw(|f| render(f, area(), &[view], &chrome()))
             .unwrap();
         let buf = terminal.backend().buffer();
         let w = buf.area.width as usize;
@@ -402,29 +544,31 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_grid(f, area(), &[], "status"))
+            .draw(|f| render(f, area(), &[], &chrome()))
             .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Ctrl-b c"), "empty state guides: {text:?}");
     }
 
     #[test]
-    fn render_marks_exited_panes() {
+    fn render_shows_only_the_focused_session() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut old = pane("old", "bye", false);
+        old.focused = false;
+        let new = pane("new", "hi", true);
+        let mut c = chrome();
+        c.tabs = vec![
+            SessionTab { title: "old".to_string(), live: false, focused: false },
+            SessionTab { title: "new".to_string(), live: true, focused: true },
+        ];
         terminal
-            .draw(|f| {
-                render_grid(
-                    f,
-                    area(),
-                    &[pane("old", "bye", false), pane("new", "hi", true)],
-                    "status",
-                )
-            })
+            .draw(|f| render(f, area(), &[old, new], &c))
             .unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains('×'), "exited glyph visible");
-        assert!(text.contains('●'), "running glyph visible");
+        assert!(text.contains("hi"), "focused body visible");
+        assert!(!text.contains("bye"), "background body hidden");
+        assert!(text.contains("1 old") && text.contains("2 new"), "both buttons");
         let _ = theme::style(theme::Role::Text);
     }
 }

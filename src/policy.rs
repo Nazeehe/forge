@@ -39,6 +39,11 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// Current mode, for chrome display.
+    pub fn mode(&self) -> PermissionMode {
+        self.mode.clone()
+    }
+
     pub fn new(
         mode: PermissionMode,
         allow: &[String],

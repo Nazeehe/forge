@@ -148,7 +148,7 @@ fn loop_until_quit(
     let mut router = InputRouter::new();
     let size = terminal.size()?;
     state.apply(AppEvent::Resize(size.height, size.width));
-    fit_panes(state, ratatui::layout::Rect::new(0, 0, size.width, size.height));
+    fit_active_pane(state);
     let mut cursor_shown = true;
     while !state.should_quit {
         if event::poll(Duration::from_millis(TICK_MS))? {
@@ -164,7 +164,7 @@ fn loop_until_quit(
                 }
                 event::Event::Resize(cols, rows) => {
                     state.apply(AppEvent::Resize(rows, cols));
-                    fit_panes(state, ratatui::layout::Rect::new(0, 0, cols, rows));
+                    fit_active_pane(state);
                 }
                 _ => {}
             }
@@ -179,10 +179,16 @@ fn loop_until_quit(
         if state.dirty {
             let views = state.views();
             let status = state.status_text();
+            let chrome = ui::Chrome {
+                tabs: state.tabs(),
+                pending: state.pending_hooks.len(),
+                mode: policy.mode().as_str(),
+                status,
+            };
             let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
             terminal.draw(|f| {
                 let area = f.area();
-                ui::render_grid(f, area, &views, &status);
+                ui::render(f, area, &views, &chrome);
             })?;
             if cursor_visible != cursor_shown {
                 if cursor_visible {
@@ -212,14 +218,22 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             UserCommand::Quit => state.should_quit = true,
             UserCommand::NextSession => {
                 state.step_session(1);
+                fit_active_pane(state);
                 state.dirty = true;
             }
             UserCommand::PrevSession => {
                 state.step_session(-1);
+                fit_active_pane(state);
                 state.dirty = true;
             }
             UserCommand::NewSession => {
                 spawn_shell(state);
+                state.dirty = true;
+            }
+            UserCommand::SelectSession(index) => {
+                if state.select_session(index) {
+                    fit_active_pane(state);
+                }
                 state.dirty = true;
             }
         },
@@ -245,18 +259,33 @@ fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
             cmd,
             RunId::generate(),
         );
-        // A new pane reshapes the grid, so every pane (not just the new
-        // one) must be fitted now: previously a spawn kept the hardcoded
-        // 24x80 until the next outer resize.
-        let (rows, cols) = state.term_size;
-        fit_panes(state, ratatui::layout::Rect::new(0, 0, cols, rows));
+        // A first/new active pane takes the main area at once instead of
+        // keeping the hardcoded 24x80 until the next outer resize.
+        // Background panes keep their size until focused.
+        fit_active_pane(state);
     }
 }
 
-/// Forward an outer mouse event to the active pane when it lands inside it
-/// and the pane requested mouse reporting. Chrome keeps everything else
-/// (borders, status bar, other panes) until the tuirealm host arrives.
+/// Route an outer mouse event: session-bar clicks switch sessions, the
+/// main area forwards to the active pane when it wants mouse reporting,
+/// and everything else (sidebar, status bar, borders) is chrome-owned.
 fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
+    let (rows, cols) = state.term_size;
+    let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    if mev.row >= areas.session_bar.y
+        && mev.row < areas.session_bar.y + areas.session_bar.height
+        && areas.session_bar.height > 0
+    {
+        let titles: Vec<String> = state.tabs().into_iter().map(|t| t.title).collect();
+        let buttons = ui::layout_session_bar(areas.session_bar, &titles);
+        if let Some(index) = ui::session_at(&buttons, mev.column) {
+            if state.select_session(index) {
+                fit_active_pane(state);
+            }
+            state.dirty = true;
+        }
+        return;
+    }
     let Some(active) = state.manager.active() else {
         return;
     };
@@ -264,20 +293,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     if mode == vt100::MouseProtocolMode::None {
         return;
     }
-    let (rows, cols) = state.term_size;
-    let term = ratatui::layout::Rect::new(0, 0, cols, rows);
-    let areas = ui::grid_areas(state.manager.len(), term);
-    let rect = state
-        .manager
-        .order()
-        .to_vec()
-        .into_iter()
-        .zip(areas.iter())
-        .find_map(|(id, area)| (id == active).then_some(*area));
-    let Some(rect) = rect else {
-        return;
-    };
-    let Some((col, row)) = ui::translate_mouse(rect, mev.column, mev.row) else {
+    let Some((col, row)) = ui::translate_mouse(areas.main, mev.column, mev.row) else {
         return;
     };
     let pev = event::MouseEvent {
@@ -290,13 +306,17 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     }
 }
 
-fn fit_panes(state: &mut AppState, term: ratatui::layout::Rect) {
-    let areas = ui::grid_areas(state.manager.len(), term);
-    for (id, area) in state.manager.order().to_vec().into_iter().zip(areas.iter()) {
-        let rows = area.height.saturating_sub(2).max(1);
-        let cols = area.width.saturating_sub(2).max(1);
-        let _ = state.manager.resize(id, rows, cols);
-    }
+/// Fit the active pane to the main area. Background panes keep their size
+/// until focused, when they are fitted in turn.
+fn fit_active_pane(state: &mut AppState) {
+    let Some(active) = state.manager.active() else {
+        return;
+    };
+    let (rows, cols) = state.term_size;
+    let main = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows)).main;
+    let pane_rows = main.height.saturating_sub(2).max(1);
+    let pane_cols = main.width.saturating_sub(2).max(1);
+    let _ = state.manager.resize(active, pane_rows, pane_cols);
 }
 
 #[cfg(test)]
@@ -304,20 +324,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_session_fits_current_grid() {
+    fn new_session_fits_main_pane() {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
         spawn_shell_cmd(&mut state, "exec sleep 30");
         let order = state.manager.order().to_vec();
         assert_eq!(order.len(), 1);
-        // 80x24 less the status row, less pane borders.
-        assert_eq!(state.manager.pane_size(order[0]), Some((21, 78)));
+        // 80x24 less session bar, status row, main-pane borders.
+        assert_eq!(state.manager.pane_size(order[0]), Some((20, 62)));
         spawn_shell_cmd(&mut state, "exec sleep 30");
         let order = state.manager.order().to_vec();
         assert_eq!(order.len(), 2);
-        // Both panes reshape to share the row.
-        assert_eq!(state.manager.pane_size(order[0]), Some((21, 38)));
-        assert_eq!(state.manager.pane_size(order[1]), Some((21, 38)));
+        // Background panes keep spawn size until focused...
+        assert_eq!(state.manager.pane_size(order[1]), Some((24, 80)));
+        // ...then take the main area on selection.
+        assert!(state.select_session(1));
+        fit_active_pane(&mut state);
+        assert_eq!(state.manager.pane_size(order[1]), Some((20, 62)));
+        assert!(state.manager.remove(order[0]));
+        assert!(state.manager.remove(order[1]));
+    }
+
+    #[test]
+    fn session_bar_click_switches_sessions() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        // Session bar is row 22; second button starts at column 11.
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 22,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        forward_mouse(&mut state, click);
+        let order = state.manager.order().to_vec();
+        assert_eq!(state.manager.active(), Some(order[1]));
+        assert_eq!(state.manager.pane_size(order[1]), Some((20, 62)));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
     }
