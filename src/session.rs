@@ -223,8 +223,17 @@ impl SessionManager {
     /// Non-blocking drain of pane events; applies exit transitions
     /// (state, code, run revocation, pane release) and returns what arrived.
     pub fn drain_pty(&mut self) -> Vec<(SessionId, crate::pty::PtyEvent)> {
+        self.drain_pty_max(usize::MAX)
+    }
+
+    /// Bounded drain: at most `max` events per call so a flooding PTY can
+    /// never starve input handling or rendering.
+    pub fn drain_pty_max(&mut self, max: usize) -> Vec<(SessionId, crate::pty::PtyEvent)> {
         let mut out = Vec::new();
-        while let Ok((id, ev)) = self.pty_rx.try_recv() {
+        while out.len() < max {
+            let Ok((id, ev)) = self.pty_rx.try_recv() else {
+                break;
+            };
             if let crate::pty::PtyEvent::Exited(code) = &ev {
                 if let Some(rec) = self.sessions.get_mut(&id) {
                     rec.state = SessionState::Exited(*code);
@@ -237,6 +246,23 @@ impl SessionManager {
             out.push((id, ev));
         }
         out
+    }
+
+    /// Write bytes to a live pane's child.
+    pub fn pane_write(&mut self, id: SessionId, bytes: &[u8]) -> std::io::Result<()> {
+        match self.sessions.get_mut(&id) {
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such session",
+            )),
+            Some(rec) => match rec.pane.as_mut() {
+                Some(pane) => pane.write_all(bytes),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session has no live pane",
+                )),
+            },
+        }
     }
 
     pub fn get(&self, id: SessionId) -> Option<&SessionRecord> {
@@ -358,6 +384,50 @@ mod tests {
         assert_eq!(m.lookup_run(run.as_str()), None);
         assert!(m.remove(id));
         assert!(m.get(id).is_none());
+    }
+
+    #[test]
+    fn bounded_drain_never_starves() {
+        let mut m = SessionManager::new();
+        let id = m
+            .spawn("flood", &workdir(), "exec yes", RunId::generate())
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let first = m.drain_pty_max(100);
+        assert!(!first.is_empty(), "flooder produced output");
+        assert!(first.len() <= 100, "drain capped, took {}", first.len());
+        // The flood continues: a second capped drain still finds events,
+        // proving the first call left the rest queued instead of dropping.
+        let second = m.drain_pty_max(100);
+        assert!(!second.is_empty());
+        assert!(m.remove(id));
+    }
+
+    #[test]
+    fn pane_write_reaches_child() {
+        let mut m = SessionManager::new();
+        let id = m
+            .spawn("w", &workdir(), "exec cat", RunId::generate())
+            .unwrap();
+        m.pane_write(id, b"via-manager\n").unwrap();
+        assert!(m.pane_write(SessionId::fresh(), b"x").is_err());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        loop {
+            for (_, ev) in m.drain_pty() {
+                if let PtyEvent::Output(b) = ev {
+                    seen.extend_from_slice(&b);
+                }
+            }
+            if seen.windows(11).any(|w| w == b"via-manager") {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("write never echoed: {seen:?}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(m.remove(id));
     }
 
     #[test]
