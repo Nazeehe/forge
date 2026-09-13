@@ -1,0 +1,180 @@
+//! Testable view layer: grid geometry plus rendering from plain view models.
+//!
+//! Content generation stays separate from frame rendering: [`render_grid`]
+//! takes snapshots, so the whole grid is assertable through a test backend
+//! without a terminal.
+
+use ratatui::layout::Rect;
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
+
+use crate::{safe_text, theme};
+
+/// One pane's renderable snapshot.
+pub struct PaneView {
+    pub title: String,
+    pub body: String,
+    pub live: bool,
+    pub focused: bool,
+}
+
+/// Split `area` for up to nine sessions, reserving the last row for the
+/// status bar: 1x1, 2x1, 2x2, 3x2, then 3x3. Extra sessions are not shown.
+pub fn grid_areas(count: usize, area: Rect) -> Vec<Rect> {
+    let (cols, rows) = grid_shape(count);
+    if cols == 0 || rows == 0 {
+        return Vec::new();
+    }
+    let grid_h = area.height.saturating_sub(1); // last row belongs to status
+    let (w, h) = (area.width / cols, grid_h / rows);
+    (0..count.min(9))
+        .map(|i| {
+            let i = i as u16;
+            Rect::new(area.x + (i % cols) * w, area.y + (i / cols) * h, w, h)
+        })
+        .collect()
+}
+
+/// Render the session grid plus a one-row status bar. Titles and bodies are
+/// untrusted PTY output, so both pass through display encoding: raw escape
+/// sequences must never reach the outer terminal.
+pub fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], status: &str) {
+    let areas = grid_areas(panes.len(), area);
+    for (view, rect) in panes.iter().zip(areas.iter()) {
+        let (glyph, _role) = if view.live {
+            theme::status_glyph_running()
+        } else {
+            theme::status_glyph_exited()
+        };
+        let border = if view.focused {
+            theme::Role::BorderFocused
+        } else {
+            theme::Role::BorderUnfocused
+        };
+        let title = format!("{} {} ", glyph, safe_text::encode_for_display(&view.title));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme::style(border))
+            .title(title);
+        frame.render_widget(
+            Paragraph::new(safe_text::encode_for_display(&view.body)).block(block),
+            *rect,
+        );
+    }
+    if area.height > 0 {
+        let bar = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+        frame.render_widget(Paragraph::new(status), bar);
+    }
+}
+
+fn grid_shape(count: usize) -> (u16, u16) {
+    match count {
+        0 => (0, 0),
+        1 => (1, 1),
+        2 => (2, 1),
+        3 | 4 => (2, 2),
+        5 | 6 => (3, 2),
+        _ => (3, 3),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn area() -> Rect {
+        Rect::new(0, 0, 80, 24)
+    }
+
+    #[test]
+    fn grid_scales_with_count() {
+        assert_eq!(grid_areas(0, area()), vec![]);
+        assert_eq!(grid_areas(1, area()).len(), 1);
+        let two = grid_areas(2, area());
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].width, 40);
+        assert_eq!(two[1].x, 40);
+        let four = grid_areas(4, area());
+        assert_eq!(four.len(), 4);
+        assert_eq!((four[0].width, four[0].height), (40, 11));
+        assert_eq!(grid_areas(6, area()).len(), 6);
+        assert_eq!(grid_areas(9, area()).len(), 9);
+        // Beyond capacity the grid caps instead of overflowing.
+        assert_eq!(grid_areas(12, area()).len(), 9);
+    }
+
+    #[test]
+    fn grid_tiles_without_overlap() {
+        for n in 1..=9 {
+            let areas = grid_areas(n, area());
+            assert_eq!(areas.len(), n);
+            for (i, a) in areas.iter().enumerate() {
+                assert!(a.x + a.width <= 80 && a.y + a.height <= 24, "pane {i} fits");
+                for b in &areas[i + 1..] {
+                    assert!(!a.intersects(*b), "panes do not overlap");
+                }
+            }
+        }
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect()
+    }
+
+    fn pane(title: &str, body: &str, live: bool) -> PaneView {
+        PaneView {
+            title: title.to_string(),
+            body: body.to_string(),
+            live,
+            focused: true,
+        }
+    }
+
+    #[test]
+    fn render_shows_titles_bodies_and_status() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_grid(
+                    f,
+                    area(),
+                    &[pane("agent-1", "hello out", true)],
+                    "2 sessions | prefix Ctrl-b",
+                )
+            })
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("agent-1"), "title visible");
+        assert!(text.contains("hello out"), "body visible");
+        assert!(text.contains("prefix Ctrl-b"), "status visible");
+    }
+
+    #[test]
+    fn render_marks_exited_panes() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_grid(
+                    f,
+                    area(),
+                    &[pane("old", "bye", false), pane("new", "hi", true)],
+                    "status",
+                )
+            })
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains('×'), "exited glyph visible");
+        assert!(text.contains('●'), "running glyph visible");
+        let _ = theme::style(theme::Role::Text);
+    }
+}
