@@ -209,6 +209,12 @@ impl SessionManager {
         self.sessions.get(&id)?.pane.as_ref().map(|pane| pane.size())
     }
 
+    /// Visible cursor of a session's live pane as 0-based (row, col), or
+    /// `None` when hidden or the pane is gone.
+    pub fn cursor(&self, id: SessionId) -> Option<(u16, u16)> {
+        self.sessions.get(&id)?.pane.as_ref().and_then(|pane| pane.cursor())
+    }
+
     pub fn resize(&mut self, id: SessionId, rows: u16, cols: u16) -> std::io::Result<()> {
         match self.sessions.get_mut(&id) {
             None => Err(std::io::Error::new(

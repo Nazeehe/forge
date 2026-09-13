@@ -132,6 +132,18 @@ impl PtyPane {
         lock_screen(&self.screen).screen().contents()
     }
 
+    /// Visible cursor as 0-based (row, col), or `None` when the application
+    /// hid it (`DECSET 25`).
+    pub fn cursor(&self) -> Option<(u16, u16)> {
+        let parser = lock_screen(&self.screen);
+        let screen = parser.screen();
+        if screen.hide_cursor() {
+            None
+        } else {
+            Some(screen.cursor_position())
+        }
+    }
+
     /// Kill the child and release the master side. The reader thread reports
     /// the exit afterwards. A plain master hangup is not enough: the reader's
     /// own cloned fd keeps the PTY open, so an output-less child (e.g. a
@@ -270,6 +282,47 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         let (_, _) = run_until_exit(&mut pane, &rx);
+    }
+
+    fn wait_cursor(
+        pane: &PtyPane,
+        rx: &std::sync::mpsc::Receiver<(SessionId, PtyEvent)>,
+        want: Option<(u16, u16)>,
+        what: &str,
+    ) {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if pane.cursor() == want {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("{what}: want {want:?}, got {:?}", pane.cursor());
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn cursor_tracks_position_and_visibility() {
+        // Drive the parser from child stdout: stdin writes would only echo
+        // back through the line discipline (ECHOCTL mangles ESC to `^[`),
+        // so they can never faithfully carry escape sequences.
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "printf '\\033[3;7H'; sleep 2; printf '\\033[?25l'; sleep 2; printf '\\033[?25h'; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        wait_cursor(&pane, &rx, Some((2, 6)), "move");
+        wait_cursor(&pane, &rx, None, "hide");
+        wait_cursor(&pane, &rx, Some((2, 6)), "reshow");
+        pane.close();
     }
 
     #[test]

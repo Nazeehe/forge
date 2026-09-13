@@ -111,6 +111,7 @@ fn loop_until_quit(
     let size = terminal.size()?;
     state.apply(AppEvent::Resize(size.height, size.width));
     fit_panes(state, ratatui::layout::Rect::new(0, 0, size.width, size.height));
+    let mut cursor_shown = true;
     while !state.should_quit {
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
@@ -128,10 +129,19 @@ fn loop_until_quit(
         if state.dirty {
             let views = state.views();
             let status = state.status_text();
+            let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
             terminal.draw(|f| {
                 let area = f.area();
                 ui::render_grid(f, area, &views, &status);
             })?;
+            if cursor_visible != cursor_shown {
+                if cursor_visible {
+                    terminal.show_cursor()?;
+                } else {
+                    terminal.hide_cursor()?;
+                }
+                cursor_shown = cursor_visible;
+            }
             state.dirty = false;
         }
     }

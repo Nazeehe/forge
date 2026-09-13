@@ -4,7 +4,7 @@
 //! takes snapshots, so the whole grid is assertable through a test backend
 //! without a terminal.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
@@ -16,6 +16,29 @@ pub struct PaneView {
     pub body: String,
     pub live: bool,
     pub focused: bool,
+    /// Visible cursor as 0-based (row, col) in terminal-grid coordinates.
+    pub cursor: Option<(u16, u16)>,
+}
+
+/// Translate a terminal-grid cursor into outer-frame coordinates, clamped
+/// inside the pane's borders. `None` when the pane hides its cursor or the
+/// pane is too small for an inner area.
+pub fn cursor_screen_pos(area: Rect, cursor: Option<(u16, u16)>) -> Option<Position> {
+    let (row, col) = cursor?;
+    if area.width < 3 || area.height < 3 {
+        return None;
+    }
+    let x = area
+        .x
+        .saturating_add(1)
+        .saturating_add(col)
+        .min(area.x + area.width - 2);
+    let y = area
+        .y
+        .saturating_add(1)
+        .saturating_add(row)
+        .min(area.y + area.height - 2);
+    Some(Position::new(x, y))
 }
 
 /// Split `area` for up to nine sessions, reserving the last row for the
@@ -50,7 +73,13 @@ pub fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], status: &s
         frame.render_widget(hint, area);
     }
     let areas = grid_areas(panes.len(), area);
+    // Ratatui places a single hardware cursor per frame: the focused pane
+    // owns it, since keyboard input goes there.
+    let mut focused_cursor = None;
     for (view, rect) in panes.iter().zip(areas.iter()) {
+        if view.focused {
+            focused_cursor = cursor_screen_pos(*rect, view.cursor);
+        }
         let (glyph, _role) = if view.live {
             theme::status_glyph_running()
         } else {
@@ -70,6 +99,9 @@ pub fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], status: &s
             Paragraph::new(safe_text::encode_multiline_for_display(&view.body)).block(block),
             *rect,
         );
+    }
+    if let Some(pos) = focused_cursor {
+        frame.set_cursor_position(pos);
     }
     if area.height > 0 {
         let bar = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
@@ -145,6 +177,7 @@ mod tests {
             body: body.to_string(),
             live,
             focused: true,
+            cursor: None,
         }
     }
 
@@ -191,6 +224,30 @@ mod tests {
         let r2 = rows.iter().position(|r| r.contains("line2")).expect("line2 visible");
         assert_eq!(r2, r1 + 1, "row break preserved: {rows:?}");
         assert!(rows.iter().all(|r| !r.contains('⏎')), "no flattened newlines");
+    }
+
+    #[test]
+    fn focused_pane_cursor_is_placed_inside_borders() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut p = pane("sh", "hi", true);
+        p.cursor = Some((2, 5));
+        terminal
+            .draw(|f| render_grid(f, area(), &[p], "status"))
+            .unwrap();
+        terminal.backend_mut().assert_cursor_position(Position::new(6, 3));
+    }
+
+    #[test]
+    fn cursor_mapping_clamps_and_hides() {
+        let full = Rect::new(0, 0, 80, 24);
+        assert_eq!(cursor_screen_pos(full, Some((0, 0))), Some(Position::new(1, 1)));
+        assert_eq!(cursor_screen_pos(full, None), None);
+        assert_eq!(
+            cursor_screen_pos(full, Some((500, 500))),
+            Some(Position::new(78, 22))
+        );
+        assert_eq!(cursor_screen_pos(Rect::new(0, 0, 2, 2), Some((0, 0))), None);
     }
 
     #[test]

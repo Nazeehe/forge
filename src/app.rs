@@ -42,6 +42,7 @@ impl AppState {
                     body,
                     live,
                     focused: Some(id) == active,
+                    cursor: self.manager.cursor(id),
                 }
             })
             .collect()

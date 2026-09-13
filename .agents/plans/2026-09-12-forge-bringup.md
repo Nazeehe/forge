@@ -79,6 +79,28 @@
 - [ ] `tuirealm` chrome host (buttons/mouse) — deferred to Phase 3+ chrome work.
 - Still open: flood-cannot-starve-input gate test.
 
+## Phase 2.5 — Complete vt100 support — STATUS: DOING
+
+Goal: full shell + full-screen app support (lazygit, htop, vim open/type/quit).
+Spec sources: VT100 User Guide on vt100.net (DEC core) + xterm ctlseqs on
+invisible-island.net (SGR-256/RGB, key modify-params, mouse encodings),
+pulled per-slice as needed.
+
+- [x] Cursor: position + show/hide on the focused pane (`pty::cursor`,
+      `PaneView.cursor`, clamped `cursor_screen_pos`; outer cursor hidden
+      when the pane hides its). Tests: live-PTY move/hide/reshow +
+      TestBackend placement.
+- [ ] SGR color + attrs → styled spans via per-cell walk (16/256/RGB
+      pass-through; theme stays chrome-only).
+- [ ] Full key encoding: arrows (normal vs application-cursor SS3), nav keys,
+      F-keys, Ctrl/Alt/Shift `1;Nm` chords; honor the pane's
+      application_cursor/application_keypad modes.
+- [ ] Mouse: capture outer events, encode per the pane's requested
+      mode/encoding; chrome keeps events otherwise.
+- [ ] Bracketed paste wrap when the pane requests it.
+- [ ] Alt-screen audit + capable `TERM` advertised to children.
+- Gate: lazygit/htop/vim live usable; key-table unit tests per chord class.
+
 ## Phase 3 — Hooks + permissions — STATUS: TODO
 
 - [ ] `hook-relay` (fail-open, exit 0, ~3s sync timeout) for claude/codex/muse.
