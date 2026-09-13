@@ -503,7 +503,7 @@ mod tests {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
             run_id: run_a.to_string(),
-            tool: "ask".to_string(),
+            tool: "ask_session".to_string(),
             args: r#"{"target":"b","text":"ready?"}"#.to_string(),
             reply: reply_tx,
         }));
@@ -524,7 +524,7 @@ mod tests {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
             run_id: "f".repeat(32),
-            tool: "ask".to_string(),
+            tool: "ask_session".to_string(),
             args: "{}".to_string(),
             reply: reply_tx,
         }));
@@ -553,7 +553,7 @@ mod tests {
         let (reply_tx, _) = std::sync::mpsc::channel();
         s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
             run_id: run_a.to_string(),
-            tool: "ask".to_string(),
+            tool: "ask_session".to_string(),
             args: r#"{"target":"b","text":"q?"}"#.to_string(),
             reply: reply_tx,
         }));
@@ -599,7 +599,7 @@ mod tests {
         let (reply_tx, _) = std::sync::mpsc::channel();
         s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
             run_id: run_a.to_string(),
-            tool: "tell".to_string(),
+            tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
             reply: reply_tx,
         }));
@@ -645,7 +645,7 @@ mod tests {
         let (reply_tx, _) = std::sync::mpsc::channel();
         s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
             run_id: run_a.to_string(),
-            tool: "tell".to_string(),
+            tool: "tell_session".to_string(),
             args: r#"{"target":"b","text":"wait"}"#.to_string(),
             reply: reply_tx,
         }));

@@ -348,7 +348,7 @@ struct ToolDef {
 fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
-            name: "ask",
+            name: "ask_session",
             description: "Ask a peer session a question; returns a conversation ID immediately and injects the question when the target is idle.",
             schema: r#"{"type":"object","properties":{"target":{"type":"string"},"text":{"type":"string"}},"required":["target","text"]}"#,
         },
@@ -358,12 +358,12 @@ fn tool_defs() -> Vec<ToolDef> {
             schema: r#"{"type":"object","properties":{"conversation":{"type":"string"},"text":{"type":"string"}},"required":["conversation","text"]}"#,
         },
         ToolDef {
-            name: "tell",
+            name: "tell_session",
             description: "Tell a peer session something; the peer acknowledges asynchronously.",
             schema: r#"{"type":"object","properties":{"target":{"type":"string"},"text":{"type":"string"},"conversation":{"type":"string"}}}"#,
         },
         ToolDef {
-            name: "ack",
+            name: "ack_message",
             description: "Acknowledge a tell addressed to this session.",
             schema: r#"{"type":"object","properties":{"conversation":{"type":"string"}},"required":["conversation"]}"#,
         },
@@ -621,7 +621,7 @@ mod tests {
             &call_ctx(),
         )
         .expect("tools/list answers");
-        for tool in ["ask", "send_response", "tell", "ack", "list_sessions"] {
+        for tool in ["ask_session", "send_response", "tell_session", "ack_message", "list_sessions"] {
             assert!(res.contains(&format!(r#""name":"{tool}""#)), "res: {res}");
         }
     }
@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn tools_call_returns_stub_result_envelope() {
         let res = handle_line(
-            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ask","arguments":{"target":"b","text":"hi"}}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"ask_session","arguments":{"target":"b","text":"hi"}}}"#,
             &ctx(),
             &stub,
             &call_ctx(),
@@ -644,7 +644,7 @@ mod tests {
     fn tool_failure_becomes_is_error_not_protocol_error() {
         let fail = |_: &str, _: &str, _: &CallCtx| ToolResult::fail("no such group");
         let res = handle_line(
-            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"tell","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"tell_session","arguments":{}}}"#,
             &ctx(),
             &fail,
             &call_ctx(),
@@ -740,7 +740,7 @@ mod tests {
         });
         let out = call_via_ipc(
             path.to_str().unwrap(),
-            "ask",
+            "ask_session",
             r#"{"target":"b"}"#,
             "abc123",
             std::time::Duration::from_secs(5),
@@ -750,7 +750,7 @@ mod tests {
         assert!(!out.is_error);
         let raw = String::from_utf8(seen.lock().unwrap().clone()).unwrap();
         assert!(raw.contains(r#""kind":"comms""#), "record: {raw}");
-        assert!(raw.contains(r#""tool":"ask""#), "record: {raw}");
+        assert!(raw.contains(r#""tool":"ask_session""#), "record: {raw}");
         assert!(raw.contains(r#""run_id":"abc123""#), "record: {raw}");
         let _ = std::fs::remove_file(&path);
     }
@@ -769,7 +769,7 @@ mod tests {
         });
         let err = call_via_ipc(
             path.to_str().unwrap(),
-            "ask",
+            "ask_session",
             "{}",
             "abc123",
             std::time::Duration::from_millis(100),

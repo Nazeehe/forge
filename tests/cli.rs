@@ -94,7 +94,7 @@ fn mcp_serve_answers_initialize_list_and_parse_error() {
     let init = lines.next().unwrap_or("");
     assert!(init.contains(r#""protocolVersion":"2025-03-26""#), "init: {init}");
     let list = lines.next().unwrap_or("");
-    assert!(list.contains(r#""name":"ask""#), "list: {list}");
+    assert!(list.contains(r#""name":"ask_session""#), "list: {list}");
     let err = lines.next().unwrap_or("");
     assert!(err.contains(r#""code":-32700"#), "err: {err}");
 }

@@ -34,11 +34,11 @@ impl InjectKind {
     /// Human-facing label for the pane-delivered block.
     pub fn label(self) -> &'static str {
         match self {
-            InjectKind::Ask => "ask",
+            InjectKind::Ask => "ask_session",
             InjectKind::Response => "response",
-            InjectKind::Tell => "tell",
+            InjectKind::Tell => "tell_session",
             InjectKind::FollowUp => "tell (follow-up)",
-            InjectKind::Ack => "ack",
+            InjectKind::Ack => "ack_message",
             InjectKind::Failed => "failed",
             InjectKind::Reminder => "reminder",
         }
@@ -293,10 +293,10 @@ impl Broker {
     ) -> Result<String, String> {
         let caller = self.resolve_caller(sessions, caller_run)?;
         match tool {
-            "ask" => self.ask(sessions, caller, args, now),
+            "ask_session" => self.ask(sessions, caller, args, now),
             "send_response" => self.send_response(sessions, caller, args, now),
-            "tell" => self.tell(sessions, caller, args, now),
-            "ack" => self.ack(sessions, caller, args, now),
+            "tell_session" => self.tell(sessions, caller, args, now),
+            "ack_message" => self.ack(sessions, caller, args, now),
             "list_sessions" => Ok(self.list_sessions(sessions)),
             _ => Err("unknown tool".to_string()),
         }
@@ -510,7 +510,7 @@ impl Broker {
                 conv: id.clone(),
                 kind: InjectKind::Ack,
                 from,
-                text: "ack".to_string(),
+                text: "ack_message".to_string(),
             },
         );
         if let Some(conv) = self.convs.get_mut(&id) {
@@ -673,7 +673,7 @@ mod tests {
     fn ask_returns_an_id_and_queues_target_injection() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "ask", r#"{"target":"b","text":"ready?"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"ready?"}"#)
             .expect("ask validates");
         assert!(res.contains(r#""conversation":""#), "res: {res}");
         let due = p.state.broker.take_due(p.b, 10);
@@ -688,7 +688,7 @@ mod tests {
         let err = p
             .call(
                 &"f".repeat(32),
-                "ask",
+                "ask_session",
                 r#"{"target":"b","text":"hi"}"#,
             )
             .expect_err("forged run ID must fail");
@@ -701,7 +701,7 @@ mod tests {
         // a joins alone; b is groupless.
         p.state.broker.join(&p.state.manager, p.a, "solo").unwrap();
         let err = p
-            .call(&p.run_a.clone(), "ask", r#"{"target":"b","text":"hi"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"hi"}"#)
             .expect_err("no shared group must fail");
         assert!(err.contains("shared group"), "err: {err}");
         assert!(p.state.broker.take_due(p.b, 10).is_empty());
@@ -713,19 +713,19 @@ mod tests {
         for i in 0..5 {
             p.call(
                 &p.run_a.clone(),
-                "ask",
+                "ask_session",
                 &format!(r#"{{"target":"b","text":"q{i}"}}"#),
             )
             .expect("first five fit");
         }
         let err = p
-            .call(&p.run_a.clone(), "ask", r#"{"target":"b","text":"q5"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"q5"}"#)
             .expect_err("sixth must fail");
         assert!(err.contains("pressure"), "err: {err}");
         // Draining the queue does not help while five asks await response.
         p.state.broker.take_due(p.b, 10);
         let err = p
-            .call(&p.run_a.clone(), "ask", r#"{"target":"b","text":"q6"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"q6"}"#)
             .expect_err("delivered asks still count");
         assert!(err.contains("pressure"), "err: {err}");
     }
@@ -734,7 +734,7 @@ mod tests {
     fn answered_ask_releases_pressure() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "ask", r#"{"target":"b","text":"q0"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"q0"}"#)
             .unwrap();
         let conv = json_field(&res, "conversation").unwrap();
         // b reads the question, then answers; the response goes back to a
@@ -758,7 +758,7 @@ mod tests {
     fn tell_followed_by_ack_notifies_source() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "tell", r#"{"target":"b","text":"fyi"}"#)
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"fyi"}"#)
             .expect("tell validates");
         let conv = json_field(&res, "conversation").unwrap();
         let due = p.state.broker.take_due(p.b, 10);
@@ -769,7 +769,7 @@ mod tests {
         let r = p
             .call(
                 &p.run_b.clone(),
-                "ack",
+                "ack_message",
                 &format!(r#"{{"conversation":"{conv}"}}"#),
             )
             .expect("target acks");
@@ -783,14 +783,14 @@ mod tests {
     fn tell_with_existing_conversation_needs_no_new_ack() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "tell", r#"{"target":"b","text":"fyi"}"#)
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"fyi"}"#)
             .unwrap();
         let conv = json_field(&res, "conversation").unwrap();
         // b reads the tell, then acks; the ack goes back to a.
         assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
         p.call(
             &p.run_b.clone(),
-            "ack",
+            "ack_message",
             &format!(r#"{{"conversation":"{conv}"}}"#),
         )
         .unwrap();
@@ -798,7 +798,7 @@ mod tests {
         // Follow-up on the same conversation: delivered, no ack expected.
         p.call(
             &p.run_a.clone(),
-            "tell",
+            "tell_session",
             &format!(r#"{{"target":"b","text":"more","conversation":"{conv}"}}"#),
         )
         .expect("follow-up validates");
@@ -812,12 +812,12 @@ mod tests {
     fn courtesy_reminder_fires_once_after_grace() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "tell", r#"{"target":"b","text":"fyi"}"#)
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"fyi"}"#)
             .unwrap();
         let conv = json_field(&res, "conversation").unwrap();
         p.call(
             &p.run_b.clone(),
-            "ack",
+            "ack_message",
             &format!(r#"{{"conversation":"{conv}"}}"#),
         )
         .unwrap();
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn target_exit_fails_the_conversation() {
         let mut p = live_pair().grouped();
-        p.call(&p.run_a.clone(), "ask", r#"{"target":"b","text":"q?"}"#)
+        p.call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"q?"}"#)
             .unwrap();
         p.state.broker.take_due(p.b, 10);
         p.state.broker.target_exited(&p.state.manager, p.b);
@@ -892,7 +892,7 @@ mod tests {
         assert!(p.state.broker.leave(p.a, "peers"));
         assert_eq!(p.state.broker.primary_group(p.a), None);
         let err = p
-            .call(&p.run_a.clone(), "ask", r#"{"target":"b","text":"hi"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"hi"}"#)
             .expect_err("left group must fail");
         assert!(err.contains("shared group"), "err: {err}");
     }
