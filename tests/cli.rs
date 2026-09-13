@@ -100,6 +100,47 @@ fn mcp_serve_answers_initialize_list_and_parse_error() {
 }
 
 #[test]
+fn installers_round_trip_on_scratch_home() {
+    let (_, home) = forge();
+    let codex_home = std::env::temp_dir().join(format!(
+        "forge-cli-codex-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&codex_home);
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let run = |sub: &str| {
+        Command::new(env!("CARGO_BIN_EXE_forge"))
+            .arg(sub)
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex_home)
+            .output()
+            .expect("run forge")
+    };
+    for sub in ["install-hooks", "install-mcp", "install-skills"] {
+        let out = run(sub);
+        assert!(
+            out.status.success(),
+            "{sub} failed: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    assert!(home.join(".claude/settings.json").is_file());
+    assert!(home.join(".claude.json").is_file());
+    assert!(codex_home.join("hooks.json").is_file());
+    assert!(codex_home.join("config.toml").is_file());
+    for sub in ["uninstall-skills", "uninstall-mcp", "uninstall-hooks"] {
+        let out = run(sub);
+        assert!(
+            out.status.success(),
+            "{sub} failed: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&codex_home);
+}
+
+#[test]
 fn first_launch_materializes_config_and_audit_log() {
     let (mut c, home) = forge();
     let out = c.output().expect("run forge");
