@@ -67,7 +67,7 @@ pub fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], status: &s
             .border_style(theme::style(border))
             .title(title);
         frame.render_widget(
-            Paragraph::new(safe_text::encode_for_display(&view.body)).block(block),
+            Paragraph::new(safe_text::encode_multiline_for_display(&view.body)).block(block),
             *rect,
         );
     }
@@ -166,6 +166,31 @@ mod tests {
         assert!(text.contains("agent-1"), "title visible");
         assert!(text.contains("hello out"), "body visible");
         assert!(text.contains("prefix Ctrl-b"), "status visible");
+    }
+
+    fn buffer_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        buf.content
+            .chunks(w)
+            .map(|row| row.iter().map(|c| c.symbol().to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn multiline_body_renders_across_rows() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                render_grid(f, area(), &[pane("sh", "line1\nline2", true)], "status")
+            })
+            .unwrap();
+        let rows = buffer_rows(&terminal);
+        let r1 = rows.iter().position(|r| r.contains("line1")).expect("line1 visible");
+        let r2 = rows.iter().position(|r| r.contains("line2")).expect("line2 visible");
+        assert_eq!(r2, r1 + 1, "row break preserved: {rows:?}");
+        assert!(rows.iter().all(|r| !r.contains('⏎')), "no flattened newlines");
     }
 
     #[test]
