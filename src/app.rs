@@ -504,7 +504,7 @@ mod tests {
         s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "ask_session".to_string(),
-            args: r#"{"target":"b","text":"ready?"}"#.to_string(),
+            args: r#"{"target":"b","message":"ready?"}"#.to_string(),
             reply: reply_tx,
         }));
         let line = reply_rx
@@ -554,7 +554,7 @@ mod tests {
         s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "ask_session".to_string(),
-            args: r#"{"target":"b","text":"q?"}"#.to_string(),
+            args: r#"{"target":"b","message":"q?"}"#.to_string(),
             reply: reply_tx,
         }));
         assert!(s.manager.kill(b));
@@ -646,7 +646,7 @@ mod tests {
         s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
-            args: r#"{"target":"b","text":"wait"}"#.to_string(),
+            args: r#"{"target":"b","message":"wait"}"#.to_string(),
             reply: reply_tx,
         }));
         s.note_human_input();

@@ -350,22 +350,22 @@ fn tool_defs() -> Vec<ToolDef> {
         ToolDef {
             name: "ask_session",
             description: "Ask a peer session a question; returns a conversation ID immediately and injects the question when the target is idle.",
-            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"text":{"type":"string"}},"required":["target","text"]}"#,
+            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"}},"required":["target","message"]}"#,
         },
         ToolDef {
             name: "send_response",
             description: "Answer a conversation addressed to this session.",
-            schema: r#"{"type":"object","properties":{"conversation":{"type":"string"},"text":{"type":"string"}},"required":["conversation","text"]}"#,
+            schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"message":{"type":"string"}},"required":["conversation_id","message"]}"#,
         },
         ToolDef {
             name: "tell_session",
             description: "Tell a peer session something; the peer acknowledges asynchronously.",
-            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"text":{"type":"string"},"conversation":{"type":"string"}}}"#,
+            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"conversation_id":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "ack_message",
             description: "Acknowledge a tell addressed to this session.",
-            schema: r#"{"type":"object","properties":{"conversation":{"type":"string"}},"required":["conversation"]}"#,
+            schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"}},"required":["conversation_id"]}"#,
         },
         ToolDef {
             name: "list_sessions",

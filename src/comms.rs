@@ -306,6 +306,12 @@ impl Broker {
         crate::policy::json_string_field(args.as_bytes(), &[name])
     }
 
+    /// Canonical blueprint names first (`message`, `conversation_id`), with
+    /// the Phase 4a short forms accepted as aliases.
+    fn arg2(args: &str, names: &[&str]) -> Option<String> {
+        crate::policy::json_string_field(args.as_bytes(), names)
+    }
+
     fn ask(
         &mut self,
         sessions: &SessionManager,
@@ -315,7 +321,7 @@ impl Broker {
     ) -> Result<String, String> {
         let target_name = Self::arg(args, "target").filter(|s| !s.is_empty())
             .ok_or_else(|| "ask needs a target".to_string())?;
-        let text = Self::arg(args, "text").filter(|s| !s.is_empty())
+        let text = Self::arg2(args, &["message", "text"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "ask needs text".to_string())?;
         let target = self.check_peer(sessions, caller, &target_name)?;
         let conv = crate::ids::ConversationId::generate().to_string();
@@ -355,9 +361,9 @@ impl Broker {
         args: &str,
         now: Instant,
     ) -> Result<String, String> {
-        let id = Self::arg(args, "conversation").filter(|s| !s.is_empty())
+        let id = Self::arg2(args, &["conversation_id", "conversation"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "a conversation ID is required".to_string())?;
-        let text = Self::arg(args, "text").filter(|s| !s.is_empty())
+        let text = Self::arg2(args, &["message", "text"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "send_response needs text".to_string())?;
         let source = {
             let conv = self
@@ -401,9 +407,9 @@ impl Broker {
     ) -> Result<String, String> {
         let target_name = Self::arg(args, "target").filter(|s| !s.is_empty())
             .ok_or_else(|| "tell needs a target".to_string())?;
-        let text = Self::arg(args, "text").filter(|s| !s.is_empty())
+        let text = Self::arg2(args, &["message", "text"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "tell needs text".to_string())?;
-        if let Some(id) = Self::arg(args, "conversation").filter(|s| !s.is_empty()) {
+        if let Some(id) = Self::arg2(args, &["conversation_id", "conversation"]).filter(|s| !s.is_empty()) {
             // Informational follow-up on an existing conversation: delivered
             // like a tell, but no new ack is expected.
             let (source, target) = {
@@ -485,7 +491,7 @@ impl Broker {
         args: &str,
         now: Instant,
     ) -> Result<String, String> {
-        let id = Self::arg(args, "conversation").filter(|s| !s.is_empty())
+        let id = Self::arg2(args, &["conversation_id", "conversation"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "a conversation ID is required".to_string())?;
         let source = {
             let conv = self
@@ -673,7 +679,7 @@ mod tests {
     fn ask_returns_an_id_and_queues_target_injection() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"ready?"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"ready?"}"#)
             .expect("ask validates");
         assert!(res.contains(r#""conversation":""#), "res: {res}");
         let due = p.state.broker.take_due(p.b, 10);
@@ -683,13 +689,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_short_params_still_accepted() {
+        let mut p = live_pair().grouped();
+        // Phase 4a short forms are aliases for the canonical blueprint names.
+        let res = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
+            .expect("canonical message validates");
+        let conv = json_field(&res, "conversation").unwrap();
+        p.state.broker.take_due(p.b, 10);
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"a"}}"#),
+        )
+        .expect("canonical conversation_id validates");
+        // ...and the old shorts keep working.
+        p.call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"old"}"#)
+            .expect("legacy text alias validates");
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].text, "old");
+    }
+
+    #[test]
     fn forged_run_id_is_rejected() {
         let mut p = live_pair().grouped();
         let err = p
             .call(
                 &"f".repeat(32),
                 "ask_session",
-                r#"{"target":"b","text":"hi"}"#,
+                r#"{"target":"b","message":"hi"}"#,
             )
             .expect_err("forged run ID must fail");
         assert!(err.contains("run ID"), "err: {err}");
@@ -701,7 +730,7 @@ mod tests {
         // a joins alone; b is groupless.
         p.state.broker.join(&p.state.manager, p.a, "solo").unwrap();
         let err = p
-            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"hi"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"hi"}"#)
             .expect_err("no shared group must fail");
         assert!(err.contains("shared group"), "err: {err}");
         assert!(p.state.broker.take_due(p.b, 10).is_empty());
@@ -714,18 +743,18 @@ mod tests {
             p.call(
                 &p.run_a.clone(),
                 "ask_session",
-                &format!(r#"{{"target":"b","text":"q{i}"}}"#),
+                &format!(r#"{{"target":"b","message":"q{i}"}}"#),
             )
             .expect("first five fit");
         }
         let err = p
-            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"q5"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q5"}"#)
             .expect_err("sixth must fail");
         assert!(err.contains("pressure"), "err: {err}");
         // Draining the queue does not help while five asks await response.
         p.state.broker.take_due(p.b, 10);
         let err = p
-            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"q6"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q6"}"#)
             .expect_err("delivered asks still count");
         assert!(err.contains("pressure"), "err: {err}");
     }
@@ -734,7 +763,7 @@ mod tests {
     fn answered_ask_releases_pressure() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"q0"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q0"}"#)
             .unwrap();
         let conv = json_field(&res, "conversation").unwrap();
         // b reads the question, then answers; the response goes back to a
@@ -744,7 +773,7 @@ mod tests {
             .call(
                 &p.run_b.clone(),
                 "send_response",
-                &format!(r#"{{"conversation":"{conv}","text":"yes"}}"#),
+                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
             )
             .expect("target answers");
         assert!(r.contains(&conv), "res: {r}");
@@ -758,7 +787,7 @@ mod tests {
     fn tell_followed_by_ack_notifies_source() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"fyi"}"#)
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
             .expect("tell validates");
         let conv = json_field(&res, "conversation").unwrap();
         let due = p.state.broker.take_due(p.b, 10);
@@ -770,7 +799,7 @@ mod tests {
             .call(
                 &p.run_b.clone(),
                 "ack_message",
-                &format!(r#"{{"conversation":"{conv}"}}"#),
+                &format!(r#"{{"conversation_id":"{conv}"}}"#),
             )
             .expect("target acks");
         assert!(r.contains(&conv), "res: {r}");
@@ -783,7 +812,7 @@ mod tests {
     fn tell_with_existing_conversation_needs_no_new_ack() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"fyi"}"#)
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
             .unwrap();
         let conv = json_field(&res, "conversation").unwrap();
         // b reads the tell, then acks; the ack goes back to a.
@@ -791,7 +820,7 @@ mod tests {
         p.call(
             &p.run_b.clone(),
             "ack_message",
-            &format!(r#"{{"conversation":"{conv}"}}"#),
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
         )
         .unwrap();
         p.state.broker.take_due(p.a, 10);
@@ -799,7 +828,7 @@ mod tests {
         p.call(
             &p.run_a.clone(),
             "tell_session",
-            &format!(r#"{{"target":"b","text":"more","conversation":"{conv}"}}"#),
+            &format!(r#"{{"target":"b","message":"more","conversation_id":"{conv}"}}"#),
         )
         .expect("follow-up validates");
         let due = p.state.broker.take_due(p.b, 10);
@@ -812,13 +841,13 @@ mod tests {
     fn courtesy_reminder_fires_once_after_grace() {
         let mut p = live_pair().grouped();
         let res = p
-            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"fyi"}"#)
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
             .unwrap();
         let conv = json_field(&res, "conversation").unwrap();
         p.call(
             &p.run_b.clone(),
             "ack_message",
-            &format!(r#"{{"conversation":"{conv}"}}"#),
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
         )
         .unwrap();
         p.state.broker.take_due(p.a, 10);
@@ -844,7 +873,7 @@ mod tests {
     #[test]
     fn target_exit_fails_the_conversation() {
         let mut p = live_pair().grouped();
-        p.call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"q?"}"#)
+        p.call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q?"}"#)
             .unwrap();
         p.state.broker.take_due(p.b, 10);
         p.state.broker.target_exited(&p.state.manager, p.b);
@@ -892,7 +921,7 @@ mod tests {
         assert!(p.state.broker.leave(p.a, "peers"));
         assert_eq!(p.state.broker.primary_group(p.a), None);
         let err = p
-            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","text":"hi"}"#)
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"hi"}"#)
             .expect_err("left group must fail");
         assert!(err.contains("shared group"), "err: {err}");
     }
