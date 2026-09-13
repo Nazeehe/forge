@@ -19,11 +19,16 @@ pub enum UserCommand {
 /// (arrows, function keys, modified chords beyond the prefix) return `None`
 /// and are dropped rather than mis-sent.
 pub fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
-    if !key.modifiers.is_empty() {
-        return None;
-    }
     match key.code {
-        KeyCode::Char(c) => Some(c.to_string().into_bytes()),
+        // SHIFT is inherent in producing this char (uppercase, `!`, ...);
+        // any other modifier means a real chord with no plain encoding.
+        KeyCode::Char(c)
+            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            Some(c.to_string().into_bytes())
+        }
+        KeyCode::Char(_) => None,
+        _ if !key.modifiers.is_empty() => None,
         KeyCode::Enter => Some(b"\r".to_vec()),
         KeyCode::Tab => Some(b"\t".to_vec()),
         KeyCode::Backspace => Some(b"\x7f".to_vec()),
@@ -173,6 +178,22 @@ mod tests {
             r.feed(key(KeyCode::Char('c'))),
             RoutedKey::Command(UserCommand::NewSession)
         );
+    }
+
+    #[test]
+    fn shift_char_keys_encode_to_pty_bytes() {
+        // Real terminals report uppercase/symbol chars with SHIFT set;
+        // the shift is inherent in the char and must not drop the key.
+        let shift_s = KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(&shift_s), Some(b"S".to_vec()));
+        let shift_bang = KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT);
+        assert_eq!(encode_key(&shift_bang), Some(b"!".to_vec()));
+        // Real chords still drop.
+        let ctrl_s = KeyEvent::new(
+            KeyCode::Char('S'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        assert_eq!(encode_key(&ctrl_s), None);
     }
 
     #[test]

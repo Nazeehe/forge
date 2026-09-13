@@ -440,6 +440,31 @@ mod tests {
     }
 
     #[test]
+    fn written_bytes_reach_screen() {
+        let mut m = SessionManager::new();
+        let id = m
+            .spawn("w", &workdir(), "exec cat", RunId::generate())
+            .unwrap();
+        m.pane_write(id, b"hello-screen-write\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(text) = m.screen_text(id) {
+                if text.contains("hello-screen-write") {
+                    break;
+                }
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "write never reached screen: {:?}",
+                    m.screen_text(id)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(m.remove(id));
+    }
+
+    #[test]
     fn quick_exit_records_code() {
         let mut m = SessionManager::new();
         let id = m.spawn("q", &workdir(), "exit 7", RunId::generate()).unwrap();
