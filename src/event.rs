@@ -15,6 +15,10 @@ pub enum AppEvent {
     Resize(u16, u16),
     SessionOutput { id: SessionId, data: Vec<u8> },
     SessionExited { id: SessionId, code: Option<i32> },
+    /// A synchronous hook record from the IPC listener. Policy and the
+    /// permission modal (3c/3d) send the one-line decision through `reply`;
+    /// dropping it leaves the relay to time out fail-open.
+    HookRequest(crate::listener::HookRequest),
     Shutdown,
 }
 

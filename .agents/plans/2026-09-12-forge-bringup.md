@@ -118,8 +118,10 @@ pulled per-slice as needed.
       field scan + CR/LF strip are exact on valid JSON. Tests: route table,
       envelope, no-listener/empty/unreachable/silent-listener/timeout,
       decision relay, CLI fail-open gate.
-- [ ] 3b TUI listener: `0600` socket + loopback TCP, 32-conn cap, no-prefetch
-      first line, AppEvent fan-in.
+- [x] 3b TUI listener: `0600` socket + loopback TCP, 32-conn cap, no-prefetch
+      first line, `HookRequest` fan-in with bounded pending queue. Live:
+      socket 0600, async instant, sync waits out the relay timeout
+      fail-open, socket file removed on quit.
 - [ ] 3c Policy/cache/audit (`audit.log` 0600, block-wins); modes Off,
       Safe-Only, YOLO (AI-Assisted deferred to Phase 7).
 - [ ] 3d `tui-realm` permission modal (keyboard nav + mouse click).

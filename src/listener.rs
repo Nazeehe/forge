@@ -1,0 +1,410 @@
+//! TUI IPC listener (Phase 3b): Unix socket + loopback TCP.
+//!
+//! Short-lived harnesses (`hook-relay`, later MCP) connect, send one header
+//! line, and — for synchronous hooks — wait for a one-line decision. The
+//! first line is read byte-at-a-time with no buffered prefetch, because
+//! binary traffic may follow it. Connections beyond the per-transport cap
+//! are closed immediately. Hook records arrive on the main loop as
+//! `AppEvent::HookRequest`; policy and the permission modal (3c/3d) reply
+//! later, so an undecided synchronous hook simply waits out the relay's
+//! own timeout and fails open.
+
+/// Connections accepted per transport before newcomers are turned away.
+pub const MAX_CONNS: usize = 32;
+
+/// Longest accepted header line; longer means a broken or hostile client.
+pub const MAX_LINE: usize = 65536;
+
+/// Pending hook queue bound; beyond it newcomers are dropped (their relays
+/// fail open on timeout) rather than growing memory without limit.
+pub const MAX_PENDING_HOOKS: usize = 128;
+
+/// How long a connection handler waits for the loop's decision before
+/// giving up. The relay enforces its own shorter deadline; this only bounds
+/// handler threads once policy exists.
+pub const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// First-line routing: hook records go to the loop, everything else
+/// (MCP, framed visual/file traffic) is deferred to its own phase.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    Hook { hook: String },
+    Other,
+}
+
+/// One hook record awaiting a decision. Policy (3c) and the permission
+/// modal (3d) answer through `reply`; dropping it fails the relay open.
+#[derive(Debug)]
+pub struct HookRequest {
+    pub hook: String,
+    pub body: String,
+    pub reply: std::sync::mpsc::Sender<String>,
+}
+
+/// Classify one header line. Hook envelopes carry a top-level `hook` string
+/// field (see `relay::record_line`); anything else is another protocol.
+pub fn classify(line: &[u8]) -> Route {
+    if let Some(hook) = crate::relay::hook_name(line) {
+        // `hook_name` also matches nested fields; require the envelope shape
+        // so a JSON-RPC body mentioning hooks cannot misroute.
+        if line.windows(6).any(|w| w == b"\"body\"") {
+            return Route::Hook { hook };
+        }
+    }
+    Route::Other
+}
+
+/// Read one `\n`-terminated header line byte-at-a-time: no buffered
+/// prefetch, so binary bytes after the newline stay in the stream for the
+/// next reader. Errors on EOF before newline or lines beyond `cap`.
+pub fn read_record_line(
+    stream: &mut impl std::io::Read,
+    cap: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(1) => {
+                line.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return Ok(line);
+                }
+                if line.len() > cap {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "header line too long",
+                    ));
+                }
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "eof before newline",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Bind a Unix socket with owner-only permissions regardless of umask. A
+/// leftover file from a dead process is removed and retried once.
+pub fn bind_unix(path: &std::path::Path) -> std::io::Result<std::os::unix::net::UnixListener> {
+    let bound = std::os::unix::net::UnixListener::bind(path).or_else(|_| {
+        let _ = std::fs::remove_file(path);
+        std::os::unix::net::UnixListener::bind(path)
+    })?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(bound)
+}
+
+/// Accept-loop guard: removing the socket file on drop. Handler threads are
+/// detached; process exit reaps them.
+pub struct ListenerGuard {
+    sock_path: Option<std::path::PathBuf>,
+}
+
+impl Drop for ListenerGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.sock_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Spawn the Unix-socket accept loop with a connection cap. Each hook record
+/// arrives on the loop as `AppEvent::HookRequest`.
+pub fn spawn_unix(
+    path: &std::path::Path,
+    tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+    cap: usize,
+) -> std::io::Result<ListenerGuard> {
+    let listener = bind_unix(path)?;
+    accept_loop(listener, tx, cap);
+    Ok(ListenerGuard {
+        sock_path: Some(path.to_path_buf()),
+    })
+}
+
+/// Spawn the loopback-TCP accept loop on a dynamic port (for reverse
+/// forwarding): same protocol and cap as the Unix socket.
+pub fn spawn_tcp(
+    tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+    cap: usize,
+) -> std::io::Result<(ListenerGuard, u16)> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    accept_loop(listener, tx, cap);
+    Ok((ListenerGuard { sock_path: None }, port))
+}
+
+/// Spawn both transports with the production cap and a pid-namespaced
+/// socket path. Never fatal to the TUI: hooks fail open without it.
+pub fn spawn_all(
+    tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+) -> std::io::Result<Spawned> {
+    let path = std::env::temp_dir().join(format!("forge.{}.sock", std::process::id()));
+    let guard = spawn_unix(&path, tx.clone(), MAX_CONNS)?;
+    let (_tcp_guard, tcp_port) = spawn_tcp(tx, MAX_CONNS)?;
+    // The TCP guard needs no cleanup; keep it alive with the return value.
+    Ok(Spawned {
+        _guard: guard,
+        _tcp_guard,
+        sock_path: path,
+        tcp_port,
+    })
+}
+
+/// Handles to a live listener pair.
+pub struct Spawned {
+    _guard: ListenerGuard,
+    _tcp_guard: ListenerGuard,
+    /// Unix socket path, also advertised as `FORGE_IPC_ENDPOINT`.
+    pub sock_path: std::path::PathBuf,
+    /// Dynamic loopback TCP port for reverse forwarding.
+    pub tcp_port: u16,
+}
+
+/// Something that can hand out accepted streams from a moved-in listener.
+trait Acceptor: Send + Sync + 'static {
+    type Stream: std::io::Read + std::io::Write + Send + 'static;
+    fn accept(&self) -> std::io::Result<Self::Stream>;
+}
+
+impl Acceptor for std::os::unix::net::UnixListener {
+    type Stream = std::os::unix::net::UnixStream;
+    fn accept(&self) -> std::io::Result<Self::Stream> {
+        self.accept().map(|(conn, _)| conn)
+    }
+}
+
+impl Acceptor for std::net::TcpListener {
+    type Stream = std::net::TcpStream;
+    fn accept(&self) -> std::io::Result<Self::Stream> {
+        self.accept().map(|(conn, _)| conn)
+    }
+}
+
+fn accept_loop<A: Acceptor>(
+    listener: A,
+    tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+    cap: usize,
+) {
+    let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    std::thread::spawn(move || loop {
+        let conn = match listener.accept() {
+            Ok(conn) => conn,
+            Err(_) => continue,
+        };
+        let n = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if n > cap {
+            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            drop(conn);
+            continue;
+        }
+        let tx = tx.clone();
+        let active = std::sync::Arc::clone(&active);
+        std::thread::spawn(move || {
+            handle_conn(conn, &tx);
+            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        });
+    });
+}
+
+fn handle_conn<S: std::io::Read + std::io::Write>(
+    mut conn: S,
+    tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
+) {
+    let line = match read_record_line(&mut conn, MAX_LINE) {
+        Ok(line) => line,
+        Err(_) => return,
+    };
+    let Route::Hook { hook } = classify(&line) else {
+        return;
+    };
+    let body = String::from_utf8_lossy(&line).into_owned();
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    if tx
+        .send(crate::event::AppEvent::HookRequest(HookRequest {
+            hook,
+            body,
+            reply: reply_tx,
+        }))
+        .is_err()
+    {
+        return;
+    }
+    if let Ok(decision) = reply_rx.recv_timeout(REPLY_WAIT) {
+        use std::io::Write;
+        let mut bytes = decision.into_bytes();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        let _ = conn.write_all(&bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn first_line_leaves_trailer_unread() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        b.write_all(b"line1\nBINARY\x00trailer").unwrap();
+        drop(b);
+        let line = read_record_line(&mut a, MAX_LINE).unwrap();
+        assert_eq!(line, b"line1\n");
+        let mut rest = Vec::new();
+        a.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"BINARY\x00trailer");
+    }
+
+    #[test]
+    fn overlong_line_is_rejected() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        b.write_all(&vec![b'x'; MAX_LINE + 1]).unwrap();
+        drop(b);
+        assert!(read_record_line(&mut a, MAX_LINE).is_err());
+    }
+
+    #[test]
+    fn eof_without_newline_is_rejected() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        b.write_all(b"partial").unwrap();
+        drop(b);
+        assert!(read_record_line(&mut a, MAX_LINE).is_err());
+    }
+
+    #[test]
+    fn header_routes_hooks_and_defers_the_rest() {
+        match classify(b"{\"v\":1,\"hook\":\"PreToolUse\",\"body\":{}}\n") {
+            Route::Hook { hook } => assert_eq!(hook, "PreToolUse"),
+            Route::Other => panic!("hook misrouted"),
+        }
+        assert!(matches!(
+            classify(b"{\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n"),
+            Route::Other
+        ));
+        assert!(matches!(classify(b"garbage\n"), Route::Other));
+    }
+
+    #[test]
+    fn unix_socket_is_owner_only() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-listen-test-{}-mode.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _listener = bind_unix(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "socket mode was {mode:o}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hook_record_reaches_the_loop_with_a_reply_path() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-listen-test-{}-hook.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _guard = spawn_unix(&path, tx, 8).unwrap();
+        let mut conn = UnixStream::connect(&path).unwrap();
+        conn.write_all(b"{\"v\":1,\"hook\":\"PreToolUse\",\"body\":{\"tool\":\"Bash\"}}\n")
+            .unwrap();
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("hook event arrives");
+        match event {
+            crate::event::AppEvent::HookRequest(req) => {
+                assert_eq!(req.hook, "PreToolUse");
+                assert!(req.body.contains("Bash"), "body carried: {:?}", req.body);
+                req.reply.send("{\"decision\":\"allow\"}\n".to_string()).unwrap();
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+        let mut out = Vec::new();
+        let mut byte = [0u8; 1];
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        loop {
+            match conn.read(&mut byte) {
+                Ok(1) => {
+                    out.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert_eq!(out, b"{\"decision\":\"allow\"}\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tcp_hook_record_reaches_the_loop() {
+        use std::io::Write;
+        use std::net::TcpStream;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (_guard, port) = spawn_tcp(tx, 8).unwrap();
+        let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        conn.write_all(b"{\"v\":1,\"hook\":\"Stop\",\"body\":{}}\n").unwrap();
+        match rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("hook event arrives over tcp")
+        {
+            crate::event::AppEvent::HookRequest(req) => {
+                assert_eq!(req.hook, "Stop");
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connections_beyond_cap_are_turned_away() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-listen-test-{}-cap.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let _guard = spawn_unix(&path, tx, 2).unwrap();
+        let held: Vec<UnixStream> = (0..2).map(|_| UnixStream::connect(&path).unwrap()).collect();
+        // Give the accept loop a beat to count both holders.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let mut extra = UnixStream::connect(&path).unwrap();
+            extra
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .unwrap();
+            let mut buf = [0u8; 1];
+            use std::io::Read;
+            match extra.read(&mut buf) {
+                // Closed promptly: over cap.
+                Ok(0) => break,
+                _ => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "extra connection was admitted over cap"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+        drop(held);
+        let _ = std::fs::remove_file(&path);
+    }
+}

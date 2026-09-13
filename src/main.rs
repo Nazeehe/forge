@@ -8,6 +8,7 @@ mod input;
 mod logging;
 mod paths;
 mod pty;
+mod listener;
 mod relay;
 mod safe_text;
 mod session;

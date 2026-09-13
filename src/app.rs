@@ -12,6 +12,10 @@ pub struct AppState {
     pub dirty: bool,
     pub should_quit: bool,
     pub term_size: (u16, u16),
+    /// Hook records awaiting a policy decision (3c) and the permission
+    /// modal (3d). Bounded: beyond the cap newcomers are dropped and their
+    /// relays fail open on timeout.
+    pub pending_hooks: std::collections::VecDeque<crate::listener::HookRequest>,
 }
 
 impl AppState {
@@ -21,6 +25,7 @@ impl AppState {
             dirty: true,
             should_quit: false,
             term_size: (24, 80),
+            pending_hooks: std::collections::VecDeque::new(),
         }
     }
 
@@ -97,6 +102,12 @@ impl AppState {
                 self.term_size = (rows, cols);
                 self.dirty = true;
             }
+            AppEvent::HookRequest(req) => {
+                if self.pending_hooks.len() < crate::listener::MAX_PENDING_HOOKS {
+                    self.pending_hooks.push_back(req);
+                }
+                self.dirty = true;
+            }
             AppEvent::Input(_) => {}
         }
     }
@@ -123,6 +134,29 @@ mod tests {
         s.dirty = false;
         s.apply(AppEvent::Shutdown);
         assert!(s.should_quit);
+    }
+
+    #[test]
+    fn hook_requests_queue_bounded_and_dirty() {
+        let mut s = AppState::new();
+        s.dirty = false;
+        let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: "{}".to_string(),
+            reply: reply_tx,
+        }));
+        assert!(s.dirty);
+        assert_eq!(s.pending_hooks.len(), 1);
+        for _ in 0..crate::listener::MAX_PENDING_HOOKS + 10 {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+                hook: "Stop".to_string(),
+                body: "{}".to_string(),
+                reply: tx,
+            }));
+        }
+        assert_eq!(s.pending_hooks.len(), crate::listener::MAX_PENDING_HOOKS);
     }
 
     #[test]

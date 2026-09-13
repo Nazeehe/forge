@@ -93,6 +93,19 @@ pub fn run(state: &mut AppState) -> i32 {
         }
     };
     install_panic_hook();
+    let (ipc_tx, ipc_rx) = std::sync::mpsc::channel();
+    // The IPC listener is fail-soft: without it, hook relays simply find
+    // no endpoint and exit zero. Children inherit the endpoint by env.
+    let _ipc = match crate::listener::spawn_all(ipc_tx) {
+        Ok(spawned) => {
+            std::env::set_var("FORGE_IPC_ENDPOINT", &spawned.sock_path);
+            Some(spawned)
+        }
+        Err(e) => {
+            eprintln!("warning: ipc listener unavailable: {e}");
+            None
+        }
+    };
     let mut terminal = match Terminal::new(CrosstermBackend::new(io::stdout())) {
         Ok(t) => t,
         Err(e) => {
@@ -100,7 +113,7 @@ pub fn run(state: &mut AppState) -> i32 {
             return 1;
         }
     };
-    if let Err(e) = loop_until_quit(state, &mut terminal) {
+    if let Err(e) = loop_until_quit(state, &mut terminal, ipc_rx) {
         eprintln!("error: main loop failed: {e}");
         return 1;
     }
@@ -110,6 +123,7 @@ pub fn run(state: &mut AppState) -> i32 {
 fn loop_until_quit(
     state: &mut AppState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ipc: std::sync::mpsc::Receiver<AppEvent>,
 ) -> io::Result<()> {
     let mut router = InputRouter::new();
     let size = terminal.size()?;
@@ -137,6 +151,9 @@ fn loop_until_quit(
         }
         for (id, ev) in state.manager.drain_pty_max(MAX_DRAIN) {
             state.apply(AppEvent::from_pty(id, ev));
+        }
+        for ev in ipc.try_iter().take(MAX_DRAIN) {
+            state.apply(ev);
         }
         if state.dirty {
             let views = state.views();
