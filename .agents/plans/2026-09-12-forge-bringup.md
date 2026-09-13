@@ -174,12 +174,19 @@ pulled per-slice as needed.
 
 ## Phase 5 — Projects, tasks, walkthrough, timers, recovery — STATUS: TODO
 
-- [ ] Projects registry + cwd matching; checklists/tasks (10 tools); walkthrough
-      (5 tools) with `<walkthrough-question>` injection; timers (10 tools' worth:
-      schedule/cancel + once/interval/daily).
-- [ ] Persistence: `forge.log`, `tasks.db`, `projects.db`,
-      `session_history.json`, `sessions/*.json` checkpoints (~2s coalesced) +
-      Save & Quit + crash recovery.
+- [ ] Projects registry + cwd matching; project tools 48-54
+      (`project_create/get/list/update/delete`, `project_path_add/remove`);
+      `tasks.db`/`projects.db` via `rusqlite` bundled (open decision:
+      blueprint toolchain names bundled rusqlite; no SQLite dep yet).
+- [ ] Checklists/tasks (10 tools 23-32); walkthrough (5 tools 33-37) with
+      `<walkthrough-question>` injection; timers (`schedule_prompt`/
+      `cancel_scheduled_prompt` + once/interval/daily).
+- [ ] TUI surface for tasks/walkthrough: views + prefix keys (blueprint
+      views 4-5; key letters locked with tests like the dispatcher map).
+- [ ] Persistence: `forge.log`, `session_history.json`, `sessions/*.json`
+      checkpoints (~2s coalesced capacity-one worker, signature-gated) +
+      Save & Quit + crash recovery + startup triage (onboard vs recover
+      vs fresh; refuse live-owner checkpoints).
 - Gate tests: migration/CRUD/reorder/focus invariants; checkpoint round-trip;
   corrupt-save quarantine; live-checkpoint refusal.
 
@@ -188,6 +195,21 @@ pulled per-slice as needed.
 - [ ] `terminal_exec/read/send` (Unix, one lease/session, supervisor reap).
 - [ ] `compact/start_session/status/message_user`, file offer/accept
       (1MiB/file, 4 pending, 4MiB staged, 5min TTL, 0600 no-overwrite).
+- [ ] Agent CLI hookup: `start_session(harness?)` launches `claude`/`codex`/
+      `muse` via the `cli_tool` registry; `install-hooks/uninstall-hooks`,
+      `install-mcp/uninstall-mcp`, `install-skills/uninstall-skills`
+      (+ codex/gemini/metamate variants) register forge into each CLI;
+      startup repairs registrations + refreshes bundled skills (`.new`
+      preserves user edits); session records gain internet/native-CLI/
+      harness/VCS/remote metadata.
+- [ ] Hook-to-session attribution + activity transitions (nothing sets
+      Thinking/ToolUse today; injections gate on it). Hook envelope must
+      carry the caller run ID.
+- [ ] `screenshot` tool (macOS-gated) + `visual-raster` subcommand.
+- Gate tests: supervisor no-zombie/CTRL-C-race/UTF-8-truncation; file
+  digest/expiry/symlink-swap negatives; tool-count check calibrated to
+  50 on Unix (57 blueprint − 7 skipped memory tools); flood-cannot-
+  starve-input gate (open since Phase 2).
 - [ ] `visual_show` (decode/budget/generation ordering; raster stubbed).
 - Gate tests: supervisor no-zombie/CTRL-C-race/UTF-8-truncation; file
   digest/expiry/symlink-swap negatives; tool-count check.
@@ -195,12 +217,28 @@ pulled per-slice as needed.
 ## Phase 7 — Deferred: teams, VCS, whiteboard-bk, remote, AI — STATUS: TODO
 
 - [ ] 7a: ephemeral team builder (+ `forge-team-mode` skill), VCS
-      (Git lazygit / Sapling smartlog), whiteboard backend + limits,
-      Claudling.
+      (Git lazygit / Sapling smartlog), whiteboard backend + limits
+      (9 tools 38-46: start/list/open/add/update/delete/highlight/
+      answer/end), Claudling.
 - [ ] 7b: SSH/OD remote + reverse-forwarding, mobile (GChat/Telegram),
       macOS raster/screenshot, AI-Assisted permissions.
 - Gate tests per subsystem negatives (stale revision, 255-flap gating,
   spoofed sender, classifier timeout).
+
+## Backlog — Deferred / needs-decision (from 2026-09-13 audit)
+
+- [ ] `clikan` Go module + `install-clikan-mcp` + kanban view: entirely
+      absent. Recommend explicit defer (forge-first rebuild) or a Phase 8.
+- [ ] Selection mode (char/line/block, Vim motion, copy,
+      ask-agent-about-selection): no TUI surface planned.
+- [ ] Prefix-hold (~500ms) shortcuts overlay; theme switching UI; manual
+      viewer; away state (pairs with 7b mobile).
+- [ ] Telemetry (blueprint: on-by-default reporting to internal endpoint):
+      needs a drop-or-stub decision for the rebuild.
+- [ ] Session model deviation (accepted so far): blueprint sessions hold
+      agent + lazy-human PTYs with tabs; rebuild uses one pane per session
+      under the user-approved 80/20 layout. Revisit only if asked.
+- [ ] `message_user` remote forwarding rides on 7b transports.
 
 ## Progress log
 
