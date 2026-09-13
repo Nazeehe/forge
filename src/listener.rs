@@ -34,10 +34,12 @@ pub enum Route {
 
 /// One hook record awaiting a decision. Policy (3c) and the permission
 /// modal (3d) answer through `reply`; dropping it fails the relay open.
+/// Asynchronous hooks never wait: the handler closes right after delivery.
 #[derive(Debug)]
 pub struct HookRequest {
     pub hook: String,
     pub body: String,
+    pub sync: bool,
     pub reply: std::sync::mpsc::Sender<String>,
 }
 
@@ -227,15 +229,20 @@ fn handle_conn<S: std::io::Read + std::io::Write>(
         return;
     };
     let body = String::from_utf8_lossy(&line).into_owned();
+    let sync = crate::relay::is_sync_hook(&hook);
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     if tx
         .send(crate::event::AppEvent::HookRequest(HookRequest {
             hook,
             body,
+            sync,
             reply: reply_tx,
         }))
         .is_err()
     {
+        return;
+    }
+    if !sync {
         return;
     }
     if let Ok(decision) = reply_rx.recv_timeout(REPLY_WAIT) {
@@ -330,6 +337,7 @@ mod tests {
         match event {
             crate::event::AppEvent::HookRequest(req) => {
                 assert_eq!(req.hook, "PreToolUse");
+                assert!(req.sync, "PreToolUse waits for a decision");
                 assert!(req.body.contains("Bash"), "body carried: {:?}", req.body);
                 req.reply.send("{\"decision\":\"allow\"}\n".to_string()).unwrap();
             }
@@ -371,6 +379,35 @@ mod tests {
             }
             other => panic!("wrong event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn async_hooks_close_without_waiting() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "forge-listen-test-{}-async.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _guard = spawn_unix(&path, tx, 8).unwrap();
+        let mut conn = UnixStream::connect(&path).unwrap();
+        conn.write_all(b"{\"v\":1,\"hook\":\"Stop\",\"body\":{}}\n").unwrap();
+        match rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("async event still delivered")
+        {
+            crate::event::AppEvent::HookRequest(req) => {
+                assert!(!req.sync, "Stop never waits");
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 1];
+        use std::io::Read;
+        assert!(matches!(conn.read(&mut buf), Ok(0)), "handler closed promptly");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

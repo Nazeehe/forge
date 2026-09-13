@@ -142,7 +142,10 @@ pulled per-slice as needed.
       Shell cache keys stay exact, others normalize; Ask never cached;
       audit repairs 0600 drift and escapes hostile fields losslessly. Live:
       Safe-Only denies `rm -rf` and allows Read instantly with audit lines.
-- [ ] 3d `tui-realm` permission modal (keyboard nav + mouse click).
+- [x] 3d `tui-realm` permission modal (keyboard nav + mouse click).
+  Sync hooks open a centered modal (Allow once/Deny); all keys, mouse,
+  and paste are captured while open; deny caches, allow stays allow-once.
+  Live: modal renders, Down+Enter denies with audit line, repeat auto-denies.
 - Gate tests: relay-never-blocks; block-wins; audit-0600-enforced;
   hostile-display-safe.
 

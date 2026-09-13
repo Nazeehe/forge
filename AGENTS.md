@@ -2,6 +2,8 @@
 
 Read this before touching any code. It binds every agent and every session.
 
+Always answer questions the user asked first. 
+
 ## 1. TDD IS MANDATORY — NO EXCEPTIONS
 
 This project is rebuilt **strict test-driven development, red → green → refactor**:

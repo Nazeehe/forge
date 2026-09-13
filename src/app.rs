@@ -16,6 +16,14 @@ pub struct AppState {
     /// modal (3d). Bounded: beyond the cap newcomers are dropped and their
     /// relays fail open on timeout.
     pub pending_hooks: std::collections::VecDeque<crate::listener::HookRequest>,
+    /// Open permission modal, if any. Captures all input while present.
+    pub modal: Option<ActiveModal>,
+}
+
+/// One modal session: the queued request plus its tuirealm state.
+pub struct ActiveModal {
+    pub req: crate::listener::HookRequest,
+    pub modal: crate::modal::PermissionModal,
 }
 
 impl AppState {
@@ -26,6 +34,7 @@ impl AppState {
             should_quit: false,
             term_size: (24, 80),
             pending_hooks: std::collections::VecDeque::new(),
+            modal: None,
         }
     }
 
@@ -129,8 +138,9 @@ impl AppState {
     }
 
     /// Run deterministic policy over queued hook requests. Allow/Deny reply
-    /// immediately and are audited; Ask stays queued for the permission
-    /// modal. Audit failures never block a decision.
+    /// immediately and are audited; synchronous Ask stays queued for the
+    /// permission modal while asynchronous Ask is audited and dropped
+    /// (nobody waits on it). Audit failures never block a decision.
     pub fn settle_hooks(
         &mut self,
         policy: &mut crate::policy::Policy,
@@ -138,27 +148,88 @@ impl AppState {
     ) {
         let mut i = 0;
         while i < self.pending_hooks.len() {
-            let (hook, body) = {
+            let (hook, body, sync) = {
                 let req = &self.pending_hooks[i];
-                (req.hook.clone(), req.body.clone())
+                (req.hook.clone(), req.body.clone(), req.sync)
             };
             let (decision, reason) = policy.decide(&hook, &body);
-            if matches!(decision, crate::policy::Decision::Ask) {
+            if matches!(decision, crate::policy::Decision::Ask) && sync {
                 i += 1;
                 continue;
             }
             if let Some(req) = self.pending_hooks.remove(i) {
-                let line = crate::policy::decision_line(decision, reason);
-                let _ = req.reply.send(line);
-                let tool = crate::policy::tool_name(&body);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let name = format!("{decision:?}").to_lowercase();
-                let _ = crate::audit::append(audit_path, &hook, &tool, &name, reason, now);
+                if !matches!(decision, crate::policy::Decision::Ask) {
+                    let line = crate::policy::decision_line(decision, reason);
+                    let _ = req.reply.send(line);
+                }
+                self.audit_hook(audit_path, &hook, &body, decision, reason);
             }
         }
+        self.dirty = true;
+    }
+
+    fn audit_hook(
+        &self,
+        audit_path: &std::path::Path,
+        hook: &str,
+        body: &str,
+        decision: crate::policy::Decision,
+        reason: &str,
+    ) {
+        let tool = crate::policy::tool_name(body);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let name = format!("{decision:?}").to_lowercase();
+        let _ = crate::audit::append(audit_path, hook, &tool, &name, reason, now);
+    }
+
+    /// Move the front queued request into the permission modal, if none is
+    /// open. Returns true when a modal is now showing.
+    pub fn open_modal_if_needed(&mut self) -> bool {
+        if self.modal.is_some() {
+            return true;
+        }
+        let Some(req) = self.pending_hooks.pop_front() else {
+            return false;
+        };
+        let prompt = crate::modal::PermissionPrompt {
+            hook: req.hook.clone(),
+            tool: crate::policy::tool_name(&req.body),
+            command: crate::policy::command_of(&req.body),
+        };
+        self.modal = Some(ActiveModal {
+            req,
+            modal: crate::modal::PermissionModal::new(prompt),
+        });
+        self.dirty = true;
+        true
+    }
+
+    /// Answer the open modal: allow-once replies without caching, deny
+    /// replies and caches the denial for identical requests. Both audit.
+    pub fn decide_modal(
+        &mut self,
+        allow: bool,
+        policy: &mut crate::policy::Policy,
+        audit_path: &std::path::Path,
+    ) {
+        let Some(active) = self.modal.take() else {
+            return;
+        };
+        let decision = if allow {
+            crate::policy::Decision::Allow
+        } else {
+            crate::policy::Decision::Deny
+        };
+        let reason = if allow { "allow once" } else { "denied by user" };
+        let line = crate::policy::decision_line(decision, reason);
+        let _ = active.req.reply.send(line);
+        if !allow {
+            policy.deny(&active.req.body);
+        }
+        self.audit_hook(audit_path, &active.req.hook, &active.req.body, decision, reason);
         self.dirty = true;
     }
 
@@ -217,6 +288,7 @@ mod tests {
         s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: "{}".to_string(),
+            sync: true,
             reply: reply_tx,
         }));
         assert!(s.dirty);
@@ -226,6 +298,7 @@ mod tests {
             s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
                 hook: "Stop".to_string(),
                 body: "{}".to_string(),
+                sync: false,
                 reply: tx,
             }));
         }
@@ -251,6 +324,7 @@ mod tests {
         s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
+            sync: true,
             reply: reply_tx,
         }));
         s.settle_hooks(&mut yolo, &audit);
@@ -273,6 +347,7 @@ mod tests {
         s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: "{}".to_string(),
+            sync: true,
             reply: reply_tx,
         }));
         s.settle_hooks(&mut off, &audit);
@@ -280,6 +355,54 @@ mod tests {
         assert!(reply_rx
             .recv_timeout(std::time::Duration::from_millis(100))
             .is_err());
+        let _ = std::fs::remove_file(&audit);
+    }
+
+    #[test]
+    fn modal_opens_decides_and_caches_deny() {
+        use crate::config::PermissionMode;
+        let audit = std::env::temp_dir().join(format!(
+            "forge-modal-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut off =
+            crate::policy::Policy::new(PermissionMode::Off, &[], &[]).unwrap();
+        let mut s = AppState::new();
+        let body = r#"{"tool_name":"Bash","tool_input":{"command":"doom"}}"#.to_string();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: body.clone(),
+            sync: true,
+            reply: reply_tx,
+        }));
+        s.settle_hooks(&mut off, &audit);
+        assert!(s.open_modal_if_needed(), "ask opens the modal");
+        assert!(s.pending_hooks.is_empty());
+        assert_eq!(s.modal.as_ref().unwrap().modal.focused(), 0);
+        s.decide_modal(false, &mut off, &audit);
+        assert!(s.modal.is_none());
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""decision":"deny""#), "line: {line:?}");
+        // Identical request now auto-denies: no modal needed.
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body,
+            sync: true,
+            reply: reply_tx,
+        }));
+        s.settle_hooks(&mut off, &audit);
+        assert!(!s.open_modal_if_needed());
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""decision":"deny""#), "cached: {line:?}");
+        let logged = std::fs::read_to_string(&audit).unwrap();
+        assert_eq!(logged.lines().count(), 2);
         let _ = std::fs::remove_file(&audit);
     }
 

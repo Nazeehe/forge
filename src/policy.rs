@@ -85,6 +85,19 @@ impl Policy {
         (decision, reason)
     }
 
+    /// Cache a manual denial so identical requests deny without asking.
+    /// Manual allows stay allow-once: they are never inserted.
+    pub fn deny(&mut self, body: &str) {
+        let tool = tool_name(body);
+        let command = json_string_field(body.as_bytes(), &["command", "cmd"]).unwrap_or_default();
+        self.cache.insert(
+            cache_key(&tool, &command),
+            CacheEntry {
+                decision: Decision::Deny,
+            },
+        );
+    }
+
     fn safe_only(&self, tool: &str, command: &str) -> (Decision, &'static str) {
         let target = format!("{tool}\n{command}");
         if self.block.iter().any(|re| re.is_match(&target)) {
@@ -134,6 +147,12 @@ fn cache_key(tool: &str, command: &str) -> String {
 /// Tool name for one hook body, for audit display.
 pub fn tool_name(body: &str) -> String {
     json_string_field(body.as_bytes(), &["tool_name", "tool"]).unwrap_or_default()
+}
+
+/// Display command for one hook body: the executed command or file target.
+pub fn command_of(body: &str) -> String {
+    json_string_field(body.as_bytes(), &["command", "cmd", "file_path", "path", "pattern"])
+        .unwrap_or_default()
 }
 
 /// Canonical one-line decision for the relay to print to the harness.
@@ -287,6 +306,16 @@ mod tests {
     #[test]
     fn invalid_pattern_fails_closed_at_construction() {
         assert!(Policy::new(PermissionMode::SafeOnly, &["([".to_string()], &[]).is_err());
+    }
+
+    #[test]
+    fn manual_deny_caches_while_allow_once_does_not() {
+        let mut p = safe_only(&[], &[]);
+        let (_, body) = pre_tool("Bash", "doom");
+        assert_eq!(p.decide(&"PreToolUse".to_string(), &body).0, Decision::Ask);
+        p.deny(&body);
+        assert_eq!(p.decide(&"PreToolUse".to_string(), &body).0, Decision::Deny);
+        assert_eq!(command_of(&body), "doom");
     }
 
     #[test]

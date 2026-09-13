@@ -153,13 +153,29 @@ fn loop_until_quit(
     while !state.should_quit {
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
-                event::Event::Key(key) => handle_key(state, &mut router, key),
-                event::Event::Mouse(mev) => forward_mouse(state, mev),
+                event::Event::Key(key) => {
+                    if state.modal.is_some() {
+                        let outcome = state.modal.as_mut().map(|m| m.modal.key(&key));
+                        match outcome {
+                            Some(crate::modal::ModalOutcome::Decided { allow }) => {
+                                state.decide_modal(allow, policy, audit_path);
+                            }
+                            _ => {
+                                state.dirty = true;
+                            }
+                        }
+                    } else {
+                        handle_key(state, &mut router, key);
+                    }
+                }
+                event::Event::Mouse(mev) => forward_mouse(state, mev, policy, audit_path),
                 event::Event::Paste(text) => {
-                    if let Some(active) = state.manager.active() {
-                        let bracketed = state.manager.bracketed_paste(active);
-                        let bytes = input::paste_bytes(&text, bracketed);
-                        let _ = state.manager.pane_write(active, &bytes);
+                    if state.modal.is_none() {
+                        if let Some(active) = state.manager.active() {
+                            let bracketed = state.manager.bracketed_paste(active);
+                            let bytes = input::paste_bytes(&text, bracketed);
+                            let _ = state.manager.pane_write(active, &bytes);
+                        }
                     }
                 }
                 event::Event::Resize(cols, rows) => {
@@ -176,6 +192,7 @@ fn loop_until_quit(
             state.apply(ev);
         }
         state.settle_hooks(policy, audit_path);
+        state.open_modal_if_needed();
         if state.dirty {
             let views = state.views();
             let status = state.status_text();
@@ -185,10 +202,14 @@ fn loop_until_quit(
                 mode: policy.mode().as_str(),
                 status,
             };
-            let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
+            let cursor_visible =
+                state.modal.is_none() && views.iter().any(|v| v.focused && v.cursor.is_some());
             terminal.draw(|f| {
                 let area = f.area();
                 ui::render(f, area, &views, &chrome);
+                if let Some(active) = state.modal.as_mut() {
+                    active.modal.view(f, crate::modal::modal_area(area));
+                }
             })?;
             if cursor_visible != cursor_shown {
                 if cursor_visible {
@@ -269,7 +290,38 @@ fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
 /// Route an outer mouse event: session-bar clicks switch sessions, the
 /// main area forwards to the active pane when it wants mouse reporting,
 /// and everything else (sidebar, status bar, borders) is chrome-owned.
-fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
+fn forward_mouse(
+    state: &mut AppState,
+    mev: event::MouseEvent,
+    policy: &mut crate::policy::Policy,
+    audit_path: &std::path::Path,
+) {
+    // An open modal swallows all mouse input; clicks on its choice rows
+    // decide it, everything else is ignored.
+    if state.modal.is_some() {
+        if matches!(mev.kind, event::MouseEventKind::Down(_)) {
+            let (rows, cols) = state.term_size;
+            let marea = crate::modal::modal_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+            if let Some((list_y, list_h)) = crate::modal::list_rows(marea) {
+                if mev.row >= list_y
+                    && mev.row < list_y + list_h
+                    && mev.column >= marea.x
+                    && mev.column < marea.x + marea.width
+                {
+                    let outcome = state
+                        .modal
+                        .as_mut()
+                        .map(|m| m.modal.click((mev.row - list_y) as usize));
+                    if let Some(crate::modal::ModalOutcome::Decided { allow }) = outcome {
+                        state.decide_modal(allow, policy, audit_path);
+                    } else {
+                        state.dirty = true;
+                    }
+                }
+            }
+        }
+        return;
+    }
     let (rows, cols) = state.term_size;
     let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
     if mev.row >= areas.session_bar.y
@@ -359,12 +411,66 @@ mod tests {
             row: 22,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        forward_mouse(&mut state, click);
+        let mut policy =
+            crate::policy::Policy::new(crate::config::PermissionMode::Off, &[], &[]).unwrap();
+        forward_mouse(&mut state, click, &mut policy, std::path::Path::new(""));
         let order = state.manager.order().to_vec();
         assert_eq!(state.manager.active(), Some(order[1]));
         assert_eq!(state.manager.pane_size(order[1]), Some((20, 62)));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
+    }
+
+    #[test]
+    fn modal_click_decides_and_outside_click_ignored() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let audit = std::env::temp_dir().join(format!(
+            "forge-modal-click-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut policy =
+            crate::policy::Policy::new(crate::config::PermissionMode::Off, &[], &[]).unwrap();
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        state.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"doom"}}"#.to_string(),
+            sync: true,
+            reply: reply_tx,
+        }));
+        state.settle_hooks(&mut policy, &audit);
+        assert!(state.open_modal_if_needed());
+        let click_at = |column: u16, row: u16| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        // Click far from the modal: swallowed, modal stays open.
+        forward_mouse(&mut state, click_at(0, 0), &mut policy, &audit);
+        assert!(state.modal.is_some());
+        assert!(reply_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        // Click the Deny choice row: modal decides deny and closes.
+        let marea = crate::modal::modal_area(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let (list_y, _) = crate::modal::list_rows(marea).unwrap();
+        forward_mouse(
+            &mut state,
+            click_at(marea.x + 2, list_y + 1),
+            &mut policy,
+            &audit,
+        );
+        assert!(state.modal.is_none());
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""decision":"deny""#), "line: {line:?}");
+        let logged = std::fs::read_to_string(&audit).unwrap();
+        assert_eq!(logged.lines().count(), 1, "audit: {logged:?}");
+        let _ = std::fs::remove_file(&audit);
     }
 
     #[test]

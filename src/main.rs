@@ -8,6 +8,7 @@ mod ids;
 mod input;
 mod listener;
 mod logging;
+mod modal;
 mod paths;
 mod policy;
 mod pty;
