@@ -268,6 +268,7 @@ fn loop_until_quit(
 fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEvent) {
     match router.feed(key) {
         RoutedKey::Forward(k) => {
+            if state.overlay_active() { return; }
             if let Some(active) = state.manager.active() {
                 let app_cursor = state.manager.app_cursor(active);
                 if let Some(bytes) = input::encode_key(&k, app_cursor) {
@@ -313,6 +314,7 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             }
             UserCommand::SwitchTab => {
                 if let Some(active) = state.manager.active() {
+                    state.overlay_view = None;
                     if state.manager.switch_tab(active) {
                         // A lazily spawned terminal tab takes the main
                         // area at once instead of keeping 24x80.
@@ -393,9 +395,26 @@ fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
 /// main area forwards to the active pane when it wants mouse reporting,
 /// and everything else (sidebar, status bar, borders) is chrome-owned.
 fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
-    // An open dialog swallows all mouse input: keyboard-first by design,
-    // clicks behind it must not refocus sessions mid-form.
-    if state.create_dialog.is_some() || state.group_dialog.is_some() {
+    // Modals own mouse input. Only a left press inside the group dialog
+    // reaches its List/Checkbox rows; clicks behind it do nothing.
+    if state.group_dialog.is_some() {
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+            let (rows, cols) = state.term_size;
+            let area = crate::groups::group_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+            if mev.column >= area.x && mev.column < area.right()
+                && mev.row >= area.y && mev.row < area.bottom()
+            {
+                let ctx = state.group_ctx();
+                if let Some(dialog) = state.group_dialog.as_mut() {
+                    if dialog.click(mev.column, mev.row, area, &ctx) {
+                        state.dirty = true;
+                    }
+                }
+            }
+        }
+        return;
+    }
+    if state.create_dialog.is_some() {
         return;
     }
     let (rows, cols) = state.term_size;
@@ -408,9 +427,14 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         let topbar = state.topbar();
         let buttons = ui::layout_topbar(areas.topbar, &topbar.tabs);
         if let Some(index) = ui::topbar_at(&buttons, mev.column) {
-            if matches!(mev.kind, event::MouseEventKind::Down(_)) {
-                if let Some(active) = state.manager.active() {
-                    if state.manager.select_tab(active, index) {
+            let button = &buttons[index];
+            let area = ratatui::layout::Rect::new(button.start, areas.topbar.y, button.end - button.start, 1);
+            if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
+                && ui::ChromeButton::new("", ratatui::style::Style::default())
+                    .click(mev.column, mev.row, area)
+            {
+                if state.manager.active().is_some() {
+                    if state.select_top_tab(index) && index < 2 {
                         fit_active_pane(state);
                     }
                     state.dirty = true;
@@ -428,14 +452,20 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row >= areas.sidebar.y
         && mev.row < areas.sidebar.y + areas.sidebar.height
     {
-        if matches!(mev.kind, event::MouseEventKind::Down(_)) {
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let buttons = ui::mode_button_areas(areas.sidebar);
             match ui::mode_at(&buttons, mev.column, mev.row) {
                 Some("yolo") => {
-                    state.set_permission_mode(crate::config::PermissionMode::Yolo);
+                    if ui::ChromeButton::new("[Yolo]", ratatui::style::Style::default())
+                        .click(mev.column, mev.row, buttons.yolo) {
+                        state.set_permission_mode(crate::config::PermissionMode::Yolo);
+                    }
                 }
                 Some(_) => {
-                    state.set_permission_mode(crate::config::PermissionMode::Off);
+                    if ui::ChromeButton::new("[Off]", ratatui::style::Style::default())
+                        .click(mev.column, mev.row, buttons.off) {
+                        state.set_permission_mode(crate::config::PermissionMode::Off);
+                    }
                 }
                 None => {}
             }
@@ -446,12 +476,17 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row < areas.session_bar.y + areas.session_bar.height
         && areas.session_bar.height > 0
     {
-        let segments = ui::session_bar_segments(&state.tabs());
+        let segments = ui::session_bar_segments_for_area(&state.tabs(), areas.session_bar);
         let buttons = ui::layout_session_bar(areas.session_bar, &segments);
         // Click-to-activate only: hover (Moved) and drags must never steal
         // the session; pane mouse protocols still get every event below.
         if let Some(index) = ui::session_at(&buttons, mev.column) {
-            if matches!(mev.kind, event::MouseEventKind::Down(_)) {
+            let button = buttons.iter().find(|b| b.index == Some(index)).unwrap();
+            let area = ratatui::layout::Rect::new(button.start, areas.session_bar.y, button.end - button.start, 1);
+            if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
+                && ui::ChromeButton::new(&button.label, ratatui::style::Style::default())
+                    .click(mev.column, mev.row, area)
+            {
                 if state.select_session(index) {
                     fit_active_pane(state);
                 }
@@ -463,11 +498,12 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     let Some(active) = state.manager.active() else {
         return;
     };
+    if state.overlay_active() { return; }
     let mode = state.manager.mouse_mode(active);
     if mode == vt100::MouseProtocolMode::None {
         return;
     }
-    let Some((col, row)) = ui::translate_mouse(areas.main, mev.column, mev.row) else {
+    let Some((col, row)) = ui::translate_mouse(ui::pane_grid_area(&areas), mev.column, mev.row) else {
         return;
     };
     let pev = event::MouseEvent {
@@ -487,7 +523,8 @@ fn fit_active_pane(state: &mut AppState) {
         return;
     };
     let (rows, cols) = state.term_size;
-    let main = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows)).main;
+    let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let main = ui::pane_grid_area(&areas);
     let pane_rows = main.height.saturating_sub(2).max(1);
     let pane_cols = main.width.saturating_sub(2).max(1);
     let _ = state.manager.resize(active, pane_rows, pane_cols);
@@ -584,6 +621,30 @@ mod tests {
         );
         assert!(state.topbar().tabs[1].active);
         assert!(!state.dirty);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn topbar_click_opens_events_and_returns_to_agent() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            RunId::generate(), "codex",
+        ).unwrap();
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs);
+        let click = |column| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left), column, row: areas.topbar.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        forward_mouse(&mut state, click(buttons[2].start));
+        assert!(state.overlay_active());
+        assert!(state.topbar().tabs[2].active);
+        forward_mouse(&mut state, click(buttons[0].start));
+        assert!(!state.overlay_active());
+        assert!(state.topbar().tabs[0].active);
         assert!(state.manager.remove(id));
     }
 
@@ -721,6 +782,28 @@ mod tests {
         handle_group_key(&mut state, gkey(KeyCode::Esc));
         assert!(state.group_dialog.is_none());
         assert!(state.manager.remove(order[0]));
+    }
+
+    #[test]
+    fn group_dialog_mouse_checks_session_then_enter_applies() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let id = state.manager.order()[0];
+        state.apply_group(crate::groups::GroupOutcome::Create("team".into()));
+        state.open_group_dialog();
+        handle_group_key(&mut state, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        let area = crate::groups::group_area(ratatui::layout::Rect::new(0, 0, 80, 24));
+        forward_mouse(&mut state, MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 3,
+            row: area.y + 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        handle_group_key(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.broker.is_member(id, "team"));
+        assert!(state.manager.remove(id));
     }
 
     #[test]

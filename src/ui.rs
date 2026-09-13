@@ -9,6 +9,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
+use tui_realm_stdlib::components::Label;
+use tuirealm::command::{Cmd, CmdResult};
+use tuirealm::component::Component;
+use tuirealm::props::{AttrValue, Attribute, QueryResult};
+use tuirealm::state::State;
 
 use crate::{
     pty::{CellColor, CellFormat, FormattedCell},
@@ -126,18 +131,29 @@ pub fn chrome_areas(area: Rect) -> ChromeAreas {
     let (bar_h, status_h) = if area.height >= 3 { (1, 1) } else { (0, 0) };
     let content_h = area.height.saturating_sub(bar_h + status_h);
     let topbar_h = if content_h > 4 { 1 } else { 0 };
-    let main_w = area.width * 4 / 5;
+    let main_w = if area.width >= 160 { area.width * 3 / 4 } else { area.width * 4 / 5 };
+    let inset_tabs = area.width >= 160 && topbar_h > 0;
     ChromeAreas {
-        main: Rect::new(
-            area.x,
-            area.y + topbar_h,
-            main_w,
-            content_h.saturating_sub(topbar_h),
-        ),
-        topbar: Rect::new(area.x, area.y, main_w, topbar_h),
+        main: if inset_tabs {
+            Rect::new(area.x, area.y, main_w, content_h)
+        } else {
+            Rect::new(area.x, area.y + topbar_h, main_w, content_h.saturating_sub(topbar_h))
+        },
+        topbar: Rect::new(area.x, area.y + inset_tabs as u16, main_w, topbar_h),
         sidebar: Rect::new(area.x + main_w, area.y, area.width.saturating_sub(main_w), content_h),
         session_bar: Rect::new(area.x, area.y + content_h, area.width, bar_h),
         status: Rect::new(area.x, area.y + content_h + bar_h, area.width, status_h),
+    }
+}
+
+/// For wide layouts the tab strip occupies the first inner pane row;
+/// mouse/cursor/PTY sizing begin one row below it.
+pub fn pane_grid_area(areas: &ChromeAreas) -> Rect {
+    if areas.topbar.height > 0 && areas.topbar.y > areas.main.y {
+        Rect::new(areas.main.x, areas.main.y + 1, areas.main.width,
+            areas.main.height.saturating_sub(1))
+    } else {
+        areas.main
     }
 }
 
@@ -161,14 +177,59 @@ pub struct TopButton {
     pub end: u16,
 }
 
+/// A small chrome button backed by a tui-realm Label. The standard
+/// library has labels and selectors but no button component, so this
+/// wrapper gives the label a Submit command for mouse activation.
+pub struct ChromeButton {
+    label: Label,
+}
+
+impl ChromeButton {
+    pub fn new(text: &str, style: Style) -> Self {
+        Self {
+            label: Label::default()
+                .text(safe_text::encode_for_display(text))
+                .style(style),
+        }
+    }
+
+    pub fn click(&mut self, col: u16, row: u16, area: Rect) -> bool {
+        col >= area.x && col < area.right() && row >= area.y && row < area.bottom()
+            && matches!(self.perform(Cmd::Submit), CmdResult::Submit(_))
+    }
+}
+
+impl Component for ChromeButton {
+    fn view(&mut self, frame: &mut Frame, area: Rect) {
+        self.label.view(frame, area);
+    }
+    fn query<'a>(&'a self, attr: Attribute) -> Option<QueryResult<'a>> {
+        self.label.query(attr)
+    }
+    fn attr(&mut self, attr: Attribute, value: AttrValue) {
+        self.label.attr(attr, value);
+    }
+    fn state(&self) -> State {
+        State::None
+    }
+    fn perform(&mut self, cmd: Cmd) -> CmdResult {
+        if matches!(cmd, Cmd::Submit) {
+            CmdResult::Submit(self.state())
+        } else {
+            CmdResult::Invalid(cmd)
+        }
+    }
+}
+
 /// Lay tab buttons left to right with two-space gaps, clipping at the edge.
 pub fn layout_topbar(bar: Rect, tabs: &[TopTab]) -> Vec<TopButton> {
     let mut buttons = Vec::new();
     let mut col = bar.x.saturating_add(1);
     let edge = bar.x + bar.width;
     for (index, tab) in tabs.iter().enumerate() {
-        let label = format!("[{}]", tab.label);
-        let end = col.saturating_add(label.len() as u16);
+        let label = format!("[{}]", safe_text::encode_for_display(&tab.label));
+        let width = Line::from(label).width().min(u16::MAX as usize) as u16;
+        let end = col.saturating_add(width);
         if col >= edge || end > edge {
             break;
         }
@@ -220,6 +281,7 @@ pub struct BarSegment {
     pub text: String,
     pub style: Style,
     pub index: Option<usize>,
+    pub accent: Option<Color>,
 }
 
 /// Build bar segments in manager order so `N` numbering (and `Ctrl-b N`)
@@ -233,26 +295,57 @@ pub fn session_bar_segments(tabs: &[SessionTab]) -> Vec<BarSegment> {
         if let Some(group) = tab.group.as_deref() {
             if prev_group != Some(group) {
                 segments.push(BarSegment {
-                    text: format!("{group}:"),
+                    text: format!("{}:", safe_text::encode_for_display(group)),
                     style: Style::default()
                         .fg(group_palette(tab.group_color.unwrap_or(0)))
                         .add_modifier(Modifier::BOLD),
                     index: None,
+                    accent: tab.group_color.map(group_palette),
                 });
             }
         }
         segments.push(BarSegment {
-            text: format!("{} {}", n + 1, tab.title),
+            text: format!("{} {}", n + 1, safe_text::encode_for_display(&tab.title)),
             style: if tab.focused {
-                Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow)
+                let mut style = theme::style(theme::Role::Focus);
+                if let Some(color) = tab.group_color {
+                    style = style.bg(group_palette(color));
+                }
+                style
+            } else if let Some(color) = tab.group_color {
+                Style::default().fg(group_palette(color))
             } else {
                 Style::default()
             },
             index: Some(n),
+            accent: tab.group_color.map(group_palette),
         });
         prev_group = tab.group.as_deref();
     }
     segments
+}
+
+/// The reference strip gives every session its own status dot, group
+/// swatch, and numbered click target. Keep the compact strip on small
+/// terminals so labels remain usable there.
+pub fn session_bar_segments_for_area(tabs: &[SessionTab], bar: Rect) -> Vec<BarSegment> {
+    if bar.width < 160 {
+        return session_bar_segments(tabs);
+    }
+    tabs.iter().enumerate().map(|(index, tab)| {
+        let status = if tab.live { "●" } else { "○" };
+        BarSegment {
+            text: format!("{status} ■ [{}] {}  │", index + 1,
+                safe_text::encode_for_display(&tab.title)),
+            style: if tab.focused {
+                theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+            } else {
+                theme::style(theme::Role::Text)
+            },
+            index: Some(index),
+            accent: tab.group_color.map(group_palette),
+        }
+    }).collect()
 }
 
 /// A laid-out session button: label plus area-relative column span.
@@ -273,7 +366,10 @@ pub fn layout_session_bar(bar: Rect, segments: &[BarSegment]) -> Vec<SessionButt
     let mut col = bar.x;
     let edge = bar.x + bar.width;
     for segment in segments {
-        let end = col.saturating_add(segment.text.len() as u16);
+        let width = Line::from(segment.text.as_str())
+            .width()
+            .min(u16::MAX as usize) as u16;
+        let end = col.saturating_add(width);
         if col >= edge || end > edge {
             break;
         }
@@ -335,13 +431,16 @@ pub fn format_uptime(secs: u64) -> String {
     }
 }
 
-/// Fixed sidebar rows: detail block, stats, then the bottom settings row
-/// carrying the clickable mode buttons. Hit-testing assumes this layout.
+/// Compact sidebar mode-button row. Taller sidebars pin it to the bottom.
 pub const SETTINGS_ROW: u16 = 11;
 
 /// Sidebar lines. Never blank: with no sessions it still guides. The
 /// active mode button renders highlighted.
 pub fn sidebar_lines(info: &SidebarInfo) -> Vec<Line<'static>> {
+    sidebar_lines_at(info, SETTINGS_ROW.saturating_sub(1) as usize)
+}
+
+fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     match &info.session {
         None => {
@@ -375,13 +474,12 @@ pub fn sidebar_lines(info: &SidebarInfo) -> Vec<Line<'static>> {
                 "  ✓ {} × {}",
                 detail.approvals, detail.denials
             )));
-            lines.push(Line::from(""));
-            lines.push(Line::from("Settings"));
         }
     }
-    while lines.len() < SETTINGS_ROW as usize {
+    while lines.len() < mode_row.saturating_sub(1) {
         lines.push(Line::from(""));
     }
+    lines.push(Line::from("Settings"));
     let (off_style, yolo_style) = if info.mode == "yolo" {
         (Style::default(), Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED))
     } else {
@@ -398,6 +496,59 @@ pub fn sidebar_lines(info: &SidebarInfo) -> Vec<Line<'static>> {
     lines
 }
 
+fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled("Forge", theme::style(theme::Role::Brand))),
+        Line::from(Span::styled("Session Control Plane", theme::style(theme::Role::Muted))),
+        Line::from(""),
+        Line::from(Span::styled("Session", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))),
+    ];
+    match &info.session {
+        Some(detail) => {
+            lines.push(Line::from(Span::styled(
+                safe_text::encode_for_display(&detail.name), theme::style(theme::Role::Focus))));
+            lines.push(Line::from(safe_text::encode_for_display(&detail.cli_tool)));
+            lines.push(Line::from(safe_text::encode_for_display(&detail.cwd)));
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::raw("Status  "),
+                Span::styled(format!("● {}", safe_text::encode_for_display(&detail.state)),
+                    theme::style(theme::Role::Running)),
+            ]));
+            lines.push(Line::from(format!("Pending hooks: {}", info.pending)));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("Stats", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))));
+            lines.push(stat_line("◷ Uptime", &format_uptime(detail.uptime_secs), width));
+            lines.push(Line::from("─".repeat(width.saturating_sub(4) as usize)));
+            lines.push(stat_line("Tool calls", &detail.tool_calls.to_string(), width));
+            lines.push(Line::from("─".repeat(width.saturating_sub(4) as usize)));
+            lines.push(Line::from("Tool Approvals"));
+            lines.push(Line::from(vec![
+                Span::styled(format!("✓ {}", detail.approvals), theme::style(theme::Role::Success)),
+                Span::raw("   "),
+                Span::styled(format!("× {}", detail.denials), theme::style(theme::Role::Danger)),
+            ]));
+            lines.push(Line::from("─".repeat(width.saturating_sub(4) as usize)));
+        }
+        None => {
+            lines.push(Line::from("No session selected"));
+            lines.push(Line::from("Ctrl-b c creates one"));
+        }
+    }
+    while lines.len() < mode_row.saturating_sub(2) { lines.push(Line::from("")); }
+    lines.push(Line::from(Span::styled("Global Settings", theme::style(theme::Role::Brand))));
+    lines.push(Line::from("Autopilot"));
+    lines.push(Line::from("")); // button widgets own this row
+    lines.push(Line::from(Span::styled("Ctrl-b shortcuts", theme::style(theme::Role::KeyHint))));
+    lines
+}
+
+fn stat_line(label: &str, value: &str, width: u16) -> Line<'static> {
+    let available = width.saturating_sub(2) as usize;
+    let spaces = available.saturating_sub(label.chars().count() + value.chars().count());
+    Line::from(format!("{label}{}{value}", " ".repeat(spaces.max(1))))
+}
+
 /// Click areas for the mode buttons, relative to the sidebar rect. Row is
 /// fixed by [`SETTINGS_ROW`]; columns match the rendered button spans.
 pub struct ModeButtons {
@@ -406,10 +557,15 @@ pub struct ModeButtons {
 }
 
 pub fn mode_button_areas(sidebar: Rect) -> ModeButtons {
-    let y = sidebar.y + SETTINGS_ROW;
+    let y = if sidebar.height >= 30 {
+        sidebar.bottom().saturating_sub(4)
+    } else {
+        sidebar.y + SETTINGS_ROW
+    };
+    let visible = sidebar.height >= SETTINGS_ROW + 2 && sidebar.width >= 16;
     ModeButtons {
-        off: Rect::new(sidebar.x + 2, y, 5, 1),
-        yolo: Rect::new(sidebar.x + 8, y, 6, 1),
+        off: Rect::new(sidebar.x + 2, y, if visible { 5 } else { 0 }, 1),
+        yolo: Rect::new(sidebar.x + 8, y, if visible { 6 } else { 0 }, 1),
     }
 }
 
@@ -443,25 +599,6 @@ pub struct Chrome {
 /// outer terminal.
 pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome) {
     let areas = chrome_areas(area);
-    if areas.topbar.height > 0 {
-        let buttons = layout_topbar(areas.topbar, &chrome.topbar.tabs);
-        let mut spans = Vec::new();
-        for button in &buttons {
-            let tab = &chrome.topbar.tabs[button.index];
-            let style = if tab.active {
-                Style::default()
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-                    .fg(Color::Yellow)
-            } else {
-                Style::default()
-            };
-            if button.start > areas.topbar.x + 1 {
-                spans.push(Span::raw("  "));
-            }
-            spans.push(Span::styled(format!("[{}]", tab.label), style));
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), areas.topbar);
-    }
     let focused = panes.iter().find(|p| p.focused).or(panes.first());
     match focused {
         Some(view) => {
@@ -475,8 +612,12 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
                 .borders(Borders::ALL)
                 .border_style(theme::style(theme::Role::BorderFocused))
                 .title(title);
-            frame.render_widget(Paragraph::new(pane_text(view)).block(block), areas.main);
-            if let Some(pos) = cursor_screen_pos(areas.main, view.cursor) {
+            let mut text = pane_text(view);
+            if areas.topbar.y > areas.main.y {
+                text.lines.insert(0, Line::from(""));
+            }
+            frame.render_widget(Paragraph::new(text).block(block), areas.main);
+            if let Some(pos) = cursor_screen_pos(pane_grid_area(&areas), view.cursor) {
                 frame.set_cursor_position(pos);
             }
         }
@@ -492,35 +633,76 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
             frame.render_widget(hint, areas.main);
         }
     }
+    if areas.topbar.height > 0 {
+        let buttons = layout_topbar(areas.topbar, &chrome.topbar.tabs);
+        for button in &buttons {
+            let tab = &chrome.topbar.tabs[button.index];
+            let style = if tab.active {
+                theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+            } else {
+                theme::style(theme::Role::Text)
+            };
+            let mut control = ChromeButton::new(&format!("[{}]", tab.label), style);
+            control.view(frame, Rect::new(button.start, areas.topbar.y,
+                button.end - button.start, 1));
+        }
+    }
     if areas.sidebar.width > 0 && areas.sidebar.height > 0 {
         let info = SidebarInfo {
             session: chrome.detail.clone(),
             pending: chrome.pending,
             mode: chrome.mode,
         };
-        let side = Paragraph::new(Text::from(sidebar_lines(&info))).block(
+        let mode_areas = mode_button_areas(areas.sidebar);
+        let mode_row = mode_areas.off.y.saturating_sub(areas.sidebar.y + 1) as usize;
+        let mut lines = if areas.sidebar.width >= 40 && areas.sidebar.height >= 30 {
+            rich_sidebar_lines(&info, mode_row, areas.sidebar.width)
+        } else {
+            sidebar_lines_at(&info, mode_row)
+        };
+        if let Some(line) = lines.get_mut(mode_row) {
+            *line = Line::from(""); // the controls below own this row
+        }
+        let side = Paragraph::new(Text::from(lines)).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme::style(theme::Role::BorderUnfocused))
                 .title(" status "),
         );
         frame.render_widget(side, areas.sidebar);
+        for (label, area, active) in [
+            ("[Off]", mode_areas.off, info.mode == "off"),
+            ("[Yolo]", mode_areas.yolo, info.mode == "yolo"),
+        ] {
+            if area.width > 0 && area.right() <= areas.sidebar.right().saturating_sub(1) {
+                let style = if active {
+                    theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+                } else {
+                    theme::style(theme::Role::Text)
+                };
+                ChromeButton::new(label, style).view(frame, area);
+            }
+        }
     }
     if areas.session_bar.height > 0 {
-        let segments = session_bar_segments(&chrome.tabs);
+        let segments = session_bar_segments_for_area(&chrome.tabs, areas.session_bar);
         let buttons = layout_session_bar(areas.session_bar, &segments);
-        let mut spans = Vec::new();
-        // Gaps come from laid-out positions (headers take one space,
-        // buttons two), so clicks always land on what they see.
-        let mut col = areas.session_bar.x;
         for (button, segment) in buttons.iter().zip(segments.iter()) {
-            for _ in col..button.start {
-                spans.push(Span::raw(" "));
+            let area = Rect::new(button.start, areas.session_bar.y, button.end - button.start, 1);
+            if button.index.is_some() {
+                ChromeButton::new(&button.label, segment.style).view(frame, area);
+                if areas.session_bar.width >= 160 && area.width >= 3 {
+                    let accent = segment.accent.unwrap_or(theme::style(theme::Role::Muted).fg.unwrap_or(Color::Reset));
+                    Label::default().text("■").style(Style::default().fg(accent))
+                        .view(frame, Rect::new(area.x + 2, area.y, 1, 1));
+                }
+            } else {
+                Label::default()
+                    .text(safe_text::encode_for_display(&button.label))
+                    .style(segment.style)
+                    .view(frame, area);
             }
-            spans.push(Span::styled(button.label.clone(), segment.style));
-            col = button.end;
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), areas.session_bar);
     }
     if areas.status.height > 0 {
         frame.render_widget(Paragraph::new(chrome.status.clone()), areas.status);
@@ -648,6 +830,127 @@ mod tests {
         assert_eq!(session_at(&buttons, buttons[5].start), Some(3));
         // Palette cycles instead of running out.
         assert_eq!(group_palette(8), group_palette(0));
+    }
+
+    #[test]
+    fn group_members_share_palette_color_and_focus_stays_visible() {
+        let segments = session_bar_segments(&[
+            grouped("a", true, "team", 2),
+            grouped("b", false, "team", 2),
+        ]);
+        assert_eq!(segments[1].style.fg, Some(Color::Yellow));
+        assert_eq!(segments[1].style.bg, Some(group_palette(2)));
+        assert_eq!(segments[2].style.fg, Some(group_palette(2)));
+        assert!(segments[1].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn tall_sidebar_keeps_mode_buttons_near_bottom() {
+        let sidebar = chrome_areas(Rect::new(0, 0, 120, 40)).sidebar;
+        let buttons = mode_button_areas(sidebar);
+        assert_eq!(buttons.off.y, sidebar.bottom() - 4);
+        assert_eq!(mode_at(&buttons, buttons.yolo.x, buttons.yolo.y), Some("yolo"));
+    }
+
+    #[test]
+    fn chrome_button_is_a_submittable_tuirealm_component() {
+        use tuirealm::command::{Cmd, CmdResult};
+        use tuirealm::component::Component;
+        let mut button = ChromeButton::new("[Terminal]", theme::style(theme::Role::Focus));
+        assert_eq!(button.perform(Cmd::Submit), CmdResult::Submit(tuirealm::state::State::None));
+        assert_eq!(button.state(), tuirealm::state::State::None);
+    }
+
+    #[test]
+    fn tab_hit_areas_follow_escaped_display_width() {
+        let top = layout_topbar(Rect::new(0, 0, 40, 1), &[
+            TopTab { label: "A\n界".into(), active: true },
+            TopTab { label: "Terminal".into(), active: false },
+        ]);
+        assert_eq!((top[0].start, top[0].end), (1, 7));
+        assert_eq!(top[1].start, 9);
+        let segments = session_bar_segments(&[tab("a\nb", true), tab("界", false)]);
+        assert_eq!(segments[0].text, "1 a⏎b");
+        let buttons = layout_session_bar(Rect::new(0, 0, 40, 1), &segments);
+        assert_eq!((buttons[0].start, buttons[0].end), (0, 5));
+        assert_eq!(buttons[1].start, 7);
+    }
+
+    #[test]
+    fn sidebar_drawn_buttons_match_click_rows_without_duplicate_glyphs() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render(f, area(), &[], &chrome())).unwrap();
+        let rows = buffer_rows(&terminal);
+        assert_eq!(rows[11].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
+        assert!(!rows[12].contains("[Off]"));
+
+        let mut tall = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        tall.draw(|f| render(f, Rect::new(0, 0, 120, 40), &[], &chrome())).unwrap();
+        let tall_rows = buffer_rows(&tall);
+        assert!(tall_rows[34].contains("[Off] [Yolo]"));
+        assert!(!tall_rows[11].contains("[Off]"));
+    }
+
+    #[test]
+    fn short_sidebar_does_not_draw_controls_on_its_border() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|f| render(f, Rect::new(0, 0, 80, 14), &[], &chrome())).unwrap();
+        let rows = buffer_rows(&terminal);
+        assert!(!rows[11].contains("[Off]"));
+    }
+
+    #[test]
+    fn wide_sidebar_matches_control_plane_sections() {
+        let areas = chrome_areas(Rect::new(0, 0, 180, 40));
+        assert_eq!(areas.sidebar.width, 45);
+        let mut c = chrome();
+        c.detail = Some(SessionDetail {
+            name: "jarvis_senior".into(), cli_tool: "Codex".into(),
+            cwd: "/work/jarvis".into(), state: "PROGRESS".into(),
+            uptime_secs: 3600, tool_calls: 489, approvals: 345, denials: 8,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
+        terminal.draw(|f| render(f, Rect::new(0, 0, 180, 40), &[], &c)).unwrap();
+        let rows = buffer_rows(&terminal);
+        let sidebar_text = rows.iter().map(|row| row.chars().skip(areas.sidebar.x as usize)
+            .collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(sidebar_text.contains("Session Control Plane"));
+        assert!(sidebar_text.contains("jarvis_senior"));
+        assert!(sidebar_text.contains("Status"));
+        assert!(sidebar_text.contains("Tool Approvals"));
+        assert!(sidebar_text.contains("Global Settings"));
+        assert!(sidebar_text.contains("[Off] [Yolo]"));
+    }
+
+    #[test]
+    fn wide_session_strip_uses_status_group_chips_and_clickable_numbers() {
+        let tabs = [grouped("jarvis_dev", false, "aura", 0), grouped("web_client", true, "aura", 0),
+            grouped("gl_rev", false, "gl", 1)];
+        let segments = session_bar_segments_for_area(&tabs, Rect::new(0, 38, 180, 1));
+        assert_eq!(segments.len(), 3);
+        assert!(segments[0].text.contains("● ■ [1] jarvis_dev"));
+        assert!(segments[1].text.contains("[2] web_client"));
+        assert_eq!(segments[0].accent, Some(group_palette(0)));
+        assert_eq!(segments[2].accent, Some(group_palette(1)));
+        let buttons = layout_session_bar(Rect::new(0, 38, 180, 1), &segments);
+        assert_eq!(session_at(&buttons, buttons[1].start + 5), Some(1));
+    }
+
+    #[test]
+    fn wide_agent_tabs_sit_inside_pane_border_above_pty_content() {
+        let bounds = Rect::new(0, 0, 180, 40);
+        let areas = chrome_areas(bounds);
+        assert_eq!(areas.main.y, 0);
+        assert_eq!(areas.topbar.y, 1);
+        let mut c = chrome();
+        c.topbar.tabs[0].label = "Codex".into();
+        let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
+        terminal.draw(|f| render(f, bounds, &[pane("agent", "PTY first line", true)], &c)).unwrap();
+        let rows = buffer_rows(&terminal);
+        assert!(rows[0].contains("agent"));
+        assert!(rows[1].contains("[Codex]"));
+        assert!(rows[2].contains("PTY first line"));
+        assert_eq!(translate_mouse(pane_grid_area(&areas), 1, 2), Some((1, 1)));
     }
 
     fn text_of(line: &Line) -> String {

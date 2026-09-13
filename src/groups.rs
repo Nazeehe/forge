@@ -9,6 +9,9 @@ use std::collections::HashSet;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
+use tui_realm_stdlib::components::{Checkbox, List};
+use tuirealm::command::Cmd;
+use tuirealm::component::Component;
 
 use crate::session::SessionId;
 
@@ -17,6 +20,8 @@ use crate::session::SessionId;
 pub struct GroupRow {
     pub name: String,
     pub members: usize,
+    pub member_names: Vec<String>,
+    pub color: usize,
 }
 
 /// One session row: identity plus display name, in bar order.
@@ -320,9 +325,7 @@ impl GroupDialog {
             }
             KeyCode::Char(' ') if key.modifiers.is_empty() => {
                 if let Some(row) = ctx.sessions.get(self.cursor) {
-                    if !self.checked.remove(&row.id) {
-                        self.checked.insert(row.id);
-                    }
+                    self.toggle_member(row);
                 }
                 return GroupOutcome::Pending;
             }
@@ -331,11 +334,70 @@ impl GroupDialog {
         GroupOutcome::Pending
     }
 
+    fn toggle_member(&mut self, row: &SessionRow) {
+        let selected = if self.checked.contains(&row.id) {
+            vec![0]
+        } else {
+            vec![]
+        };
+        let mut checkbox = Checkbox::default()
+            .choices([safe_name(&row.name)])
+            .values(&selected);
+        checkbox.perform(Cmd::Toggle);
+        if checkbox.states.has(0) {
+            self.checked.insert(row.id);
+        } else {
+            self.checked.remove(&row.id);
+        }
+    }
+
+    /// Dispatch a left click within the modal. Rows are the same rows
+    /// rendered by the List and Checkbox components below.
+    pub fn click(&mut self, col: u16, row: u16, area: Rect, ctx: &GroupCtx) -> bool {
+        self.reconcile(ctx);
+        if col <= area.x || col >= area.right().saturating_sub(1)
+            || row <= area.y || row >= area.bottom().saturating_sub(1)
+        {
+            return false;
+        }
+        let index = (row - area.y - 1) as usize;
+        let visible_rows = area.height.saturating_sub(3) as usize;
+        match self.mode {
+            Mode::List => {
+                let rows = overview_rows(ctx);
+                let selected_row = overview_selected_row(ctx, self.cursor);
+                let start = visible_start(selected_row, visible_rows);
+                if index >= visible_rows {
+                    return false;
+                }
+                if let Some((group_index, _)) = rows.get(start + index) {
+                    self.cursor = *group_index;
+                    let group = &ctx.groups[*group_index];
+                    self.selected = group.name.clone();
+                    self.error = None;
+                    return true;
+                }
+            }
+            Mode::Members => {
+                if let Some(index) = index.checked_sub(1).filter(|i| *i < visible_rows) {
+                    let selected = visible_start(self.cursor, visible_rows) + index;
+                    if let Some(session) = ctx.sessions.get(selected) {
+                        self.cursor = selected;
+                        self.toggle_member(session);
+                        return true;
+                    }
+                }
+            }
+            Mode::Name { .. } => {}
+        }
+        false
+    }
+
     /// Render the centered dialog from the same snapshot `key` used.
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect, ctx: &GroupCtx) {
         use ratatui::widgets::{Block, Borders, Paragraph};
         let hint = match self.mode {
-            Mode::List => " groups (n new • a members • r rename • d delete • Esc close) ",
+            Mode::List => " Communication Groups ",
             Mode::Name { rename: false } => " new group (Enter create • Esc back) ",
             Mode::Name { rename: true } => " rename group (Enter apply • Esc back) ",
             Mode::Members => " members (Space toggle • Enter apply • Esc back) ",
@@ -351,46 +413,102 @@ impl GroupDialog {
         }
         let mut row = inner.y;
         let end = inner.y + inner.height;
-        let mut lines: Vec<String> = Vec::new();
         match self.mode {
             Mode::List => {
                 if ctx.groups.is_empty() {
-                    lines.push("No groups yet. n creates one.".to_string());
+                    frame.render_widget(
+                        Paragraph::new("No groups yet. n creates one."),
+                        Rect::new(inner.x, row, inner.width, 1),
+                    );
+                } else {
+                    let visible_rows = inner.height.saturating_sub(1) as usize;
+                    let all_rows = overview_rows(ctx);
+                    let selected_row = overview_selected_row(ctx, self.cursor);
+                    let start = visible_start(selected_row, visible_rows);
+                    let rows = all_rows.iter().skip(start).take(visible_rows)
+                        .map(|(_, text)| text.clone());
+                    let mut list = List::default()
+                        .rows(rows)
+                        .always_active()
+                        .scroll(true)
+                        .selected_line(selected_row.saturating_sub(start))
+                        .highlight_str("▸");
+                    list.view(
+                        frame,
+                        Rect::new(inner.x, row, inner.width, inner.height.saturating_sub(1)),
+                    );
+                    for (offset, (group_index, text)) in all_rows.iter().skip(start)
+                        .take(visible_rows).enumerate()
+                    {
+                        if text.starts_with("    ● ") && inner.width > 6 {
+                            let color = crate::ui::group_palette(ctx.groups[*group_index].color);
+                            let mut dot = tui_realm_stdlib::components::Label::default()
+                                .text("●")
+                                .style(ratatui::style::Style::default().fg(color));
+                            dot.view(frame, Rect::new(inner.x + 5, row + offset as u16, 1, 1));
+                        }
+                    }
                 }
-                for g in ctx.groups.iter() {
-                    let mark = if g.name == self.selected { "▸" } else { " " };
-                    let noun = if g.members == 1 { "member" } else { "members" };
-                    lines.push(format!("{mark} {} ({} {noun})", g.name, g.members));
-                }
+                row = row.saturating_add(overview_rows(ctx).len().min(inner.height as usize) as u16);
             }
             Mode::Name { rename } => {
                 let verb = if rename { "Rename to" } else { "New group" };
-                lines.push(format!("{verb}: {}▌", self.name_buf));
+                frame.render_widget(
+                    Paragraph::new(format!("{verb}: {}▌", safe_name(&self.name_buf))),
+                    Rect::new(inner.x, row, inner.width, 1),
+                );
+                row += 1;
             }
             Mode::Members => {
-                lines.push(format!("{}:", self.selected));
+                frame.render_widget(
+                    Paragraph::new(format!("{}:", safe_name(&self.selected))),
+                    Rect::new(inner.x, row, inner.width, 1),
+                );
+                row += 1;
                 if ctx.sessions.is_empty() {
-                    lines.push("  (no sessions)".to_string());
+                    frame.render_widget(
+                        Paragraph::new("  (no sessions)"),
+                        Rect::new(inner.x, row, inner.width, 1),
+                    );
+                    row += 1;
                 }
-                for (i, s) in ctx.sessions.iter().enumerate() {
-                    let cursor = if i == self.cursor { "▸" } else { " " };
-                    let check = if self.checked.contains(&s.id) { "[x]" } else { "[ ]" };
-                    lines.push(format!("{cursor} {check} {}", s.name));
+                let visible_rows = inner.height.saturating_sub(1) as usize;
+                let start = visible_start(self.cursor, visible_rows);
+                for (i, s) in ctx.sessions.iter().enumerate().skip(start).take(visible_rows) {
+                    if row >= end {
+                        break;
+                    }
+                    let selected = if self.checked.contains(&s.id) {
+                        vec![0]
+                    } else {
+                        vec![]
+                    };
+                    let mut checkbox = Checkbox::default()
+                        .choices([safe_name(&s.name)])
+                        .values(&selected)
+                        .style(if i == self.cursor {
+                            crate::theme::style(crate::theme::Role::Focus)
+                        } else {
+                            crate::theme::style(crate::theme::Role::Text)
+                        });
+                    checkbox.view(frame, Rect::new(inner.x, row, inner.width, 1));
+                    row += 1;
                 }
             }
         }
-        for line in lines {
-            if row >= end {
-                break;
-            }
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner.x, row, inner.width, 1),
-            );
-            row += 1;
+        if self.mode == Mode::List && inner.height > 0 {
+            use ratatui::text::{Line, Span};
+            let key = crate::theme::style(crate::theme::Role::KeyHint);
+            let footer = Line::from(vec![
+                Span::styled("n", key), Span::raw(" new group   "),
+                Span::styled("a", key), Span::raw(" add session   "),
+                Span::styled("r", key), Span::raw(" rename   "),
+                Span::styled("d", key), Span::raw(" delete group"),
+            ]);
+            frame.render_widget(Paragraph::new(footer), Rect::new(inner.x, end - 1, inner.width, 1));
         }
         if let Some(err) = &self.error {
-            if row < end {
+            if row < end.saturating_sub((self.mode == Mode::List) as u16) {
                 frame.render_widget(
                     Paragraph::new(err.clone())
                         .style(crate::theme::style(crate::theme::Role::Danger)),
@@ -399,6 +517,29 @@ impl GroupDialog {
             }
         }
     }
+}
+
+fn safe_name(raw: &str) -> String {
+    crate::safe_text::encode_for_display(raw)
+}
+
+fn visible_start(cursor: usize, rows: usize) -> usize {
+    cursor.saturating_sub(rows.saturating_sub(1))
+}
+
+fn overview_rows(ctx: &GroupCtx) -> Vec<(usize, String)> {
+    let mut rows = Vec::new();
+    for (index, group) in ctx.groups.iter().enumerate() {
+        rows.push((index, format!("Group {}: {}", index + 1, safe_name(&group.name))));
+        for name in &group.member_names {
+            rows.push((index, format!("    ● {}", safe_name(name))));
+        }
+    }
+    rows
+}
+
+fn overview_selected_row(ctx: &GroupCtx, group_index: usize) -> usize {
+    ctx.groups.iter().take(group_index).map(|g| 1 + g.member_names.len()).sum()
 }
 
 impl Default for GroupDialog {
@@ -425,8 +566,8 @@ mod tests {
         let b = SessionId::fresh();
         let ctx = GroupCtx {
             groups: vec![
-                GroupRow { name: "codex-proj".to_string(), members: 1 },
-                GroupRow { name: "other".to_string(), members: 0 },
+                GroupRow { name: "codex-proj".to_string(), members: 1, member_names: vec!["a1".into()], color: 0 },
+                GroupRow { name: "other".to_string(), members: 0, member_names: vec![], color: 1 },
             ],
             sessions: vec![
                 SessionRow { id: a, name: "a1".to_string() },
@@ -563,6 +704,99 @@ mod tests {
         assert!(matches!(d.key(&key(KeyCode::Esc), &ctx), GroupOutcome::Pending));
         // Back in the list: Esc now closes.
         assert!(matches!(d.key(&key(KeyCode::Esc), &ctx), GroupOutcome::Closed));
+    }
+
+    #[test]
+    fn mouse_selects_group_and_toggles_member_checkbox() {
+        let (_, b, mut ctx) = fixture();
+        let mut d = GroupDialog::new();
+        let area = Rect::new(8, 2, 64, 20);
+        assert!(d.click(12, 5, area, &ctx));
+        assert_eq!(d.selected_name(), "other");
+        ctx.members.clear(); // fresh membership snapshot for the selected group
+        assert!(matches!(d.key(&ch('a'), &ctx), GroupOutcome::Pending));
+        assert!(d.click(12, 5, area, &ctx));
+        match d.key(&key(KeyCode::Enter), &ctx) {
+            GroupOutcome::SetMembers { group, members } => {
+                assert_eq!(group, "other");
+                assert_eq!(members, vec![b]);
+            }
+            other => panic!("expected members, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn member_picker_renders_tuirealm_checkboxes() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let (_, _, ctx) = fixture();
+        let mut d = GroupDialog::new();
+        let _ = d.key(&ch('a'), &ctx);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, group_area(f.area()), &ctx)).unwrap();
+        let cells = &terminal.backend().buffer().content;
+        assert!(cells.iter().any(|c| c.symbol() == "☑"));
+        assert!(cells.iter().any(|c| c.symbol() == "☐"));
+    }
+
+    #[test]
+    fn member_picker_scrolls_and_clicks_visible_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut ctx = empty_ctx();
+        ctx.groups.push(GroupRow { name: "team".into(), members: 0, member_names: vec![], color: 0 });
+        for n in 0..25 {
+            ctx.sessions.push(SessionRow { id: SessionId::fresh(), name: format!("member-{n}") });
+        }
+        let mut d = GroupDialog::new();
+        let _ = d.key(&ch('a'), &ctx);
+        for _ in 0..24 { let _ = d.key(&key(KeyCode::Down), &ctx); }
+        let area = Rect::new(8, 2, 64, 20);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, area, &ctx)).unwrap();
+        let content = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(content.contains("member-24"), "selected member must be visible");
+        assert!(d.click(area.x + 2, area.y + 2, area, &ctx));
+        match d.key(&key(KeyCode::Enter), &ctx) {
+            GroupOutcome::SetMembers { members, .. } => assert_eq!(members, vec![ctx.sessions[8].id]),
+            other => panic!("expected members, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn group_overview_shows_numbered_groups_nested_members_and_footer() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut ctx = empty_ctx();
+        ctx.groups = vec![
+            GroupRow {
+                name: "aura".into(),
+                members: 2,
+                member_names: vec!["jarvis_cdx".into(), "jarvis_dev".into()],
+                color: 2,
+            },
+            GroupRow { name: "forge".into(), members: 0, member_names: vec![], color: 3 },
+        ];
+        let mut dialog = GroupDialog::new();
+        let _ = dialog.key(&key(KeyCode::Down), &ctx);
+        let area = Rect::new(8, 2, 64, 20);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| dialog.view(f, area, &ctx)).unwrap();
+        let content = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(content.contains("Communication Groups"));
+        assert!(content.contains("Group 1: aura"));
+        assert!(content.contains("jarvis_cdx"));
+        assert!(content.contains("jarvis_dev"));
+        assert!(content.contains("Group 2: forge"));
+        let selected_row = terminal.backend().buffer().content.chunks(80).nth(6).unwrap()
+            .iter().map(|cell| cell.symbol()).collect::<String>();
+        assert!(selected_row.contains("▸"), "{selected_row:?}");
+        assert!(content.contains("n new group"));
+        assert!(content.contains("a add session"));
+        let dot = terminal.backend().buffer().content.chunks(80).nth(4).unwrap()
+            .iter().find(|cell| cell.symbol() == "●").unwrap();
+        assert_eq!(dot.fg, crate::ui::group_palette(2));
+        assert!(dialog.click(area.x + 4, area.y + 4, area, &ctx));
+        assert_eq!(dialog.selected_name(), "forge");
     }
 
     #[test]

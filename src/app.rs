@@ -33,6 +33,8 @@ pub struct AppState {
     /// follows after [`crate::comms::INJECT_ENTER_DELAY`], staged per
     /// session and re-armed by newer bodies.
     pub pending_enter: std::collections::HashMap<crate::session::SessionId, std::time::Instant>,
+    /// One read-only chrome view, scoped to the currently focused session.
+    pub overlay_view: Option<(crate::session::SessionId, usize)>,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
             broker: crate::comms::Broker::new(),
             last_human_input: None,
             pending_enter: std::collections::HashMap::new(),
+            overlay_view: None,
         }
     }
 
@@ -82,7 +85,7 @@ impl AppState {
         let Some(rec) = self.manager.get(id) else {
             return crate::ui::TopBar::default();
         };
-        let tabs = rec
+        let mut tabs: Vec<crate::ui::TopTab> = rec
             .tabs
             .iter()
             .enumerate()
@@ -102,7 +105,47 @@ impl AppState {
                 active: i == rec.active_tab,
             })
             .collect();
+        if rec.tabs.len() > 1 && self.term_size.1 >= 100 {
+            for (index, label) in ["Events", "Tasks", "Visual", "SCM"].iter().enumerate() {
+                tabs.push(crate::ui::TopTab {
+                    label: (*label).to_string(),
+                    active: self.overlay_view == Some((id, index + 2)),
+                });
+            }
+            if self.overlay_view.is_some_and(|(view_id, _)| view_id == id) {
+                for tab in tabs.iter_mut().take(2) { tab.active = false; }
+            }
+        }
+        if self.term_size.1 >= 100 {
+            for (tab, icon) in tabs.iter_mut().zip(["◉", "▣", "▤", "☑", "▧", "✣"]) {
+                tab.label = format!("{icon} {}", tab.label);
+            }
+        }
         crate::ui::TopBar { tabs }
+    }
+
+    /// Select a PTY tab or one of the read-only view slots shown in the
+    /// agent's top bar. Extra views never create a PTY or accept typing.
+    pub fn select_top_tab(&mut self, index: usize) -> bool {
+        let Some(id) = self.manager.active() else { return false; };
+        let Some(rec) = self.manager.get(id) else { return false; };
+        if index >= self.topbar().tabs.len() { return false; }
+        if index < rec.tabs.len() {
+            let was_overlay = self.overlay_view.take().is_some();
+            let changed = self.manager.select_tab(id, index);
+            self.dirty |= was_overlay || changed;
+            was_overlay || changed
+        } else {
+            let next = Some((id, index));
+            let changed = self.overlay_view != next;
+            self.overlay_view = next;
+            self.dirty |= changed;
+            changed
+        }
+    }
+
+    pub fn overlay_active(&self) -> bool {
+        self.overlay_view.is_some_and(|(id, _)| self.manager.active() == Some(id))
     }
 
     /// Snapshot the grid: one view per session in manager order.
@@ -114,6 +157,22 @@ impl AppState {
             .map(|&id| {
                 let rec = self.manager.get(id).expect("ordered session exists");
                 let live = rec.state.is_live();
+                if let Some((view_id, index)) = self.overlay_view {
+                    if Some(id) == active && view_id == id {
+                        let label = ["", "", "Events", "Tasks", "Visual", "SCM"]
+                            .get(index).copied().unwrap_or("View");
+                        return crate::ui::PaneView {
+                            title: format!("{} · {label}", rec.name),
+                            lines: vec![vec![crate::ui::SpanView {
+                                text: format!("{label} view unavailable in this build"),
+                                style: crate::theme::style(crate::theme::Role::Muted),
+                            }]],
+                            live,
+                            focused: true,
+                            cursor: None,
+                        };
+                    }
+                }
                 let mut lines: Vec<Vec<crate::ui::SpanView>> = self
                     .manager
                     .styled_rows(id)
@@ -154,7 +213,12 @@ impl AppState {
             .map(|g| format!(" | group:{g}"))
             .unwrap_or_default();
         // Dual-tab sessions name the visible tab; single-tab shells omit it.
-        let tab = self
+        let tab = self.overlay_view
+            .filter(|(id, _)| self.manager.active() == Some(*id))
+            .and_then(|(_, index)| ["", "", "events", "tasks", "visual", "scm"].get(index).copied())
+            .filter(|label| !label.is_empty())
+            .map(|label| format!(" [{label}]"))
+            .or_else(|| self
             .manager
             .active()
             .filter(|&id| self.manager.tab_count(id) > 1)
@@ -167,7 +231,7 @@ impl AppState {
                         crate::session::TabKind::Terminal => "terminal",
                     }
                 )
-            })
+            }))
             .unwrap_or_default();
         format!("{active}{tab} | {n} {noun} | prefix Ctrl-b (q quit, c new, n/p switch, t tab, g peers, o groups, y yolo){group}")
     }
@@ -209,7 +273,8 @@ impl AppState {
     pub fn open_create_dialog(&mut self) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let name = self.suggested_session_name();
-        self.create_dialog = Some(crate::create::CreateDialog::new(&name, &cwd));
+        let groups = self.broker.group_names();
+        self.create_dialog = Some(crate::create::CreateDialog::new(&name, &cwd, &groups));
         self.dirty = true;
     }
 
@@ -229,6 +294,10 @@ impl AppState {
             .into_iter()
             .map(|name| crate::groups::GroupRow {
                 members: self.broker.group_members(&name).len(),
+                member_names: self.broker.group_members(&name).into_iter()
+                    .filter_map(|id| self.manager.get(id).map(|rec| rec.name.clone()))
+                    .collect(),
+                color: self.broker.group_color(&name).unwrap_or(0),
                 name,
             })
             .collect();
@@ -315,7 +384,7 @@ impl AppState {
         // Agent CLIs get the dual-tab layout (agent on tab 0, a lazy
         // human terminal on tab 1); plain shells stay single-tab.
         let run = crate::ids::RunId::generate();
-        match spec.kind {
+        let id = match spec.kind {
             SessionKind::Agent(_) => {
                 self.manager
                     .spawn_agent(&spec.name, &spec.cwd, &cmd, run, &cli_tool)
@@ -324,7 +393,14 @@ impl AppState {
                 self.manager
                     .spawn(&spec.name, &spec.cwd, &cmd, run, &cli_tool)
             }
+        }?;
+        // The dialog's comm-group choice joins at birth (a group deleted
+        // mid-dialog is recreated by the join — the user explicitly picked
+        // it a moment ago).
+        if let Some(group) = spec.group.as_deref() {
+            let _ = self.broker.join(&self.manager, id, group);
         }
+        Ok(id)
     }
 
     /// Deliver due injections into idle, non-recently-typed panes. Targets
@@ -413,6 +489,7 @@ impl AppState {
             .unwrap_or(0) as i32;
         let next = (cur + dir).rem_euclid(order.len() as i32) as usize;
         self.manager.switch(order[next]);
+        self.overlay_view = None;
     }
 
     /// Focus session by order index (`Ctrl-b 1` is index 0). Returns false
@@ -421,6 +498,7 @@ impl AppState {
         match self.manager.order().to_vec().get(index) {
             Some(&id) => {
                 self.manager.switch(id);
+                self.overlay_view = None;
                 self.dirty = true;
                 true
             }
@@ -561,6 +639,7 @@ impl AppState {
             }
             AppEvent::Resize(rows, cols) => {
                 self.term_size = (rows, cols);
+                if cols < 100 { self.overlay_view = None; }
                 self.dirty = true;
             }
             AppEvent::HookRequest(req) => {
@@ -1176,12 +1255,31 @@ mod tests {
             name: "work".to_string(),
             cwd: std::env::temp_dir(),
             model: String::new(),
+            group: None,
         };
         let id = s.create_session(&spec).unwrap();
         let rec = s.manager.get(id).unwrap();
         assert_eq!(rec.name, "work");
         assert_eq!(rec.cli_tool, "shell");
         assert_eq!(rec.cwd, std::env::temp_dir());
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn create_session_with_group_joins_at_birth() {
+        let mut s = AppState::new();
+        s.broker.create_group("team").unwrap();
+        let id = s
+            .create_session(&crate::create::SessionSpec {
+                kind: crate::create::SessionKind::Shell,
+                name: "work".to_string(),
+                cwd: std::env::temp_dir(),
+                model: String::new(),
+                group: Some("team".to_string()),
+            })
+            .unwrap();
+        assert!(s.broker.is_member(id, "team"));
+        assert_eq!(s.tabs().iter().find(|t| t.title == "work").and_then(|t| t.group.clone()), Some("team".to_string()), "bar reflects it");
         assert!(s.manager.remove(id));
     }
 
@@ -1197,6 +1295,7 @@ mod tests {
             name: "coder".to_string(),
             cwd: std::env::temp_dir(),
             model: "gpt-5".to_string(),
+            group: None,
         };
         let id = s.create_session(&spec).unwrap();
         let rec = s.manager.get(id).unwrap();
@@ -1417,6 +1516,7 @@ mod tests {
                 name: "codex-1".to_string(),
                 cwd: std::env::temp_dir(),
                 model: String::new(),
+                group: None,
             })
             .unwrap();
         std::env::remove_var("CODEX_BIN");
@@ -1432,11 +1532,95 @@ mod tests {
                 name: "shell-1".to_string(),
                 cwd: std::env::temp_dir(),
                 model: String::new(),
+                group: None,
             })
             .unwrap();
         assert_eq!(s.manager.tab_count(shell), 1);
         assert!(s.manager.remove(agent));
         assert!(s.manager.remove(shell));
+    }
+
+    #[test]
+    fn agent_topbar_exposes_clickable_read_only_views() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
+        assert_eq!(labels, ["◉ Codex", "▣ Terminal", "▤ Events", "☑ Tasks", "▧ Visual", "✣ SCM"]);
+        assert!(state.select_top_tab(2));
+        assert!(state.topbar().tabs[2].active);
+        assert!(state.status_text().contains("[events]"));
+        let view = state.views().into_iter().find(|v| v.focused).unwrap();
+        assert!(view.lines.iter().flatten().any(|span| span.text.contains("Events")));
+        assert!(view.lines.iter().flatten().any(|span| span.text.contains("unavailable")));
+        assert!(state.select_top_tab(0));
+        assert!(state.topbar().tabs[0].active);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn wide_agent_topbar_uses_labeled_icons_from_reference() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
+        assert!(labels[0].starts_with("◉ "));
+        assert!(labels[1].starts_with("▣ "));
+        assert!(labels[2].starts_with("▤ "));
+        assert!(labels[3].starts_with("☑ "));
+        assert!(labels[4].starts_with("▧ "));
+        assert!(labels[5].starts_with("✣ "));
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn shrinking_hides_and_closes_extra_view() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        assert!(state.select_top_tab(2));
+        state.apply(AppEvent::Resize(24, 80));
+        assert!(!state.overlay_active());
+        assert_eq!(state.topbar().tabs.len(), 2);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn ordinary_wide_terminal_keeps_all_topbar_views_visible() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(30, 120));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        assert_eq!(state.topbar().tabs.len(), 6);
+        let bar = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
+        assert_eq!(crate::ui::layout_topbar(bar, &state.topbar().tabs).len(), 6);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn events_tab_does_not_mislabel_tool_calls_as_event_count() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let run = crate::ids::RunId::generate();
+        let id = state.manager.spawn_agent("agent", &std::env::temp_dir(), "exec cat", run.clone(), "codex").unwrap();
+        let (reply, _) = std::sync::mpsc::channel();
+        state.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".into(), body: "{}".into(), run_id: run.as_str().into(),
+            sync: false, reply, timed_out: Default::default(),
+        }));
+        assert_eq!(state.topbar().tabs[2].label, "▤ Events");
+        assert!(state.manager.remove(id));
     }
 
     #[test]
