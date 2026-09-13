@@ -4,3 +4,6 @@ version = "1.0.0"
 edition = "2021"
 
 [dependencies]
+crossterm = "0.29"
+ratatui = "0.30"
+toml = "1"
