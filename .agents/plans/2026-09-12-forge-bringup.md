@@ -52,7 +52,7 @@
   legacy-dir-collision, corrupt-save, full-disk-error, hostile-text-safety,
   theme-no-inline-RGB.
 
-## Phase 2 — Terminal core, first pixels — STATUS: DONE, manually testable (80 green: 76 unit + 4 integration)
+## Phase 2 — Terminal core, first pixels — STATUS: DONE, manually testable (81 green: 77 unit + 4 integration)
 
 - [x] `AppEvent` protocol (Send) + `from_pty` mapping + single-owner `AppState` reducer.
 - [x] `SessionManager` (order/active/run-index/rebind/retention) + `PtyPane`
@@ -68,6 +68,14 @@
       `input::tests::shift_char_keys_encode_to_pty_bytes`.
 - [x] Multiline pane bodies: `encode_multiline_for_display` preserves `\n`
       row breaks (single-line encoding flattened the screen to one line).
+- [x] Resize-on-spawn: new panes are fitted to their grid area immediately
+      (were hardcoded 24x80 until the next outer resize; broke lazygit
+      layout). Test: `tui::tests::new_session_fits_current_grid`; live
+      `stty size` reports the fitted 21x78.
+- [ ] Pane-content color: `screen_text` is plain text end to end (vt100 cell
+      attributes dropped, `Paragraph` has no spans), so full-screen apps
+      render monochrome. Needs a styled-row view model + SGR→theme mapping
+      (+ advertise a capable `TERM` to children). Next render-fidelity item.
 - [ ] `tuirealm` chrome host (buttons/mouse) — deferred to Phase 3+ chrome work.
 - Still open: flood-cannot-starve-input gate test.
 

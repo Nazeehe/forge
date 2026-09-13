@@ -204,6 +204,11 @@ impl SessionManager {
         true
     }
 
+    /// Current PTY dimensions of a session's live pane, if it has one.
+    pub fn pane_size(&self, id: SessionId) -> Option<(u16, u16)> {
+        self.sessions.get(&id)?.pane.as_ref().map(|pane| pane.size())
+    }
+
     pub fn resize(&mut self, id: SessionId, rows: u16, cols: u16) -> std::io::Result<()> {
         match self.sessions.get_mut(&id) {
             None => Err(std::io::Error::new(

@@ -170,6 +170,10 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
 
 fn spawn_shell(state: &mut AppState) {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    spawn_shell_cmd(state, &format!("exec {shell} -i"));
+}
+
+fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
     if let Ok(cwd) = std::env::current_dir() {
         let n = state.manager.len() + 1;
         // Spawn failures have no modal surface yet (Phase 3); the grid
@@ -177,9 +181,14 @@ fn spawn_shell(state: &mut AppState) {
         let _ = state.manager.spawn(
             &format!("shell-{n}"),
             &cwd,
-            &format!("exec {shell} -i"),
+            cmd,
             RunId::generate(),
         );
+        // A new pane reshapes the grid, so every pane (not just the new
+        // one) must be fitted now: previously a spawn kept the hardcoded
+        // 24x80 until the next outer resize.
+        let (rows, cols) = state.term_size;
+        fit_panes(state, ratatui::layout::Rect::new(0, 0, cols, rows));
     }
 }
 
@@ -195,6 +204,25 @@ fn fit_panes(state: &mut AppState, term: ratatui::layout::Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_session_fits_current_grid() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let order = state.manager.order().to_vec();
+        assert_eq!(order.len(), 1);
+        // 80x24 less the status row, less pane borders.
+        assert_eq!(state.manager.pane_size(order[0]), Some((21, 78)));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let order = state.manager.order().to_vec();
+        assert_eq!(order.len(), 2);
+        // Both panes reshape to share the row.
+        assert_eq!(state.manager.pane_size(order[0]), Some((21, 38)));
+        assert_eq!(state.manager.pane_size(order[1]), Some((21, 38)));
+        assert!(state.manager.remove(order[0]));
+        assert!(state.manager.remove(order[1]));
+    }
 
     #[test]
     fn loop_constants_match_blueprint() {
