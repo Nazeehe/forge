@@ -215,6 +215,15 @@ impl SessionManager {
         self.sessions.get(&id)?.pane.as_ref().and_then(|pane| pane.cursor())
     }
 
+    /// Whether the pane's application wants SS3 application-cursor arrows.
+    /// False when the pane is gone (normal CSI arrows then).
+    pub fn app_cursor(&self, id: SessionId) -> bool {
+        self.sessions
+            .get(&id)
+            .and_then(|rec| rec.pane.as_ref())
+            .is_some_and(|pane| pane.application_cursor())
+    }
+
     /// Styled screen rows of a session's live pane; empty when gone.
     pub fn styled_rows(&self, id: SessionId) -> Vec<Vec<crate::pty::FormattedCell>> {
         self.sessions

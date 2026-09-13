@@ -181,10 +181,12 @@ impl PtyPane {
         lock_screen(&self.screen).screen().contents()
     }
 
-    /// Visible screen as styled rows: one entry per non-empty cell, trailing
-    /// blank rows trimmed. Wide-char continuations are skipped (the lead
-    /// cell carries the glyph); never-written cells contribute nothing, so
-    /// runs of spaces survive as real text.
+    /// Visible screen as styled rows. Every cell is emitted: never-written
+    /// cells become padding spaces carrying their own format (backgrounds
+    /// included). Skipping them would shift every later column left and
+    /// shred fullscreen layouts. Wide-char continuations are skipped (the
+    /// lead cell carries the glyph); trailing plain padding and blank rows
+    /// are trimmed.
     pub fn styled_rows(&self) -> Vec<Vec<FormattedCell>> {
         let parser = lock_screen(&self.screen);
         let screen = parser.screen();
@@ -200,20 +202,23 @@ impl PtyPane {
                     continue;
                 }
                 let text = cell.contents();
-                if text.is_empty() {
-                    continue;
-                }
+                let format = CellFormat {
+                    fg: map_color(cell.fgcolor()),
+                    bg: map_color(cell.bgcolor()),
+                    bold: cell.bold(),
+                    italic: cell.italic(),
+                    underline: cell.underline(),
+                    inverse: cell.inverse(),
+                };
                 line.push(FormattedCell {
-                    text,
-                    format: CellFormat {
-                        fg: map_color(cell.fgcolor()),
-                        bg: map_color(cell.bgcolor()),
-                        bold: cell.bold(),
-                        italic: cell.italic(),
-                        underline: cell.underline(),
-                        inverse: cell.inverse(),
-                    },
+                    text: if text.is_empty() { " ".to_string() } else { text },
+                    format,
                 });
+            }
+            while line.last().is_some_and(|cell| {
+                cell.text == " " && cell.format == CellFormat::plain()
+            }) {
+                line.pop();
             }
             out.push(line);
         }
@@ -221,6 +226,12 @@ impl PtyPane {
             out.pop();
         }
         out
+    }
+
+    /// Whether the application requested application-cursor keys (`DECCKM`):
+    /// arrows must arrive as SS3 (`\x1bOA`) rather than CSI (`\x1b[A`).
+    pub fn application_cursor(&self) -> bool {
+        lock_screen(&self.screen).screen().application_cursor()
     }
 
     /// Visible cursor as 0-based (row, col), or `None` when the application
@@ -416,13 +427,17 @@ mod tests {
         pane.close();
     }
 
+    fn row_text(row: &[FormattedCell]) -> String {
+        row.iter().map(|c| c.text.clone()).collect()
+    }
+
     #[test]
     fn styled_rows_carry_sgr_colors() {
         let (tx, rx) = channel();
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
-            "printf '\\033[31mRED\\033[0m\\nplain'; sleep 30",
+            "printf '\\033[31mRED\\033[0m\\nA\\033[2CB'; sleep 30",
             &workdir(),
             24,
             80,
@@ -432,9 +447,9 @@ mod tests {
         let deadline = Instant::now() + TIMEOUT;
         let rows = loop {
             let rows = pane.styled_rows();
-            let first: String = rows.first().map(|l| l.iter().map(|c| c.text.clone()).collect()).unwrap_or_default();
-            let second: String = rows.get(1).map(|l| l.iter().map(|c| c.text.clone()).collect()).unwrap_or_default();
-            if first == "RED" && second == "plain" {
+            let first = rows.first().map(|row| row_text(row)).unwrap_or_default();
+            let second = rows.get(1).map(|row| row_text(row)).unwrap_or_default();
+            if first.starts_with("RED") && second.starts_with("A  B") {
                 break rows;
             }
             if Instant::now() > deadline {
@@ -443,8 +458,49 @@ mod tests {
             while rx.try_recv().is_ok() {}
             std::thread::sleep(Duration::from_millis(5));
         };
-        assert!(rows[0].iter().all(|c| c.format.fg == CellColor::Indexed(1)));
+        assert!(rows[0].iter().take(3).all(|c| c.format.fg == CellColor::Indexed(1)));
+        // Interior gaps must survive as padding: skipping them would shift
+        // every later column left and shred fullscreen layouts.
+        assert_eq!(&row_text(&rows[1])[..4], "A  B");
         assert!(rows[1].iter().all(|c| c.format == CellFormat::plain()));
+        pane.close();
+    }
+
+    #[test]
+    fn app_cursor_tracks_decckm() {
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "printf '\\033[?1h'; sleep 2; printf '\\033[?1l'; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if pane.application_cursor() {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("DECCKM never engaged");
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if !pane.application_cursor() {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("DECCKM never released");
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
         pane.close();
     }
 

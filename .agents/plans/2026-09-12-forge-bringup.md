@@ -96,9 +96,12 @@ pulled per-slice as needed.
       `lines: Vec<Vec<SpanView>>`; the old newline-flattening encoder is
       gone (rows are structural). Tests: live-PTY SGR + mapping table +
       TestBackend cell-fg assert; live smoke shows real SGR bytes.
-- [ ] Full key encoding: arrows (normal vs application-cursor SS3), nav keys,
+- [x] Full key encoding: arrows (normal vs application-cursor SS3), nav keys,
       F-keys, Ctrl/Alt/Shift `1;Nm` chords; honor the pane's
-      application_cursor/application_keypad modes.
+      application_cursor mode (keypad deferred: crossterm reports no
+      numpad-distinct events). Live: Down scrolls `less`, Ctrl-C kills.
+      Note: lazygit Files panel is a tree — single visible file means
+      Up/Down only moves within tree rows, not between diffs.
 - [ ] Mouse: capture outer events, encode per the pane's requested
       mode/encoding; chrome keeps events otherwise.
 - [ ] Bracketed paste wrap when the pane requests it.

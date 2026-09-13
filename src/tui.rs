@@ -152,7 +152,8 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
     match router.feed(key) {
         RoutedKey::Forward(k) => {
             if let Some(active) = state.manager.active() {
-                if let Some(bytes) = input::encode_key(&k) {
+                let app_cursor = state.manager.app_cursor(active);
+                if let Some(bytes) = input::encode_key(&k, app_cursor) {
                     let _ = state.manager.pane_write(active, &bytes);
                 }
             }
