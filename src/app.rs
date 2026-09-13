@@ -18,6 +18,8 @@ pub struct AppState {
     pub pending_hooks: std::collections::VecDeque<crate::listener::HookRequest>,
     /// Open permission modal, if any. Captures all input while present.
     pub modal: Option<ActiveModal>,
+    /// Cross-session message broker (Phase 4): groups, conversations, queues.
+    pub broker: crate::comms::Broker,
 }
 
 /// One modal session: the queued request plus its tuirealm state.
@@ -35,6 +37,7 @@ impl AppState {
             term_size: (24, 80),
             pending_hooks: std::collections::VecDeque::new(),
             modal: None,
+            broker: crate::comms::Broker::new(),
         }
     }
 

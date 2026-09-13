@@ -178,7 +178,7 @@ pub fn decision_line(decision: Decision, reason: &str) -> String {
 
 /// First string value for any of `fields` in a JSON document, reusing the
 /// field-scan technique: valid JSON holds no literal controls in strings.
-fn json_string_field(haystack: &[u8], fields: &[&str]) -> Option<String> {
+pub(crate) fn json_string_field(haystack: &[u8], fields: &[&str]) -> Option<String> {
     for field in fields {
         let needle = format!("\"{field}\"");
         let mut search = haystack;

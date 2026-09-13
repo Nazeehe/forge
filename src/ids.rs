@@ -94,6 +94,28 @@ impl fmt::Display for RunId {
     }
 }
 
+/// Opaque conversation identity for ask/response and tell/ack flows.
+/// Same entropy shape as a run ID, distinct type so the two never mix.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ConversationId(String);
+
+impl ConversationId {
+    pub fn generate() -> Self {
+        let bytes = os_entropy().unwrap_or_else(fallback_entropy);
+        ConversationId(hex(&bytes))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ConversationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

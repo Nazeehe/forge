@@ -1,6 +1,7 @@
 mod app;
 mod audit;
 mod branding;
+mod comms;
 mod config;
 mod event;
 mod fs_atomic;
