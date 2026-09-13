@@ -1,0 +1,294 @@
+//! Deterministic permission policy (Phase 3c).
+//!
+//! Modes come from `[permission]` config: Off lets the harness ask, YOLO
+//! allows everything, AI-Assisted currently asks (classifier deferred to
+//! Phase 7), and Safe-Only applies block patterns first, then allow
+//! patterns and safe reads, asking otherwise. Block always wins, including
+//! when an allow pattern matches the same request. Allow/Deny outcomes are
+//! cached; Ask is never cached. Shell-execution keys stay byte-exact while
+//! all other keys normalize case and whitespace.
+
+use crate::config::PermissionMode;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Deny,
+    Ask,
+}
+
+/// Read-only harness tools that Safe-Only mode allows without asking.
+pub const SAFE_READ_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS"];
+
+/// Tools whose cache key must stay byte-exact: normalizing a shell command
+/// could merge distinct executions into one decision.
+pub const SHELL_TOOLS: &[&str] = &["Bash", "shell"];
+
+struct CacheEntry {
+    decision: Decision,
+}
+
+/// Deterministic permission policy: compiled block/allow patterns plus a
+/// normalized decision cache. Construction fails closed on invalid
+/// patterns so a half-built policy can never decide.
+pub struct Policy {
+    mode: PermissionMode,
+    allow: Vec<regex::Regex>,
+    block: Vec<regex::Regex>,
+    cache: std::collections::HashMap<String, CacheEntry>,
+}
+
+impl Policy {
+    pub fn new(
+        mode: PermissionMode,
+        allow: &[String],
+        block: &[String],
+    ) -> Result<Self, regex::Error> {
+        let compile = |patterns: &[String]| {
+            patterns
+                .iter()
+                .map(|p| regex::Regex::new(p))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(Policy {
+            mode,
+            allow: compile(allow)?,
+            block: compile(block)?,
+            cache: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Decide one hook event, returning the decision and a short reason.
+    /// Allow/Deny outcomes populate the cache; Ask never does.
+    pub fn decide(&mut self, _hook: &str, body: &str) -> (Decision, &'static str) {
+        let tool = tool_name(body);
+        let command =
+            json_string_field(body.as_bytes(), &["command", "cmd"]).unwrap_or_default();
+        let key = cache_key(&tool, &command);
+        if let Some(hit) = self.cache.get(&key) {
+            return (hit.decision, "cached");
+        }
+        let (decision, reason) = match self.mode {
+            PermissionMode::Yolo => (Decision::Allow, "yolo mode"),
+            PermissionMode::Off => (Decision::Ask, "off: harness asks"),
+            PermissionMode::AiAssisted => (Decision::Ask, "ai-assisted deferred"),
+            PermissionMode::SafeOnly => self.safe_only(&tool, &command),
+        };
+        if !matches!(decision, Decision::Ask) {
+            self.cache.insert(key, CacheEntry { decision });
+        }
+        (decision, reason)
+    }
+
+    fn safe_only(&self, tool: &str, command: &str) -> (Decision, &'static str) {
+        let target = format!("{tool}\n{command}");
+        if self.block.iter().any(|re| re.is_match(&target)) {
+            return (Decision::Deny, "block pattern");
+        }
+        if self.allow.iter().any(|re| re.is_match(&target)) {
+            return (Decision::Allow, "allow pattern");
+        }
+        if SAFE_READ_TOOLS
+            .iter()
+            .any(|safe| safe.eq_ignore_ascii_case(tool))
+        {
+            return (Decision::Allow, "safe read");
+        }
+        (Decision::Ask, "needs approval")
+    }
+
+    #[cfg(test)]
+    fn cache_len(&self) -> usize {
+        self.cache.len()
+    }
+}
+
+/// Cache key for one request. Shell executions stay byte-exact; everything
+/// else lowercases and collapses whitespace runs.
+fn cache_key(tool: &str, command: &str) -> String {
+    if SHELL_TOOLS.iter().any(|s| s.eq_ignore_ascii_case(tool)) {
+        return format!("{tool}\0{command}");
+    }
+    let lowered = format!("{tool}\0{command}").to_lowercase();
+    let mut collapsed = String::with_capacity(lowered.len());
+    let mut gap = false;
+    for c in lowered.chars() {
+        if c.is_whitespace() {
+            gap = true;
+        } else {
+            if gap && !collapsed.is_empty() {
+                collapsed.push(' ');
+            }
+            gap = false;
+            collapsed.push(c);
+        }
+    }
+    collapsed
+}
+
+/// Tool name for one hook body, for audit display.
+pub fn tool_name(body: &str) -> String {
+    json_string_field(body.as_bytes(), &["tool_name", "tool"]).unwrap_or_default()
+}
+
+/// Canonical one-line decision for the relay to print to the harness.
+pub fn decision_line(decision: Decision, reason: &str) -> String {
+    let name = match decision {
+        Decision::Allow => "allow",
+        Decision::Deny => "deny",
+        Decision::Ask => "ask",
+    };
+    let mut safe = String::with_capacity(reason.len());
+    for c in reason.chars() {
+        match c {
+            '"' | '\\' => {
+                safe.push('\\');
+                safe.push(c);
+            }
+            c if c.is_control() => safe.push(' '),
+            c => safe.push(c),
+        }
+    }
+    format!("{{\"decision\":\"{name}\",\"reason\":\"{safe}\"}}\n")
+}
+
+/// First string value for any of `fields` in a JSON document, reusing the
+/// field-scan technique: valid JSON holds no literal controls in strings.
+fn json_string_field(haystack: &[u8], fields: &[&str]) -> Option<String> {
+    for field in fields {
+        let needle = format!("\"{field}\"");
+        let mut search = haystack;
+        while let Some(pos) = search
+            .windows(needle.len())
+            .position(|w| w == needle.as_bytes())
+        {
+            let mut rest = &search[pos + needle.len()..];
+            rest = skip_gap(rest);
+            if rest.first() != Some(&b':') {
+                search = &search[pos + 1..];
+                continue;
+            }
+            rest = skip_gap(&rest[1..]);
+            if rest.first() != Some(&b'"') {
+                search = &search[pos + 1..];
+                continue;
+            }
+            let mut end = 1;
+            while end < rest.len() && rest[end] != b'"' {
+                if rest[end] == b'\\' {
+                    end += 1;
+                }
+                end += 1;
+            }
+            if end < rest.len() {
+                if let Ok(value) = std::str::from_utf8(&rest[1..end]) {
+                    return Some(value.to_string());
+                }
+            }
+            search = &search[pos + 1..];
+        }
+    }
+    None
+}
+
+fn skip_gap(mut bytes: &[u8]) -> &[u8] {
+    while matches!(bytes.first(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+        bytes = &bytes[1..];
+    }
+    bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn safe_only(allow: &[&str], block: &[&str]) -> Policy {
+        Policy::new(
+            PermissionMode::SafeOnly,
+            &allow.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            &block.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    fn pre_tool(tool: &str, input: &str) -> (String, String) {
+        (
+            "PreToolUse".to_string(),
+            format!(r#"{{"tool_name":"{tool}","tool_input":{{"command":"{input}"}}}}"#),
+        )
+    }
+
+    #[test]
+    fn block_wins_over_allow_on_same_request() {
+        let mut p = safe_only(&["rm -rf"], &["rm -rf"]);
+        let (hook, body) = pre_tool("Bash", "rm -rf /tmp/x");
+        let (decision, _) = p.decide(&hook, &body);
+        assert_eq!(decision, Decision::Deny);
+    }
+
+    #[test]
+    fn allow_pattern_permits_without_asking() {
+        let mut p = safe_only(&["git status"], &["rm -rf"]);
+        let (hook, body) = pre_tool("Bash", "git status");
+        let (decision, _) = p.decide(&hook, &body);
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn safe_reads_allowed_everything_else_asks() {
+        let mut p = safe_only(&[], &[]);
+        let (hook, body) = pre_tool("Read", "/etc/hosts");
+        assert_eq!(p.decide(&hook, &body).0, Decision::Allow);
+        let (hook, body) = pre_tool("Bash", "ls");
+        assert_eq!(p.decide(&hook, &body).0, Decision::Ask);
+    }
+
+    #[test]
+    fn yolo_allows_and_off_asks() {
+        let mut yolo = Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+        let (hook, body) = pre_tool("Bash", "rm -rf /");
+        assert_eq!(yolo.decide(&hook, &body).0, Decision::Allow);
+        let mut off = Policy::new(PermissionMode::Off, &[], &[]).unwrap();
+        assert_eq!(off.decide(&hook, &body).0, Decision::Ask);
+    }
+
+    #[test]
+    fn allow_deny_cached_ask_never_cached() {
+        let mut p = safe_only(&["git status"], &[]);
+        let (hook, body) = pre_tool("Bash", "git status");
+        assert_eq!(p.decide(&hook, &body).0, Decision::Allow);
+        assert_eq!(p.cache_len(), 1);
+        let (hook, body) = pre_tool("Bash", "something-new");
+        assert_eq!(p.decide(&hook, &body).0, Decision::Ask);
+        assert_eq!(p.cache_len(), 1, "ask leaves no entry");
+    }
+
+    #[test]
+    fn shell_keys_stay_exact_others_normalize() {
+        let mut p = safe_only(&["echo"], &[]);
+        let (hook, body) = pre_tool("Bash", "echo A  B");
+        let _ = p.decide(&hook, &body);
+        assert_eq!(p.cache_len(), 1);
+        let (hook, other_case) = pre_tool("Bash", "echo a b");
+        let _ = p.decide(&hook, &other_case);
+        assert_eq!(p.cache_len(), 2, "shell keys must not merge");
+        let (hook, read) = pre_tool("Read", "/TMP/X");
+        let _ = p.decide(&hook, &read);
+        let (hook, read_lower) = pre_tool("read", "/tmp/x");
+        let _ = p.decide(&hook, &read_lower);
+        assert_eq!(p.cache_len(), 3, "read keys normalize together");
+    }
+
+    #[test]
+    fn invalid_pattern_fails_closed_at_construction() {
+        assert!(Policy::new(PermissionMode::SafeOnly, &["([".to_string()], &[]).is_err());
+    }
+
+    #[test]
+    fn decision_line_is_canonical_json() {
+        let line = decision_line(Decision::Deny, "block pattern");
+        assert!(line.ends_with('\n'));
+        assert!(line.contains(r#""decision":"deny""#), "line: {line:?}");
+        assert!(line.contains("block pattern"));
+    }
+}

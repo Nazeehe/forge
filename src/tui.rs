@@ -83,8 +83,13 @@ fn install_panic_hook() {
 }
 
 /// Run the TUI until quit. Returns the process exit code. Without a terminal
-/// this fails cleanly instead of hanging.
-pub fn run(state: &mut AppState) -> i32 {
+/// this fails cleanly instead of hanging. Invalid permission patterns fall
+/// back to Off (ask everything) rather than blocking startup.
+pub fn run(
+    state: &mut AppState,
+    permission: &crate::config::PermissionConfig,
+    audit_path: &std::path::Path,
+) -> i32 {
     let _guard = match TerminalGuard::setup() {
         Ok(guard) => guard,
         Err(e) => {
@@ -93,6 +98,19 @@ pub fn run(state: &mut AppState) -> i32 {
         }
     };
     install_panic_hook();
+    let mut policy = match crate::policy::Policy::new(
+        permission.mode.clone(),
+        &permission.allow,
+        &permission.block,
+    ) {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("warning: bad permission pattern ({e}); asking everything");
+            crate::policy::Policy::new(crate::config::PermissionMode::Off, &[], &[])
+                .expect("empty patterns compile")
+        }
+    };
+    let audit_path = audit_path.to_path_buf();
     let (ipc_tx, ipc_rx) = std::sync::mpsc::channel();
     // The IPC listener is fail-soft: without it, hook relays simply find
     // no endpoint and exit zero. Children inherit the endpoint by env.
@@ -113,7 +131,7 @@ pub fn run(state: &mut AppState) -> i32 {
             return 1;
         }
     };
-    if let Err(e) = loop_until_quit(state, &mut terminal, ipc_rx) {
+    if let Err(e) = loop_until_quit(state, &mut terminal, ipc_rx, &mut policy, &audit_path) {
         eprintln!("error: main loop failed: {e}");
         return 1;
     }
@@ -124,6 +142,8 @@ fn loop_until_quit(
     state: &mut AppState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ipc: std::sync::mpsc::Receiver<AppEvent>,
+    policy: &mut crate::policy::Policy,
+    audit_path: &std::path::Path,
 ) -> io::Result<()> {
     let mut router = InputRouter::new();
     let size = terminal.size()?;
@@ -155,6 +175,7 @@ fn loop_until_quit(
         for ev in ipc.try_iter().take(MAX_DRAIN) {
             state.apply(ev);
         }
+        state.settle_hooks(policy, audit_path);
         if state.dirty {
             let views = state.views();
             let status = state.status_text();

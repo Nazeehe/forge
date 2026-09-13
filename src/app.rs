@@ -89,6 +89,40 @@ impl AppState {
         self.manager.switch(order[next]);
     }
 
+    /// Run deterministic policy over queued hook requests. Allow/Deny reply
+    /// immediately and are audited; Ask stays queued for the permission
+    /// modal. Audit failures never block a decision.
+    pub fn settle_hooks(
+        &mut self,
+        policy: &mut crate::policy::Policy,
+        audit_path: &std::path::Path,
+    ) {
+        let mut i = 0;
+        while i < self.pending_hooks.len() {
+            let (hook, body) = {
+                let req = &self.pending_hooks[i];
+                (req.hook.clone(), req.body.clone())
+            };
+            let (decision, reason) = policy.decide(&hook, &body);
+            if matches!(decision, crate::policy::Decision::Ask) {
+                i += 1;
+                continue;
+            }
+            if let Some(req) = self.pending_hooks.remove(i) {
+                let line = crate::policy::decision_line(decision, reason);
+                let _ = req.reply.send(line);
+                let tool = crate::policy::tool_name(&body);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let name = format!("{decision:?}").to_lowercase();
+                let _ = crate::audit::append(audit_path, &hook, &tool, &name, reason, now);
+            }
+        }
+        self.dirty = true;
+    }
+
     /// Reduce one event. Input routing arrives with the input slice; until
     /// then input events are acknowledged but change nothing.
     pub fn apply(&mut self, ev: AppEvent) {
@@ -157,6 +191,57 @@ mod tests {
             }));
         }
         assert_eq!(s.pending_hooks.len(), crate::listener::MAX_PENDING_HOOKS);
+    }
+
+    #[test]
+    fn settle_hooks_replies_audits_and_keeps_asks() {
+        use crate::config::PermissionMode;
+        let audit = std::env::temp_dir().join(format!(
+            "forge-settle-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut yolo = crate::policy::Policy::new(
+            PermissionMode::Yolo,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let mut s = AppState::new();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
+            reply: reply_tx,
+        }));
+        s.settle_hooks(&mut yolo, &audit);
+        assert!(s.pending_hooks.is_empty());
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""decision":"allow""#), "line: {line:?}");
+        let logged = std::fs::read_to_string(&audit).unwrap();
+        assert_eq!(logged.lines().count(), 1);
+        assert!(logged.contains(r#""decision":"allow""#), "audit: {logged:?}");
+
+        let mut off = crate::policy::Policy::new(
+            PermissionMode::Off,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: "{}".to_string(),
+            reply: reply_tx,
+        }));
+        s.settle_hooks(&mut off, &audit);
+        assert_eq!(s.pending_hooks.len(), 1, "ask waits for the modal");
+        assert!(reply_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        let _ = std::fs::remove_file(&audit);
     }
 
     #[test]

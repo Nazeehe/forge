@@ -122,8 +122,11 @@ pulled per-slice as needed.
       first line, `HookRequest` fan-in with bounded pending queue. Live:
       socket 0600, async instant, sync waits out the relay timeout
       fail-open, socket file removed on quit.
-- [ ] 3c Policy/cache/audit (`audit.log` 0600, block-wins); modes Off,
-      Safe-Only, YOLO (AI-Assisted deferred to Phase 7).
+- [x] 3c Policy/cache/audit (`audit.log` 0600, block-wins); modes Off,
+      Safe-Only, YOLO (AI-Assisted asks; classifier deferred to Phase 7).
+      Shell cache keys stay exact, others normalize; Ask never cached;
+      audit repairs 0600 drift and escapes hostile fields losslessly. Live:
+      Safe-Only denies `rm -rf` and allows Read instantly with audit lines.
 - [ ] 3d `tui-realm` permission modal (keyboard nav + mouse click).
 - Gate tests: relay-never-blocks; block-wins; audit-0600-enforced;
   hostile-display-safe.

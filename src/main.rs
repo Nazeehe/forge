@@ -1,14 +1,16 @@
 mod app;
+mod audit;
 mod branding;
 mod config;
 mod event;
 mod fs_atomic;
 mod ids;
 mod input;
+mod listener;
 mod logging;
 mod paths;
+mod policy;
 mod pty;
-mod listener;
 mod relay;
 mod safe_text;
 mod session;
@@ -86,7 +88,7 @@ fn startup() -> i32 {
         ));
     }
     let mut state = app::AppState::new();
-    tui::run(&mut state)
+    tui::run(&mut state, &loaded.config.permission, &audit)
 }
 
 fn main() {
