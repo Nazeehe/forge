@@ -1,10 +1,15 @@
+mod app;
 mod branding;
 mod config;
+mod event;
 mod fs_atomic;
 mod ids;
+mod input;
 mod logging;
 mod paths;
+mod pty;
 mod safe_text;
+mod session;
 mod theme;
 
 const VERSION: &str = "1.0.0";

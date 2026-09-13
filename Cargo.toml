@@ -5,5 +5,7 @@ edition = "2021"
 
 [dependencies]
 crossterm = "0.29"
+portable-pty = "0.8"
 ratatui = "0.30"
 toml = "1"
+vt100 = "0.15"
