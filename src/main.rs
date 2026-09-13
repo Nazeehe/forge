@@ -5,6 +5,7 @@ mod comms;
 mod config;
 mod event;
 mod fs_atomic;
+mod harness;
 mod ids;
 mod input;
 mod listener;
