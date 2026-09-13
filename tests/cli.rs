@@ -43,6 +43,29 @@ fn no_command_reports_missing_tui() {
 }
 
 #[test]
+fn hook_relay_without_listener_is_silent_success() {
+    use std::io::Write;
+    let (mut c, _home) = forge();
+    let mut child = c
+        .arg("hook-relay")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run forge");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"PreToolUse","tool":"Bash"}"#)
+        .unwrap();
+    let out = child.wait_with_output().expect("relay exits");
+    assert!(out.status.success(), "fail-open exit 0");
+    assert!(out.stdout.is_empty(), "silent without listener");
+    assert!(out.stderr.is_empty(), "silent without listener");
+}
+
+#[test]
 fn first_launch_materializes_config_and_audit_log() {
     let (mut c, home) = forge();
     let out = c.output().expect("run forge");

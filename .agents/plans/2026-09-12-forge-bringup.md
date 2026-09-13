@@ -80,7 +80,7 @@
 - [ ] `tuirealm` chrome host (buttons/mouse) — deferred to Phase 3+ chrome work.
 - Still open: flood-cannot-starve-input gate test.
 
-## Phase 2.5 — Complete vt100 support — STATUS: DOING
+## Phase 2.5 — Complete vt100 support — STATUS: DONE (106 green: 101 unit + 5 integration)
 
 Goal: full shell + full-screen app support (lazygit, htop, vim open/type/quit).
 Spec sources: VT100 User Guide on vt100.net (DEC core) + xterm ctlseqs on
@@ -111,7 +111,20 @@ pulled per-slice as needed.
       (live: dumb parent → xterm-256color child).
 - Gate: lazygit/htop/vim live usable; key-table unit tests per chord class.
 
-## Phase 3 — Hooks + permissions — STATUS: TODO
+## Phase 3 — Hooks + permissions — STATUS: DOING
+
+- [x] 3a `hook-relay`: fail-open relay (stdin JSON → route → one newline
+      record → optional ~3 s decision; always exit 0 silent). No serde:
+      field scan + CR/LF strip are exact on valid JSON. Tests: route table,
+      envelope, no-listener/empty/unreachable/silent-listener/timeout,
+      decision relay, CLI fail-open gate.
+- [ ] 3b TUI listener: `0600` socket + loopback TCP, 32-conn cap, no-prefetch
+      first line, AppEvent fan-in.
+- [ ] 3c Policy/cache/audit (`audit.log` 0600, block-wins); modes Off,
+      Safe-Only, YOLO (AI-Assisted deferred to Phase 7).
+- [ ] 3d `tui-realm` permission modal (keyboard nav + mouse click).
+- Gate tests: relay-never-blocks; block-wins; audit-0600-enforced;
+  hostile-display-safe.
 
 - [ ] `hook-relay` (fail-open, exit 0, ~3s sync timeout) for claude/codex/muse.
 - [ ] Listener: `0600` socket + loopback TCP, 32-conn cap, no-prefetch first line.

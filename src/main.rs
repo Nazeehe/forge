@@ -8,6 +8,7 @@ mod input;
 mod logging;
 mod paths;
 mod pty;
+mod relay;
 mod safe_text;
 mod session;
 mod theme;
@@ -17,11 +18,12 @@ mod ui;
 const VERSION: &str = "1.0.0";
 
 fn print_help() {
-    println!("Usage: {} [--version|--help]", branding::binary_name());
+    println!("Usage: {} [--version|--help|hook-relay [endpoint]]", branding::binary_name());
     println!(
-        "{} terminal control plane for AI coding agents (TUI arrives in Phase 2).",
+        "{} terminal control plane for AI coding agents.",
         branding::product_name()
     );
+    println!("  hook-relay [endpoint]  forward one hook event from stdin; always exits 0");
 }
 
 fn home_dir() -> std::path::PathBuf {
@@ -91,6 +93,10 @@ fn main() {
     match args.next().as_deref() {
         Some("--version") | Some("-V") => println!("{} {VERSION}", branding::binary_name()),
         Some("--help") | Some("-h") => print_help(),
+        Some("hook-relay") => {
+            let endpoint = args.next();
+            std::process::exit(relay::run_stdin(endpoint.as_deref()));
+        }
         Some(other) => {
             eprintln!("error: unexpected argument `{other}`");
             eprintln!("Usage: forge [--version|--help]");
