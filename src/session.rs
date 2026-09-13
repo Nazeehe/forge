@@ -248,6 +248,15 @@ impl SessionManager {
         out
     }
 
+    /// Visible screen text of a live pane, if it still has one.
+    pub fn screen_text(&self, id: SessionId) -> Option<String> {
+        self.sessions
+            .get(&id)?
+            .pane
+            .as_ref()
+            .map(|pane| pane.screen_text())
+    }
+
     /// Write bytes to a live pane's child.
     pub fn pane_write(&mut self, id: SessionId, bytes: &[u8]) -> std::io::Result<()> {
         match self.sessions.get_mut(&id) {

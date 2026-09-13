@@ -12,6 +12,24 @@ pub enum UserCommand {
     Quit,
     NextSession,
     PrevSession,
+    NewSession,
+}
+
+/// Encode a forwarded key as PTY input bytes. Keys with no useful encoding
+/// (arrows, function keys, modified chords beyond the prefix) return `None`
+/// and are dropped rather than mis-sent.
+pub fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
+    if !key.modifiers.is_empty() {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(c) => Some(c.to_string().into_bytes()),
+        KeyCode::Enter => Some(b"\r".to_vec()),
+        KeyCode::Tab => Some(b"\t".to_vec()),
+        KeyCode::Backspace => Some(b"\x7f".to_vec()),
+        KeyCode::Esc => Some(b"\x1b".to_vec()),
+        _ => None,
+    }
 }
 
 /// Where a key goes.
@@ -64,6 +82,7 @@ impl InputRouter {
                     KeyCode::Char('q') => RoutedKey::Command(UserCommand::Quit),
                     KeyCode::Char('n') => RoutedKey::Command(UserCommand::NextSession),
                     KeyCode::Char('p') => RoutedKey::Command(UserCommand::PrevSession),
+                    KeyCode::Char('c') => RoutedKey::Command(UserCommand::NewSession),
                     _ => RoutedKey::Forward(key),
                 }
             }
@@ -144,5 +163,29 @@ mod tests {
     #[test]
     fn default_prefix_is_ctrl_b() {
         assert_eq!(prefix_key(), ctrl(KeyCode::Char('b')));
+    }
+
+    #[test]
+    fn prefix_c_creates_sessions() {
+        let mut r = InputRouter::new();
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('c'))),
+            RoutedKey::Command(UserCommand::NewSession)
+        );
+    }
+
+    #[test]
+    fn keys_encode_to_pty_bytes() {
+        assert_eq!(encode_key(&key(KeyCode::Char('a'))), Some(b"a".to_vec()));
+        assert_eq!(encode_key(&key(KeyCode::Enter)), Some(b"\r".to_vec()));
+        assert_eq!(encode_key(&key(KeyCode::Tab)), Some(b"\t".to_vec()));
+        assert_eq!(encode_key(&key(KeyCode::Backspace)), Some(b"\x7f".to_vec()));
+        assert_eq!(encode_key(&key(KeyCode::Esc)), Some(b"\x1b".to_vec()));
+        assert_eq!(encode_key(&key(KeyCode::Char('é'))), Some("é".as_bytes().to_vec()));
+        // No useful encoding: dropped, never mis-sent.
+        assert_eq!(encode_key(&key(KeyCode::Up)), None);
+        assert_eq!(encode_key(&key(KeyCode::F(1))), None);
+        assert_eq!(encode_key(&ctrl(KeyCode::Char('a'))), None);
     }
 }
