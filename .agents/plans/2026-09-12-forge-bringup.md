@@ -40,7 +40,7 @@
       errors, migration 4-case matrix, hostile-text, mixed-script flag, no-RGB audit,
       atomicity, 0600, I/O-error propagation, CLI red→green, first-launch e2e.
 - Known warnings (resolve as phases land): `RunId::parse` (Phase 4 MCP auth),
-  `confine` (Phase 6 file transfer), `safe_text` display fns (Phase 3 permission UI),
+  `confine` (Phase 7 file transfer), `safe_text` display fns (Phase 3 permission UI),
   `CellFormat::plain` (test + future-chrome use).
 
 - [ ] `branding` (naming constants), `errors/logging` (bounded, terminal-safe).
@@ -138,7 +138,7 @@ pulled per-slice as needed.
       socket 0600, async instant, sync waits out the relay timeout
       fail-open, socket file removed on quit.
 - [x] 3c Policy/cache/audit (`audit.log` 0600, block-wins); modes Off,
-      Safe-Only, YOLO (AI-Assisted asks; classifier deferred to Phase 7).
+      Safe-Only, YOLO (AI-Assisted asks; classifier deferred to Phase 8).
       Shell cache keys stay exact, others normalize; Ask never cached;
       audit repairs 0600 drift and escapes hostile fields losslessly. Live:
       Safe-Only denies `rm -rf` and allows Read instantly with audit lines.
@@ -152,7 +152,7 @@ pulled per-slice as needed.
 - [ ] `hook-relay` (fail-open, exit 0, ~3s sync timeout) for claude/codex/muse.
 - [ ] Listener: `0600` socket + loopback TCP, 32-conn cap, no-prefetch first line.
 - [ ] Policy/cache/audit (`audit.log` 0600, block-wins); modes Off, Safe-Only,
-      YOLO (AI-Assisted deferred to Phase 7).
+      YOLO (AI-Assisted deferred to Phase 8).
 - [ ] `tui-realm` permission modal (keyboard nav + mouse click).
 - Gate tests: relay-never-blocks; block-wins; audit-0600-enforced;
   hostile-display-safe.
@@ -166,13 +166,37 @@ pulled per-slice as needed.
 - [x] 4c Tools `ask/send_response/tell/ack/list_sessions`; exit-fails-
       conversation; idle/debounce injection into panes; pane env
       (`FORGE_RUN_ID/SESSION_NAME/SESSION_CWD`); `Ctrl-b g` peers toggle.
-      Dynamic project/memory init context deferred to Phase 5; per-session
-      route file only matters for remote (Phase 7).
+      Dynamic project/memory init context deferred to Phase 6; per-session
+      route file only matters for remote (Phase 8).
 - Gate tests: no-group-no-transfer; forged/stale-run-ID rejected;
   pressure-cap; target-exit-determinism. Manual: two live sessions
   ask/tell/ack plus live no-group refusal — all passed.
 
-## Phase 5 — Projects, tasks, walkthrough, timers, recovery — STATUS: TODO
+## Phase 5 — Agent CLI sessions (pulled forward) — STATUS: TODO
+
+- [ ] 5a `cli_tool` registry: `claude`/`codex`/`muse` (binary, env
+      override, model flag, launch flags per blueprint table; muse binary
+      is `muse`, not `metacode`); binary-missing errors. Needs `serde_json`
+      (blueprint toolchain) for settings surgery.
+- [ ] 5b Installers: `install-hooks/uninstall-hooks` (claude
+      settings.json; codex `hooks.json` best-effort — inert but firing
+      unverified without API auth; muse: none per blueprint),
+      `install-mcp/uninstall-mcp` (`claude mcp add -s user`; `codex mcp add`;
+      muse `opencode.json`), `install-skills/uninstall-skills`
+      (+codex/gemini/metamate variants); startup repairs registrations +
+      refreshes bundled skills (`.new` preserves edits).
+- [ ] 5c Create-session UI (minimum set): harness picker, session name
+      field, folder path picker, model picker. Keyboard-first dialog.
+- [ ] 5d Launch + dual-tab sessions: agent-CLI tab + lazy terminal tab
+      (created on first switch); tab switch keys; `FORGE_CLI_TOOL` env;
+      hook→session attribution via caller run ID in the relay record +
+      activity transitions.
+- Gate tests: registry matrix (flags/env/missing); installer round-trips
+  on scratch homes; dialog validation; tab switch + lazy spawn; attribution.
+  Manual: launch codex + muse + claude, switch sessions, cross-talk both
+  directions via injection, MCP registered per CLI.
+
+## Phase 6 — Projects, tasks, walkthrough, timers, recovery — STATUS: TODO
 
 - [ ] Projects registry + cwd matching; project tools 48-54
       (`project_create/get/list/update/delete`, `project_path_add/remove`);
@@ -191,40 +215,27 @@ pulled per-slice as needed.
 - Gate tests: migration/CRUD/reorder/focus invariants; checkpoint round-trip;
   corrupt-save quarantine; live-checkpoint refusal.
 
-## Phase 6 — Full local tool surface — STATUS: TODO
+## Phase 7 — Full local tool surface — STATUS: TODO
 
 - [ ] `terminal_exec/read/send` (Unix, one lease/session, supervisor reap).
 - [ ] `compact/start_session/status/message_user`, file offer/accept
       (1MiB/file, 4 pending, 4MiB staged, 5min TTL, 0600 no-overwrite).
-- [ ] Agent CLI hookup: every session has an agent-CLI tab plus a terminal
-      tab (lazy human PTY, created on first switch); `start_session(harness?)`
-      launches `claude`/`codex`/`muse` via the `cli_tool` registry into the
-      agent tab; keys switch tabs within the focused session; checkpoints
-      record per-session tabs. `install-hooks/uninstall-hooks`,
-      `install-mcp/uninstall-mcp`, `install-skills/uninstall-skills`
-      (+ codex/gemini/metamate variants) register forge into each CLI;
-      startup repairs registrations + refreshes bundled skills (`.new`
-      preserves user edits); session records gain internet/native-CLI/
-      harness/VCS/remote metadata.
-- [ ] Hook-to-session attribution + activity transitions (nothing sets
-      Thinking/ToolUse today; injections gate on it). Hook envelope must
-      carry the caller run ID.
+- [ ] `start_session` (local harness sessions from the registry) +
+      session records gain internet/native-CLI/harness/VCS/remote metadata.
 - [ ] `screenshot` tool (macOS-gated) + `visual-raster` subcommand.
+- [ ] `visual_show` (decode/budget/generation ordering; raster stubbed).
 - Gate tests: supervisor no-zombie/CTRL-C-race/UTF-8-truncation; file
   digest/expiry/symlink-swap negatives; tool-count check calibrated to
   50 on Unix (57 blueprint − 7 skipped memory tools); flood-cannot-
   starve-input gate (open since Phase 2).
-- [ ] `visual_show` (decode/budget/generation ordering; raster stubbed).
-- Gate tests: supervisor no-zombie/CTRL-C-race/UTF-8-truncation; file
-  digest/expiry/symlink-swap negatives; tool-count check.
 
-## Phase 7 — Deferred: teams, VCS, whiteboard-bk, remote, AI — STATUS: TODO
+## Phase 8 — Deferred: teams, VCS, whiteboard-bk, remote, AI — STATUS: TODO
 
 - [ ] 7a: ephemeral team builder (+ `forge-team-mode` skill), VCS
       (Git lazygit / Sapling smartlog), whiteboard backend + limits
       (9 tools 38-46: start/list/open/add/update/delete/highlight/
       answer/end), Claudling.
-- [ ] 7b: SSH/OD remote + reverse-forwarding, mobile (GChat/Telegram),
+- [ ] 8b: SSH/OD remote + reverse-forwarding, mobile (GChat/Telegram),
       macOS raster/screenshot, AI-Assisted permissions.
 - Gate tests per subsystem negatives (stale revision, 255-flap gating,
   spoofed sender, classifier timeout).
@@ -232,12 +243,12 @@ pulled per-slice as needed.
 ## Backlog — Deferred / needs-decision (from 2026-09-13 audit)
 
 - [ ] `clikan` Go module + `install-clikan-mcp` + kanban view: confirmed
-      for a later build (post-7), forge-first until then.
+      for a later build (post-8), forge-first until then.
 - Dropped 2026-09-13: selection mode/copy; telemetry reporting (local
   `forge.log` logging stays and is already implemented).
 - [ ] Prefix-hold (~500ms) shortcuts overlay; manual viewer; away state
-      (pairs with 7b mobile).
-- [ ] `message_user` remote forwarding rides on 7b transports.
+      (pairs with 8b mobile).
+- [ ] `message_user` remote forwarding rides on 8b transports.
 
 ## Progress log
 

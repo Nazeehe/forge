@@ -344,7 +344,7 @@ struct ToolDef {
 }
 
 /// Phase 4 serves the five comms tools on every platform. Unix terminal
-/// tools join this list in Phase 6.
+/// tools join this list in Phase 7.
 fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
@@ -471,7 +471,7 @@ pub fn handle_line(
 
 /// Resolve the broker endpoint: an explicit flag wins, otherwise the
 /// inherited environment. A per-session route file supersedes stale
-/// inheritance only for remote sessions (Phase 7); locally the inherited
+/// inheritance only for remote sessions (Phase 8); locally the inherited
 /// endpoint is always fresh because panes spawn after the listener.
 pub fn resolve_endpoint(explicit: Option<&str>) -> Option<String> {
     if let Some(p) = explicit.filter(|p| !p.is_empty()) {

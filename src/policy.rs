@@ -2,7 +2,7 @@
 //!
 //! Modes come from `[permission]` config: Off lets the harness ask, YOLO
 //! allows everything, AI-Assisted currently asks (classifier deferred to
-//! Phase 7), and Safe-Only applies block patterns first, then allow
+//! Phase 8), and Safe-Only applies block patterns first, then allow
 //! patterns and safe reads, asking otherwise. Block always wins, including
 //! when an allow pattern matches the same request. Allow/Deny outcomes are
 //! cached; Ask is never cached. Shell-execution keys stay byte-exact while
