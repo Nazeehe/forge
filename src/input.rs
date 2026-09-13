@@ -12,7 +12,7 @@ pub enum UserCommand {
     Quit,
     NextSession,
     PrevSession,
-    NewSession,
+    CreateSession,
     /// Focus session by zero-based order index (`Ctrl-b 1` is index 0).
     SelectSession(usize),
     /// Toggle the active session in/out of the shared `peers` group (4c).
@@ -289,7 +289,7 @@ impl InputRouter {
                     KeyCode::Char('q') => RoutedKey::Command(UserCommand::Quit),
                     KeyCode::Char('n') => RoutedKey::Command(UserCommand::NextSession),
                     KeyCode::Char('p') => RoutedKey::Command(UserCommand::PrevSession),
-                    KeyCode::Char('c') => RoutedKey::Command(UserCommand::NewSession),
+                    KeyCode::Char('c') => RoutedKey::Command(UserCommand::CreateSession),
                     KeyCode::Char('g') => RoutedKey::Command(UserCommand::TogglePeerGroup),
                     KeyCode::Char(d @ '1'..='9') => {
                         RoutedKey::Command(UserCommand::SelectSession(d as usize - '1' as usize))
@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
         assert_eq!(
             r.feed(key(KeyCode::Char('c'))),
-            RoutedKey::Command(UserCommand::NewSession)
+            RoutedKey::Command(UserCommand::CreateSession)
         );
     }
 

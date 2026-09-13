@@ -646,11 +646,11 @@ mod tests {
         let run_b = RunId::generate();
         let a = state
             .manager
-            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
             .unwrap();
         let b = state
             .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
             .unwrap();
         Pair {
             state,

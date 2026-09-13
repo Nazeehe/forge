@@ -62,6 +62,8 @@ pub struct SessionRecord {
     pub state: SessionState,
     pub activity: Activity,
     pub run_id: crate::ids::RunId,
+    /// Agent CLI behind the pane (`shell`, `claude`, `codex`, `muse`).
+    pub cli_tool: String,
     pub exit_code: Option<i32>,
     pane: Option<crate::pty::PtyPane>,
 }
@@ -102,6 +104,7 @@ impl SessionManager {
         cwd: &std::path::Path,
         cmd: &str,
         run_id: crate::ids::RunId,
+        cli_tool: &str,
     ) -> std::io::Result<SessionId> {
         let id = SessionId::fresh();
         // Harnesses discover the broker through these: the run ID proves
@@ -119,6 +122,7 @@ impl SessionManager {
                 ("FORGE_RUN_ID", run_str.as_str()),
                 ("FORGE_SESSION_NAME", name),
                 ("FORGE_SESSION_CWD", cwd_str.as_str()),
+                ("FORGE_CLI_TOOL", cli_tool),
             ],
         )?;
         // Run IDs are minted fresh per launch so collisions should not happen;
@@ -138,6 +142,7 @@ impl SessionManager {
                 state: SessionState::Running,
                 activity: Activity::Idle,
                 run_id,
+                cli_tool: cli_tool.to_string(),
                 exit_code: None,
                 pane: Some(pane),
             },
@@ -432,9 +437,9 @@ mod tests {
     fn spawn_switch_reorder_remove() {
         let mut m = SessionManager::new();
         assert!(m.is_empty());
-        let a = m.spawn("a", &workdir(), "exec sleep 30", RunId::generate()).unwrap();
+        let a = m.spawn("a", &workdir(), "exec sleep 30", RunId::generate(), "shell").unwrap();
         assert_eq!(m.active(), Some(a));
-        let b = m.spawn("b", &workdir(), "exec sleep 30", RunId::generate()).unwrap();
+        let b = m.spawn("b", &workdir(), "exec sleep 30", RunId::generate(), "shell").unwrap();
         assert_eq!(m.len(), 2);
         assert!(m.switch(a));
         assert_eq!(m.active(), Some(a));
@@ -452,7 +457,7 @@ mod tests {
     fn rebind_revokes_old_run() {
         let mut m = SessionManager::new();
         let old = RunId::generate();
-        let id = m.spawn("r", &workdir(), "exec sleep 30", old.clone()).unwrap();
+        let id = m.spawn("r", &workdir(), "exec sleep 30", old.clone(), "shell").unwrap();
         assert_eq!(m.lookup_run(old.as_str()), Some(id));
         let new = RunId::generate();
         assert!(m.rebind(id, new.clone()));
@@ -466,7 +471,7 @@ mod tests {
     fn kill_retains_exited_card_and_revokes_run() {
         let mut m = SessionManager::new();
         let run = RunId::generate();
-        let id = m.spawn("k", &workdir(), "exec sleep 30", run.clone()).unwrap();
+        let id = m.spawn("k", &workdir(), "exec sleep 30", run.clone(), "shell").unwrap();
         assert!(m.kill(id));
         assert!(!m.kill(SessionId::fresh()));
         poll_exit(&mut m, id);
@@ -481,7 +486,7 @@ mod tests {
     fn bounded_drain_never_starves() {
         let mut m = SessionManager::new();
         let id = m
-            .spawn("flood", &workdir(), "exec yes", RunId::generate())
+            .spawn("flood", &workdir(), "exec yes", RunId::generate(), "shell")
             .unwrap();
         std::thread::sleep(Duration::from_millis(200));
         let first = m.drain_pty_max(100);
@@ -498,7 +503,7 @@ mod tests {
     fn pane_write_reaches_child() {
         let mut m = SessionManager::new();
         let id = m
-            .spawn("w", &workdir(), "exec cat", RunId::generate())
+            .spawn("w", &workdir(), "exec cat", RunId::generate(), "shell")
             .unwrap();
         m.pane_write(id, b"via-manager\n").unwrap();
         assert!(m.pane_write(SessionId::fresh(), b"x").is_err());
@@ -525,7 +530,7 @@ mod tests {
     fn written_bytes_reach_screen() {
         let mut m = SessionManager::new();
         let id = m
-            .spawn("w", &workdir(), "exec cat", RunId::generate())
+            .spawn("w", &workdir(), "exec cat", RunId::generate(), "shell")
             .unwrap();
         m.pane_write(id, b"hello-screen-write\n").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -549,7 +554,7 @@ mod tests {
     #[test]
     fn quick_exit_records_code() {
         let mut m = SessionManager::new();
-        let id = m.spawn("q", &workdir(), "exit 7", RunId::generate()).unwrap();
+        let id = m.spawn("q", &workdir(), "exit 7", RunId::generate(), "shell").unwrap();
         assert_eq!(poll_exit(&mut m, id), Some(7));
         let rec = m.get(id).unwrap();
         assert_eq!(rec.state, SessionState::Exited(Some(7)));

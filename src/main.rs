@@ -3,6 +3,7 @@ mod audit;
 mod branding;
 mod comms;
 mod config;
+mod create;
 mod event;
 mod fs_atomic;
 mod harness;

@@ -18,6 +18,8 @@ pub struct AppState {
     pub pending_hooks: std::collections::VecDeque<crate::listener::HookRequest>,
     /// Open permission modal, if any. Captures all input while present.
     pub modal: Option<ActiveModal>,
+    /// Open create-session dialog, if any. Captures input like the modal.
+    pub create_dialog: Option<crate::create::CreateDialog>,
     /// Cross-session message broker (Phase 4): groups, conversations, queues.
     pub broker: crate::comms::Broker,
     /// Last human key/paste forwarded to a pane. Injections wait out a short
@@ -40,6 +42,7 @@ impl AppState {
             term_size: (24, 80),
             pending_hooks: std::collections::VecDeque::new(),
             modal: None,
+            create_dialog: None,
             broker: crate::comms::Broker::new(),
             last_human_input: None,
         }
@@ -99,6 +102,72 @@ impl AppState {
     /// Record human typing: injections debounce until it settles.
     pub fn note_human_input(&mut self) {
         self.last_human_input = Some(std::time::Instant::now());
+    }
+
+    /// Live session names for dialog validation.
+    pub fn live_names(&self) -> Vec<String> {
+        self.manager
+            .order()
+            .iter()
+            .filter_map(|&id| self.manager.get(id))
+            .filter(|rec| rec.state.is_live())
+            .map(|rec| rec.name.clone())
+            .collect()
+    }
+
+    /// First free `shell-N` name for the dialog prefill.
+    pub fn suggested_session_name(&self) -> String {
+        let taken = self.live_names();
+        let mut n = self.manager.len() + 1;
+        loop {
+            let candidate = format!("shell-{n}");
+            if !taken.iter().any(|t| t == &candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Open the create-session dialog, prefilled from current state.
+    pub fn open_create_dialog(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let name = self.suggested_session_name();
+        self.create_dialog = Some(crate::create::CreateDialog::new(&name, &cwd));
+        self.dirty = true;
+    }
+
+    /// Spawn exactly what a submitted dialog describes: shells run the
+    /// login shell, agents run their registry argv. Returns the new id.
+    pub fn create_session(
+        &mut self,
+        spec: &crate::create::SessionSpec,
+    ) -> std::io::Result<crate::session::SessionId> {
+        use crate::create::SessionKind;
+        let (cmd, cli_tool) = match spec.kind {
+            SessionKind::Shell => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+                (format!("exec {shell} -i"), "shell".to_string())
+            }
+            SessionKind::Agent(h) => {
+                let hs = h.spec();
+                let model = if spec.model.is_empty() {
+                    None
+                } else {
+                    Some(spec.model.as_str())
+                };
+                let argv = hs.launch_argv(&hs.resolve_binary(), model);
+                let mut cmd = String::from("exec ");
+                cmd.push_str(&crate::create::shell_join(&argv));
+                (cmd, h.as_str().to_string())
+            }
+        };
+        self.manager.spawn(
+            &spec.name,
+            &spec.cwd,
+            &cmd,
+            crate::ids::RunId::generate(),
+            &cli_tool,
+        )
     }
 
     /// Deliver due injections into idle, non-recently-typed panes. Targets
@@ -491,12 +560,12 @@ mod tests {
         let run_a = RunId::generate();
         let a = s
             .manager
-            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
             .unwrap();
         let run_b = RunId::generate();
         let b = s
             .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
             .unwrap();
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
@@ -541,12 +610,12 @@ mod tests {
         let run_a = RunId::generate();
         let a = s
             .manager
-            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
             .unwrap();
         let run_b = RunId::generate();
         let b = s
             .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
             .unwrap();
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
@@ -585,12 +654,12 @@ mod tests {
         let run_a = RunId::generate();
         let a = s
             .manager
-            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
             .unwrap();
         let run_b = RunId::generate();
         let b = s
             .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
             .unwrap();
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
@@ -633,12 +702,12 @@ mod tests {
         let run_a = RunId::generate();
         let a = s
             .manager
-            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone())
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
             .unwrap();
         let run_b = RunId::generate();
         let b = s
             .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone())
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
             .unwrap();
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
@@ -654,6 +723,60 @@ mod tests {
         assert_eq!(s.broker.queued(b), 1, "fresh typing debounces delivery");
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn create_session_spawns_named_shell() {
+        let mut s = AppState::new();
+        let spec = crate::create::SessionSpec {
+            kind: crate::create::SessionKind::Shell,
+            name: "work".to_string(),
+            cwd: std::env::temp_dir(),
+            model: String::new(),
+        };
+        let id = s.create_session(&spec).unwrap();
+        let rec = s.manager.get(id).unwrap();
+        assert_eq!(rec.name, "work");
+        assert_eq!(rec.cli_tool, "shell");
+        assert_eq!(rec.cwd, std::env::temp_dir());
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn create_session_agent_records_cli_tool() {
+        // Hermetic: stand in for the codex binary; argv shape is locked in
+        // the harness registry tests.
+        let saved = std::env::var("CODEX_BIN").ok();
+        std::env::set_var("CODEX_BIN", "/bin/true");
+        let mut s = AppState::new();
+        let spec = crate::create::SessionSpec {
+            kind: crate::create::SessionKind::Agent(crate::harness::Harness::Codex),
+            name: "coder".to_string(),
+            cwd: std::env::temp_dir(),
+            model: "gpt-5".to_string(),
+        };
+        let id = s.create_session(&spec).unwrap();
+        let rec = s.manager.get(id).unwrap();
+        assert_eq!(rec.cli_tool, "codex");
+        assert!(s.manager.remove(id));
+        match saved {
+            Some(v) => std::env::set_var("CODEX_BIN", v),
+            None => std::env::remove_var("CODEX_BIN"),
+        }
+    }
+
+    #[test]
+    fn suggested_name_skips_taken_names() {
+        let mut s = AppState::new();
+        assert_eq!(s.suggested_session_name(), "shell-1");
+        s.open_create_dialog();
+        assert!(s.create_dialog.is_some());
+        let id = s
+            .manager
+            .spawn("shell-1", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        assert_eq!(s.suggested_session_name(), "shell-2");
+        assert!(s.manager.remove(id));
     }
 
     #[test]
@@ -697,11 +820,11 @@ mod tests {
         let mut s = AppState::new();
         let a = s
             .manager
-            .spawn("one", &std::env::temp_dir(), "exec sleep 30", RunId::generate())
+            .spawn("one", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
             .unwrap();
         let b = s
             .manager
-            .spawn("two", &std::env::temp_dir(), "exec sleep 30", RunId::generate())
+            .spawn("two", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
             .unwrap();
         let views = s.views();
         assert_eq!(views.len(), 2);
@@ -728,11 +851,11 @@ mod tests {
         assert!(!s.select_session(0), "empty: no-op");
         let a = s
             .manager
-            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate())
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
             .unwrap();
         let b = s
             .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate())
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
             .unwrap();
         assert!(s.select_session(1));
         assert_eq!(s.manager.active(), Some(b));
@@ -760,7 +883,7 @@ mod tests {
         let mut s = AppState::new();
         let id = s
             .manager
-            .spawn("w", &std::env::temp_dir(), "exit 0", RunId::generate())
+            .spawn("w", &std::env::temp_dir(), "exit 0", RunId::generate(), "shell")
             .unwrap();
         assert!(s.manager.get(id).is_some());
         assert!(s.manager.remove(id));

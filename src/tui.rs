@@ -164,13 +164,15 @@ fn loop_until_quit(
                                 state.dirty = true;
                             }
                         }
+                    } else if state.create_dialog.is_some() {
+                        handle_dialog_key(state, key);
                     } else {
                         handle_key(state, &mut router, key);
                     }
                 }
                 event::Event::Mouse(mev) => forward_mouse(state, mev, policy, audit_path),
                 event::Event::Paste(text) => {
-                    if state.modal.is_none() {
+                    if state.modal.is_none() && state.create_dialog.is_none() {
                         if let Some(active) = state.manager.active() {
                             let bracketed = state.manager.bracketed_paste(active);
                             let bytes = input::paste_bytes(&text, bracketed);
@@ -210,6 +212,9 @@ fn loop_until_quit(
             terminal.draw(|f| {
                 let area = f.area();
                 ui::render(f, area, &views, &chrome);
+                if let Some(dialog) = state.create_dialog.as_mut() {
+                    dialog.view(f, crate::create::create_area(area));
+                }
                 if let Some(active) = state.modal.as_mut() {
                     active.modal.view(f, crate::modal::modal_area(area));
                 }
@@ -252,9 +257,8 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
                 fit_active_pane(state);
                 state.dirty = true;
             }
-            UserCommand::NewSession => {
-                spawn_shell(state);
-                state.dirty = true;
+            UserCommand::CreateSession => {
+                state.open_create_dialog();
             }
             UserCommand::SelectSession(index) => {
                 if state.select_session(index) {
@@ -279,9 +283,26 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
     }
 }
 
-fn spawn_shell(state: &mut AppState) {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-    spawn_shell_cmd(state, &format!("exec {shell} -i"));
+/// One dialog key: submit spawns and fits, cancel closes, edits redraw.
+fn handle_dialog_key(state: &mut AppState, key: event::KeyEvent) {
+    let names = state.live_names();
+    let outcome = state.create_dialog.as_mut().map(|d| d.key(&key, &names));
+    match outcome {
+        Some(crate::create::DialogOutcome::Submitted(spec)) => {
+            state.create_dialog = None;
+            if state.create_session(&spec).is_ok() {
+                fit_active_pane(state);
+            }
+            state.dirty = true;
+        }
+        Some(crate::create::DialogOutcome::Cancelled) => {
+            state.create_dialog = None;
+            state.dirty = true;
+        }
+        _ => {
+            state.dirty = true;
+        }
+    }
 }
 
 fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
@@ -294,6 +315,7 @@ fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
             &cwd,
             cmd,
             RunId::generate(),
+            "shell",
         );
         // A first/new active pane takes the main area at once instead of
         // keeping the hardcoded 24x80 until the next outer resize.
@@ -311,6 +333,11 @@ fn forward_mouse(
     policy: &mut crate::policy::Policy,
     audit_path: &std::path::Path,
 ) {
+    // An open dialog swallows all mouse input: keyboard-first by design,
+    // clicks behind it must not refocus sessions mid-form.
+    if state.create_dialog.is_some() {
+        return;
+    }
     // An open modal swallows all mouse input; clicks on its choice rows
     // decide it, everything else is ignored.
     if state.modal.is_some() {
@@ -486,6 +513,43 @@ mod tests {
         let logged = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(logged.lines().count(), 1, "audit: {logged:?}");
         let _ = std::fs::remove_file(&audit);
+    }
+
+    #[test]
+    fn prefix_c_opens_create_dialog() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key(&mut state, &mut router, prefix);
+        handle_key(
+            &mut state,
+            &mut router,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+        );
+        assert!(state.create_dialog.is_some());
+    }
+
+    #[test]
+    fn dialog_submit_spawns_and_cancel_closes() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        state.open_create_dialog();
+        // Prefilled shell-1 submits a real shell.
+        handle_dialog_key(&mut state, KeyEvent::new(KeyCode::Enter, none));
+        assert!(state.create_dialog.is_none());
+        assert_eq!(state.manager.len(), 1);
+        // Escape closes without spawning.
+        state.open_create_dialog();
+        handle_dialog_key(&mut state, KeyEvent::new(KeyCode::Esc, none));
+        assert!(state.create_dialog.is_none());
+        assert_eq!(state.manager.len(), 1);
+        let order = state.manager.order().to_vec();
+        for id in order {
+            assert!(state.manager.remove(id));
+        }
     }
 
     #[test]
