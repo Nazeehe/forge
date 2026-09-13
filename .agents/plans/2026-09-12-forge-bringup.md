@@ -40,7 +40,8 @@
       errors, migration 4-case matrix, hostile-text, mixed-script flag, no-RGB audit,
       atomicity, 0600, I/O-error propagation, CLI red→green, first-launch e2e.
 - Known warnings (resolve as phases land): `RunId::parse` (Phase 4 MCP auth),
-  `confine` (Phase 6 file transfer), `safe_text` display fns (Phase 3 permission UI).
+  `confine` (Phase 6 file transfer), `safe_text` display fns (Phase 3 permission UI),
+  `CellFormat::plain` (test + future-chrome use).
 
 - [ ] `branding` (naming constants), `errors/logging` (bounded, terminal-safe).
 - [ ] `theme` (semantic APIs only) + `safe_text` + path-jail checks.
@@ -90,8 +91,11 @@ pulled per-slice as needed.
       `PaneView.cursor`, clamped `cursor_screen_pos`; outer cursor hidden
       when the pane hides its). Tests: live-PTY move/hide/reshow +
       TestBackend placement.
-- [ ] SGR color + attrs → styled spans via per-cell walk (16/256/RGB
-      pass-through; theme stays chrome-only).
+- [x] SGR color + attrs → styled spans via per-cell walk (16/256/RGB
+      pass-through; theme stays chrome-only). `PaneView.body` is now
+      `lines: Vec<Vec<SpanView>>`; the old newline-flattening encoder is
+      gone (rows are structural). Tests: live-PTY SGR + mapping table +
+      TestBackend cell-fg assert; live smoke shows real SGR bytes.
 - [ ] Full key encoding: arrows (normal vs application-cursor SS3), nav keys,
       F-keys, Ctrl/Alt/Shift `1;Nm` chords; honor the pane's
       application_cursor/application_keypad modes.

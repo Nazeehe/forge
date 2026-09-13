@@ -26,6 +26,55 @@ pub enum PtyEvent {
 
 type ChildCell = Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>;
 
+/// Plain-text color of one terminal cell. Mirrors `vt100::Color` so the
+/// view layer never depends on the parser crate's versioning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellColor {
+    Default,
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+/// Text attributes of one terminal cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellFormat {
+    pub fg: CellColor,
+    pub bg: CellColor,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub inverse: bool,
+}
+
+impl CellFormat {
+    /// No color, no attributes: plain terminal text.
+    pub fn plain() -> Self {
+        CellFormat {
+            fg: CellColor::Default,
+            bg: CellColor::Default,
+            bold: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+        }
+    }
+}
+
+/// One non-empty terminal cell with its text and attributes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormattedCell {
+    pub text: String,
+    pub format: CellFormat,
+}
+
+fn map_color(color: vt100::Color) -> CellColor {
+    match color {
+        vt100::Color::Default => CellColor::Default,
+        vt100::Color::Idx(i) => CellColor::Indexed(i),
+        vt100::Color::Rgb(r, g, b) => CellColor::Rgb(r, g, b),
+    }
+}
+
 pub struct PtyPane {
     id: SessionId,
     rows: u16,
@@ -130,6 +179,48 @@ impl PtyPane {
     /// Current visible screen contents, for grid rendering.
     pub fn screen_text(&self) -> String {
         lock_screen(&self.screen).screen().contents()
+    }
+
+    /// Visible screen as styled rows: one entry per non-empty cell, trailing
+    /// blank rows trimmed. Wide-char continuations are skipped (the lead
+    /// cell carries the glyph); never-written cells contribute nothing, so
+    /// runs of spaces survive as real text.
+    pub fn styled_rows(&self) -> Vec<Vec<FormattedCell>> {
+        let parser = lock_screen(&self.screen);
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        let mut out = Vec::new();
+        for r in 0..rows {
+            let mut line = Vec::new();
+            for c in 0..cols {
+                let Some(cell) = screen.cell(r, c) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() {
+                    continue;
+                }
+                let text = cell.contents();
+                if text.is_empty() {
+                    continue;
+                }
+                line.push(FormattedCell {
+                    text,
+                    format: CellFormat {
+                        fg: map_color(cell.fgcolor()),
+                        bg: map_color(cell.bgcolor()),
+                        bold: cell.bold(),
+                        italic: cell.italic(),
+                        underline: cell.underline(),
+                        inverse: cell.inverse(),
+                    },
+                });
+            }
+            out.push(line);
+        }
+        while out.last().is_some_and(|line| line.is_empty()) {
+            out.pop();
+        }
+        out
     }
 
     /// Visible cursor as 0-based (row, col), or `None` when the application
@@ -322,6 +413,38 @@ mod tests {
         wait_cursor(&pane, &rx, Some((2, 6)), "move");
         wait_cursor(&pane, &rx, None, "hide");
         wait_cursor(&pane, &rx, Some((2, 6)), "reshow");
+        pane.close();
+    }
+
+    #[test]
+    fn styled_rows_carry_sgr_colors() {
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "printf '\\033[31mRED\\033[0m\\nplain'; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        let rows = loop {
+            let rows = pane.styled_rows();
+            let first: String = rows.first().map(|l| l.iter().map(|c| c.text.clone()).collect()).unwrap_or_default();
+            let second: String = rows.get(1).map(|l| l.iter().map(|c| c.text.clone()).collect()).unwrap_or_default();
+            if first == "RED" && second == "plain" {
+                break rows;
+            }
+            if Instant::now() > deadline {
+                panic!("styled rows never arrived: {rows:?}");
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(rows[0].iter().all(|c| c.format.fg == CellColor::Indexed(1)));
+        assert!(rows[1].iter().all(|c| c.format == CellFormat::plain()));
         pane.close();
     }
 

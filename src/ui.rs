@@ -5,15 +5,69 @@
 //! without a terminal.
 
 use ratatui::layout::{Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::{safe_text, theme};
+use crate::{
+    pty::{CellColor, CellFormat, FormattedCell},
+    safe_text, theme,
+};
+
+/// One styled run of pane text.
+#[derive(Clone, Debug)]
+pub struct SpanView {
+    pub text: String,
+    pub style: Style,
+}
+
+/// Map one parsed cell format to a render style. App colors pass through
+/// raw; the semantic theme stays chrome-only by design.
+pub fn style_for(format: &CellFormat) -> Style {
+    let mut style = Style::default();
+    if let Some(fg) = map_color(format.fg) {
+        style = style.fg(fg);
+    }
+    if let Some(bg) = map_color(format.bg) {
+        style = style.bg(bg);
+    }
+    if format.bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if format.italic {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if format.underline {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    if format.inverse {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    style
+}
+
+/// Encode one cell for display and attach its style. Cells never contain
+/// newlines (rows are structural now), so single-line encoding is exact.
+pub fn span_for(cell: &FormattedCell) -> SpanView {
+    SpanView {
+        text: safe_text::encode_for_display(&cell.text),
+        style: style_for(&cell.format),
+    }
+}
+
+fn map_color(color: CellColor) -> Option<Color> {
+    match color {
+        CellColor::Default => None,
+        CellColor::Indexed(i) => Some(Color::Indexed(i)),
+        CellColor::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
+    }
+}
 
 /// One pane's renderable snapshot.
 pub struct PaneView {
     pub title: String,
-    pub body: String,
+    pub lines: Vec<Vec<SpanView>>,
     pub live: bool,
     pub focused: bool,
     /// Visible cursor as 0-based (row, col) in terminal-grid coordinates.
@@ -95,10 +149,19 @@ pub fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], status: &s
             .borders(Borders::ALL)
             .border_style(theme::style(border))
             .title(title);
-        frame.render_widget(
-            Paragraph::new(safe_text::encode_multiline_for_display(&view.body)).block(block),
-            *rect,
+        let text = Text::from(
+            view.lines
+                .iter()
+                .map(|line| {
+                    Line::from(
+                        line.iter()
+                            .map(|span| Span::styled(span.text.clone(), span.style))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
         );
+        frame.render_widget(Paragraph::new(text).block(block), *rect);
     }
     if let Some(pos) = focused_cursor {
         frame.set_cursor_position(pos);
@@ -174,7 +237,15 @@ mod tests {
     fn pane(title: &str, body: &str, live: bool) -> PaneView {
         PaneView {
             title: title.to_string(),
-            body: body.to_string(),
+            lines: body
+                .split('\n')
+                .map(|line| {
+                    vec![SpanView {
+                        text: line.to_string(),
+                        style: Style::default(),
+                    }]
+                })
+                .collect(),
             live,
             focused: true,
             cursor: None,
@@ -236,6 +307,55 @@ mod tests {
             .draw(|f| render_grid(f, area(), &[p], "status"))
             .unwrap();
         terminal.backend_mut().assert_cursor_position(Position::new(6, 3));
+    }
+
+    #[test]
+    fn style_for_maps_sgr_attributes() {
+        use crate::pty::{CellColor, CellFormat};
+        let f = CellFormat {
+            fg: CellColor::Indexed(1),
+            bg: CellColor::Rgb(10, 20, 30),
+            bold: true,
+            italic: false,
+            underline: true,
+            inverse: true,
+        };
+        let s = style_for(&f);
+        assert_eq!(s.fg, Some(Color::Indexed(1)));
+        assert_eq!(s.bg, Some(Color::Rgb(10, 20, 30)));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+        assert!(s.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(s.add_modifier.contains(Modifier::REVERSED));
+        assert!(!s.add_modifier.contains(Modifier::ITALIC));
+        let plain = style_for(&CellFormat::plain());
+        assert_eq!(plain.fg, None);
+        assert_eq!(plain.bg, None);
+        assert!(plain.add_modifier.is_empty());
+    }
+
+    #[test]
+    fn render_shows_sgr_colors() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let red = Style::default().fg(Color::Indexed(1));
+        let view = PaneView {
+            title: "sh".to_string(),
+            lines: vec![vec![SpanView {
+                text: "RED".to_string(),
+                style: red,
+            }]],
+            live: true,
+            focused: true,
+            cursor: None,
+        };
+        terminal
+            .draw(|f| render_grid(f, area(), &[view], "status"))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        let cell = &buf.content[1 * w + 1];
+        assert_eq!(cell.symbol(), "R");
+        assert_eq!(cell.fg, Color::Indexed(1));
     }
 
     #[test]

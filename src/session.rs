@@ -215,6 +215,15 @@ impl SessionManager {
         self.sessions.get(&id)?.pane.as_ref().and_then(|pane| pane.cursor())
     }
 
+    /// Styled screen rows of a session's live pane; empty when gone.
+    pub fn styled_rows(&self, id: SessionId) -> Vec<Vec<crate::pty::FormattedCell>> {
+        self.sessions
+            .get(&id)
+            .and_then(|rec| rec.pane.as_ref())
+            .map(|pane| pane.styled_rows())
+            .unwrap_or_default()
+    }
+
     pub fn resize(&mut self, id: SessionId, rows: u16, cols: u16) -> std::io::Result<()> {
         match self.sessions.get_mut(&id) {
             None => Err(std::io::Error::new(

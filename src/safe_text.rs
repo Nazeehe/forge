@@ -26,17 +26,6 @@ pub fn encode_for_display(s: &str) -> String {
     out
 }
 
-/// Multiline variant of [`encode_for_display`]: preserves `\n` row breaks
-/// (e.g. terminal screen contents, where the parser already consumed escape
-/// sequences) while encoding every other control identically. Splitting on
-/// `\n` first means a newline can never smuggle encoded content.
-pub fn encode_multiline_for_display(s: &str) -> String {
-    s.split('\n')
-        .map(encode_for_display)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// True if `s` contains Unicode bidi control characters.
 pub fn contains_bidi_controls(s: &str) -> bool {
     s.chars().any(is_bidi_control)
@@ -74,14 +63,6 @@ fn is_invisible(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn multiline_keeps_row_breaks_but_encodes_the_rest() {
-        assert_eq!(
-            encode_multiline_for_display("l1\nl2\x07"),
-            "l1\nl2␇"
-        );
-    }
 
     #[test]
     fn controls_become_visible() {

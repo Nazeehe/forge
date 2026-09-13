@@ -33,13 +33,21 @@ impl AppState {
             .map(|&id| {
                 let rec = self.manager.get(id).expect("ordered session exists");
                 let live = rec.state.is_live();
-                let body = self
+                let mut lines: Vec<Vec<crate::ui::SpanView>> = self
                     .manager
-                    .screen_text(id)
-                    .unwrap_or_else(|| "(exited)".to_string());
+                    .styled_rows(id)
+                    .iter()
+                    .map(|row| row.iter().map(crate::ui::span_for).collect())
+                    .collect();
+                if lines.is_empty() {
+                    lines = vec![vec![crate::ui::SpanView {
+                        text: "(exited)".to_string(),
+                        style: ratatui::style::Style::default(),
+                    }]];
+                }
                 crate::ui::PaneView {
                     title: rec.name.clone(),
-                    body,
+                    lines,
                     live,
                     focused: Some(id) == active,
                     cursor: self.manager.cursor(id),
