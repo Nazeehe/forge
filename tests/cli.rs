@@ -66,6 +66,40 @@ fn hook_relay_without_listener_is_silent_success() {
 }
 
 #[test]
+fn mcp_serve_answers_initialize_list_and_parse_error() {
+    use std::io::Write;
+    let (mut c, _home) = forge();
+    let mut child = c
+        .arg("mcp-serve")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run forge");
+    let stdin = child.stdin.as_mut().unwrap();
+    stdin
+        .write_all(br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        .unwrap();
+    stdin.write_all(b"\n").unwrap();
+    stdin
+        .write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#)
+        .unwrap();
+    stdin.write_all(b"\n").unwrap();
+    stdin.write_all(b"garbage\n").unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().expect("mcp-serve exits");
+    assert!(out.status.success(), "stdio server exits 0, stderr: {:?}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let init = lines.next().unwrap_or("");
+    assert!(init.contains(r#""protocolVersion":"2025-03-26""#), "init: {init}");
+    let list = lines.next().unwrap_or("");
+    assert!(list.contains(r#""name":"ask""#), "list: {list}");
+    let err = lines.next().unwrap_or("");
+    assert!(err.contains(r#""code":-32700"#), "err: {err}");
+}
+
+#[test]
 fn first_launch_materializes_config_and_audit_log() {
     let (mut c, home) = forge();
     let out = c.output().expect("run forge");

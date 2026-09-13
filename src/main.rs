@@ -8,6 +8,7 @@ mod ids;
 mod input;
 mod listener;
 mod logging;
+mod mcp;
 mod modal;
 mod paths;
 mod policy;
@@ -22,12 +23,13 @@ mod ui;
 const VERSION: &str = "1.0.0";
 
 fn print_help() {
-    println!("Usage: {} [--version|--help|hook-relay [endpoint]]", branding::binary_name());
+    println!("Usage: {} [--version|--help|hook-relay [endpoint]|mcp-serve [--endpoint PATH]]", branding::binary_name());
     println!(
         "{} terminal control plane for AI coding agents.",
         branding::product_name()
     );
     println!("  hook-relay [endpoint]  forward one hook event from stdin; always exits 0");
+    println!("  mcp-serve [--endpoint PATH]  JSON-RPC comms server on stdio for harnesses");
 }
 
 fn home_dir() -> std::path::PathBuf {
@@ -100,6 +102,26 @@ fn main() {
         Some("hook-relay") => {
             let endpoint = args.next();
             std::process::exit(relay::run_stdin(endpoint.as_deref()));
+        }
+        Some("mcp-serve") => {
+            let mut explicit: Option<String> = None;
+            while let Some(flag) = args.next() {
+                if flag == "--endpoint" {
+                    explicit = args.next();
+                } else {
+                    eprintln!("error: unexpected mcp-serve argument `{flag}`");
+                    std::process::exit(2);
+                }
+            }
+            let srv = mcp::ServerCtx {
+                instructions_extra: String::new(),
+            };
+            let cc = mcp::CallCtx {
+                endpoint: mcp::resolve_endpoint(explicit.as_deref()),
+                run_id: std::env::var("FORGE_RUN_ID").unwrap_or_default(),
+                timeout: std::time::Duration::from_secs(3),
+            };
+            std::process::exit(mcp::serve_stdio(&srv, &cc));
         }
         Some(other) => {
             eprintln!("error: unexpected argument `{other}`");
