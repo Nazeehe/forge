@@ -52,7 +52,7 @@
   legacy-dir-collision, corrupt-save, full-disk-error, hostile-text-safety,
   theme-no-inline-RGB.
 
-## Phase 2 — Terminal core, first pixels — STATUS: DONE, manually testable (78 green: 74 unit + 4 integration)
+## Phase 2 — Terminal core, first pixels — STATUS: DONE, manually testable (80 green: 76 unit + 4 integration)
 
 - [x] `AppEvent` protocol (Send) + `from_pty` mapping + single-owner `AppState` reducer.
 - [x] `SessionManager` (order/active/run-index/rebind/retention) + `PtyPane`
@@ -66,6 +66,8 @@
       (terminals report uppercase/symbols as SHIFT+char); live PTY
       `echo SMOKE-OK` renders on screen. Test:
       `input::tests::shift_char_keys_encode_to_pty_bytes`.
+- [x] Multiline pane bodies: `encode_multiline_for_display` preserves `\n`
+      row breaks (single-line encoding flattened the screen to one line).
 - [ ] `tuirealm` chrome host (buttons/mouse) — deferred to Phase 3+ chrome work.
 - Still open: flood-cannot-starve-input gate test.
 
