@@ -39,6 +39,16 @@ pub fn grid_areas(count: usize, area: Rect) -> Vec<Rect> {
 /// untrusted PTY output, so both pass through display encoding: raw escape
 /// sequences must never reach the outer terminal.
 pub fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], status: &str) {
+    if panes.is_empty() {
+        let hint = Paragraph::new("No sessions yet — press Ctrl-b c to create one.\nCtrl-b q quits.")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(theme::style(theme::Role::BorderUnfocused))
+                    .title(" forge "),
+            );
+        frame.render_widget(hint, area);
+    }
     let areas = grid_areas(panes.len(), area);
     for (view, rect) in panes.iter().zip(areas.iter()) {
         let (glyph, _role) = if view.live {
@@ -156,6 +166,17 @@ mod tests {
         assert!(text.contains("agent-1"), "title visible");
         assert!(text.contains("hello out"), "body visible");
         assert!(text.contains("prefix Ctrl-b"), "status visible");
+    }
+
+    #[test]
+    fn empty_grid_explains_itself() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_grid(f, area(), &[], "status"))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Ctrl-b c"), "empty state guides: {text:?}");
     }
 
     #[test]

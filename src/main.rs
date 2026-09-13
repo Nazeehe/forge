@@ -11,6 +11,8 @@ mod pty;
 mod safe_text;
 mod session;
 mod theme;
+mod tui;
+mod ui;
 
 const VERSION: &str = "1.0.0";
 
@@ -75,13 +77,13 @@ fn startup() -> i32 {
     if let Ok(mut log) =
         logging::FileLogger::open(&branding::app_log(&home), logging::DEFAULT_MAX_BYTES)
     {
-        let _ = log.append(&format!("forge {VERSION} start run {run}"));
+        let _ = log.append(&format!(
+            "forge {VERSION} start run {run} permission={:?}",
+            loaded.config.permission.mode
+        ));
     }
-    eprintln!(
-        "forge TUI not yet implemented (Phase 2); run {} permission={:?}",
-        run, loaded.config.permission.mode
-    );
-    1
+    let mut state = app::AppState::new();
+    tui::run(&mut state)
 }
 
 fn main() {
