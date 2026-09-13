@@ -33,10 +33,15 @@ pub struct PtyPane {
     writer: Option<Box<dyn Write + Send>>,
     master: Option<Box<dyn MasterPty + Send>>,
     child: ChildCell,
+    screen: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
     _reader: Option<thread::JoinHandle<()>>,
 }
 
 fn lock_child(cell: &ChildCell) -> MutexGuard<'_, Box<dyn portable_pty::Child + Send + Sync>> {
+    cell.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock_screen(cell: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>) -> std::sync::MutexGuard<'_, vt100::Parser> {
     cell.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -70,9 +75,12 @@ impl PtyPane {
         let reader = pair.master.try_clone_reader().map_err(pty_error)?;
         let writer = pair.master.take_writer().map_err(pty_error)?;
         let child: ChildCell = Arc::new(Mutex::new(child));
+        let screen = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(
+            rows, cols, 1000,
+        )));
         // Reap promptly so short-lived commands never linger as zombies: the
         // reader observes EOF first, then waits for the status.
-        let handle = Self::spawn_reader(id, reader, Arc::clone(&child), tx);
+        let handle = Self::spawn_reader(id, reader, Arc::clone(&child), Arc::clone(&screen), tx);
         Ok(PtyPane {
             id,
             rows,
@@ -80,6 +88,7 @@ impl PtyPane {
             writer: Some(writer),
             master: Some(pair.master),
             child,
+            screen,
             _reader: Some(handle),
         })
     }
@@ -112,9 +121,15 @@ impl PtyPane {
                 .map(|_| {
                     self.rows = rows;
                     self.cols = cols;
+                    lock_screen(&self.screen).set_size(rows, cols);
                 }),
             None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "pane is closed")),
         }
+    }
+
+    /// Current visible screen contents, for grid rendering.
+    pub fn screen_text(&self) -> String {
+        lock_screen(&self.screen).screen().contents()
     }
 
     /// Kill the child and release the master side. The reader thread reports
@@ -131,6 +146,7 @@ impl PtyPane {
         id: SessionId,
         mut reader: Box<dyn Read + Send>,
         child: ChildCell,
+        screen: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
         tx: Sender<(SessionId, PtyEvent)>,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
@@ -139,6 +155,7 @@ impl PtyPane {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        lock_screen(&screen).process(&buf[..n]);
                         if tx.send((id, PtyEvent::Output(buf[..n].to_vec()))).is_err() {
                             break;
                         }
@@ -233,6 +250,26 @@ mod tests {
             }
         }
         pane.close();
+    }
+
+    #[test]
+    fn screen_shows_output() {
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(id, "printf hello-screen", &workdir(), 24, 80, tx).unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            if pane.screen_text().contains("hello-screen") {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("screen never showed output: {:?}", pane.screen_text());
+            }
+            // Drain so the reader never blocks on a full channel.
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (_, _) = run_until_exit(&mut pane, &rx);
     }
 
     #[test]
