@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -517,6 +518,43 @@ impl SessionManager {
         false
     }
 
+    /// SIGTERM every live pane's child, then wait up to `grace` total for
+    /// all of them to exit on their own (agents flush state on TERM).
+    /// Already-exited records are skipped. Returns the number of panes
+    /// still alive afterwards: the caller should `close()`/drop those
+    /// (SIGKILL). Never blocks longer than `grace`, and never reaps —
+    /// reader threads report the real exit codes as usual.
+    pub fn shutdown_gracefully(&mut self, grace: Duration) -> usize {
+        for rec in self.sessions.values() {
+            if !rec.state.is_live() {
+                continue;
+            }
+            for tab in rec.tabs.iter() {
+                if let Some(pane) = tab.pane.as_ref() {
+                    pane.terminate();
+                }
+            }
+        }
+        let deadline = Instant::now() + grace;
+        loop {
+            let alive = self
+                .sessions
+                .values()
+                .filter(|rec| rec.state.is_live())
+                .flat_map(|rec| rec.tabs.iter())
+                .filter_map(|tab| tab.pane.as_ref())
+                .filter(|pane| pane.child_alive())
+                .count();
+            if alive == 0 {
+                return 0;
+            }
+            if Instant::now() >= deadline {
+                return alive;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     /// Kill every tab pane; the record is retained and marked exited once
     /// the primary reader reports back through [`SessionManager::drain_pty`].
     pub fn kill(&mut self, id: SessionId) -> bool {
@@ -949,6 +987,76 @@ mod tests {
         assert_eq!(m.lookup_run(run.as_str()), None);
         assert!(m.remove(id));
         assert!(m.get(id).is_none());
+    }
+
+    #[test]
+    fn shutdown_gracefully_terms_all_live_panes() {
+        let mut m = SessionManager::new();
+        // Exit code 3 proves each trap ran: signal-death reports code 1.
+        // READY is printed after the trap installs, so shutdown's SIGTERM
+        // deterministically runs it instead of racing trap installation.
+        let a = m
+            .spawn(
+                "a",
+                &workdir(),
+                "trap 'exit 3' TERM; echo READY-A; while :; do :; done",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        let b = m
+            .spawn(
+                "b",
+                &workdir(),
+                "trap 'exit 3' TERM; echo READY-B; while :; do :; done",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        let (mut ba, mut bb) = (Vec::new(), Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(ba.windows(7).any(|w| w == b"READY-A") && bb.windows(7).any(|w| w == b"READY-B"))
+        {
+            for (eid, _tab, ev) in m.drain_pty() {
+                match ev {
+                    PtyEvent::Output(bytes) => {
+                        if eid == a {
+                            ba.extend_from_slice(&bytes);
+                        } else if eid == b {
+                            bb.extend_from_slice(&bytes);
+                        }
+                    }
+                    PtyEvent::Exited(code) => {
+                        panic!("session {eid} died before READY: {code:?}")
+                    }
+                }
+            }
+            if Instant::now() > deadline {
+                panic!("READY never arrived: a={ba:?} b={bb:?}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(m.shutdown_gracefully(Duration::from_secs(10)), 0);
+        // One collecting drain: poll_exit-style per-id drains would eat
+        // the other session's Exited (drain_pty yields every session's
+        // events, and unconsumed entries are dropped with the Vec).
+        let mut codes = std::collections::HashMap::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while codes.len() < 2 {
+            for (eid, _tab, ev) in m.drain_pty() {
+                if let PtyEvent::Exited(code) = ev {
+                    codes.insert(eid, code);
+                }
+            }
+            if Instant::now() > deadline {
+                panic!("missing exits: {codes:?}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(codes.get(&a), Some(&Some(3)));
+        assert_eq!(codes.get(&b), Some(&Some(3)));
+        assert!(m.remove(a));
+        assert!(m.remove(b));
     }
 
     #[test]

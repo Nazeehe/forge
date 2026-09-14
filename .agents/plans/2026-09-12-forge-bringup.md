@@ -43,17 +43,7 @@
   `confine` (Phase 7 file transfer), `safe_text` display fns (Phase 3 permission UI),
   `CellFormat::plain` (test + future-chrome use).
 
-- [ ] `branding` (naming constants), `errors/logging` (bounded, terminal-safe).
-- [ ] `theme` (semantic APIs only) + `safe_text` + path-jail checks.
-- [ ] `config` (`~/.forge/config.toml`, no memory section; defaults: prefix
-      ctrl-b, perm Off, AI gpt-4.1-mini/thr 0.6/10s; unknown-section preserve;
-      mutex-serialized writes) + `~/.ccpp`→`~/.forge` migration.
-- [ ] `ids` (run-ID/enums) + `fs_atomic` (tmp/fsync/rename, 0600 helpers).
-- Gate tests: config-defaults, unknown-TOML-preserved, atomicity,
-  legacy-dir-collision, corrupt-save, full-disk-error, hostile-text-safety,
-  theme-no-inline-RGB.
-
-## Phase 2 — Terminal core, first pixels — STATUS: DONE, manually testable (81 green: 77 unit + 4 integration)
+## Phase 2 — Terminal core, first pixels — STATUS: DONE, manually testable (81 green at the time; now 300+; see progress log)
 
 - [x] `AppEvent` protocol (Send) + `from_pty` mapping + single-owner `AppState` reducer.
 - [x] `SessionManager` (order/active/run-index/rebind/retention) + `PtyPane`
@@ -73,11 +63,13 @@
       (were hardcoded 24x80 until the next outer resize; broke lazygit
       layout). Test: `tui::tests::new_session_fits_current_grid`; live
       `stty size` reports the fitted 21x78.
-- [ ] Pane-content color: `screen_text` is plain text end to end (vt100 cell
-      attributes dropped, `Paragraph` has no spans), so full-screen apps
-      render monochrome. Needs a styled-row view model + SGR→theme mapping
-      (+ advertise a capable `TERM` to children). Next render-fidelity item.
-- [ ] `tuirealm` chrome host (buttons/mouse) — deferred to Phase 3+ chrome work.
+- [x] Pane-content color — LANDED 2026-09-14: styled-row view model +
+      SGR→theme absolute-role map (hue carried through child output, readable
+      against measured bg); capable `TERM` advertised to children.
+- [ ] `tuirealm` chrome host (buttons/mouse) — SUPERSEDED (deliberate,
+      2026-09-14): chrome is manual render + hit-test (session bar buttons,
+      opaque modals, restore picker); tui-realm stays for dialog form inputs
+      only. No component-tree migration planned.
 - Still open: flood-cannot-starve-input gate test.
 
 ## Phase 2.6 — Session layout model (80/20 + session bar) — STATUS: DONE (131 green: 126 unit + 5 integration)
@@ -126,7 +118,7 @@ pulled per-slice as needed.
       (live: dumb parent → xterm-256color child).
 - Gate: lazygit/htop/vim live usable; key-table unit tests per chord class.
 
-## Phase 3 — Hooks + permissions — STATUS: DOING
+## Phase 3 — Hooks + permissions — STATUS: DONE (gate tests listed under 3a–3c landed; see progress log)
 
 - [x] 3a `hook-relay`: fail-open relay (stdin JSON → route → one newline
       record → optional ~3 s decision; always exit 0 silent). No serde:
@@ -148,14 +140,10 @@ pulled per-slice as needed.
   Live: modal renders, Down+Enter denies with audit line, repeat auto-denies.
 - Gate tests: relay-never-blocks; block-wins; audit-0600-enforced;
   hostile-display-safe.
-
-- [ ] `hook-relay` (fail-open, exit 0, ~3s sync timeout) for claude/codex/muse.
-- [ ] Listener: `0600` socket + loopback TCP, 32-conn cap, no-prefetch first line.
-- [ ] Policy/cache/audit (`audit.log` 0600, block-wins); modes Off, Safe-Only,
-      YOLO (AI-Assisted deferred to Phase 8).
-- [ ] `tui-realm` permission modal (keyboard nav + mouse click).
-- Gate tests: relay-never-blocks; block-wins; audit-0600-enforced;
-  hostile-display-safe.
+- (Stale duplicate checklist removed 2026-09-14: repeated 3a–3d, all landed.
+  Off-phase additions: opaque restyled modals, group modal with auto-focus,
+  300 ms staged Enter injection, wheel-scroll on alt-screen, SCM lazygit tab,
+  Omarchy live theme follow — see progress log.)
 
 ## Phase 4 — Comms core — STATUS: DONE
 
@@ -172,32 +160,33 @@ pulled per-slice as needed.
   pressure-cap; target-exit-determinism. Manual: two live sessions
   ask/tell/ack plus live no-group refusal — all passed.
 
-## Phase 5 — Agent CLI sessions (pulled forward) — STATUS: TODO
+## Phase 5 — Agent CLI sessions (pulled forward) — STATUS: MOSTLY DONE (5a/5c/5d landed 2026-09-13/14; 5b partial)
 
-- [ ] 5a `cli_tool` registry: `claude`/`codex`/`muse` (binary, env
+- [x] 5a `cli_tool` registry: `claude`/`codex`/`muse` (binary, env
       override, model flag, launch flags per blueprint table; muse binary
-      is `muse`, not `metacode`); binary-missing errors. Needs `serde_json`
-      (blueprint toolchain) for settings surgery.
-- [ ] 5b Installers: `install-hooks/uninstall-hooks` (claude
-      settings.json; codex `hooks.json` best-effort — inert but firing
-      unverified without API auth; muse: DONE 2026-09-13, user `hooks`
+      is `muse`, not `metacode`); binary-missing errors.
+- [ ] 5b Installers: muse hooks + MCP entries DONE 2026-09-13 (user `hooks`
       block in ~/.config/muse/settings.json, 5 events verified live on
       1.2.1; scrubbed hook env bridged via ~/.forge/endpoint.json +
-      harness-ID attribution),
-      `install-mcp/uninstall-mcp` (`claude mcp add -s user`; `codex mcp add`;
-      muse: DONE 2026-09-13, `mcp_servers.forge` stdio entry, ${VAR} env
-      expansion verified live), `install-skills/uninstall-skills`
-      (+codex/gemini/metamate variants); startup repairs registrations +
-      refreshes bundled skills (`.new` preserves edits).
-- [ ] 5c Create-session UI (minimum set): harness picker, session name
-      field, folder path picker, model picker. Keyboard-first dialog.
-- [ ] 5d Launch + dual-tab sessions: agent-CLI tab + lazy terminal tab
-      (created on first switch); tab switch keys; `FORGE_CLI_TOOL` env;
-      hook→session attribution via caller run ID in the relay record +
-      activity transitions.
-- Gate tests: registry matrix (flags/env/missing); installer round-trips
-  on scratch homes; dialog validation; tab switch + lazy spawn; attribution.
-  Manual: launch codex + muse + claude, switch sessions, cross-talk both
+      harness-ID attribution; `mcp_servers.forge` stdio entry, ${VAR} env
+      expansion verified live). Still open: claude settings.json, codex
+      `hooks.json` (best-effort, unverified without API auth),
+      `install-skills/uninstall-skills` (+codex/gemini/metamate variants),
+      startup repair of registrations + bundled-skills refresh (`.new`
+      preserves edits).
+- [x] 5c Create-session UI — LANDED, trimmed per user: harness picker,
+      session name, folder path (no internet/model/local fields);
+      keyboard-first opaque dialog; new session auto-focuses on create.
+- [x] 5d Launch + triple-tab sessions: harness tab + lazy terminal tab +
+      lazy SCM tab (lazygit, created on first switch); tab switch keys;
+      `FORGE_CLI_TOOL` env; hook→session attribution via caller run ID in
+      the relay record + activity transitions; staged injection (300 ms
+      before Enter).
+- Gate tests: tab switch + lazy spawn + SCM fit landed
+  (`new_session_fits_current_grid`, `topbar_click_fits_lazy_scm_pane_to_main`,
+  `staged_enter_beat_is_300ms`, dialog validation). Still open: registry
+  matrix (flags/env/missing), installer round-trips on scratch homes,
+  attribution test. Manual: launch codex + muse + claude, cross-talk both
   directions via injection, MCP registered per CLI.
 
 ## Phase 6 — Projects, tasks, walkthrough, timers, recovery — STATUS: TODO
@@ -211,11 +200,15 @@ pulled per-slice as needed.
       `cancel_scheduled_prompt` + once/interval/daily).
 - [ ] TUI surface for tasks/walkthrough: views + prefix keys (blueprint
       views 4-5; key letters locked with tests like the dispatcher map);
-      theme switching UI (cycle key + config persist).
-- [ ] Persistence: `forge.log`, `session_history.json`, `sessions/*.json`
-      checkpoints (~2s coalesced capacity-one worker, signature-gated) +
-      Save & Quit + crash recovery + startup triage (onboard vs recover
-      vs fresh; refuse live-owner checkpoints).
+      theme switching UI: SUPERSEDED in part — Omarchy live auto-follow
+      shipped 2026-09-14 (no restart); manual cycle key + config persist
+      still an open user decision.
+- [ ] Persistence: PARTIAL off-phase — `sessions/*.json` checkpoints +
+      crash recovery + startup triage + restore picker + graceful
+      SIGTERM-on-quit landed 2026-09-14. Still open:
+      `session_history.json`, ~2s coalesced capacity-one worker,
+      signature-gating, Save & Quit. (`forge.log` already implemented —
+      see backlog.)
 - Gate tests: migration/CRUD/reorder/focus invariants; checkpoint round-trip;
   corrupt-save quarantine; live-checkpoint refusal.
 
@@ -235,9 +228,10 @@ pulled per-slice as needed.
 
 ## Phase 8 — Deferred: teams, VCS, whiteboard-bk, remote, AI — STATUS: TODO
 
-- [ ] 7a: ephemeral team builder (+ `forge-team-mode` skill), VCS
-      (Git lazygit / Sapling smartlog), whiteboard backend + limits
-      (9 tools 38-46: start/list/open/add/update/delete/highlight/
+- [ ] 7a: ephemeral team builder (+ `forge-team-mode` skill), VCS: Git
+      lazygit pane LANDED 2026-09-14 (lazy SCM tab, fitted; fallback text
+      when lazygit missing; Sapling smartlog still open), whiteboard backend
+      + limits (9 tools 38-46: start/list/open/add/update/delete/highlight/
       answer/end), Claudling.
 - [ ] 8b: SSH/OD remote + reverse-forwarding, mobile (GChat/Telegram),
       macOS raster/screenshot, AI-Assisted permissions.
@@ -335,3 +329,30 @@ pulled per-slice as needed.
   overlays. Proven end-to-end: lazygit 0.65 renders its full TUI through
   a forge pane in ~1s (needs /dev/tty, which portable-pty provides; no
   extra query answering required). Suite 297 + 7 green.
+- 2026-09-14: plan reconciliation (user: "what have we not done yet").
+  Removed two stale duplicate checklists (Phase 1 tail, Phase 3 tail);
+  Phase 3 DOING→DONE; Phase 5 TODO→MOSTLY DONE (5a/5c/5d checked, 5b
+  narrowed to claude/codex installers + skills + startup repair); Phase 2
+  color item checked (absolute-role map shipped), chrome-host marked
+  SUPERSEDED (manual chrome is deliberate); Phase 6 persistence marked
+  PARTIAL, theme-cycle UI half-superseded by Omarchy auto-follow; Phase 8
+  7a notes the shipped lazygit pane. Remaining: graceful SIGTERM on quit
+  (queued, next), Phase 6 tasks/walkthrough/timers/projects +
+  session_history/coalesced-checkpoints/signature-gating/Save & Quit,
+  Phase 5b remainder, Phase 7 full tool surface, Phase 8 teams/whiteboard/
+  remote/AI, backlog (clikan post-8, prefix-hold overlay, manual viewer,
+  away state). Open gates: flood-cannot-starve-input, registry matrix,
+  installer round-trips, attribution test.
+- 2026-09-14: graceful SIGTERM on quit (queued risk: agents killed
+  mid-thought). `PtyPane::terminate` (SIGTERM via new `libc` dep, no
+  waitpid — the reader keeps sole reap ownership so exit codes stay
+  accurate) + `child_alive` (`kill(pid,0)` probe) + `terminate_gracefully`
+  + `SessionManager::shutdown_gracefully` (TERMs all live panes, one
+  shared 2 s grace via `SHUTDOWN_GRACE` in `tui::run`; stragglers die by
+  the existing drop-SIGKILL and are logged to the app log, not stderr).
+  Tests: trap-exit reports the trap's code (SIGTERM proof), TERM-ignorer
+  times out then dies by SIGKILL fallback, manager fan-out covers two
+  panes. Test lessons: SIGTERM races trap installation (READY handshake
+  required), portable-pty maps signal-death to code 1 (not None), and
+  `poll_exit`-style per-id drains eat other sessions' Exited events —
+  collect multi-session exits in one drain. Suite 301 + 7 green.

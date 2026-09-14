@@ -25,6 +25,10 @@ pub const TICK_MS: u64 = 16;
 /// Background events drained per iteration (anti-starvation bound).
 pub const MAX_DRAIN: usize = 100;
 
+/// Grace window on quit: SIGTERM'd agents share this long to save state
+/// before the state drop SIGKILLs stragglers.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
 /// RAII terminal setup: raw mode plus the alternate screen while alive.
 pub struct TerminalGuard {
     active: bool,
@@ -142,7 +146,7 @@ pub fn run(
             return 1;
         }
     };
-    if let Err(e) = loop_until_quit(
+    let result = loop_until_quit(
         state,
         &mut terminal,
         ipc_rx,
@@ -150,7 +154,24 @@ pub fn run(
         &audit_path,
         loaded,
         home,
-    ) {
+    );
+    // Graceful shutdown: SIGTERM every live pane so agents can save
+    // state; stragglers die by SIGKILL when the state drops below.
+    // Bounded: the last frame sits for at most the grace window.
+    let survivors = state.manager.shutdown_gracefully(SHUTDOWN_GRACE);
+    if survivors > 0 {
+        // The terminal still owns the screen, so the app log (not
+        // stderr) carries the straggler report.
+        if let Ok(mut log) = crate::logging::FileLogger::open(
+            &crate::branding::app_log(home),
+            crate::logging::DEFAULT_MAX_BYTES,
+        ) {
+            let _ = log.append(&format!(
+                "quit: {survivors} pane(s) ignored SIGTERM, SIGKILLed"
+            ));
+        }
+    }
+    if let Err(e) = result {
         eprintln!("error: main loop failed: {e}");
         crate::relay::clear_endpoint_file(home);
         return 1;

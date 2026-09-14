@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 crossterm = "0.29"
+libc = "0.2"
 portable-pty = "0.8"
 ratatui = "0.30"
 regex = "1"

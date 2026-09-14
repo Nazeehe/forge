@@ -410,6 +410,7 @@ name = "forge"
 version = "1.0.0"
 dependencies = [
  "crossterm",
+ "libc",
  "portable-pty",
  "ratatui",
  "regex",

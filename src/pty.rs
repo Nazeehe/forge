@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -345,10 +346,68 @@ impl PtyPane {
         }
     }
 
+    /// Poll interval while waiting for a SIGTERM'd child to exit.
+    const TERMINATE_POLL: Duration = Duration::from_millis(25);
+
+    /// Ask the child to exit on its own (SIGTERM), without waiting.
+    /// True when the signal was sent or the child is already gone; false
+    /// only when signaling itself failed. The reader thread keeps sole
+    /// `waitpid` ownership, so exit reporting is unaffected.
+    pub fn terminate(&self) -> bool {
+        let Some(pid) = lock_child(&self.child).process_id() else {
+            return true;
+        };
+        // SAFETY: kill with a signal number only delivers; it never
+        // touches memory.
+        let sent = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0;
+        sent || !Self::pid_alive(pid)
+    }
+
+    /// Whether a pid still names a live process. A zombie awaiting reap
+    /// counts as alive; an unknown pid counts as gone. EPERM (exists but
+    /// unsignalable) counts as alive.
+    fn pid_alive(pid: u32) -> bool {
+        // SAFETY: signal 0 performs no delivery; it only probes.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    /// Whether this pane's child is still alive. A missing pid counts as
+    /// gone.
+    pub fn child_alive(&self) -> bool {
+        match lock_child(&self.child).process_id() {
+            Some(pid) => Self::pid_alive(pid),
+            None => false,
+        }
+    }
+
+    /// SIGTERM the child and wait up to `grace` for it to exit on its own
+    /// (agents flush state on TERM). True when the child is gone before
+    /// the deadline; false when the caller should `close()` it (SIGKILL)
+    /// instead. Never blocks longer than `grace`, and never reaps: the
+    /// reader thread reports the real exit code as usual.
+    pub fn terminate_gracefully(&self, grace: Duration) -> bool {
+        self.terminate();
+        let deadline = Instant::now() + grace;
+        loop {
+            if !self.child_alive() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Self::TERMINATE_POLL);
+        }
+    }
+
     /// Kill the child and release the master side. The reader thread reports
     /// the exit afterwards. A plain master hangup is not enough: the reader's
     /// own cloned fd keeps the PTY open, so an output-less child (e.g. a
     /// sleeping harness) would never see EOF without the kill.
+    /// Immediate SIGKILL: shutdown paths should `terminate_gracefully`
+    /// first so agents can save state.
     pub fn close(&mut self) {
         let _ = lock_child(&self.child).kill();
         lock_writer(&self.writer).take();
@@ -541,6 +600,87 @@ mod tests {
             "origin report in output: {seen:?}"
         );
         pane.close();
+    }
+
+    /// Drain output until `needle` appears; return all bytes seen. A
+    /// child that exits first (or never prints) fails the test: without
+    /// the marker there is no proof the trap below is installed, and a
+    /// SIGTERM sent earlier would race trap installation (default
+    /// disposition kills instantly, trap never runs).
+    fn drain_until_marker(
+        rx: &std::sync::mpsc::Receiver<(SessionId, PtyEvent)>,
+        needle: &[u8],
+    ) -> Vec<u8> {
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok((_, PtyEvent::Output(b))) => {
+                    seen.extend_from_slice(&b);
+                    if seen.windows(needle.len()).any(|w| w == needle) {
+                        return seen;
+                    }
+                }
+                Ok((_, PtyEvent::Exited(code))) => {
+                    panic!("child exited {code:?} before marker: {seen:?}")
+                }
+                Err(_) => panic!("marker never arrived: {seen:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn terminate_gracefully_delivers_sigterm_for_clean_child_exit() {
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        // Builtin-only loop: no forked child can swallow the signal, so
+        // the trap runs the moment SIGTERM lands. READY is printed after
+        // the trap installs, so the SIGTERM below deterministically runs
+        // it. Exit code 3 proves the trap ran (signal-death reports 1).
+        let mut pane = PtyPane::spawn(
+            id,
+            "trap 'echo TERM-SAVED; exit 3' TERM; echo READY; while :; do :; done",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let mut all = drain_until_marker(&rx, b"READY");
+        assert!(pane.terminate_gracefully(Duration::from_secs(10)));
+        let (out, code) = run_until_exit(&mut pane, &rx);
+        all.extend_from_slice(&out);
+        assert!(all.windows(10).any(|w| w == b"TERM-SAVED"), "got: {all:?}");
+        assert_eq!(code, Some(3));
+    }
+
+    #[test]
+    fn terminate_gracefully_times_out_when_child_ignores_sigterm() {
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "trap '' TERM; echo READY; exec sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        drain_until_marker(&rx, b"READY");
+        let start = Instant::now();
+        assert!(!pane.terminate_gracefully(Duration::from_millis(300)));
+        let waited = start.elapsed();
+        assert!(waited >= Duration::from_millis(300), "gave up early: {waited:?}");
+        assert!(waited < TIMEOUT, "hung past the grace window: {waited:?}");
+        // The ignorer is still alive: only the SIGKILL fallback ends it.
+        // portable-pty reports signal-death as code 1 (`with_signal`), so
+        // Some(1) here proves the SIGKILL fallback did it — the graceful
+        // path would have carried the trap's own code instead.
+        pane.close();
+        let (_, code) = run_until_exit(&mut pane, &rx);
+        assert_eq!(code, Some(1));
     }
 
     #[test]
