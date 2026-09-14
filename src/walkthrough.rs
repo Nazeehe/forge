@@ -38,13 +38,31 @@ pub struct Question {
     pub answer: Option<String>,
 }
 
-/// One highlighted token: a theme role over a byte range of its line.
-/// Roles only, never raw colors, so OS themes remap code like chrome.
+/// One highlighted token: a static color over a byte range of its
+/// line. Code ignores the OS theme on purpose: one hand-picked dark
+/// palette that always contrasts, like any editor theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HLSpan {
-    pub role: Role,
+    pub color: ratatui::style::Color,
     pub start: usize,
     pub end: usize,
+}
+
+/// Static code palette (OneDark hues): body text, dim comments,
+/// green strings, purple keywords, blue names, teal types, orange
+/// constants, the step-row wash, and the gutter bar.
+pub mod code {
+    use ratatui::style::Color;
+    pub const FG: Color = Color::Rgb(171, 178, 191);
+    pub const COMMENT: Color = Color::Rgb(92, 99, 112);
+    pub const STRING: Color = Color::Rgb(152, 195, 121);
+    pub const KEYWORD: Color = Color::Rgb(198, 120, 221);
+    pub const NAME: Color = Color::Rgb(97, 175, 239);
+    pub const TYPE: Color = Color::Rgb(86, 182, 194);
+    pub const CONSTANT: Color = Color::Rgb(209, 154, 102);
+    pub const INVALID: Color = Color::Rgb(224, 108, 117);
+    pub const WASH: Color = Color::Rgb(44, 49, 60);
+    pub const GUTTER: Color = Color::Rgb(86, 182, 194);
 }
 
 /// Live walkthrough for one session: tour position plus the running
@@ -448,16 +466,21 @@ fn syntax_set() -> &'static syntect::parsing::SyntaxSet {
     SET.get_or_init(syntect::parsing::SyntaxSet::load_defaults_newlines)
 }
 
-/// Theme role for one scope stack, innermost first. Comments dim,
-/// strings go green, keywords gold, types cyan — the reference look —
-/// everything else stays body text. Unknown scopes fall through to
-/// the next outer scope, so partial grammars degrade gracefully.
-fn role_for(stack: &[syntect::parsing::Scope]) -> Role {
+/// Static color for one scope stack, innermost first. Unknown scopes
+/// fall through to the next outer scope, so partial grammars degrade
+/// gracefully to body text.
+fn color_for(stack: &[syntect::parsing::Scope]) -> ratatui::style::Color {
     fn sel(name: &str) -> syntect::parsing::Scope {
         syntect::parsing::Scope::new(name).expect("builtin scope selector parses")
     }
     let (comment, string, constant) = (sel("comment"), sel("string"), sel("constant"));
     let (keyword, storage) = (sel("keyword"), sel("storage"));
+    let names = [
+        sel("entity.name.function"),
+        sel("entity.name.macro"),
+        sel("support.function"),
+        sel("variable.function"),
+    ];
     let types = [
         sel("entity.name.type"),
         sel("entity.name.class"),
@@ -471,25 +494,28 @@ fn role_for(stack: &[syntect::parsing::Scope]) -> Role {
     let invalid = sel("invalid");
     for scope in stack.iter().rev() {
         if invalid.is_prefix_of(*scope) {
-            return Role::Danger;
+            return code::INVALID;
         }
         if comment.is_prefix_of(*scope) {
-            return Role::Muted;
+            return code::COMMENT;
         }
         if string.is_prefix_of(*scope) {
-            return Role::Success;
+            return code::STRING;
         }
         if constant.is_prefix_of(*scope) {
-            return Role::Command;
+            return code::CONSTANT;
         }
         if keyword.is_prefix_of(*scope) || storage.is_prefix_of(*scope) {
-            return Role::Brand;
+            return code::KEYWORD;
+        }
+        if names.iter().any(|n| n.is_prefix_of(*scope)) {
+            return code::NAME;
         }
         if types.iter().any(|t| t.is_prefix_of(*scope)) {
-            return Role::Info;
+            return code::TYPE;
         }
     }
-    Role::Text
+    code::FG
 }
 
 /// Token roles for every line, parsed as one document so multi-line
@@ -518,14 +544,14 @@ fn highlight_lines(file_path: &str, lines: &[String]) -> Vec<Vec<HLSpan>> {
             let mut flush = |upto: usize, stack: &ScopeStack, spans: &mut Vec<HLSpan>| {
                 let end = upto.min(line.len());
                 if end > prev && line.is_char_boundary(prev) && line.is_char_boundary(end) {
-                    let role = role_for(stack.as_slice());
+                    let color = color_for(stack.as_slice());
                     // Adjacent plain runs merge; anything else (or a
                     // leading plain run) starts its own span.
                     match spans.last_mut() {
-                        Some(last) if last.role == Role::Text && role == Role::Text => {
+                        Some(last) if last.color == code::FG && color == code::FG => {
                             last.end = end;
                         }
-                        _ => spans.push(HLSpan { role, start: prev, end }),
+                        _ => spans.push(HLSpan { color, start: prev, end }),
                     }
                 }
                 prev = end;
@@ -716,18 +742,19 @@ impl Walkthrough {
         }
         let num_w = self.lines.len().to_string().len().max(2);
         let rows = self.code_window(area.height as usize);
-        // Step rows tint with the Info wash so token colors sit on one
-        // surface; every span carries the wash or the tint gets holes.
-        let wash = style(Role::Info).fg;
+        // Step rows sit on the static wash so the bar and tokens share
+        // one surface; every span carries it or the tint gets holes.
+        // All code colors are static (see `code`), never theme roles.
+        use ratatui::style::Style;
         let lines: Vec<Line> = rows
             .into_iter()
             .map(|(no, text, in_range)| {
-                let tint = if in_range { wash } else { None };
-                let mut base = style(Role::Text);
+                let tint = if in_range { Some(code::WASH) } else { None };
+                let mut base = Style::default().fg(code::FG);
                 base.bg = tint;
-                let mut gutter = style(Role::Text);
+                let mut gutter = Style::default().fg(code::GUTTER);
                 gutter.bg = tint;
-                let mut num = style(Role::Muted);
+                let mut num = Style::default().fg(code::COMMENT);
                 num.bg = tint;
                 let mut row = vec![
                     Span::styled(if in_range { "▌" } else { " " }, gutter),
@@ -740,9 +767,9 @@ impl Walkthrough {
                             let Some(slice) = text.get(tok.start..tok.end) else {
                                 continue;
                             };
-                            let mut s = base;
-                            s.fg = style(tok.role).fg.or(base.fg);
-                            row.push(Span::styled(encode_for_display(slice), s));
+                            let mut style = Style::default().fg(tok.color);
+                            style.bg = tint;
+                            row.push(Span::styled(encode_for_display(slice), style));
                         }
                     }
                     _ => row.push(Span::styled(encode_for_display(text), base)),
@@ -1218,28 +1245,24 @@ mod tests {
     }
 
     #[test]
-    fn rust_tokens_take_theme_roles_not_rgb() {
-        use crate::theme::{style, Role};
-        use ratatui::style::Color;
+    fn rust_tokens_take_static_palette() {
         let wt = rust_tour();
         // Code rows start below the two header rows; the gutter plus a
         // two-wide number field precede the source text.
         let buf = render_cells(&wt, 60, 20);
         let fg = |x: u16, y: u16| buf[(x, y)].fg;
-        assert_eq!(fg(4, 2), style(Role::Brand).fg.unwrap(), "fn keyword");
-        assert_eq!(fg(8, 3), style(Role::Brand).fg.unwrap(), "let keyword");
-        assert_eq!(fg(16, 3), style(Role::Success).fg.unwrap(), "string");
-        assert_eq!(fg(22, 3), style(Role::Muted).fg.unwrap(), "comment");
-        for cell in buf.content.iter() {
-            for color in [cell.fg, cell.bg] {
-                assert!(!matches!(color, Color::Rgb(..)), "cell {cell:?}");
-            }
-        }
+        assert_eq!(fg(4, 2), code::KEYWORD, "fn keyword");
+        assert_eq!(fg(8, 3), code::KEYWORD, "let keyword");
+        assert_eq!(fg(16, 3), code::STRING, "string");
+        assert_eq!(fg(22, 3), code::COMMENT, "comment");
+        // Step rows sit on the static wash, never the old cyan theme
+        // tint; out-of-step rows stay transparent.
+        assert_eq!(buf[(4, 2)].bg, code::WASH, "wash behind step code");
+        assert_eq!(buf[(4, 5)].bg, ratatui::style::Color::Reset, "no wash off-step");
     }
 
     #[test]
     fn gutter_bar_marks_only_step_rows() {
-        use crate::theme::{style, Role};
         let wt = rich();
         // Step 1 covers lines 2-3; the code window opens at line 1.
         let buf = render_cells(&wt, 100, 30);
@@ -1247,7 +1270,8 @@ mod tests {
         assert_eq!(buf[(0, 3)].symbol(), "▌");
         assert_eq!(buf[(0, 4)].symbol(), "▌");
         assert_eq!(buf[(0, 5)].symbol(), " ");
-        assert_eq!(buf[(0, 3)].bg, style(Role::Info).fg.unwrap(), "bar sits on the tint");
+        assert_eq!(buf[(0, 3)].fg, code::GUTTER, "static bar color");
+        assert_eq!(buf[(0, 3)].bg, code::WASH, "bar sits on the wash");
     }
 
     #[test]
