@@ -412,6 +412,22 @@ fn option_key(radio: &mut Radio, key: &KeyEvent) {
     }
 }
 
+/// Truncate to a cell width, marking cuts at the front with an
+/// ellipsis and keeping the tail intact — for paths, where the end
+/// carries the meaning.
+fn fit_start(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let len = text.chars().count();
+    if len <= width {
+        return text.to_string();
+    }
+    let mut out = String::from("…");
+    out.extend(text.chars().skip(len - width + 1));
+    out
+}
+
 /// Truncate to a cell width, marking cuts with an ellipsis.
 fn fit(text: &str, width: usize) -> String {
     if width == 0 {
@@ -475,10 +491,12 @@ impl CreateDialog {
             )
         };
         // `[value]` box, padded to fill; empty shows the dim placeholder.
-        let field = |value: &str, focused: bool, placeholder: &str| -> Vec<Span> {
+        // Paths truncate at the front (`…tail`) so the meaningful end
+        // stays visible; names truncate at the end as usual.
+        let field = |value: &str, focused: bool, placeholder: &str, front: bool| -> Vec<Span> {
             let room = content_w.saturating_sub(2);
             let shown = if value.is_empty() { placeholder } else { value };
-            let cut = fit(shown, room);
+            let cut = if front { fit_start(shown, room) } else { fit(shown, room) };
             let pad = room.saturating_sub(cut.chars().count());
             if focused {
                 vec![Span::styled(format!("[{cut}{}]", " ".repeat(pad)), focus_row())]
@@ -536,9 +554,13 @@ impl CreateDialog {
                 FOCUS_DIRECTORY => line_at(
                     labels[index],
                     focused,
-                    field(&self.directory_text(), focused, ""),
+                    field(&self.directory_text(), focused, "", true),
                 ),
-                FOCUS_NAME => line_at(labels[index], focused, field(&self.name_text(), focused, "")),
+                FOCUS_NAME => line_at(
+                    labels[index],
+                    focused,
+                    field(&self.name_text(), focused, "", false),
+                ),
                 FOCUS_TOOL => line_at(
                     labels[index],
                     focused,
@@ -1023,6 +1045,35 @@ mod tests {
         tab(&mut d, &names, 1);
         assert_eq!(d.spec().cwd, PathBuf::from(format!("{r}/alpha-service/zzz")));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fit_start_keeps_the_tail() {
+        assert_eq!(fit_start("", 5), "");
+        assert_eq!(fit_start("short", 5), "short");
+        assert_eq!(fit_start("exactly", 7), "exactly");
+        assert_eq!(fit_start("/a/very/long/path", 8), "…ng/path");
+        assert_eq!(fit_start("abcdef", 1), "…");
+        assert_eq!(fit_start("abcdef", 0), "");
+    }
+
+    #[test]
+    fn long_directory_renders_ellipsis_front() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let long = "/home/user/projects/some/deeply/nested/directory/structure/that/goes/on/forever";
+        // Room is 61 cells on an 80-wide terminal; the fixture overflows it.
+        assert!(long.chars().count() > 61);
+        let mut d = CreateDialog::new("x", std::path::Path::new(long), &[]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        let buf = terminal.backend().buffer();
+        // Directory row (y 7): `[` at x 15, then the `…tail` box.
+        let row: String = (15..15 + 63)
+            .map(|x| buf.get(x, 7).symbol().to_string())
+            .collect();
+        assert_eq!(row, format!("[{}]", fit_start(long, 61)));
+        assert!(row.starts_with("[…"));
+        assert!(row.ends_with("forever]"));
     }
 
     #[test]
