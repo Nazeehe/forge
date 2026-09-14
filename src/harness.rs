@@ -51,10 +51,51 @@ impl Harness {
         }
     }
 
-    /// Whether `install-hooks` can do anything. Muse exposes no shell hook
-    /// configuration (blueprint §5); its allow policy lives in opencode.json.
+    /// Whether `install-hooks` can do anything. All three harnesses take
+    /// shell hook commands now: muse's user `hooks` block in
+    /// ~/.config/muse/settings.json fires them (verified live on 1.2.1).
     pub fn supports_hooks(self) -> bool {
-        !matches!(self, Harness::Muse)
+        matches!(self, Harness::Claude | Harness::Codex | Harness::Muse)
+    }
+
+    /// Resume argv for a saved harness conversation. Every flag here is
+    /// grounded in the installed CLIs (`--help`): claude takes
+    /// `--resume <id>` / `--continue`; codex takes `resume [SESSION_ID]`
+    /// / `resume --last`; muse takes `resume <uuid>` / `resume --last`.
+    /// No model override rides along: a resumed session keeps the model
+    /// it already had. The no-ID fallbacks are cwd-scoped (`--continue`,
+    /// workspace `--last`) except codex `--last`, which is global and
+    /// therefore last resort.
+    pub fn resume_argv(self, binary: &str, harness_session_id: Option<&str>) -> Vec<String> {
+        match self {
+            Harness::Claude => {
+                let mut argv = vec![binary.to_string()];
+                match harness_session_id.filter(|s| !s.is_empty()) {
+                    Some(id) => {
+                        argv.push("--resume".to_string());
+                        argv.push(id.to_string());
+                    }
+                    None => argv.push("--continue".to_string()),
+                }
+                argv
+            }
+            Harness::Codex => {
+                let mut argv = vec![binary.to_string(), "resume".to_string()];
+                match harness_session_id.filter(|s| !s.is_empty()) {
+                    Some(id) => argv.push(id.to_string()),
+                    None => argv.push("--last".to_string()),
+                }
+                argv
+            }
+            Harness::Muse => {
+                let mut argv = vec![binary.to_string(), "resume".to_string()];
+                match harness_session_id.filter(|s| !s.is_empty()) {
+                    Some(id) => argv.push(id.to_string()),
+                    None => argv.push("--last".to_string()),
+                }
+                argv
+            }
+        }
     }
 }
 
@@ -131,9 +172,42 @@ mod tests {
     }
 
     #[test]
+    fn resume_argv_pins_grounded_flags() {
+        assert_eq!(
+            Harness::Claude.resume_argv("claude", Some("abc-123")),
+            vec!["claude", "--resume", "abc-123"]
+        );
+        assert_eq!(
+            Harness::Claude.resume_argv("claude", None),
+            vec!["claude", "--continue"]
+        );
+        assert_eq!(
+            Harness::Claude.resume_argv("claude", Some("")),
+            vec!["claude", "--continue"],
+            "empty ID falls back"
+        );
+        assert_eq!(
+            Harness::Codex.resume_argv("/bin/codex", Some("uuid-1")),
+            vec!["/bin/codex", "resume", "uuid-1"]
+        );
+        assert_eq!(
+            Harness::Codex.resume_argv("codex", None),
+            vec!["codex", "resume", "--last"]
+        );
+        assert_eq!(
+            Harness::Muse.resume_argv("muse", Some("uuid-9")),
+            vec!["muse", "resume", "uuid-9"]
+        );
+        assert_eq!(
+            Harness::Muse.resume_argv("muse", None),
+            vec!["muse", "resume", "--last"]
+        );
+    }
+
+    #[test]
     fn hook_support_matrix_matches_blueprint() {
         assert!(Harness::Claude.supports_hooks());
         assert!(Harness::Codex.supports_hooks());
-        assert!(!Harness::Muse.supports_hooks());
+        assert!(Harness::Muse.supports_hooks());
     }
 }

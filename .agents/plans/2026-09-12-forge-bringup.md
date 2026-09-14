@@ -180,9 +180,13 @@ pulled per-slice as needed.
       (blueprint toolchain) for settings surgery.
 - [ ] 5b Installers: `install-hooks/uninstall-hooks` (claude
       settings.json; codex `hooks.json` best-effort — inert but firing
-      unverified without API auth; muse: none per blueprint),
+      unverified without API auth; muse: DONE 2026-09-13, user `hooks`
+      block in ~/.config/muse/settings.json, 5 events verified live on
+      1.2.1; scrubbed hook env bridged via ~/.forge/endpoint.json +
+      harness-ID attribution),
       `install-mcp/uninstall-mcp` (`claude mcp add -s user`; `codex mcp add`;
-      muse `opencode.json`), `install-skills/uninstall-skills`
+      muse: DONE 2026-09-13, `mcp_servers.forge` stdio entry, ${VAR} env
+      expansion verified live), `install-skills/uninstall-skills`
       (+codex/gemini/metamate variants); startup repairs registrations +
       refreshes bundled skills (`.new` preserves edits).
 - [ ] 5c Create-session UI (minimum set): harness picker, session name

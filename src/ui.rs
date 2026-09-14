@@ -49,6 +49,11 @@ pub fn style_for(format: &CellFormat) -> Style {
     if format.inverse {
         style = style.add_modifier(Modifier::REVERSED);
     }
+    // Faint ghost/prediction text (SGR 2): real terminals render this dim
+    // gray instead of full-bright.
+    if format.dim {
+        style = style.add_modifier(Modifier::DIM);
+    }
     style
 }
 
@@ -1108,6 +1113,34 @@ mod tests {
     }
 
     #[test]
+    fn dim_spans_render_faint_in_the_grid() {
+        // End of the ghost-text chain: parser marks dim (pty test),
+        // style_for maps it (sgr test), and the grid must keep the
+        // modifier so the terminal faints it instead of full-bright.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut p = pane("sh", "ghost", true);
+        p.lines = vec![vec![SpanView {
+            text: "ghost".to_string(),
+            style: Style::default().add_modifier(Modifier::DIM),
+        }]];
+        terminal
+            .draw(|f| render(f, area(), &[p], &chrome()))
+            .unwrap();
+        let cell = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .find(|c| c.symbol() == "g")
+            .expect("ghost visible");
+        assert!(
+            cell.modifier.contains(Modifier::DIM),
+            "faint reaches the grid"
+        );
+    }
+
+    #[test]
     fn focused_pane_cursor_is_placed_inside_borders() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1129,6 +1162,7 @@ mod tests {
             italic: false,
             underline: true,
             inverse: true,
+            dim: true,
         };
         let s = style_for(&f);
         assert_eq!(s.fg, Some(Color::Indexed(1)));
@@ -1136,6 +1170,7 @@ mod tests {
         assert!(s.add_modifier.contains(Modifier::BOLD));
         assert!(s.add_modifier.contains(Modifier::UNDERLINED));
         assert!(s.add_modifier.contains(Modifier::REVERSED));
+        assert!(s.add_modifier.contains(Modifier::DIM));
         assert!(!s.add_modifier.contains(Modifier::ITALIC));
         let plain = style_for(&CellFormat::plain());
         assert_eq!(plain.fg, None);

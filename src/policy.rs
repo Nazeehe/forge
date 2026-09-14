@@ -143,7 +143,12 @@ pub fn command_of(body: &str) -> String {
 }
 
 /// Canonical one-line decision for the relay to print to the harness.
-pub fn decision_line(decision: Decision, reason: &str) -> String {
+/// PreToolUse answers use the `hookSpecificOutput` shape: newer Claude
+/// and muse both reject the legacy top-level `decision` field there
+/// ("unsupported legacy PreToolUse output"). Deny always carries a
+/// non-empty reason because the validators require one. Every other hook
+/// keeps the legacy shape its harness already accepts.
+pub fn decision_line(hook: &str, decision: Decision, reason: &str) -> String {
     let name = match decision {
         Decision::Allow => "allow",
         Decision::Deny => "deny",
@@ -160,7 +165,20 @@ pub fn decision_line(decision: Decision, reason: &str) -> String {
             c => safe.push(c),
         }
     }
-    format!("{{\"decision\":\"{name}\",\"reason\":\"{safe}\"}}\n")
+    // A deny with an empty reason is rejected by the validators, which
+    // would fail the gate open. Reasons are static non-empty strings
+    // today; the fallback keeps that invariant structural.
+    let reason_out = if safe.is_empty() && matches!(decision, Decision::Deny) {
+        "denied".to_string()
+    } else {
+        safe
+    };
+    if hook == "PreToolUse" {
+        return format!(
+            "{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"{name}\",\"permissionDecisionReason\":\"{reason_out}\"}}}}\n"
+        );
+    }
+    format!("{{\"decision\":\"{name}\",\"reason\":\"{reason_out}\"}}\n")
 }
 
 /// First string value for any of `fields` in a JSON document, reusing the
@@ -304,9 +322,49 @@ mod tests {
 
     #[test]
     fn decision_line_is_canonical_json() {
-        let line = decision_line(Decision::Deny, "block pattern");
+        // Non-PreToolUse hooks keep the legacy shape byte for byte.
+        let line = decision_line("Stop", Decision::Deny, "block pattern");
         assert!(line.ends_with('\n'));
         assert!(line.contains(r#""decision":"deny""#), "line: {line:?}");
         assert!(line.contains("block pattern"));
+        let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(parsed["decision"], serde_json::Value::String("deny".to_string()));
+    }
+
+    #[test]
+    fn decision_line_pre_tool_use_uses_hook_specific_output() {
+        for (decision, name) in [
+            (Decision::Allow, "allow"),
+            (Decision::Deny, "deny"),
+            (Decision::Ask, "ask"),
+        ] {
+            let line = decision_line("PreToolUse", decision, "yolo mode");
+            assert!(line.ends_with('\n'), "newline terminated");
+            let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            assert!(v.get("decision").is_none(), "no legacy field: {line:?}");
+            let out = &v["hookSpecificOutput"];
+            assert_eq!(out["hookEventName"], serde_json::Value::String("PreToolUse".to_string()));
+            assert_eq!(
+                out["permissionDecision"],
+                serde_json::Value::String(name.to_string()),
+                "line: {line:?}"
+            );
+            assert!(
+                out["permissionDecisionReason"].as_str().is_some_and(|r| !r.is_empty()),
+                "validators reject reason-less denies: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decision_line_never_emits_a_reasonless_deny() {
+        let line = decision_line("PreToolUse", Decision::Deny, "");
+        let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert!(
+            v["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "fallback reason: {line:?}"
+        );
     }
 }

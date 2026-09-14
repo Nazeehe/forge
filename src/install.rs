@@ -126,6 +126,66 @@ fn obj_mut<'v>(
     value[key].as_object_mut().expect("just ensured object")
 }
 
+/// Merge forge hook-relay groups into a Claude-style settings document:
+/// top-level `hooks` object keyed by event, each an array of
+/// `{matcher, hooks: [...]}` groups. Everything else is preserved.
+/// Returns the number of events gained an entry.
+fn merge_hook_groups(
+    v: &mut serde_json::Value,
+    path: &std::path::Path,
+    events: &[&str],
+    handler: &serde_json::Value,
+    forge_bin: &str,
+) -> Result<usize, String> {
+    let ours = hook_command(forge_bin);
+    let mut added = 0;
+    for event in events {
+        let hooks = obj_mut(v, "hooks");
+        let slot = hooks
+            .entry(event.to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if !slot.is_array() {
+            return Err(format!("{event} is not an array in {}", path.display()));
+        }
+        let arr = slot.as_array_mut().expect("just checked array");
+        let present = arr.iter().any(|e| {
+            e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(&ours))
+            })
+        });
+        if !present {
+            arr.push(serde_json::json!({
+                "matcher": "",
+                "hooks": [handler],
+            }));
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
+/// Drop every hook group that invokes this installer's relay, across all
+/// events. Foreign entries are kept. Returns the drop count.
+fn drop_hook_groups(v: &mut serde_json::Value) -> usize {
+    let mut dropped = 0;
+    if let Some(hooks) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        for arr in hooks.values_mut().filter_map(|v| v.as_array_mut()) {
+            let before = arr.len();
+            arr.retain(|e| {
+                !e.get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()).is_some_and(is_ours)
+                        })
+                    })
+            });
+            dropped += before - arr.len();
+        }
+    }
+    dropped
+}
+
 /// Install hooks for one harness by name.
 pub fn install_one_hooks(
     home: &std::path::Path,
@@ -139,8 +199,6 @@ pub fn install_one_hooks(
                 Ok(v) => v,
                 Err(e) => return Outcome::error(harness, e),
             };
-            let ours = hook_command(forge_bin);
-            let mut added = 0;
             // Stop is the turn-end edge: it parks the session at Stopped,
             // which is what lets queued peer replies deliver. Without it
             // every session wedges at ToolUse after its first tool call.
@@ -148,31 +206,17 @@ pub fn install_one_hooks(
             // prompted session still looks Stopped while it generates, so
             // injections land mid-turn where Enter is eaten and the text
             // sits as an unsubmitted draft.
-            for event in ["PreToolUse", "PermissionRequest", "Stop", "UserPromptSubmit"] {
-                let hooks = obj_mut(&mut v, "hooks");
-                let slot = hooks
-                    .entry(event.to_string())
-                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-                if !slot.is_array() {
-                    return Outcome::error(
-                        harness,
-                        format!("{event} is not an array in {}", path.display()),
-                    );
-                }
-                let arr = slot.as_array_mut().expect("just checked array");
-                let present = arr.iter().any(|e| {
-                    e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
-                        hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(&ours))
-                    })
-                });
-                if !present {
-                    arr.push(serde_json::json!({
-                        "matcher": "",
-                        "hooks": [{"type": "command", "command": ours}],
-                    }));
-                    added += 1;
-                }
-            }
+            let handler = serde_json::json!({"type": "command", "command": hook_command(forge_bin)});
+            let added = match merge_hook_groups(
+                &mut v,
+                &path,
+                &["PreToolUse", "PermissionRequest", "Stop", "UserPromptSubmit"],
+                &handler,
+                forge_bin,
+            ) {
+                Ok(added) => added,
+                Err(e) => return Outcome::error(harness, e),
+            };
             if added == 0 {
                 return Outcome::unchanged(harness, format!("already in {}", path.display()));
             }
@@ -245,11 +289,57 @@ pub fn install_one_hooks(
                 Err(e) => Outcome::error(harness, e),
             }
         }
-        "muse" => Outcome::skipped(
-            harness,
-            "muse exposes no shell hook configuration; allow policy lives in opencode.json"
-                .to_string(),
-        ),
+        "muse" => {
+            // Grounded in muse 1.2.1, verified live: the user `hooks`
+            // block in ~/.config/muse/settings.json takes the same
+            // Claude-style shape ({Event: [{matcher, hooks}]}), and
+            // SessionStart, PreToolUse, UserPromptSubmit, Stop, and
+            // SessionEnd all fire with hook_event_name, session_id, and
+            // cwd on stdin. PermissionRequest is left out: its blocking
+            // semantics are unverified and a wrong verdict would gate
+            // every tool call. Hook children run with a cleared
+            // environment, so hook-relay resolves the TUI through the
+            // endpoint file and the loop attributes by harness session ID.
+            let path = home.join(".config/muse/settings.json");
+            let mut v = match read_json(&path) {
+                Ok(v) => v,
+                Err(e) => return Outcome::error(harness, e),
+            };
+            // Same turn edges as claude/codex (see above), plus
+            // SessionStart (the harness-side conversation ID the restore
+            // path resumes with) and SessionEnd (orderly termination).
+            // `timeout` caps a wedged relay on the harness side; the
+            // relay itself gives up after 3 s and always exits 0, so
+            // 10 s never blocks a session.
+            let handler = serde_json::json!({
+                "type": "command",
+                "command": hook_command(forge_bin),
+                "timeout": 10,
+            });
+            let added = match merge_hook_groups(
+                &mut v,
+                &path,
+                &[
+                    "SessionStart",
+                    "PreToolUse",
+                    "UserPromptSubmit",
+                    "Stop",
+                    "SessionEnd",
+                ],
+                &handler,
+                forge_bin,
+            ) {
+                Ok(added) => added,
+                Err(e) => return Outcome::error(harness, e),
+            };
+            if added == 0 {
+                return Outcome::unchanged(harness, format!("already in {}", path.display()));
+            }
+            match write_json(&path, &v) {
+                Ok(()) => Outcome::installed(harness, path.display().to_string()),
+                Err(e) => Outcome::error(harness, e),
+            }
+        }
         "gemini" => Outcome::skipped(
             harness,
             "no grounded gemini hook mechanism; gemini hooks stay uninstalled".to_string(),
@@ -262,31 +352,16 @@ pub fn install_one_hooks(
 /// kept; the codex file goes away only when nothing foreign remains.
 pub fn uninstall_one_hooks(home: &std::path::Path, harness: &str) -> Outcome {
     match harness {
-        "claude" => {
-            let path = home.join(".claude/settings.json");
+        "claude" | "muse" => {
+            let path = match harness {
+                "claude" => home.join(".claude/settings.json"),
+                _ => home.join(".config/muse/settings.json"),
+            };
             let mut v = match read_json(&path) {
                 Ok(v) => v,
                 Err(e) => return Outcome::error(harness, e),
             };
-            let mut dropped = 0;
-            if let Some(hooks) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-                for arr in hooks.values_mut().filter_map(|v| v.as_array_mut()) {
-                    let before = arr.len();
-                    arr.retain(|e| {
-                        !e.get("hooks")
-                            .and_then(|h| h.as_array())
-                            .is_some_and(|hs| {
-                                hs.iter().any(|h| {
-                                    h.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .is_some_and(is_ours)
-                                })
-                            })
-                    });
-                    dropped += before - arr.len();
-                }
-            }
-            if dropped == 0 {
+            if drop_hook_groups(&mut v) == 0 {
                 return Outcome::unchanged(harness, "nothing to remove".to_string());
             }
             match write_json(&path, &v) {
@@ -362,7 +437,6 @@ pub fn uninstall_one_hooks(home: &std::path::Path, harness: &str) -> Outcome {
                 }
             }
         }
-        "muse" => Outcome::skipped(harness, "muse has no shell hooks to remove".to_string()),
         "gemini" => Outcome::skipped(harness, "gemini hooks were never installed".to_string()),
         other => Outcome::error(harness, format!("unknown harness {other:?}")),
     }
@@ -410,30 +484,34 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
                 ),
             }
         }
-        // Best-effort opencode format; pickup confirmed at first live muse run.
+        // Grounded in muse 1.2.1, verified live: the `mcp_servers`
+        // block in ~/.config/muse/settings.json takes stdio entries
+        // {transport, command, args, env} plus `enabled` and `mode`.
+        // MCP children inherit only PATH+PWD plus the static `env` map,
+        // but ${VAR} entries expand from the parent process (verified),
+        // so the endpoint and run ride through from forge-spawned panes.
+        // Outside forge both expand empty and mcp-serve fail-softs. Mode
+        // is optional so a broken forge warns instead of aborting runs.
         "muse" => {
-            let path = home.join(".config/opencode/opencode.json");
+            let path = home.join(".config/muse/settings.json");
             let mut v = match read_json(&path) {
                 Ok(v) => v,
                 Err(e) => return Outcome::error(harness, e),
             };
-            let mcp = obj_mut(&mut v, "mcp");
-            let forge = mcp
-                .entry("forge".to_string())
-                .or_insert_with(|| serde_json::Value::Object(Default::default()));
-            if !forge.is_object() {
-                return Outcome::error(
-                    harness,
-                    format!("mcp.forge is not an object in {}", path.display()),
-                );
-            }
-            let fo = forge.as_object_mut().expect("just checked object");
-            fo.insert(
-                "command".to_string(),
-                serde_json::json!([forge_bin, "mcp-serve"]),
+            obj_mut(&mut v, "mcp_servers").insert(
+                "forge".to_string(),
+                serde_json::json!({
+                    "transport": "stdio",
+                    "command": forge_bin,
+                    "args": ["mcp-serve"],
+                    "env": {
+                        "FORGE_IPC_ENDPOINT": "${FORGE_IPC_ENDPOINT}",
+                        "FORGE_RUN_ID": "${FORGE_RUN_ID}",
+                    },
+                    "enabled": true,
+                    "mode": "optional",
+                }),
             );
-            fo.insert("type".to_string(), serde_json::Value::String("local".to_string()));
-            fo.insert("enabled".to_string(), serde_json::Value::Bool(true));
             match write_json(&path, &v) {
                 Ok(()) => Outcome::installed(harness, path.display().to_string()),
                 Err(e) => Outcome::error(harness, e),
@@ -523,13 +601,13 @@ pub fn uninstall_one_mcp(home: &std::path::Path, harness: &str) -> Outcome {
             }
         }
         "muse" => {
-            let path = home.join(".config/opencode/opencode.json");
+            let path = home.join(".config/muse/settings.json");
             let mut v = match read_json(&path) {
                 Ok(v) => v,
                 Err(e) => return Outcome::error(harness, e),
             };
             let gone = v
-                .get_mut("mcp")
+                .get_mut("mcp_servers")
                 .and_then(|m| m.as_object_mut())
                 .is_some_and(|m| m.remove("forge").is_some());
             if !gone {
@@ -934,27 +1012,98 @@ mod tests {
     }
 
     #[test]
-    fn muse_hooks_are_reported_unsupported() {
+    fn muse_hooks_merge_and_are_idempotent() {
         let home = scratch_home();
+        // Pre-existing model/effort settings survive; schema matches the
+        // shape verified live against muse 1.2.1.
+        std::fs::create_dir_all(home.join(".config/muse")).unwrap();
+        std::fs::write(
+            home.join(".config/muse/settings.json"),
+            r#"{"schema_version": 1, "model": "muse-spark-1.3-contributor", "hooks": {"PostToolUse": []}}"#,
+        )
+        .unwrap();
         let out = install_one_hooks(&home, "muse", FORGE_BIN);
-        assert!(!out.installed, "out: {out:?}");
-        assert!(out.skipped, "out: {out:?}");
+        assert!(out.installed, "out: {out:?}");
+        let text = std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        assert!(text.contains("muse-spark-1.3-contributor"), "kept: {text}");
+        assert!(text.contains("PostToolUse"), "kept: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for event in [
+            "SessionStart",
+            "PreToolUse",
+            "UserPromptSubmit",
+            "Stop",
+            "SessionEnd",
+        ] {
+            let groups = v["hooks"][event]
+                .as_array()
+                .unwrap_or_else(|| panic!("event present: {text}"));
+            assert!(
+                groups.iter().any(|g| {
+                    g["matcher"] == serde_json::Value::String(String::new())
+                        && g["hooks"][0]["type"] == serde_json::Value::String("command".to_string())
+                        && g["hooks"][0]["command"]
+                            == serde_json::Value::String(format!("{FORGE_BIN} hook-relay"))
+                        && g["hooks"][0]["timeout"] == serde_json::Value::from(10)
+                }),
+                "relay group on {event}: {text}"
+            );
+        }
+        // Second install adds no duplicate.
+        install_one_hooks(&home, "muse", FORGE_BIN);
+        let text = std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        assert_eq!(text.matches("hook-relay").count(), 5, "one per event: {text}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn muse_mcp_merges_opencode_json() {
+    fn muse_hooks_uninstall_removes_only_ours() {
+        let home = scratch_home();
+        install_one_hooks(&home, "muse", FORGE_BIN);
+        let out = uninstall_one_hooks(&home, "muse");
+        assert!(out.removed, "out: {out:?}");
+        let text = std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        assert!(!text.contains("hook-relay"), "gone: {text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn muse_mcp_writes_verified_schema() {
         let home = scratch_home();
         let out = install_one_mcp(&home, "muse", FORGE_BIN);
         assert!(out.installed, "out: {out:?}");
         let text =
-            std::fs::read_to_string(home.join(".config/opencode/opencode.json")).unwrap();
+            std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let cmd = &v["mcp"]["forge"]["command"];
-        assert_eq!(cmd[0], serde_json::Value::String(FORGE_BIN.to_string()));
-        assert_eq!(cmd[1], serde_json::Value::String("mcp-serve".to_string()));
+        let srv = &v["mcp_servers"]["forge"];
+        assert_eq!(srv["transport"], serde_json::Value::String("stdio".to_string()));
+        assert_eq!(srv["command"], serde_json::Value::String(FORGE_BIN.to_string()));
+        assert_eq!(srv["args"][0], serde_json::Value::String("mcp-serve".to_string()));
+        // ${VAR} entries expand from the parent process at spawn (verified
+        // live); static values would freeze a dead endpoint into config.
+        assert_eq!(
+            srv["env"]["FORGE_IPC_ENDPOINT"],
+            serde_json::Value::String("${FORGE_IPC_ENDPOINT}".to_string())
+        );
+        assert_eq!(
+            srv["env"]["FORGE_RUN_ID"],
+            serde_json::Value::String("${FORGE_RUN_ID}".to_string())
+        );
+        assert_eq!(srv["enabled"], serde_json::Value::Bool(true));
+        assert_eq!(srv["mode"], serde_json::Value::String("optional".to_string()));
+        // Hooks and MCP share the file: installing both keeps both.
+        install_one_hooks(&home, "muse", FORGE_BIN);
+        let text =
+            std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        assert!(text.contains("mcp_servers"), "mcp kept: {text}");
+        assert!(text.contains("hook-relay"), "hooks kept: {text}");
         let out = uninstall_one_mcp(&home, "muse");
         assert!(out.removed, "out: {out:?}");
+        let text =
+            std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(v["mcp_servers"].get("forge").is_none(), "gone: {text}");
+        assert!(text.contains("hook-relay"), "hooks kept: {text}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1120,7 +1269,7 @@ mod tests {
         assert_eq!(outs.len(), 3);
         assert!(outs.iter().any(|o| o.harness == "claude" && o.installed));
         assert!(outs.iter().any(|o| o.harness == "codex" && o.installed));
-        assert!(outs.iter().any(|o| o.harness == "muse" && o.skipped));
+        assert!(outs.iter().any(|o| o.harness == "muse" && o.installed));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

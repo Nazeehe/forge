@@ -4,6 +4,7 @@ mod branding;
 mod comms;
 mod config;
 mod create;
+mod checkpoint;
 mod event;
 mod fs_atomic;
 mod groups;
@@ -125,7 +126,22 @@ fn startup() -> i32 {
         ));
     }
     let mut state = app::AppState::new();
-    tui::run(&mut state, &mut loaded, &home, &audit)
+    let code = tui::run(&mut state, &mut loaded, &home, &audit);
+    // Quitting serializes the live agent sessions for the next startup's
+    // restore picker. An empty topology deletes the file so no stale
+    // offer survives; failures warn instead of failing the exit.
+    let path = branding::sessions_file(&home);
+    let sessions = state.snapshot_sessions();
+    if sessions.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let mut file = checkpoint::SessionsFile::load(&path);
+        file.push(checkpoint::make_entry(sessions, checkpoint::now_unix()));
+        if let Err(e) = file.save(&path) {
+            eprintln!("warning: cannot save sessions: {e}");
+        }
+    }
+    code
 }
 
 fn main() {

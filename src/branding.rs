@@ -45,6 +45,11 @@ pub fn app_log(home: &Path) -> PathBuf {
     config_dir(home).join("forge.log")
 }
 
+/// `~/.forge/sessions`: saved session snapshots, newest last.
+pub fn sessions_file(home: &Path) -> PathBuf {
+    config_dir(home).join("sessions")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

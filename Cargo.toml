@@ -12,4 +12,5 @@ serde_json = "1"
 toml = "1"
 tui-realm-stdlib = "4.1.0"
 tuirealm = "4.1.0"
-vt100 = "0.15"
+# Vendored 0.15.2 + faint (SGR 2) patch; see vendor/vt100/FORGE-PATCHES.md.
+vt100 = { path = "vendor/vt100" }

@@ -247,6 +247,12 @@ impl Broker {
             .and_then(|entry| entry.first().map(String::as_str))
     }
 
+    /// Every group one session belongs to, in join order. Snapshots use
+    /// this so restores rejoin exactly.
+    pub fn groups_of(&self, id: SessionId) -> Vec<String> {
+        self.membership.get(&id).cloned().unwrap_or_default()
+    }
+
     /// Palette index of a group, if it exists.
     pub fn group_color(&self, group: &str) -> Option<usize> {
         self.groups.get(group).map(|g| g.color)

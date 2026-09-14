@@ -7,6 +7,12 @@
 use crate::event::AppEvent;
 use crate::session::SessionManager;
 
+/// Restore outcome counts for the status line.
+pub struct RestoreReport {
+    pub spawned: usize,
+    pub skipped: Vec<String>,
+}
+
 pub struct AppState {
     pub manager: SessionManager,
     pub dirty: bool,
@@ -21,6 +27,9 @@ pub struct AppState {
     /// present; never both dialogs at once (openers are unreachable
     /// behind the other dialog).
     pub group_dialog: Option<crate::groups::GroupDialog>,
+    /// Startup restore picker, if a sessions file offered entries. First
+    /// input goes here until it resolves to a pick or a fresh start.
+    pub restore_picker: Option<crate::checkpoint::RestorePicker>,
     /// Live permission mode. The TUI loop rebuilds policy and persists the
     /// config whenever this diverges from the loaded one.
     pub permission_mode: crate::config::PermissionMode,
@@ -47,6 +56,7 @@ impl AppState {
             pending_hooks: std::collections::VecDeque::new(),
             create_dialog: None,
             group_dialog: None,
+            restore_picker: None,
             permission_mode: crate::config::PermissionMode::Yolo,
             broker: crate::comms::Broker::new(),
             last_human_input: None,
@@ -180,8 +190,16 @@ impl AppState {
                     .map(|row| row.iter().map(crate::ui::span_for).collect())
                     .collect();
                 if lines.is_empty() {
+                    // Blank scrollback means opposite things by state: a
+                    // live pane simply hasn't printed yet, an exited one
+                    // is gone.
+                    let text = if live {
+                        "(running — no output yet)"
+                    } else {
+                        "(exited)"
+                    };
                     lines = vec![vec![crate::ui::SpanView {
-                        text: "(exited)".to_string(),
+                        text: text.to_string(),
                         style: ratatui::style::Style::default(),
                     }]];
                 }
@@ -257,11 +275,13 @@ impl AppState {
     }
 
     /// First free `shell-N` name for the dialog prefill.
+    /// Prefill name for the create dialog. The dialog defaults to the
+    /// claude tool, so the prefix matches; the user can rename freely.
     pub fn suggested_session_name(&self) -> String {
         let taken = self.live_names();
         let mut n = self.manager.len() + 1;
         loop {
-            let candidate = format!("shell-{n}");
+            let candidate = format!("claude-{n}");
             if !taken.iter().any(|t| t == &candidate) {
                 return candidate;
             }
@@ -354,6 +374,71 @@ impl AppState {
             Out::Pending | Out::Closed => {}
         }
         self.dirty = true;
+    }
+
+    /// Live agent sessions as restorable records, in bar order. Shells
+    /// have no resume form and exited sessions are gone, so both are
+    /// left out; groups ride along for exact rejoins.
+    pub fn snapshot_sessions(&self) -> Vec<crate::checkpoint::SavedSession> {
+        self.manager
+            .order()
+            .to_vec()
+            .into_iter()
+            .filter_map(|id| {
+                let rec = self.manager.get(id)?;
+                if !rec.state.is_live() {
+                    return None;
+                }
+                if crate::harness::Harness::from_name(&rec.cli_tool).is_none() {
+                    return None;
+                }
+                Some(crate::checkpoint::SavedSession {
+                    name: rec.name.clone(),
+                    cli_tool: rec.cli_tool.clone(),
+                    cwd: rec.cwd.to_string_lossy().into_owned(),
+                    groups: self.broker.groups_of(id),
+                    harness_session_id: rec.harness_session_id.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Recreate every restorable session in an entry: agents relaunch
+    /// with resume argv (or the cwd-scoped fallback), rejoin their
+    /// groups, and fit the main pane. Unknown tools and vanished working
+    /// directories skip with a reason instead of failing the batch.
+    pub fn restore_entry(&mut self, entry: &crate::checkpoint::SavedEntry) -> RestoreReport {
+        let mut report = RestoreReport {
+            spawned: 0,
+            skipped: Vec::new(),
+        };
+        for saved in &entry.sessions {
+            let Some(harness) = crate::harness::Harness::from_name(&saved.cli_tool) else {
+                report.skipped.push(format!("{}: unknown tool {}", saved.name, saved.cli_tool));
+                continue;
+            };
+            let cwd = std::path::PathBuf::from(&saved.cwd);
+            if !cwd.is_dir() {
+                report.skipped.push(format!("{}: missing directory {}", saved.name, saved.cwd));
+                continue;
+            }
+            let spec = harness.spec();
+            let argv = harness.resume_argv(&spec.resolve_binary(), saved.harness_session_id.as_deref());
+            let mut cmd = String::from("exec ");
+            cmd.push_str(&crate::create::shell_join(&argv));
+            let run = crate::ids::RunId::generate();
+            match self.manager.spawn_agent(&saved.name, &cwd, &cmd, run, &saved.cli_tool) {
+                Ok(id) => {
+                    for group in &saved.groups {
+                        let _ = self.broker.join(&self.manager, id, group);
+                    }
+                    report.spawned += 1;
+                }
+                Err(e) => report.skipped.push(format!("{}: spawn failed ({e})", saved.name)),
+            }
+        }
+        self.dirty = true;
+        report
     }
 
     /// Spawn exactly what a submitted dialog describes: shells run the
@@ -578,7 +663,7 @@ impl AppState {
     ) {
         while let Some(req) = self.pending_hooks.pop_front() {
             let (decision, reason) = policy.decide(&req.hook, &req.body);
-            let line = crate::policy::decision_line(decision, reason);
+            let line = crate::policy::decision_line(&req.hook, decision, reason);
             let _ = req.reply.send(line);
             // Attribute the verdict to the sender's sidebar counters.
             if let Some(id) = self.manager.lookup_run(&req.run_id) {
@@ -643,14 +728,44 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::HookRequest(req) => {
+                // Unattributed SessionStarts bind by working directory when
+                // unambiguous (muse scrubs hook-child environments, so its
+                // relays send no run ID). The bind runs first so the record
+                // below attributes like any other SessionStart.
+                if req.hook == "SessionStart" && self.manager.lookup_run(&req.run_id).is_none()
+                {
+                    if let Some(harness) = crate::session::session_id_from_hook_body(&req.body) {
+                        if let Some(cwd) = crate::session::cwd_from_hook_body(&req.body) {
+                            self.manager.bind_harness_session(&harness, &cwd);
+                        }
+                    }
+                }
                 // Attribute hook activity before queuing: the sender's run
-                // ID resolves to its session, unknown runs stay untouched.
-                // Tool-gated hooks also count one sidebar tool call.
+                // ID resolves to its session; records without one resolve
+                // by the harness session ID instead. Unknown runs stay
+                // untouched. Tool-gated hooks also count one sidebar call.
+                let fallback_id = if self.manager.lookup_run(&req.run_id).is_none() {
+                    crate::session::session_id_from_hook_body(&req.body)
+                        .and_then(|h| self.manager.lookup_harness_session(&h))
+                } else {
+                    None
+                };
+                let attributed = self.manager.lookup_run(&req.run_id).or(fallback_id);
                 if let Some(activity) = crate::session::activity_for_hook(&req.hook) {
-                    if let Some(id) = self.manager.lookup_run(&req.run_id) {
+                    if let Some(id) = attributed {
                         self.manager.set_activity(id, activity);
                         if activity == crate::session::Activity::ToolUse {
                             self.manager.note_tool_call(id);
+                        }
+                    }
+                }
+                // SessionStart carries the harness-side conversation ID the
+                // restore path resumes with. Bodies without one (or from
+                // unknown runs) leave any earlier value alone.
+                if req.hook == "SessionStart" {
+                    if let Some(harness) = crate::session::session_id_from_hook_body(&req.body) {
+                        if let Some(id) = attributed {
+                            self.manager.set_harness_session(id, harness);
                         }
                     }
                 }
@@ -687,6 +802,163 @@ mod tests {
         assert!(s.should_quit);
     }
 
+    fn hook_request(hook: &str, run_id: &str, body: &str) -> AppEvent {
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: hook.to_string(),
+            body: body.to_string(),
+            run_id: run_id.to_string(),
+            sync: false,
+            reply: reply_tx,
+            timed_out: Default::default(),
+        })
+    }
+
+    #[test]
+    fn session_start_captures_harness_id() {
+        let mut s = AppState::new();
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent("a", &std::env::temp_dir(), "exec sleep 30", run.clone(), "claude")
+            .unwrap();
+        assert_eq!(s.manager.get(id).unwrap().harness_session_id, None);
+        // Claude envelope nests the harness JSON under body.
+        s.apply(hook_request(
+            "SessionStart",
+            run.as_str(),
+            r#"{"v":1,"hook":"SessionStart","run_id":"r","body":{"session_id":"harness-9","cwd":"/tmp"}}"#,
+        ));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("harness-9")
+        );
+        // Bodies without an ID (or other hooks) leave the value alone.
+        s.apply(hook_request("SessionStart", run.as_str(), "{}"));
+        s.apply(hook_request("PreToolUse", run.as_str(), "{}"));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("harness-9")
+        );
+        // Unknown runs touch nothing.
+        s.apply(hook_request(
+            "SessionStart",
+            "nope",
+            r#"{"v":1,"body":{"session_id":"other"}}"#,
+        ));
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn unattributed_muse_hooks_bootstrap_and_attribute() {
+        use crate::session::Activity;
+        let mut s = AppState::new();
+        let cwd = std::env::temp_dir();
+        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent("m", &cwd, "exec sleep 30", run.clone(), "muse")
+            .unwrap();
+        // Scrubbed relay: empty run_id, muse SessionStart body shape.
+        let start = format!(
+            "{{\"v\":1,\"hook\":\"SessionStart\",\"run_id\":\"\",\"forge_pid\":0,\"body\":{{\"session_id\":\"muse-9\",\"cwd\":{cwd_json}}}}}"
+        );
+        s.apply(hook_request("SessionStart", "", &start));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("muse-9"),
+            "bootstrap captured the resume ID"
+        );
+        assert_eq!(s.manager.get(id).unwrap().activity, Activity::Thinking);
+        // Later edges carry no run either; the bound ID attributes them.
+        let stop = format!(
+            "{{\"v\":1,\"hook\":\"Stop\",\"run_id\":\"\",\"forge_pid\":0,\"body\":{{\"session_id\":\"muse-9\",\"cwd\":{cwd_json}}}}}"
+        );
+        s.apply(hook_request("Stop", "", &stop));
+        assert_eq!(s.manager.get(id).unwrap().activity, Activity::Stopped);
+        // An unknown harness ID still touches nothing.
+        let strange = format!(
+            "{{\"v\":1,\"hook\":\"Stop\",\"run_id\":\"\",\"forge_pid\":0,\"body\":{{\"session_id\":\"ghost\",\"cwd\":{cwd_json}}}}}"
+        );
+        s.apply(hook_request("Stop", "", &strange));
+        assert_eq!(s.manager.get(id).unwrap().activity, Activity::Stopped);
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn snapshot_keeps_live_agents_with_groups() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn_agent("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "claude")
+            .unwrap();
+        s.manager.set_harness_session(a, "h-1".to_string());
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, a, "team").unwrap();
+        // Shells and exited sessions never snapshot.
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("sh", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        let snap = s.snapshot_sessions();
+        assert_eq!(snap.len(), 1, "agent only: {snap:?}");
+        assert_eq!(snap[0].name, "a");
+        assert_eq!(snap[0].cli_tool, "claude");
+        assert_eq!(snap[0].groups, vec!["peers".to_string(), "team".to_string()]);
+        assert_eq!(snap[0].harness_session_id.as_deref(), Some("h-1"));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn restore_respawns_with_resume_and_rejoins() {
+        // Hermetic stand-in binary; the record outlives its instant exit.
+        let saved = std::env::var("CODEX_BIN").ok();
+        std::env::set_var("CODEX_BIN", "/bin/true");
+        let mut s = AppState::new();
+        let entry = crate::checkpoint::SavedEntry {
+            label: "a, gone, weird".to_string(),
+            saved_at_unix: 1_700_000_000,
+            sessions: vec![
+                crate::checkpoint::SavedSession {
+                    name: "a".to_string(),
+                    cli_tool: "codex".to_string(),
+                    cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                    groups: vec!["peers".to_string()],
+                    harness_session_id: Some("uuid-a".to_string()),
+                },
+                crate::checkpoint::SavedSession {
+                    name: "gone".to_string(),
+                    cli_tool: "codex".to_string(),
+                    cwd: "/no/such/dir-anywhere".to_string(),
+                    groups: vec![],
+                    harness_session_id: None,
+                },
+                crate::checkpoint::SavedSession {
+                    name: "weird".to_string(),
+                    cli_tool: "shell".to_string(),
+                    cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                    groups: vec![],
+                    harness_session_id: None,
+                },
+            ],
+        };
+        let report = s.restore_entry(&entry);
+        assert_eq!(report.spawned, 1, "report: {:?}", report.skipped);
+        assert_eq!(report.skipped.len(), 2, "missing dir + shell: {:?}", report.skipped);
+        let id = s.manager.order().to_vec().pop().unwrap();
+        assert_eq!(s.manager.get(id).unwrap().name, "a");
+        assert!(s.broker.is_member(id, "peers"), "rejoined");
+        match saved {
+            Some(v) => std::env::set_var("CODEX_BIN", v),
+            None => std::env::remove_var("CODEX_BIN"),
+        }
+        assert!(s.manager.remove(id));
+    }
+
     #[test]
     fn hook_requests_queue_bounded_and_dirty() {
         let mut s = AppState::new();
@@ -714,6 +986,53 @@ mod tests {
             }));
         }
         assert_eq!(s.pending_hooks.len(), crate::listener::MAX_PENDING_HOOKS);
+    }
+
+    #[test]
+    fn pre_tool_use_replies_use_hook_specific_output() {
+        // Newer Claude (and muse) reject the legacy top-level `decision`
+        // field on PreToolUse replies: "unsupported legacy PreToolUse
+        // output; use hookSpecificOutput.permissionDecision".
+        use crate::config::PermissionMode;
+        let audit = std::env::temp_dir().join(format!(
+            "forge-hookshape-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut yolo = crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+        let mut s = AppState::new();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
+            run_id: String::new(),
+            sync: true,
+            reply: reply_tx,
+            timed_out: Default::default(),
+        }));
+        s.settle_hooks(&mut yolo, &audit);
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(line.trim()).expect("reply is JSON");
+        assert_eq!(
+            v["hookSpecificOutput"]["hookEventName"],
+            serde_json::Value::String("PreToolUse".to_string()),
+            "line: {line:?}"
+        );
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecision"],
+            serde_json::Value::String("allow".to_string()),
+            "line: {line:?}"
+        );
+        assert!(
+            v["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
+            "deny requires a non-empty reason; allow carries one too: {line:?}"
+        );
+        assert!(v.get("decision").is_none(), "no legacy field: {line:?}");
+        let _ = std::fs::remove_file(&audit);
     }
 
     #[test]
@@ -745,7 +1064,10 @@ mod tests {
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap();
-        assert!(line.contains(r#""decision":"allow""#), "line: {line:?}");
+        assert!(
+            line.contains(r#""permissionDecision":"allow""#),
+            "line: {line:?}"
+        );
         let logged = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(logged.lines().count(), 1);
         assert!(logged.contains(r#""decision":"allow""#), "audit: {logged:?}");
@@ -771,7 +1093,7 @@ mod tests {
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap();
-        assert!(line.contains(r#""decision":"ask""#), "line: {line:?}");
+        assert!(line.contains(r#""permissionDecision":"ask""#), "line: {line:?}");
         let logged = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(logged.lines().count(), 2, "audit: {logged:?}");
         assert!(logged.contains(r#""decision":"ask""#), "audit: {logged:?}");
@@ -807,7 +1129,7 @@ mod tests {
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap();
-        assert!(line.contains(r#""decision":"deny""#), "line: {line:?}");
+        assert!(line.contains(r#""permissionDecision":"deny""#), "line: {line:?}");
         let logged = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(logged.lines().count(), 1, "audit: {logged:?}");
         let _ = std::fs::remove_file(&audit);
@@ -1310,14 +1632,14 @@ mod tests {
     #[test]
     fn suggested_name_skips_taken_names() {
         let mut s = AppState::new();
-        assert_eq!(s.suggested_session_name(), "shell-1");
+        assert_eq!(s.suggested_session_name(), "claude-1");
         s.open_create_dialog();
         assert!(s.create_dialog.is_some());
         let id = s
             .manager
-            .spawn("shell-1", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .spawn("claude-1", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
             .unwrap();
-        assert_eq!(s.suggested_session_name(), "shell-2");
+        assert_eq!(s.suggested_session_name(), "claude-2");
         assert!(s.manager.remove(id));
     }
 

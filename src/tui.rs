@@ -116,10 +116,18 @@ pub fn run(
     let audit_path = audit_path.to_path_buf();
     let (ipc_tx, ipc_rx) = std::sync::mpsc::channel();
     // The IPC listener is fail-soft: without it, hook relays simply find
-    // no endpoint and exit zero. Children inherit the endpoint by env.
+    // no endpoint and exit zero. Children inherit the endpoint by env;
+    // harnesses that scrub hook environments (muse) use the endpoint file.
     let _ipc = match crate::listener::spawn_all(ipc_tx) {
         Ok(spawned) => {
             std::env::set_var("FORGE_IPC_ENDPOINT", &spawned.sock_path);
+            if let Err(e) = crate::relay::write_endpoint_file(
+                home,
+                std::process::id(),
+                &spawned.sock_path,
+            ) {
+                eprintln!("warning: cannot publish endpoint file: {e}");
+            }
             Some(spawned)
         }
         Err(e) => {
@@ -144,8 +152,10 @@ pub fn run(
         home,
     ) {
         eprintln!("error: main loop failed: {e}");
+        crate::relay::clear_endpoint_file(home);
         return 1;
     }
+    crate::relay::clear_endpoint_file(home);
     0
 }
 
@@ -161,6 +171,13 @@ fn loop_until_quit(
     let mut router = InputRouter::new();
     let size = terminal.size()?;
     state.apply(AppEvent::Resize(size.height, size.width));
+    // Saved snapshots offer themselves before anything else: a pick
+    // restores the whole topology, Esc starts fresh.
+    let file = crate::checkpoint::SessionsFile::load(&crate::branding::sessions_file(home));
+    if let Some(picker) = crate::checkpoint::RestorePicker::new(&file) {
+        state.restore_picker = Some(picker);
+        state.dirty = true;
+    }
     fit_active_pane(state);
     let mut cursor_shown = true;
     while !state.should_quit {
@@ -189,7 +206,9 @@ fn loop_until_quit(
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
                 event::Event::Key(key) => {
-                    if state.create_dialog.is_some() {
+                    if state.restore_picker.is_some() {
+                        handle_restore_key(state, key);
+                    } else if state.create_dialog.is_some() {
                         handle_dialog_key(state, key);
                     } else if state.group_dialog.is_some() {
                         handle_group_key(state, key);
@@ -199,7 +218,10 @@ fn loop_until_quit(
                 }
                 event::Event::Mouse(mev) => forward_mouse(state, mev),
                 event::Event::Paste(text) => {
-                    if state.create_dialog.is_none() && state.group_dialog.is_none() {
+                    if state.restore_picker.is_none()
+                        && state.create_dialog.is_none()
+                        && state.group_dialog.is_none()
+                    {
                         if let Some(active) = state.manager.active() {
                             let bracketed = state.manager.bracketed_paste(active);
                             let bytes = input::paste_bytes(&text, bracketed);
@@ -249,6 +271,9 @@ fn loop_until_quit(
                     if let Some(dialog) = state.group_dialog.as_ref() {
                         dialog.view(f, garea, &ctx);
                     }
+                }
+                if let Some(picker) = state.restore_picker.as_ref() {
+                    picker.view(f, crate::checkpoint::RestorePicker::picker_area(area));
                 }
             })?;
             if cursor_visible != cursor_shown {
@@ -350,6 +375,28 @@ fn handle_group_key(state: &mut AppState, key: event::KeyEvent) {
     }
 }
 
+/// One restore-picker key: a pick recreates the whole entry and fits
+/// the panes, Esc starts fresh. Either way the picker closes.
+fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
+    let outcome = state.restore_picker.as_mut().map(|p| p.key(&key));
+    match outcome {
+        Some(crate::checkpoint::RestoreOutcome::Pick(_)) => {
+            let entry = state.restore_picker.as_ref().and_then(|p| p.take_selected());
+            state.restore_picker = None;
+            if let Some(entry) = entry {
+                state.restore_entry(&entry);
+                fit_active_pane(state);
+            }
+            state.dirty = true;
+        }
+        Some(_) => {
+            state.restore_picker = None;
+            state.dirty = true;
+        }
+        None => {}
+    }
+}
+
 /// One dialog key: submit spawns and fits, cancel closes, edits redraw.
 fn handle_dialog_key(state: &mut AppState, key: event::KeyEvent) {
     let names = state.live_names();
@@ -397,6 +444,10 @@ fn spawn_shell_cmd(state: &mut AppState, cmd: &str) {
 fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     // Modals own mouse input. Only a left press inside the group dialog
     // reaches its List/Checkbox rows; clicks behind it do nothing.
+    // The restore picker is keyboard-only: every click dies here.
+    if state.restore_picker.is_some() {
+        return;
+    }
     if state.group_dialog.is_some() {
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let (rows, cols) = state.term_size;
@@ -738,6 +789,46 @@ mod tests {
     }
 
     #[test]
+    fn restore_picker_pick_spawns_and_esc_goes_fresh() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let saved = std::env::var("CODEX_BIN").ok();
+        std::env::set_var("CODEX_BIN", "/bin/true");
+        let entry = crate::checkpoint::SavedEntry {
+            label: "a".to_string(),
+            saved_at_unix: 1_700_000_000,
+            sessions: vec![crate::checkpoint::SavedSession {
+                name: "a".to_string(),
+                cli_tool: "codex".to_string(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                groups: vec![],
+                harness_session_id: None,
+            }],
+        };
+        let file = crate::checkpoint::SessionsFile {
+            entries: vec![entry],
+        };
+        // Esc resolves fresh with no sessions and keeps the file.
+        let mut state = AppState::new();
+        state.restore_picker = crate::checkpoint::RestorePicker::new(&file);
+        handle_restore_key(&mut state, KeyEvent::new(KeyCode::Esc, none));
+        assert!(state.restore_picker.is_none());
+        assert!(state.manager.order().is_empty());
+        // Enter restores the entry.
+        state.restore_picker = crate::checkpoint::RestorePicker::new(&file);
+        handle_restore_key(&mut state, KeyEvent::new(KeyCode::Enter, none));
+        assert!(state.restore_picker.is_none());
+        let order = state.manager.order().to_vec();
+        assert_eq!(order.len(), 1);
+        assert_eq!(state.manager.get(order[0]).unwrap().name, "a");
+        match saved {
+            Some(v) => std::env::set_var("CODEX_BIN", v),
+            None => std::env::remove_var("CODEX_BIN"),
+        }
+        assert!(state.manager.remove(order[0]));
+    }
+
+    #[test]
     fn prefix_o_manages_groups_end_to_end() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         let none = KeyModifiers::NONE;
@@ -810,10 +901,14 @@ mod tests {
     fn dialog_submit_spawns_and_cancel_closes() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let none = KeyModifiers::NONE;
+        // The dialog only offers agents now; stand in a binary that exits
+        // at once so the submit path stays hermetic.
+        let saved = std::env::var("CLAUDE_BIN").ok();
+        std::env::set_var("CLAUDE_BIN", "/bin/true");
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
         state.open_create_dialog();
-        // Prefilled shell-1 submits a real shell.
+        // Prefilled claude-1 submits a real (stand-in) agent session.
         handle_dialog_key(&mut state, KeyEvent::new(KeyCode::Enter, none));
         assert!(state.create_dialog.is_none());
         assert_eq!(state.manager.len(), 1);
@@ -825,6 +920,10 @@ mod tests {
         let order = state.manager.order().to_vec();
         for id in order {
             assert!(state.manager.remove(id));
+        }
+        match saved {
+            Some(v) => std::env::set_var("CLAUDE_BIN", v),
+            None => std::env::remove_var("CLAUDE_BIN"),
         }
     }
 

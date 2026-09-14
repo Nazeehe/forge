@@ -1,0 +1,369 @@
+//! Saved session snapshots (`~/.forge/sessions`): quitting forge
+//! serializes every live agent session, and startup offers the saved
+//! entries back through a picker (or a fresh instance). Plain JSON via
+//! `serde_json::Value` — no derive macros — written atomically; a
+//! missing or corrupt file reads as empty. Newest entries last, capped.
+
+use std::path::Path;
+
+/// Cap on stored snapshots; oldest entries drop first.
+pub const MAX_ENTRIES: usize = 20;
+
+/// One restorable agent session: everything resume argv needs plus the
+/// human-facing identity and group memberships.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedSession {
+    pub name: String,
+    pub cli_tool: String,
+    pub cwd: String,
+    pub groups: Vec<String>,
+    pub harness_session_id: Option<String>,
+}
+
+/// One quit-time snapshot of the whole topology.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedEntry {
+    pub label: String,
+    pub saved_at_unix: u64,
+    pub sessions: Vec<SavedSession>,
+}
+
+/// The sessions file in memory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionsFile {
+    pub entries: Vec<SavedEntry>,
+}
+
+/// Seconds since the Unix epoch; saturates to zero before 1970.
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Short human age for the picker ("just now", "5m ago").
+pub fn age_string(saved_at_unix: u64, now_unix: u64) -> String {
+    let ago = now_unix.saturating_sub(saved_at_unix);
+    if ago < 60 {
+        "just now".to_string()
+    } else if ago < 3600 {
+        format!("{}m ago", ago / 60)
+    } else if ago < 86400 {
+        format!("{}h ago", ago / 3600)
+    } else {
+        format!("{}d ago", ago / 86400)
+    }
+}
+
+/// Build one snapshot entry: the label names the member sessions (the
+/// picker appends the count and age itself).
+pub fn make_entry(sessions: Vec<SavedSession>, now: u64) -> SavedEntry {
+    let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+    let label = if names.is_empty() {
+        "empty".to_string()
+    } else {
+        names.join(", ")
+    };
+    SavedEntry {
+        label,
+        saved_at_unix: now,
+        sessions,
+    }
+}
+
+impl SessionsFile {
+    /// Read the file; missing, unreadable, or corrupt content yields an
+    /// empty file rather than an error — a bad snapshot must never block
+    /// startup.
+    pub fn load(path: &Path) -> SessionsFile {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if text.trim().is_empty() {
+            return SessionsFile::default();
+        }
+        parse(&text).unwrap_or_default()
+    }
+
+    /// Append one snapshot, pruning oldest past the cap.
+    pub fn push(&mut self, entry: SavedEntry) {
+        self.entries.push(entry);
+        while self.entries.len() > MAX_ENTRIES {
+            self.entries.remove(0);
+        }
+    }
+
+    /// Atomic write of the whole file.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let mut entries = Vec::new();
+        for entry in &self.entries {
+            let mut sessions = Vec::new();
+            for session in &entry.sessions {
+                sessions.push(serde_json::json!({
+                    "name": session.name,
+                    "cli_tool": session.cli_tool,
+                    "cwd": session.cwd,
+                    "groups": session.groups,
+                    "harness_session_id": session.harness_session_id,
+                }));
+            }
+            entries.push(serde_json::json!({
+                "label": entry.label,
+                "saved_at_unix": entry.saved_at_unix,
+                "sessions": sessions,
+            }));
+        }
+        let text = serde_json::json!({ "entries": entries }).to_string();
+        crate::fs_atomic::write_atomic(path, text.as_bytes())
+    }
+}
+
+fn parse(text: &str) -> Option<SessionsFile> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let mut entries = Vec::new();
+    for raw in value.get("entries")?.as_array()? {
+        let mut sessions = Vec::new();
+        for item in raw.get("sessions")?.as_array()? {
+            sessions.push(SavedSession {
+                name: item.get("name")?.as_str()?.to_string(),
+                cli_tool: item.get("cli_tool")?.as_str()?.to_string(),
+                cwd: item.get("cwd")?.as_str()?.to_string(),
+                groups: item
+                    .get("groups")?
+                    .as_array()?
+                    .iter()
+                    .map(|g| g.as_str().map(str::to_string))
+                    .collect::<Option<Vec<String>>>()?,
+                harness_session_id: match item.get("harness_session_id") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(v) => Some(v.as_str()?.to_string()),
+                },
+            });
+        }
+        entries.push(SavedEntry {
+            label: raw.get("label")?.as_str()?.to_string(),
+            saved_at_unix: raw.get("saved_at_unix")?.as_u64()?,
+            sessions,
+        });
+    }
+    Some(SessionsFile { entries })
+}
+
+/// Startup restore picker: newest entry preselected, Enter loads it,
+/// Esc starts fresh. Keyboard-first like every other dialog. Full
+/// entries ride along so a pick restores without re-reading the file.
+pub struct RestorePicker {
+    entries: Vec<SavedEntry>,
+    selected: usize,
+}
+
+/// Dialog result after one input.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    Pending,
+    /// Fresh instance: leave the file alone.
+    Fresh,
+    /// Load entries[selected].
+    Pick(usize),
+}
+
+impl RestorePicker {
+    pub fn new(file: &SessionsFile) -> Option<RestorePicker> {
+        if file.entries.is_empty() {
+            return None;
+        }
+        let selected = file.entries.len().saturating_sub(1);
+        Some(RestorePicker {
+            entries: file.entries.clone(),
+            selected,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    /// Clone the selected entry for the restore path.
+    pub fn take_selected(&self) -> Option<SavedEntry> {
+        self.entries.get(self.selected).cloned()
+    }
+
+    pub fn key(&mut self, key: &crossterm::event::KeyEvent) -> RestoreOutcome {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return RestoreOutcome::Pending;
+        }
+        match key.code {
+            KeyCode::Esc => RestoreOutcome::Fresh,
+            KeyCode::Enter => RestoreOutcome::Pick(self.selected),
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                RestoreOutcome::Pending
+            }
+            KeyCode::Down => {
+                self.selected = (self.selected + 1).min(self.entries.len().saturating_sub(1));
+                RestoreOutcome::Pending
+            }
+            KeyCode::Char('k') if key.modifiers.is_empty() => {
+                self.selected = self.selected.saturating_sub(1);
+                RestoreOutcome::Pending
+            }
+            KeyCode::Char('j') if key.modifiers.is_empty() => {
+                self.selected = (self.selected + 1).min(self.entries.len().saturating_sub(1));
+                RestoreOutcome::Pending
+            }
+            _ => RestoreOutcome::Pending,
+        }
+    }
+
+    /// Centered picker box, clamped into tiny terminals.
+    pub fn picker_area(term: ratatui::layout::Rect) -> ratatui::layout::Rect {
+        let (w, h) = (64.min(term.width), 20.min(term.height));
+        ratatui::layout::Rect::new(
+            term.x + term.width.saturating_sub(w) / 2,
+            term.y + term.height.saturating_sub(h) / 2,
+            w,
+            h,
+        )
+    }
+
+    /// Render the box: title, one row per snapshot, footer hints.
+    pub fn view(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        use ratatui::widgets::{Block, Borders, Paragraph};
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Restore session ")
+            .style(crate::theme::style(crate::theme::Role::BorderFocused));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height < 4 || inner.width < 20 {
+            return;
+        }
+        let end = inner.y + inner.height;
+        let mut row = inner.y;
+        let now = now_unix();
+        for (index, entry) in self.entries.iter().enumerate() {
+            if row + 1 >= end {
+                break;
+            }
+            let mark = if index == self.selected { "▸" } else { " " };
+            let noun = if entry.sessions.len() == 1 {
+                "session"
+            } else {
+                "sessions"
+            };
+            let line = format!(
+                "{mark} {} ({} {noun} · {})",
+                entry.label,
+                entry.sessions.len(),
+                age_string(entry.saved_at_unix, now)
+            );
+            let style = if index == self.selected {
+                crate::theme::style(crate::theme::Role::Focus)
+            } else {
+                crate::theme::style(crate::theme::Role::Text)
+            };
+            frame.render_widget(
+                Paragraph::new(line).style(style),
+                ratatui::layout::Rect::new(inner.x, row, inner.width, 1),
+            );
+            row += 1;
+        }
+        if row < end {
+            frame.render_widget(
+                Paragraph::new("Enter load • Esc fresh start"),
+                ratatui::layout::Rect::new(inner.x, row, inner.width, 1),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn saved(name: &str) -> SavedSession {
+        SavedSession {
+            name: name.to_string(),
+            cli_tool: "claude".to_string(),
+            cwd: "/tmp/proj".to_string(),
+            groups: vec!["peers".to_string()],
+            harness_session_id: Some("harness-1".to_string()),
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn round_trip_preserves_everything() {
+        let dir = std::env::temp_dir().join(format!("forge-ckpt-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions");
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved("a"), saved("b")], 1_700_000_000));
+        file.save(&path).unwrap();
+        let back = SessionsFile::load(&path);
+        assert_eq!(back, file);
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].sessions[0].harness_session_id.as_deref(), Some("harness-1"));
+        assert!(back.entries[0].label.contains('a'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_and_corrupt_read_as_empty() {
+        let missing = std::env::temp_dir().join(format!("forge-ckpt-nope-{}", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        assert!(SessionsFile::load(&missing).entries.is_empty());
+        let dir = std::env::temp_dir().join(format!("forge-ckpt-bad-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions");
+        std::fs::write(&path, "{oops").unwrap();
+        assert!(SessionsFile::load(&path).entries.is_empty());
+        std::fs::write(&path, r#"{"entries":[{"label":"x"}]}"#).unwrap();
+        assert!(SessionsFile::load(&path).entries.is_empty(), "shape-checked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn push_prunes_oldest_past_the_cap() {
+        let mut file = SessionsFile::default();
+        for n in 0..MAX_ENTRIES + 3 {
+            file.push(make_entry(vec![saved("a")], n as u64));
+        }
+        assert_eq!(file.entries.len(), MAX_ENTRIES);
+        assert_eq!(file.entries[0].saved_at_unix, 3);
+        assert_eq!(file.entries[MAX_ENTRIES - 1].saved_at_unix, (MAX_ENTRIES + 2) as u64);
+    }
+
+    #[test]
+    fn picker_selects_newest_and_navigates() {
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved("a")], 100));
+        file.push(make_entry(vec![saved("b")], 200));
+        let mut picker = RestorePicker::new(&file).unwrap();
+        assert_eq!(picker.len(), 2);
+        assert_eq!(picker.selected(), 1, "newest preselected");
+        assert!(matches!(picker.key(&key(KeyCode::Up)), RestoreOutcome::Pending));
+        assert_eq!(picker.selected(), 0);
+        assert!(matches!(picker.key(&key(KeyCode::Up)), RestoreOutcome::Pending));
+        assert_eq!(picker.selected(), 0, "clamps at top");
+        assert_eq!(picker.key(&key(KeyCode::Enter)), RestoreOutcome::Pick(0));
+        assert_eq!(picker.key(&key(KeyCode::Esc)), RestoreOutcome::Fresh);
+        assert!(RestorePicker::new(&SessionsFile::default()).is_none(), "empty offers nothing");
+    }
+
+    #[test]
+    fn age_strings_cover_units() {
+        assert_eq!(age_string(1000, 1010), "just now");
+        assert_eq!(age_string(1000, 1300), "5m ago");
+        assert_eq!(age_string(1000, 8200), "2h ago");
+        assert_eq!(age_string(1000, 90000), "1d ago");
+    }
+}

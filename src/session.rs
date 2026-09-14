@@ -52,6 +52,29 @@ pub enum Activity {
     Stopped,
 }
 
+/// Harness-side session ID from a hook envelope body, when the harness
+/// reports one (Claude's `session_id`; other harnesses name it
+/// differently, so `thread_id` is accepted too). The envelope nests the
+/// harness JSON under `body`; both layers reuse the dependency-free
+/// field scanner. Unknown shapes yield None rather than a guess.
+pub fn session_id_from_hook_body(body: &str) -> Option<String> {
+    let nested = crate::mcp::top_raw(body, "body")?;
+    crate::mcp::top_str(nested, "session_id")
+        .or_else(|| crate::mcp::top_str(nested, "thread_id"))
+}
+
+/// Working directory from a hook envelope body, when the harness reports
+/// one (muse's `cwd`). Same nesting as the session ID above.
+pub fn cwd_from_hook_body(body: &str) -> Option<String> {
+    let nested = crate::mcp::top_raw(body, "body")?;
+    crate::mcp::top_str(nested, "cwd")
+}
+
+/// How long after spawn an unattributed SessionStart may still claim its
+/// session. Hooks fire at harness boot, so a generous minute covers slow
+/// machines without inviting stale binds.
+pub const BOOTSTRAP_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Hook event to session activity: tool gates mark ToolUse (which holds
 /// broker injections), session edges mark Thinking, user-wait marks
 /// Waiting, and the stop edge parks at Stopped. Unknown hooks leave the
@@ -93,6 +116,9 @@ pub struct SessionRecord {
     pub state: SessionState,
     pub activity: Activity,
     pub run_id: crate::ids::RunId,
+    /// Harness-side conversation ID from the SessionStart hook body, when
+    /// the harness reports one. This is what resume argv needs on restore.
+    pub harness_session_id: Option<String>,
     /// Agent CLI behind the agent tab (`shell`, `claude`, `codex`, `muse`).
     pub cli_tool: String,
     pub tabs: Vec<Tab>,
@@ -197,6 +223,7 @@ impl SessionManager {
                 state: SessionState::Running,
                 activity: Activity::Idle,
                 run_id,
+                harness_session_id: None,
                 cli_tool: cli_tool.to_string(),
                 tabs,
                 active_tab: 0,
@@ -366,6 +393,17 @@ impl SessionManager {
     }
 
     /// Replace a session's run ID, revoking the old value.
+    /// Record the harness-side session ID (resume key). False when unknown.
+    pub fn set_harness_session(&mut self, id: SessionId, harness: String) -> bool {
+        match self.sessions.get_mut(&id) {
+            None => false,
+            Some(rec) => {
+                rec.harness_session_id = Some(harness);
+                true
+            }
+        }
+    }
+
     /// Mark a session's hook activity (Idle/Stopped gates injections).
     pub fn set_activity(&mut self, id: SessionId, activity: Activity) -> bool {
         match self.sessions.get_mut(&id) {
@@ -428,6 +466,49 @@ impl SessionManager {
             Some(rec) if rec.state.is_live() => Some(id),
             _ => None,
         }
+    }
+
+    /// Resolve a harness-side session ID to its live session, if any. This
+    /// is the steady-state route for records whose relay could not send a
+    /// run ID (muse scrubs hook-child environments).
+    pub fn lookup_harness_session(&self, harness: &str) -> Option<SessionId> {
+        if harness.is_empty() {
+            return None;
+        }
+        self.sessions
+            .iter()
+            .find(|(_, rec)| {
+                rec.state.is_live() && rec.harness_session_id.as_deref() == Some(harness)
+            })
+            .map(|(id, _)| *id)
+    }
+
+    /// Bind a harness-side session ID learned from an unattributed
+    /// SessionStart to the session it belongs to. Succeeds only when
+    /// exactly one live muse session without an ID matches the working
+    /// directory and spawned recently: ambiguity (two same-cwd spawns in
+    /// the window) binds nothing rather than the wrong session. True when
+    /// bound.
+    pub fn bind_harness_session(&mut self, harness: &str, cwd: &str) -> bool {
+        if harness.is_empty() || cwd.is_empty() {
+            return false;
+        }
+        if self.lookup_harness_session(harness).is_some() {
+            return true;
+        }
+        let mut candidates = self.sessions.iter().filter(|(_, rec)| {
+            rec.state.is_live()
+                && rec.cli_tool == "muse"
+                && rec.harness_session_id.is_none()
+                && rec.cwd.to_string_lossy() == cwd
+                && rec.spawned_at.elapsed() < BOOTSTRAP_WINDOW
+        });
+        let first = candidates.next();
+        if first.is_some() && candidates.next().is_none() {
+            let id = *first.expect("just checked Some").0;
+            return self.set_harness_session(id, harness.to_string());
+        }
+        false
     }
 
     /// Kill every tab pane; the record is retained and marked exited once
@@ -695,6 +776,30 @@ mod tests {
         assert!(!SessionState::Exited(None).is_live());
         assert!(!SessionState::Exited(Some(0)).is_live());
         assert!(!SessionState::Exited(Some(1)).is_live());
+    }
+
+    #[test]
+    fn hook_body_yields_harness_id() {
+        assert_eq!(
+            session_id_from_hook_body(
+                r#"{"v":1,"hook":"SessionStart","run_id":"r","body":{"session_id":"abc","cwd":"/tmp"}}"#
+            )
+            .as_deref(),
+            Some("abc"),
+            "claude envelope"
+        );
+        assert_eq!(
+            session_id_from_hook_body(r#"{"v":1,"body":{"thread_id":"t-1"}}"#).as_deref(),
+            Some("t-1"),
+            "thread fallback"
+        );
+        assert_eq!(session_id_from_hook_body("{}"), None);
+        assert_eq!(
+            session_id_from_hook_body(r#"{"v":1,"body":{"cwd":"/tmp"}}"#),
+            None,
+            "no id, no guess"
+        );
+        assert_eq!(session_id_from_hook_body("not json"), None);
     }
 
     #[test]
@@ -1002,5 +1107,61 @@ mod tests {
         assert_eq!(m.lookup_run(run.as_str()), None);
         assert!(m.pane_size(id).is_none(), "visible agent pane released");
         assert!(m.remove(id));
+    }
+
+    #[test]
+    fn cwd_parses_from_hook_envelope() {
+        let line = r#"{"v":1,"hook":"SessionStart","run_id":"","body":{"session_id":"s-1","cwd":"/tmp/work"}}"#;
+        assert_eq!(cwd_from_hook_body(line).as_deref(), Some("/tmp/work"));
+        assert_eq!(session_id_from_hook_body(line).as_deref(), Some("s-1"));
+        assert_eq!(cwd_from_hook_body(r#"{"v":1,"body":{}}"#), None);
+        assert_eq!(cwd_from_hook_body("not json"), None);
+    }
+
+    #[test]
+    fn harness_bootstrap_binds_unique_muse_session() {
+        let mut m = SessionManager::new();
+        let cwd = workdir();
+        let id = m
+            .spawn_agent("m", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        assert!(m.bind_harness_session("sid-1", &cwd_str));
+        assert_eq!(
+            m.get(id).unwrap().harness_session_id.as_deref(),
+            Some("sid-1")
+        );
+        assert_eq!(m.lookup_harness_session("sid-1"), Some(id));
+        assert_eq!(m.lookup_harness_session(""), None);
+        assert_eq!(m.lookup_harness_session("nope"), None);
+        assert!(m.remove(id));
+    }
+
+    #[test]
+    fn harness_bootstrap_refuses_ambiguity_and_strangers() {
+        let mut m = SessionManager::new();
+        let cwd = workdir();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        // Two same-cwd muse sessions: neither may claim the ID.
+        let a = m
+            .spawn_agent("a", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let b = m
+            .spawn_agent("b", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        assert!(!m.bind_harness_session("sid-x", &cwd_str));
+        assert_eq!(m.get(a).unwrap().harness_session_id, None);
+        assert_eq!(m.get(b).unwrap().harness_session_id, None);
+        assert!(m.remove(a));
+        assert!(m.remove(b));
+        // A claude session never matches a muse bootstrap, nor does a
+        // foreign cwd or an empty ID.
+        let c = m
+            .spawn_agent("c", &cwd, "exec sleep 30", RunId::generate(), "claude")
+            .unwrap();
+        assert!(!m.bind_harness_session("sid-y", &cwd_str));
+        assert!(!m.bind_harness_session("sid-y", "/no/such/dir"));
+        assert!(!m.bind_harness_session("", &cwd_str));
+        assert!(m.remove(c));
     }
 }

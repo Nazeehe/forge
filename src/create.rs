@@ -123,8 +123,9 @@ impl CreateDialog {
             .choices(["OFF", "ON"])
             .value(0)
             .rewind(true);
+        // Agent CLIs only: forge never creates a bare shell session.
         let tool = Radio::default()
-            .choices(["shell", "claude", "codex", "muse"])
+            .choices(["claude", "codex", "muse"])
             .value(0)
             .rewind(true);
         let connection = Radio::default().choices(["Local"]).value(0);
@@ -163,10 +164,9 @@ impl CreateDialog {
 
     pub fn tool_choice(&self) -> SessionKind {
         match self.tool.states.choice {
-            1 => SessionKind::Agent(Harness::Claude),
-            2 => SessionKind::Agent(Harness::Codex),
-            3 => SessionKind::Agent(Harness::Muse),
-            _ => SessionKind::Shell,
+            1 => SessionKind::Agent(Harness::Codex),
+            2 => SessionKind::Agent(Harness::Muse),
+            _ => SessionKind::Agent(Harness::Claude),
         }
     }
 
@@ -486,14 +486,14 @@ mod tests {
     fn fresh() -> (CreateDialog, Vec<String>) {
         let cwd = std::env::temp_dir();
         let groups = vec!["team".to_string(), "other".to_string()];
-        (CreateDialog::new("shell-1", &cwd, &groups), Vec::new())
+        (CreateDialog::new("claude-1", &cwd, &groups), Vec::new())
     }
 
     #[test]
-    fn defaults_prefill_shell_and_none_group() {
+    fn defaults_prefill_claude_and_none_group() {
         let (d, _) = fresh();
-        assert_eq!(d.tool_choice(), SessionKind::Shell);
-        assert_eq!(d.spec().name, "shell-1");
+        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Claude));
+        assert_eq!(d.spec().name, "claude-1");
         assert_eq!(d.spec().cwd, std::env::temp_dir());
         assert_eq!(d.spec().model, "");
         assert_eq!(d.group_choice(), None);
@@ -530,13 +530,12 @@ mod tests {
         tab(&mut d, &names, 4);
         assert_eq!(d.focus(), 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
-        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Claude));
-        assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
+        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Codex));
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Muse));
-        // Rewind wraps back to shell.
+        // Rewind wraps back to claude.
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
-        assert_eq!(d.tool_choice(), SessionKind::Shell);
+        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Claude));
         assert!(matches!(d.key(&key(KeyCode::Left), &names), DialogOutcome::Pending));
         assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Muse));
     }
@@ -580,8 +579,8 @@ mod tests {
         assert_eq!(d.focus(), 7);
         match d.key(&key(KeyCode::Enter), &names) {
             DialogOutcome::Submitted(spec) => {
-                assert_eq!(spec.name, "shell-1");
-                assert!(matches!(spec.kind, SessionKind::Shell));
+                assert_eq!(spec.name, "claude-1");
+                assert!(matches!(spec.kind, SessionKind::Agent(_)));
                 assert_eq!(spec.group, Some("team".to_string()));
             }
             other => panic!("expected submit, got {other:?}"),
@@ -601,7 +600,7 @@ mod tests {
         let (mut d, names) = fresh();
         match d.key(&key(KeyCode::Enter), &names) {
             DialogOutcome::Submitted(spec) => {
-                assert_eq!(spec.name, "shell-1");
+                assert_eq!(spec.name, "claude-1");
                 assert_eq!(spec.group, None);
             }
             other => panic!("expected submit, got {other:?}"),
@@ -612,7 +611,7 @@ mod tests {
     fn typing_edits_name_and_backspace_deletes() {
         let (mut d, names) = fresh();
         tab(&mut d, &names, 1);
-        for _ in 0.."shell-1".len() {
+        for _ in 0.."claude-1".len() {
             assert!(matches!(
                 d.key(&key(KeyCode::Backspace), &names),
                 DialogOutcome::Pending
@@ -626,12 +625,12 @@ mod tests {
     fn enter_with_bad_name_stays_open_with_error() {
         let (mut d, _) = fresh();
         // Duplicate name.
-        let names = vec!["shell-1".to_string()];
+        let names = vec!["claude-1".to_string()];
         assert!(matches!(d.key(&key(KeyCode::Enter), &names), DialogOutcome::Pending));
         assert!(d.error().is_some_and(|e| e.contains("taken")), "err: {:?}", d.error());
         // Empty name.
         tab(&mut d, &names, 1);
-        for _ in 0.."shell-1".len() {
+        for _ in 0.."claude-1".len() {
             let _ = d.key(&key(KeyCode::Backspace), &names);
         }
         assert!(matches!(d.key(&key(KeyCode::Enter), &names), DialogOutcome::Pending));

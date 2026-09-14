@@ -264,7 +264,17 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
 ) {
     let body = String::from_utf8_lossy(line).into_owned();
     let run_id = crate::mcp::top_str(&body, "run_id").unwrap_or_default();
+    // Records resolved through the endpoint file carry their owner's pid;
+    // another live instance's relays must not land in this loop.
+    let forge_pid: u32 = crate::mcp::top_raw(&body, "forge_pid")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(0);
+    if forge_pid != 0 && forge_pid != std::process::id() {
+        return;
+    }
     let sync = crate::relay::is_sync_hook(&hook);
+    // The timeout-deny below still needs the name after the move.
+    let hook_for_timeout = hook.clone();
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if tx
@@ -292,6 +302,7 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
         Err(_) => {
             timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
             crate::policy::decision_line(
+                &hook_for_timeout,
                 crate::policy::Decision::Deny,
                 "operator timeout; denied",
             )
@@ -453,6 +464,51 @@ mod tests {
     }
 
     #[test]
+    fn foreign_instance_records_never_reach_the_loop() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-listen-test-{}-pid.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _guard = spawn_unix(&path, tx, 8).unwrap();
+        // Another instance's relay: dropped before an event exists.
+        let mut conn = UnixStream::connect(&path).unwrap();
+        conn.write_all(b"{\"v\":1,\"hook\":\"Stop\",\"run_id\":\"\",\"forge_pid\":424242,\"body\":{}}\n")
+            .unwrap();
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "foreign record dropped"
+        );
+        // Own pid (or untagged legacy records) still arrive.
+        let mut conn = UnixStream::connect(&path).unwrap();
+        let own = std::process::id();
+        let line = format!(
+            "{{\"v\":1,\"hook\":\"Stop\",\"run_id\":\"\",\"forge_pid\":{own},\"body\":{{}}}}\n"
+        );
+        conn.write_all(line.as_bytes()).unwrap();
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("own record arrives");
+        assert!(
+            matches!(event, crate::event::AppEvent::HookRequest(_)),
+            "own record kept"
+        );
+        let mut conn = UnixStream::connect(&path).unwrap();
+        conn.write_all(b"{\"v\":1,\"hook\":\"Stop\",\"run_id\":\"\",\"body\":{}}\n")
+            .unwrap();
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("untagged record arrives");
+        assert!(
+            matches!(event, crate::event::AppEvent::HookRequest(_)),
+            "legacy record kept"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn unanswered_sync_hook_fails_closed_with_deny() {
         use std::io::Write;
         let path = std::env::temp_dir().join(format!(
@@ -490,7 +546,14 @@ mod tests {
             }
         }
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains(r#""decision":"deny""#), "fail closed: {text:?}");
+        assert!(
+            text.contains(r#""permissionDecision":"deny""#),
+            "fail closed: {text:?}"
+        );
+        assert!(
+            text.contains("operator timeout"),
+            "reason rides along: {text:?}"
+        );
         assert!(
             req.timed_out.load(std::sync::atomic::Ordering::SeqCst),
             "queued request flagged stale"

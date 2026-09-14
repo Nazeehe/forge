@@ -1,1 +1,4 @@
 /target
+# Cargo registry metadata accidentally copied with vendor/vt100.
+vendor/vt100/.cargo-ok
+vendor/vt100/.cargo_vcs_info.json

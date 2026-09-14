@@ -44,6 +44,9 @@ pub struct CellFormat {
     pub italic: bool,
     pub underline: bool,
     pub inverse: bool,
+    /// Faint (SGR 2): agent ghost/prediction text. Needs the vendored
+    /// vt100 patch; upstream 0.15.2 drops the attribute at parse time.
+    pub dim: bool,
 }
 
 impl CellFormat {
@@ -56,6 +59,7 @@ impl CellFormat {
             italic: false,
             underline: false,
             inverse: false,
+            dim: false,
         }
     }
 }
@@ -261,6 +265,7 @@ impl PtyPane {
                     italic: cell.italic(),
                     underline: cell.underline(),
                     inverse: cell.inverse(),
+                    dim: cell.dim(),
                 };
                 line.push(FormattedCell {
                     text: if text.is_empty() { " ".to_string() } else { text },
@@ -607,6 +612,43 @@ mod tests {
         // every later column left and shred fullscreen layouts.
         assert_eq!(&row_text(&rows[1])[..4], "A  B");
         assert!(rows[1].iter().all(|c| c.format == CellFormat::plain()));
+        pane.close();
+    }
+
+    #[test]
+    fn styled_rows_carry_dim() {
+        // Ghost/prediction text arrives as SGR 2 (faint). Dropping it
+        // renders predictions full-bright white; the dim bit must survive
+        // the parser so the view layer can faint it.
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "printf 'A\\033[2mDIM\\033[22mB'; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        let rows = loop {
+            let rows = pane.styled_rows();
+            if row_text(rows.first().unwrap_or(&Vec::new())).starts_with("ADIMB") {
+                break rows;
+            }
+            if Instant::now() > deadline {
+                panic!("styled rows never arrived: {rows:?}");
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(!rows[0][0].format.dim, "plain stays plain");
+        assert!(
+            rows[0][1..4].iter().all(|c| c.format.dim),
+            "SGR 2 marks faint: {rows:?}"
+        );
+        assert!(!rows[0][4].format.dim, "SGR 22 clears faint");
         pane.close();
     }
 

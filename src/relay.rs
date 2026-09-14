@@ -10,6 +10,66 @@
 /// How long a synchronous hook waits for the TUI decision.
 pub const DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Home-relative path of the live-endpoint file the TUI maintains. Some
+/// harnesses (muse) scrub hook-child environments, so neither
+/// `FORGE_IPC_ENDPOINT` nor `FORGE_RUN_ID` arrives; the file lets the relay
+/// still reach a running TUI. Records sent this way carry no run ID and the
+/// loop attributes them by harness session ID (see session.rs).
+pub fn endpoint_file_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".forge/endpoint.json")
+}
+
+/// Publish this process's listener socket for scrubbed hook children. Called
+/// once per TUI boot; records the owner pid so a later instance never
+/// accepts another instance's records.
+pub fn write_endpoint_file(
+    home: &std::path::Path,
+    pid: u32,
+    sock: &std::path::Path,
+) -> std::io::Result<()> {
+    if let Some(parent) = endpoint_file_path(home).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = format!(
+        "{{\"pid\":{pid},\"sock\":{}}}",
+        crate::mcp::escape_json(&sock.to_string_lossy())
+    );
+    crate::fs_atomic::write_atomic(&endpoint_file_path(home), text.as_bytes())
+}
+
+/// Remove the live-endpoint file at orderly shutdown so orphaned hook
+/// children fail open instead of routing into whoever boots next.
+pub fn clear_endpoint_file(home: &std::path::Path) {
+    let _ = std::fs::remove_file(endpoint_file_path(home));
+}
+
+/// Owner pid recorded in `text`, when it names a live process running this
+/// same binary. Anything else (missing file, foreign pid, reused pid now
+/// running something else) yields None.
+fn file_owner_pid(text: &str) -> Option<u32> {
+    let pid: u32 = crate::mcp::top_raw(text, "pid")?.parse().ok()?;
+    if pid == 0 || pid == std::process::id() {
+        return None;
+    }
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let own = std::env::current_exe().ok()?;
+    (exe == own).then_some(pid)
+}
+
+/// Endpoint from the live-endpoint file: `(owner pid, socket path)`. The
+/// pid check keeps stale files (dead TUI, reused pid) fail-open and lets
+/// the loop drop records that another instance's relays send our way.
+pub fn file_endpoint() -> Option<(u32, String)> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let text = std::fs::read_to_string(endpoint_file_path(&home)).ok()?;
+    let pid = file_owner_pid(&text)?;
+    let sock = crate::mcp::top_str(&text, "sock")?;
+    if sock.is_empty() {
+        return None;
+    }
+    Some((pid, sock))
+}
+
 /// Hooks that block the harness until Forge decides. Everything else is
 /// fire-and-forget: the record is still delivered, but no reply is read.
 pub fn is_sync_hook(name: &str) -> bool {
@@ -89,22 +149,25 @@ fn unescape_json_string(s: &str) -> String {
 }
 
 /// Build the single newline record: a tiny envelope carrying the route, the
-/// sender's run ID (empty when unset), plus the raw stdin body. Literal
-/// CR/LF bytes cannot occur inside valid JSON strings, so stripping them
-/// keeps the body intact while guaranteeing one line on the wire.
-pub fn record_line(input: &[u8], hook: Option<&str>, run_id: &str) -> Vec<u8> {
+/// sender's run ID (empty when unset), the endpoint-file owner pid (zero
+/// for explicit channels), plus the raw stdin body. Literal CR/LF bytes
+/// cannot occur inside valid JSON strings, so stripping them keeps the body
+/// intact while guaranteeing one line on the wire.
+pub fn record_line(input: &[u8], hook: Option<&str>, run_id: &str, forge_pid: u32) -> Vec<u8> {
     let body: Vec<u8> = input
         .iter()
         .copied()
         .filter(|b| *b != b'\n' && *b != b'\r')
         .collect();
     let hook = hook.unwrap_or("");
-    let mut line = Vec::with_capacity(body.len() + hook.len() + run_id.len() + 48);
+    let mut line = Vec::with_capacity(body.len() + hook.len() + run_id.len() + 64);
     line.extend_from_slice(b"{\"v\":1,\"hook\":\"");
     line.extend_from_slice(hook.replace('\\', "\\\\").replace('"', "\\\"").as_bytes());
     line.extend_from_slice(b"\",\"run_id\":\"");
     line.extend_from_slice(run_id.replace('\\', "\\\\").replace('"', "\\\"").as_bytes());
-    line.extend_from_slice(b"\",\"body\":");
+    line.extend_from_slice(b"\",\"forge_pid\":");
+    line.extend_from_slice(forge_pid.to_string().as_bytes());
+    line.extend_from_slice(b",\"body\":");
     if body.is_empty() {
         line.extend_from_slice(b"null");
     } else {
@@ -116,9 +179,12 @@ pub fn record_line(input: &[u8], hook: Option<&str>, run_id: &str) -> Vec<u8> {
 
 /// Relay one hook event. Returns the process exit code: always zero.
 /// `endpoint` is the TUI listener socket path; `None` means unavailable.
+/// `forge_pid` tags records resolved through the endpoint file so the loop
+/// can drop another instance's relays; explicit channels pass zero.
 pub fn run(
     stdin_bytes: &[u8],
     endpoint: Option<&str>,
+    forge_pid: u32,
     stdout: &mut dyn std::io::Write,
     timeout: std::time::Duration,
 ) -> i32 {
@@ -130,9 +196,10 @@ pub fn run(
     };
     let hook = hook_name(stdin_bytes);
     // Hook children inherit this from the session pane (session.rs); it
-    // attributes the record to its session for activity tracking.
+    // attributes the record to its session for activity tracking. Scrubbed
+    // harnesses (muse) send none; the loop falls back to harness ID.
     let run_id = std::env::var("FORGE_RUN_ID").unwrap_or_default();
-    let record = record_line(stdin_bytes, hook.as_deref(), &run_id);
+    let record = record_line(stdin_bytes, hook.as_deref(), &run_id, forge_pid);
     let mut conn = match std::os::unix::net::UnixStream::connect(path) {
         Ok(conn) => conn,
         Err(_) => return 0,
@@ -172,8 +239,10 @@ pub fn run(
     0
 }
 
-/// Read stdin fully and relay through the endpoint override or
-/// `FORGE_IPC_ENDPOINT`. Always exits zero; use the return as the code.
+/// Read stdin fully and relay through the endpoint override,
+/// `FORGE_IPC_ENDPOINT`, or the TUI's live-endpoint file (for harnesses
+/// like muse that scrub hook-child environments). Always exits zero; use
+/// the return as the code.
 pub fn run_stdin(endpoint_override: Option<&str>) -> i32 {
     let mut stdin_bytes = Vec::new();
     {
@@ -183,13 +252,20 @@ pub fn run_stdin(endpoint_override: Option<&str>) -> i32 {
         }
     }
     let env_endpoint = std::env::var("FORGE_IPC_ENDPOINT").ok();
-    let endpoint = endpoint_override
+    let (endpoint, forge_pid) = match endpoint_override
         .filter(|p| !p.is_empty())
         .map(str::to_string)
-        .or(env_endpoint);
+        .or(env_endpoint)
+    {
+        Some(path) => (Some(path), 0),
+        None => match file_endpoint() {
+            Some((pid, sock)) => (Some(sock), pid),
+            None => (None, 0),
+        },
+    };
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    run(&stdin_bytes, endpoint.as_deref(), &mut handle, DECISION_TIMEOUT)
+    run(&stdin_bytes, endpoint.as_deref(), forge_pid, &mut handle, DECISION_TIMEOUT)
 }
 
 #[cfg(test)]
@@ -224,7 +300,7 @@ mod tests {
 
     #[test]
     fn record_is_one_line_envelope() {
-        let line = record_line(br#"{"hook_event_name":"Stop"}"#, Some("Stop"), "run-1");
+        let line = record_line(br#"{"hook_event_name":"Stop"}"#, Some("Stop"), "run-1", 0);
         assert_eq!(
             line.iter().filter(|b| **b == b'\n').count(),
             1,
@@ -234,13 +310,20 @@ mod tests {
         let text = String::from_utf8(line).unwrap();
         assert!(text.contains(r#""hook":"Stop""#), "route inside: {text:?}");
         assert!(text.contains(r#""run_id":"run-1""#), "attribution inside: {text:?}");
+        assert!(text.contains(r#""forge_pid":0"#), "explicit channel untagged: {text:?}");
         assert!(text.contains(r#"hook_event_name"#), "body inside");
+        let tagged = record_line(b"{}", Some("Stop"), "", 4242);
+        let tagged_text = String::from_utf8(tagged).unwrap();
+        assert!(
+            tagged_text.contains(r#""forge_pid":4242"#),
+            "file owner rides along: {tagged_text:?}"
+        );
     }
 
     #[test]
     fn no_endpoint_is_silent_success() {
         let mut out = Vec::new();
-        let code = run(b"{}", None, &mut out, std::time::Duration::from_millis(50));
+        let code = run(b"{}", None, 0, &mut out, std::time::Duration::from_millis(50));
         assert_eq!(code, 0);
         assert!(out.is_empty());
     }
@@ -251,6 +334,7 @@ mod tests {
         let code = run(
             b"",
             Some("/nonexistent-forge-test.sock"),
+            0,
             &mut out,
             std::time::Duration::from_millis(50),
         );
@@ -264,11 +348,48 @@ mod tests {
         let code = run(
             br#"{"hook_event_name":"PreToolUse"}"#,
             Some("/nonexistent-forge-test.sock"),
+            0,
             &mut out,
             std::time::Duration::from_millis(50),
         );
         assert_eq!(code, 0);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn endpoint_file_round_trips_through_helpers() {
+        let home = std::env::temp_dir().join(format!(
+            "forge-relay-test-{}-home",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        // Self pid is never accepted back: a relay is never its own TUI.
+        write_endpoint_file(&home, std::process::id(), std::path::Path::new("/tmp/x.sock"))
+            .unwrap();
+        let text = std::fs::read_to_string(endpoint_file_path(&home)).unwrap();
+        assert!(text.contains("/tmp/x.sock"), "sock persisted: {text}");
+        assert_eq!(file_owner_pid(&text), None, "self pid refused");
+        // A dead pid is refused too.
+        let dead = 424242u32;
+        assert!(
+            std::fs::read_link(format!("/proc/{dead}/exe")).is_err(),
+            "test needs a dead pid"
+        );
+        write_endpoint_file(
+            &home,
+            dead,
+            std::path::Path::new("/tmp/y.sock"),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(endpoint_file_path(&home)).unwrap();
+        assert_eq!(file_owner_pid(&text), None, "dead pid refused");
+        // Garbage is refused without panicking.
+        assert_eq!(file_owner_pid("not json"), None);
+        assert_eq!(file_owner_pid(r#"{"pid":"abc","sock":"/tmp/z.sock"}"#), None);
+        assert_eq!(file_owner_pid(r#"{"pid":0,"sock":"/tmp/z.sock"}"#), None);
+        clear_endpoint_file(&home);
+        assert!(!endpoint_file_path(&home).exists(), "cleared");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -305,6 +426,7 @@ mod tests {
         let code = run(
             br#"{"hook_event_name":"PreToolUse","tool":"Bash"}"#,
             Some(path.to_str().unwrap()),
+            0,
             &mut out,
             std::time::Duration::from_secs(5),
         );
@@ -331,6 +453,7 @@ mod tests {
         let code = run(
             br#"{"hook_event_name":"PreToolUse"}"#,
             Some(path.to_str().unwrap()),
+            0,
             &mut out,
             std::time::Duration::from_millis(150),
         );
