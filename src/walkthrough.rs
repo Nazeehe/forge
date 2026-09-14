@@ -139,37 +139,74 @@ impl Walkthrough {
         Ok(())
     }
 
-    /// Parse the `steps` tool arg: one `start:end:explanation` step per
-    /// line (the explanation runs to end of line, colons included).
+    /// Parse the `steps` tool arg: one `start:end:explanation` step
+    /// header per line (colons included in the explanation), with the
+    /// explanation running on: a line starting with a space or tab
+    /// continues the open step with exactly one blank stripped, so
+    /// Markdown nesting survives, and blank lines become paragraph
+    /// breaks. A header may leave the explanation empty when
+    /// continuation lines carry it.
     pub fn parse_steps(text: &str, line_count: usize) -> Result<Vec<Step>, String> {
-        let mut steps = Vec::new();
-        for (n, raw) in text.lines().enumerate() {
-            let line = raw.trim();
-            if line.is_empty() {
+        let mut steps: Vec<Step> = Vec::new();
+        let mut current: Option<(Step, usize)> = None;
+        // Trailing paragraph breaks never survive: the explanation is
+        // trimmed when its step closes, and emptiness fails there.
+        let close = |current: &mut Option<(Step, usize)>,
+                         steps: &mut Vec<Step>|
+         -> Result<(), String> {
+            if let Some((mut step, header)) = current.take() {
+                step.explanation = step.explanation.trim_end().to_string();
+                if step.explanation.is_empty() {
+                    return Err(format!("step {header} needs an explanation"));
+                }
+                steps.push(step);
+            }
+            Ok(())
+        };
+        for (i, raw) in text.lines().enumerate() {
+            let no = i + 1;
+            if raw.trim().is_empty() {
+                if let Some((step, _)) = current.as_mut() {
+                    step.explanation.push('\n');
+                }
                 continue;
             }
-            let mut parts = line.splitn(3, ':');
+            if raw.starts_with(' ') || raw.starts_with('\t') {
+                let Some((step, _)) = current.as_mut() else {
+                    return Err(format!("line {no} continues no open step"));
+                };
+                let cont = raw
+                    .strip_prefix(' ')
+                    .or_else(|| raw.strip_prefix('\t'))
+                    .unwrap_or(raw);
+                step.explanation.push('\n');
+                step.explanation.push_str(cont);
+                continue;
+            }
+            close(&mut current, &mut steps)?;
+            let mut parts = raw.trim().splitn(3, ':');
             let (start, end, explanation) = match (parts.next(), parts.next(), parts.next()) {
                 (Some(s), Some(e), Some(x)) => (s.trim(), e.trim(), x.trim()),
-                _ => return Err(format!("step {} must be start:end:explanation", n + 1)),
+                _ => return Err(format!("step {no} must be start:end:explanation")),
             };
             let parse = |v: &str| {
                 v.parse::<u32>()
-                    .map_err(|_| format!("step {} has non-numeric range", n + 1))
+                    .map_err(|_| format!("step {no} has non-numeric range"))
             };
             let (start, end) = (parse(start)?, parse(end)?);
             if start < 1 || end < start || end as usize > line_count {
-                return Err(format!("step {} range out of bounds", n + 1));
+                return Err(format!("step {no} range out of bounds"));
             }
-            if explanation.is_empty() {
-                return Err(format!("step {} needs an explanation", n + 1));
-            }
-            steps.push(Step {
-                start,
-                end,
-                explanation: explanation.to_string(),
-            });
+            current = Some((
+                Step {
+                    start,
+                    end,
+                    explanation: explanation.to_string(),
+                },
+                no,
+            ));
         }
+        close(&mut current, &mut steps)?;
         if steps.is_empty() {
             return Err("no walkthrough steps found".to_string());
         }
@@ -1006,6 +1043,30 @@ mod tests {
         let steps = Walkthrough::parse_steps("1:3:uses a:b literals\n5:5:done", 10).unwrap();
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].explanation, "uses a:b literals");
+    }
+
+    #[test]
+    fn parse_steps_joins_continuations_and_blank_lines() {
+        let steps = Walkthrough::parse_steps(
+            "1:3:First line.\n Second line.\n\n - bullet\n   - nested\n5:5:Next step.",
+            10,
+        )
+        .unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            steps[0].explanation,
+            "First line.\nSecond line.\n\n- bullet\n  - nested"
+        );
+        assert_eq!(steps[1].explanation, "Next step.");
+    }
+
+    #[test]
+    fn parse_steps_rejects_orphan_continuations_and_empty_ends() {
+        assert!(Walkthrough::parse_steps("  orphan", 10).is_err());
+        assert!(Walkthrough::parse_steps("1:3:ok\n  \n\n", 10).is_ok());
+        let steps = Walkthrough::parse_steps("1:3:ok\n  \n\n", 10).unwrap();
+        assert_eq!(steps[0].explanation, "ok", "trailing breaks trimmed");
+        assert!(Walkthrough::parse_steps("1:3:\n  carried", 10).is_ok());
     }
 
     #[test]
