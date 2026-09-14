@@ -261,6 +261,19 @@ impl Broker {
         removed
     }
 
+    /// Drop a session from every group it belongs to (termination path);
+    /// true when it belonged to at least one.
+    pub fn leave_all(&mut self, id: SessionId) -> bool {
+        let groups = self.membership.remove(&id).unwrap_or_default();
+        let mut removed = false;
+        for group in &groups {
+            if let Some(g) = self.groups.get_mut(group) {
+                removed |= g.members.remove(&id);
+            }
+        }
+        removed
+    }
+
     /// First membership is the primary display group.
     pub fn primary_group(&self, id: SessionId) -> Option<&str> {
         self.membership
@@ -1449,6 +1462,19 @@ mod tests {
             .call(&p.run_b.clone(), "list_sessions", "{}")
             .expect("listing works for b too");
         assert!(res_b.starts_with(r#"{"you":"b","#), "res: {res_b}");
+    }
+
+    #[test]
+    fn leave_all_drops_every_group() {
+        let mut p = live_pair();
+        p.state.broker.join(&p.state.manager, p.a, "peers").unwrap();
+        p.state.broker.join(&p.state.manager, p.a, "other").unwrap();
+        assert!(p.state.broker.leave_all(p.a));
+        assert!(!p.state.broker.is_member(p.a, "peers"));
+        assert!(!p.state.broker.is_member(p.a, "other"));
+        assert_eq!(p.state.broker.primary_group(p.a), None);
+        assert!(!p.state.broker.leave_all(p.a), "second leave is a no-op");
+        assert!(!p.state.broker.leave_all(p.b), "never joined");
     }
 
     #[test]

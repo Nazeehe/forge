@@ -1026,6 +1026,21 @@ impl AppState {
         }
     }
 
+    /// Terminate a session (`Ctrl-b x`): leave every comm group, fail its
+    /// open conversations and timers, then drop the record so it leaves
+    /// the UI. Focus falls to the first remaining session. False when the
+    /// id is unknown.
+    pub fn terminate_session(&mut self, id: crate::session::SessionId) -> bool {
+        self.broker.leave_all(id);
+        self.broker.target_exited(&self.manager, id);
+        if !self.manager.remove(id) {
+            return false;
+        }
+        self.overlay_view = None;
+        self.dirty = true;
+        true
+    }
+
     /// Session-bar tabs in order with live/focus flags.
     pub fn tabs(&self) -> Vec<crate::ui::SessionTab> {
         let active = self.manager.active();
@@ -2205,6 +2220,29 @@ mod tests {
         assert!(tabs[0].focused && !tabs[1].focused);
         assert_eq!(s.sidebar_info().pending, 0);
         assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn terminate_session_drops_ui_and_groups() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, a, "other").unwrap();
+        assert!(s.terminate_session(a));
+        assert!(s.manager.get(a).is_none(), "record gone");
+        assert_eq!(s.manager.order().len(), 1);
+        assert!(!s.broker.is_member(a, "peers"), "left peers");
+        assert!(!s.broker.is_member(a, "other"), "left other");
+        assert_eq!(s.manager.active(), Some(b), "focus falls through");
+        assert!(!s.terminate_session(a), "unknown id is a no-op");
         assert!(s.manager.remove(b));
     }
 

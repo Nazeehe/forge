@@ -395,6 +395,13 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             UserCommand::TogglePermissionMode => {
                 state.toggle_permission_mode();
             }
+            UserCommand::TerminateSession => {
+                if let Some(active) = state.manager.active() {
+                    state.terminate_session(active);
+                    fit_active_pane(state);
+                }
+                state.dirty = true;
+            }
         },
         RoutedKey::PrefixPending | RoutedKey::Cancelled => {
             state.dirty = true;
@@ -1183,6 +1190,28 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
         );
         assert!(state.create_dialog.is_some());
+    }
+
+    #[test]
+    fn prefix_x_terminates_active_session() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        assert_eq!(state.manager.order().len(), 2);
+        let victim = state.manager.active().unwrap();
+        state.broker.join(&state.manager, victim, "peers").unwrap();
+        let mut router = InputRouter::new();
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('x'), none));
+        assert!(state.manager.get(victim).is_none(), "record gone from UI");
+        assert!(!state.broker.is_member(victim, "peers"), "left the group");
+        assert_eq!(state.manager.order().len(), 1);
+        assert_ne!(state.manager.active(), Some(victim));
+        let survivor = state.manager.active().unwrap();
+        assert!(state.manager.remove(survivor));
     }
 
     #[test]
