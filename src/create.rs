@@ -51,6 +51,72 @@ const FOCUS_GROUP: usize = 3;
 const FOCUS_ACTIONS: usize = 4;
 const FIELD_COUNT: usize = 5;
 
+/// Shell-like Tab completion for the directory field: completes the final
+/// path segment against the filesystem and returns the new field text, or
+/// `None` when nothing completes (no match, an unreadable directory, or a
+/// prefix that is already fully extended). A bare segment completes against
+/// `base` the way a shell completes against `$PWD`; anything with a `/`
+/// keeps its directory part verbatim and only extends the last segment. A
+/// unique match that is itself a directory gains a trailing `/` so the user
+/// can keep drilling; several matches extend to their longest common
+/// prefix. Dotfiles only match a dotted prefix, as in a shell.
+fn complete_path(raw: &str, base: &Path) -> Option<String> {
+    let (dir_text, prefix) = match raw.rsplit_once('/') {
+        Some((dir, pre)) => (format!("{dir}/"), pre),
+        None => (String::new(), raw),
+    };
+    let search_dir = if dir_text.is_empty() {
+        base.to_path_buf()
+    } else {
+        expand_folder(&dir_text, base)
+    };
+    let mut names: Vec<String> = std::fs::read_dir(&search_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name.starts_with(prefix)
+                && (prefix.starts_with('.') || !name.starts_with('.'))
+        })
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return None;
+    }
+    if names.len() == 1 {
+        let mut done = names.pop().expect("exactly one match");
+        if search_dir.join(&done).is_dir() {
+            done.push('/');
+        }
+        return Some(format!("{dir_text}{done}"));
+    }
+    let common = common_prefix(&names);
+    if common.len() > prefix.len() {
+        Some(format!("{dir_text}{common}"))
+    } else {
+        None
+    }
+}
+
+/// Longest common char prefix of pre-sorted candidate names.
+fn common_prefix(names: &[String]) -> String {
+    let first: Vec<char> = names.first().map(|s| s.chars().collect()).unwrap_or_default();
+    let last: Vec<char> = names.last().map(|s| s.chars().collect()).unwrap_or_default();
+    first
+        .iter()
+        .zip(last.iter())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| *a)
+        .collect()
+}
+
+/// Replace an input's whole text, parking the cursor at the end.
+fn set_text(input: &mut Input, text: &str) {
+    input.states.input = text.chars().collect();
+    input.states.cursor = input.states.input.len();
+    input.states.display_offset = 0;
+}
+
 /// Expand `~` against HOME; resolve relatives against the dialog's base.
 pub fn expand_folder(raw: &str, base: &Path) -> PathBuf {
     let trimmed = raw.trim();
@@ -89,8 +155,10 @@ pub fn shell_join(argv: &[String]) -> String {
 }
 
 /// New-session dialog: two text inputs, two option rows, and an action
-/// row. Tab cycles rows, Left/Right changes the focused option, typing
-/// edits the focused text, Enter submits, Esc cancels.
+/// row. Tab completes the directory path on the directory row and cycles
+/// rows elsewhere, Left/Right changes the focused option, typing edits
+/// the focused text (the name default is selected, so the first keystroke
+/// replaces it), Enter submits, Esc cancels.
 pub struct CreateDialog {
     directory: Input,
     name: Input,
@@ -100,6 +168,10 @@ pub struct CreateDialog {
     focus: usize,
     base_cwd: PathBuf,
     error: Option<String>,
+    /// The name row opens with its suggested default selected: the first
+    /// typed or deleted char replaces it wholesale, while cursor keys
+    /// just deselect and keep the text.
+    name_pristine: bool,
 }
 
 impl CreateDialog {
@@ -134,6 +206,7 @@ impl CreateDialog {
             focus: 0,
             base_cwd: cwd.to_path_buf(),
             error: None,
+            name_pristine: true,
         }
     }
 
@@ -210,13 +283,22 @@ impl CreateDialog {
         DialogOutcome::Submitted(spec)
     }
 
-    /// One key: Tab/BackTab cycle rows, Left/Right changes the focused
-    /// option row (or moves the text cursor), typing edits the focused
-    /// text, Enter submits (or activates the focused action), Esc cancels.
+    /// One key: Tab completes the directory path on the directory row
+    /// and cycles rows everywhere else (BackTab always cycles back),
+    /// Left/Right changes the focused option row (or moves the text
+    /// cursor), typing edits the focused text, Enter submits (or
+    /// activates the focused action), Esc cancels.
     pub fn key(&mut self, key: &KeyEvent, live_names: &[String]) -> DialogOutcome {
         match key.code {
             KeyCode::Esc => return DialogOutcome::Cancelled,
             KeyCode::Tab => {
+                if self.focus == FOCUS_DIRECTORY && key.modifiers.is_empty() {
+                    if let Some(done) = complete_path(&self.directory_text(), &self.base_cwd) {
+                        set_text(&mut self.directory, &done);
+                        self.error = None;
+                    }
+                    return DialogOutcome::Pending;
+                }
                 self.focus = (self.focus + 1) % FIELD_COUNT;
                 return DialogOutcome::Pending;
             }
@@ -262,6 +344,22 @@ impl CreateDialog {
                 option_key(&mut self.actions, key);
             }
             _ => {
+                // The name row opens selected: its first edit replaces the
+                // suggested default wholesale (a delete just clears it),
+                // while cursor keys only deselect and keep the text.
+                if self.focus == FOCUS_NAME && self.name_pristine {
+                    match key.code {
+                        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete => {
+                            set_text(&mut self.name, "");
+                            self.error = None;
+                        }
+                        _ => {}
+                    }
+                    self.name_pristine = false;
+                    if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) {
+                        return DialogOutcome::Pending;
+                    }
+                }
                 let field = match self.focus {
                     FOCUS_DIRECTORY => &mut self.directory,
                     _ => &mut self.name,
@@ -516,13 +614,13 @@ impl CreateDialog {
             // Shorter hint on narrow dialogs so it never wraps.
             let keys: &[(&str, &str)] = if inner.width >= 60 {
                 &[
-                    ("Tab", " move • "),
+                    ("Tab", " complete/move • "),
                     ("Left/Right", " change • "),
                     ("Enter", " create • "),
                     ("Esc", " cancel"),
                 ]
             } else {
-                &[("Tab", " move • "), ("Enter", " create • "), ("Esc", " cancel")]
+                &[("Tab", " complete/move • "), ("Enter", " create • "), ("Esc", " cancel")]
             };
             let hint = Line::from(
                 keys.iter()
@@ -583,6 +681,30 @@ mod tests {
         }
     }
 
+    /// Down-steps: Tab owns completion on the directory row, so tests
+    /// move between rows with Down.
+    fn step(dialog: &mut CreateDialog, names: &[String], n: usize) {
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        for _ in 0..n {
+            assert!(matches!(dialog.key(&down, names), DialogOutcome::Pending));
+        }
+    }
+
+    static SANDBOX_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Unique scratch tree; parallel-safe, removed by the caller.
+    fn sandbox(dirs: &[&str], files: &[&str]) -> PathBuf {
+        let n = SANDBOX_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("forge-create-{}-{n}", std::process::id()));
+        for dir in dirs {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        for file in files {
+            std::fs::write(root.join(file), "x").unwrap();
+        }
+        root
+    }
+
     fn fresh() -> (CreateDialog, Vec<String>) {
         let cwd = std::env::temp_dir();
         let groups = vec!["team".to_string(), "other".to_string()];
@@ -626,7 +748,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
         use ratatui::style::{Color, Modifier};
         let (mut d, names) = fresh();
-        tab(&mut d, &names, 4);
+        step(&mut d, &names, 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
@@ -670,14 +792,20 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_all_rows_and_wraps() {
+    fn tab_cycles_rows_except_directory_which_completes() {
         let (mut d, names) = fresh();
-        for expect in [1, 2, 3, 4, 0, 1] {
+        // The directory row owns Tab for completion: focus stays put.
+        tab(&mut d, &names, 1);
+        assert_eq!(d.focus(), 0);
+        // Everywhere else Tab still advances and wraps around.
+        step(&mut d, &names, 1);
+        for expect in [2, 3, 4, 0] {
             tab(&mut d, &names, 1);
             assert_eq!(d.focus(), expect);
         }
+        // BackTab always cycles back, even from the directory row.
         assert!(matches!(d.key(&key(KeyCode::BackTab), &names), DialogOutcome::Pending));
-        assert_eq!(d.focus(), 0);
+        assert_eq!(d.focus(), 4);
     }
 
     #[test]
@@ -695,7 +823,7 @@ mod tests {
     #[test]
     fn left_right_drives_tool_radio_and_rewinds() {
         let (mut d, names) = fresh();
-        tab(&mut d, &names, 2);
+        step(&mut d, &names, 2);
         assert_eq!(d.focus(), 2);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Codex));
@@ -711,7 +839,7 @@ mod tests {
     #[test]
     fn group_select_cycles_none_and_groups() {
         let (mut d, names) = fresh();
-        tab(&mut d, &names, 3);
+        step(&mut d, &names, 3);
         assert_eq!(d.group_choice(), None);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         assert_eq!(d.group_choice(), Some("team".to_string()));
@@ -727,9 +855,9 @@ mod tests {
     #[test]
     fn actions_create_submits_with_group() {
         let (mut d, names) = fresh();
-        tab(&mut d, &names, 3);
+        step(&mut d, &names, 3);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
-        tab(&mut d, &names, 1);
+        step(&mut d, &names, 1);
         assert_eq!(d.focus(), 4);
         match d.key(&key(KeyCode::Enter), &names) {
             DialogOutcome::Submitted(spec) => {
@@ -744,7 +872,7 @@ mod tests {
     #[test]
     fn actions_cancel_cancels_from_button_row() {
         let (mut d, names) = fresh();
-        tab(&mut d, &names, 4);
+        step(&mut d, &names, 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         assert!(matches!(d.key(&key(KeyCode::Enter), &names), DialogOutcome::Cancelled));
     }
@@ -764,7 +892,7 @@ mod tests {
     #[test]
     fn typing_edits_name_and_backspace_deletes() {
         let (mut d, names) = fresh();
-        tab(&mut d, &names, 1);
+        step(&mut d, &names, 1);
         for _ in 0.."claude-1".len() {
             assert!(matches!(
                 d.key(&key(KeyCode::Backspace), &names),
@@ -783,7 +911,7 @@ mod tests {
         assert!(matches!(d.key(&key(KeyCode::Enter), &names), DialogOutcome::Pending));
         assert!(d.error().is_some_and(|e| e.contains("taken")), "err: {:?}", d.error());
         // Empty name.
-        tab(&mut d, &names, 1);
+        step(&mut d, &names, 1);
         for _ in 0.."claude-1".len() {
             let _ = d.key(&key(KeyCode::Backspace), &names);
         }
@@ -805,7 +933,7 @@ mod tests {
     #[test]
     fn escape_cancels_from_any_row() {
         let (mut d, names) = fresh();
-        tab(&mut d, &names, 3);
+        step(&mut d, &names, 3);
         assert!(matches!(d.key(&key(KeyCode::Esc), &names), DialogOutcome::Cancelled));
     }
 
@@ -836,5 +964,80 @@ mod tests {
             shell_join(&["a'b".to_string()]),
             "'a'\\''b'"
         );
+    }
+
+    #[test]
+    fn first_name_keystroke_replaces_default() {
+        let (mut d, names) = fresh();
+        step(&mut d, &names, 1);
+        typed(&mut d, "z", &names);
+        assert_eq!(d.spec().name, "z");
+        // Once replaced, later keystrokes append as usual.
+        typed(&mut d, "z", &names);
+        assert_eq!(d.spec().name, "zz");
+    }
+
+    #[test]
+    fn backspace_on_pristine_name_clears_it() {
+        let (mut d, names) = fresh();
+        step(&mut d, &names, 1);
+        assert!(matches!(d.key(&key(KeyCode::Backspace), &names), DialogOutcome::Pending));
+        assert_eq!(d.spec().name, "");
+        // Submit now reports empty instead of using the stale default.
+        assert!(matches!(d.key(&key(KeyCode::Enter), &names), DialogOutcome::Pending));
+        assert!(d.error().is_some_and(|e| e.contains("empty")));
+    }
+
+    #[test]
+    fn arrow_deselects_name_default_without_clearing() {
+        let (mut d, names) = fresh();
+        step(&mut d, &names, 1);
+        assert!(matches!(d.key(&key(KeyCode::Left), &names), DialogOutcome::Pending));
+        typed(&mut d, "X", &names);
+        assert_eq!(d.spec().name, "claude-X1");
+    }
+
+    #[test]
+    fn tab_completes_directory_prefixes_shell_style() {
+        let root = sandbox(&["alpha-service", "alpha-worker"], &["top.txt"]);
+        let r = root.to_string_lossy().into_owned();
+        let groups: Vec<String> = vec![];
+        let mut d = CreateDialog::new("x", &root, &groups);
+        let names: Vec<String> = vec![];
+        assert_eq!(d.focus(), 0);
+        // Several matches extend to their longest common prefix; a shared
+        // directory part stays verbatim and focus never leaves the row.
+        typed(&mut d, "/alp", &names);
+        tab(&mut d, &names, 1);
+        assert_eq!(d.focus(), 0);
+        assert_eq!(d.spec().cwd, PathBuf::from(format!("{r}/alpha-")));
+        // A second Tab is a no-op: the prefix is already fully extended.
+        tab(&mut d, &names, 1);
+        assert_eq!(d.spec().cwd, PathBuf::from(format!("{r}/alpha-")));
+        // Narrowing to one match finishes it; directories gain `/`.
+        typed(&mut d, "s", &names);
+        tab(&mut d, &names, 1);
+        assert_eq!(d.spec().cwd, PathBuf::from(format!("{r}/alpha-service/")));
+        // No match leaves the text alone.
+        typed(&mut d, "zzz", &names);
+        tab(&mut d, &names, 1);
+        assert_eq!(d.spec().cwd, PathBuf::from(format!("{r}/alpha-service/zzz")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn complete_path_covers_files_dotfiles_and_bad_dirs() {
+        let root = sandbox(&["beta"], &["top.txt", ".hidden"]);
+        // Bare segments complete to just the name shell-style (submit
+        // resolves them against the base); unique files gain no slash.
+        assert_eq!(complete_path("top", &root), Some("top.txt".to_string()));
+        assert_eq!(complete_path("beta", &root), Some("beta/".to_string()));
+        // Bare dots match dotfiles; an empty prefix skips them shell-style.
+        assert_eq!(complete_path(".", &root), Some(".hidden".to_string()));
+        assert_eq!(complete_path("", &root), None);
+        // Missing entries and unreadable directories stay put.
+        assert_eq!(complete_path("zzz", &root), None);
+        assert_eq!(complete_path("/no/such/dir-anywhere/xyz", &root), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
