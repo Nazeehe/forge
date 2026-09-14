@@ -38,12 +38,23 @@ pub struct Question {
     pub answer: Option<String>,
 }
 
+/// One highlighted token: a theme role over a byte range of its line.
+/// Roles only, never raw colors, so OS themes remap code like chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HLSpan {
+    pub role: Role,
+    pub start: usize,
+    pub end: usize,
+}
+
 /// Live walkthrough for one session: tour position plus the running
 /// Q&A log. `input` is `Some` while the bottom bar is a `> ` prompt.
+/// `hl` holds one token row per source line, computed once at open.
 pub struct Walkthrough {
     pub title: String,
     pub file_path: String,
     pub lines: Vec<String>,
+    pub hl: Vec<Vec<HLSpan>>,
     pub steps: Vec<Step>,
     pub index: usize,
     pub completed: bool,
@@ -74,6 +85,7 @@ impl Walkthrough {
             title,
             file_path,
             lines,
+            hl: Vec::new(),
             steps: Vec::new(),
             index: 0,
             completed: false,
@@ -87,6 +99,9 @@ impl Walkthrough {
             wt.check_step(step.start, step.end, &step.explanation)?;
             wt.steps.push(step);
         }
+        // Token roles once at open: renders stay cheap no matter how
+        // often keys repaint, and unknown extensions stay plain.
+        wt.hl = highlight_lines(&wt.file_path, &wt.lines);
         Ok(wt)
     }
 
@@ -423,6 +438,108 @@ impl Walkthrough {
     }
 }
 
+/// Wheel notches scroll the code window this many lines.
+pub const WHEEL_SCROLL_LINES: i32 = 3;
+
+/// Shared Sublime grammar set, loaded once: every tour detects its
+/// language from the file extension against the same tables.
+fn syntax_set() -> &'static syntect::parsing::SyntaxSet {
+    static SET: std::sync::OnceLock<syntect::parsing::SyntaxSet> = std::sync::OnceLock::new();
+    SET.get_or_init(syntect::parsing::SyntaxSet::load_defaults_newlines)
+}
+
+/// Theme role for one scope stack, innermost first. Comments dim,
+/// strings go green, keywords gold, types cyan — the reference look —
+/// everything else stays body text. Unknown scopes fall through to
+/// the next outer scope, so partial grammars degrade gracefully.
+fn role_for(stack: &[syntect::parsing::Scope]) -> Role {
+    fn sel(name: &str) -> syntect::parsing::Scope {
+        syntect::parsing::Scope::new(name).expect("builtin scope selector parses")
+    }
+    let (comment, string, constant) = (sel("comment"), sel("string"), sel("constant"));
+    let (keyword, storage) = (sel("keyword"), sel("storage"));
+    let types = [
+        sel("entity.name.type"),
+        sel("entity.name.class"),
+        sel("entity.name.struct"),
+        sel("entity.name.enum"),
+        sel("support.class"),
+        sel("support.type"),
+        sel("meta.annotation"),
+        sel("entity.other.attribute-name"),
+    ];
+    let invalid = sel("invalid");
+    for scope in stack.iter().rev() {
+        if invalid.is_prefix_of(*scope) {
+            return Role::Danger;
+        }
+        if comment.is_prefix_of(*scope) {
+            return Role::Muted;
+        }
+        if string.is_prefix_of(*scope) {
+            return Role::Success;
+        }
+        if constant.is_prefix_of(*scope) {
+            return Role::Command;
+        }
+        if keyword.is_prefix_of(*scope) || storage.is_prefix_of(*scope) {
+            return Role::Brand;
+        }
+        if types.iter().any(|t| t.is_prefix_of(*scope)) {
+            return Role::Info;
+        }
+    }
+    Role::Text
+}
+
+/// Token roles for every line, parsed as one document so multi-line
+/// strings and comments carry across rows. A failed line (or an
+/// unknown extension) renders plain; ranges clamp to the line so a
+/// grammar can never panic the overlay on odd bytes.
+fn highlight_lines(file_path: &str, lines: &[String]) -> Vec<Vec<HLSpan>> {
+    use syntect::parsing::{ParseState, ScopeStack};
+    let set = syntax_set();
+    let ext = file_path.rsplit('.').next().unwrap_or("");
+    let Some(syntax) = set.find_syntax_by_extension(ext) else {
+        return Vec::new();
+    };
+    let mut state = ParseState::new(syntax);
+    lines
+        .iter()
+        .map(|line| {
+            let probe = format!("{line}\n");
+            let ops = match state.parse_line(&probe, set) {
+                Ok(ops) => ops,
+                Err(_) => return Vec::new(),
+            };
+            let mut stack = ScopeStack::new();
+            let mut spans = Vec::new();
+            let mut prev = 0usize;
+            let mut flush = |upto: usize, stack: &ScopeStack, spans: &mut Vec<HLSpan>| {
+                let end = upto.min(line.len());
+                if end > prev && line.is_char_boundary(prev) && line.is_char_boundary(end) {
+                    let role = role_for(stack.as_slice());
+                    // Adjacent plain runs merge; anything else (or a
+                    // leading plain run) starts its own span.
+                    match spans.last_mut() {
+                        Some(last) if last.role == Role::Text && role == Role::Text => {
+                            last.end = end;
+                        }
+                        _ => spans.push(HLSpan { role, start: prev, end }),
+                    }
+                }
+                prev = end;
+            };
+            for (idx, op) in ops {
+                flush(idx, &stack, &mut spans);
+                let _ = stack.apply(&op);
+            }
+            flush(line.len(), &stack, &mut spans);
+            spans
+        })
+        .collect()
+}
+
 /// Forge markdown skin: every color comes from a theme role so
 /// answers stay readable on light OS themes too (the default sheet
 /// hardcodes dark-theme colors). Alert icons are ASCII: several
@@ -593,23 +710,44 @@ impl Walkthrough {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::Paragraph;
         use crate::safe_text::encode_for_display;
-        use crate::theme::{focus_row, style, Role};
+        use crate::theme::{style, Role};
         if area.height == 0 {
             return;
         }
         let num_w = self.lines.len().to_string().len().max(2);
         let rows = self.code_window(area.height as usize);
-        let first_range = rows.iter().find(|(_, _, in_range)| *in_range).map(|(no, _, _)| *no);
+        // Step rows tint with the Info wash so token colors sit on one
+        // surface; every span carries the wash or the tint gets holes.
+        let wash = style(Role::Info).fg;
         let lines: Vec<Line> = rows
             .into_iter()
             .map(|(no, text, in_range)| {
-                let mark = if Some(no) == first_range { ">" } else { " " };
-                let body = if in_range { focus_row() } else { style(Role::Text) };
-                Line::from(vec![
-                    Span::styled(format!("{no:>num_w$} "), style(Role::Muted)),
-                    Span::styled(mark.to_string(), body),
-                    Span::styled(encode_for_display(text), body),
-                ])
+                let tint = if in_range { wash } else { None };
+                let mut base = style(Role::Text);
+                base.bg = tint;
+                let mut gutter = style(Role::Text);
+                gutter.bg = tint;
+                let mut num = style(Role::Muted);
+                num.bg = tint;
+                let mut row = vec![
+                    Span::styled(if in_range { "▌" } else { " " }, gutter),
+                    Span::styled(format!("{no:>num_w$} "), num),
+                ];
+                let idx = (no as usize).saturating_sub(1);
+                match self.hl.get(idx) {
+                    Some(tokens) if !tokens.is_empty() => {
+                        for tok in tokens {
+                            let Some(slice) = text.get(tok.start..tok.end) else {
+                                continue;
+                            };
+                            let mut s = base;
+                            s.fg = style(tok.role).fg.or(base.fg);
+                            row.push(Span::styled(encode_for_display(slice), s));
+                        }
+                    }
+                    _ => row.push(Span::styled(encode_for_display(text), base)),
+                }
+                Line::from(row)
             })
             .collect();
         frame.render_widget(Paragraph::new(lines), area);
@@ -772,10 +910,22 @@ impl Walkthrough {
     }
 }
 
-/// Main-area rect for the tour: the pane grid minus the topbar strip,
-/// so the session tabs stay visible and clickable above it.
+/// Main-area rect for the tour: the pane grid below the topbar strip,
+/// so the session tabs stay visible and clickable above it. Wide
+/// layouts inset the strip into the grid's first row, which is cut
+/// here (the grid itself keeps that row for PTY sizing).
 pub fn walk_area(term: ratatui::layout::Rect) -> ratatui::layout::Rect {
-    crate::ui::pane_grid_area(&crate::ui::chrome_areas(term))
+    let areas = crate::ui::chrome_areas(term);
+    let mut grid = crate::ui::pane_grid_area(&areas);
+    if areas.topbar.height > 0
+        && areas.topbar.y >= grid.y
+        && areas.topbar.y < grid.y.saturating_add(grid.height)
+    {
+        let cut = areas.topbar.y + areas.topbar.height - grid.y;
+        grid.y += cut;
+        grid.height = grid.height.saturating_sub(cut);
+    }
+    grid
 }
 
 /// Outcome of one key for the TUI loop to apply.
@@ -1041,11 +1191,117 @@ mod tests {
         assert!(text.contains("Step 1 of 2"), "counter: {text:?}");
         assert!(text.contains("src/f.rs"), "path: {text:?}");
         assert!(text.contains("code line 2"), "step code: {text:?}");
-        assert!(text.contains(">"), "range marker: {text:?}");
+        assert!(text.contains("▌"), "gutter bar on step rows: {text:?}");
         assert!(text.contains("Why"), "markdown explanation: {text:?}");
         assert!(text.contains("reason"), "markdown body: {text:?}");
         for hint in ["Enter ask", "steps", "scroll", "back"] {
             assert!(text.contains(hint), "key bar {hint:?}: {text:?}");
+        }
+    }
+
+    fn render_cells(wt: &Walkthrough, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| wt.view(f, f.area())).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn rust_tour() -> Walkthrough {
+        let content = "fn main() {\n    let x = \"hi\"; // note\n}\n";
+        Walkthrough::start(
+            "Tour".to_string(),
+            "main.rs".to_string(),
+            content,
+            vec![Step { start: 1, end: 3, explanation: "e".to_string() }],
+        )
+        .expect("valid fixture")
+    }
+
+    #[test]
+    fn rust_tokens_take_theme_roles_not_rgb() {
+        use crate::theme::{style, Role};
+        use ratatui::style::Color;
+        let wt = rust_tour();
+        // Code rows start below the two header rows; the gutter plus a
+        // two-wide number field precede the source text.
+        let buf = render_cells(&wt, 60, 20);
+        let fg = |x: u16, y: u16| buf[(x, y)].fg;
+        assert_eq!(fg(4, 2), style(Role::Brand).fg.unwrap(), "fn keyword");
+        assert_eq!(fg(8, 3), style(Role::Brand).fg.unwrap(), "let keyword");
+        assert_eq!(fg(16, 3), style(Role::Success).fg.unwrap(), "string");
+        assert_eq!(fg(22, 3), style(Role::Muted).fg.unwrap(), "comment");
+        for cell in buf.content.iter() {
+            for color in [cell.fg, cell.bg] {
+                assert!(!matches!(color, Color::Rgb(..)), "cell {cell:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn gutter_bar_marks_only_step_rows() {
+        use crate::theme::{style, Role};
+        let wt = rich();
+        // Step 1 covers lines 2-3; the code window opens at line 1.
+        let buf = render_cells(&wt, 100, 30);
+        assert_eq!(buf[(0, 2)].symbol(), " ");
+        assert_eq!(buf[(0, 3)].symbol(), "▌");
+        assert_eq!(buf[(0, 4)].symbol(), "▌");
+        assert_eq!(buf[(0, 5)].symbol(), " ");
+        assert_eq!(buf[(0, 3)].bg, style(Role::Info).fg.unwrap(), "bar sits on the tint");
+    }
+
+    #[test]
+    fn unknown_extension_stays_plain() {
+        let content = (1..=10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let wt = Walkthrough::start(
+            "Tour".to_string(),
+            "data.foobarxyz".to_string(),
+            &content,
+            vec![Step { start: 1, end: 2, explanation: "e".to_string() }],
+        )
+        .expect("valid fixture");
+        assert!(wt.hl.is_empty(), "no grammar, no tokens");
+        let text = render_text(&wt, 60, 20);
+        assert!(text.contains("line 1"), "plain render: {text:?}");
+    }
+
+    #[test]
+    fn highlight_covers_every_line_contiguously() {
+        let content = (0..3000)
+            .map(|i| format!("fn f{i}() {{ let x = {i}; }} // tail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let wt = Walkthrough::start(
+            "Tour".to_string(),
+            "big.rs".to_string(),
+            &content,
+            vec![Step { start: 1, end: 10, explanation: "e".to_string() }],
+        )
+        .expect("valid fixture");
+        assert_eq!(wt.hl.len(), 3000);
+        for (line, spans) in content.lines().zip(wt.hl.iter()) {
+            assert!(!spans.is_empty(), "line renders: {line:?}");
+            assert_eq!(spans[0].start, 0, "head: {line:?}");
+            assert_eq!(spans.last().unwrap().end, line.len(), "tail: {line:?}");
+            for w in spans.windows(2) {
+                assert_eq!(w[0].end, w[1].start, "gap: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn walk_area_keeps_topbar_visible() {
+        use ratatui::layout::Rect;
+        for (w, h) in [(120u16, 30u16), (200u16, 50u16)] {
+            let term = Rect::new(0, 0, w, h);
+            let areas = crate::ui::chrome_areas(term);
+            let walk = walk_area(term);
+            assert!(
+                walk.y >= areas.topbar.y + areas.topbar.height,
+                "{w}x{h}: tour starts below the strip: {walk:?}"
+            );
+            assert_eq!((walk.x, walk.width), (areas.main.x, areas.main.width));
+            assert!(walk.height > 0, "{w}x{h}: tour keeps body rows");
         }
     }
 

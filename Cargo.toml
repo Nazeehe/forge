@@ -6,9 +6,12 @@ edition = "2021"
 [dependencies]
 crossterm = "0.29"
 libc = "0.2"
-# Markdown answers in the walkthrough Q&A panel; no syntax highlighter
-# (code fences take the stylesheet code style instead).
+# Markdown answers in the walkthrough Q&A panel (its code fences take
+# the stylesheet code style; tour source highlighting is syntect below).
 tui-markdown = { version = "0.3.9", default-features = false }
+# Walkthrough code highlighting: Sublime grammars via a pure-Rust regex
+# engine (no onig C build). Scopes map onto theme roles, never raw RGB.
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
 portable-pty = "0.8"
 ratatui = "0.30"
 regex = "1"

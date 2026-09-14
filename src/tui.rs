@@ -624,6 +624,29 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         }
         return;
     }
+    // An open tour owns the main area: the wheel scrolls its code
+    // window and every other main-area event dies here, so clicks
+    // never reach the agent pane hiding behind the tour. Chrome above
+    // (tabs, sidebar, session bar) already returned, so those clicks
+    // keep working.
+    if state.walkthrough_overlay_active() {
+        match mev.kind {
+            event::MouseEventKind::ScrollUp => {
+                if let Some(tour) = state.walkthrough_overlay_mut() {
+                    tour.scroll_code(crate::walkthrough::WHEEL_SCROLL_LINES);
+                    state.dirty = true;
+                }
+            }
+            event::MouseEventKind::ScrollDown => {
+                if let Some(tour) = state.walkthrough_overlay_mut() {
+                    tour.scroll_code(-crate::walkthrough::WHEEL_SCROLL_LINES);
+                    state.dirty = true;
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
     let Some(active) = state.manager.active() else {
         return;
     };
@@ -843,6 +866,48 @@ mod tests {
         handle_walkthrough_key(&mut state, esc);
         assert!(state.walkthrough_overlay().is_none());
         assert!(!state.walkthrough_overlay_active());
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn wheel_scrolls_tour_code_while_tabs_stay_clickable() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            RunId::generate(), "codex",
+        ).unwrap();
+        let content = (1..=40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let tour = crate::walkthrough::Walkthrough::start(
+            "Tour".to_string(),
+            "f.rs".to_string(),
+            &content,
+            vec![crate::walkthrough::Step {
+                start: 1,
+                end: 3,
+                explanation: "first".to_string(),
+            }],
+        ).unwrap();
+        state.walkthroughs.insert(id, tour);
+        assert!(state.select_top_tab(6));
+        let wheel = |kind| MouseEvent {
+            kind, column: 90, row: 20, modifiers: KeyModifiers::NONE,
+        };
+        forward_mouse(&mut state, wheel(MouseEventKind::ScrollDown));
+        assert_eq!(state.walkthrough_overlay().unwrap().code_scroll, 3);
+        forward_mouse(&mut state, wheel(MouseEventKind::ScrollUp));
+        assert_eq!(state.walkthrough_overlay().unwrap().code_scroll, 0);
+        // Clicks in the tour pane never reach the agent, but the tab
+        // strip above it still switches back to the CLI tab.
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs);
+        forward_mouse(&mut state, MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: buttons[0].start, row: areas.topbar.y, modifiers: KeyModifiers::NONE,
+        });
+        assert!(!state.walkthrough_overlay_active());
+        assert!(state.topbar().tabs[0].active);
         assert!(state.manager.remove(id));
     }
 
