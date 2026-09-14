@@ -433,10 +433,13 @@ impl PtyPane {
                     Ok(n) => {
                         let mut parser = lock_screen(&screen);
                         parser.process(&buf[..n]);
-                        // Live output returns a scrolled view to the tail:
-                        // the viewport is a quiet-pane peek, never a frozen
-                        // stream.
-                        parser.screen_mut().set_scrollback(0);
+                        // Follow-tail: a viewport sitting at the live tail
+                        // stays there on its own, while a scrolled-up view
+                        // holds its position instead of being yanked back
+                        // by every chunk — scrolling a busy pane must not
+                        // fight the refresh. Typing and injections still
+                        // return to live explicitly; scrolling back down
+                        // to offset 0 re-engages the tail.
                         drop(parser);
                         Self::answer_device_queries(&screen, &writer, &mut carry, &buf[..n]);
                         if tx.send((id, PtyEvent::Output(buf[..n].to_vec()))).is_err() {
@@ -915,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn wheel_scrolls_scrollback_and_output_resets_to_live() {
+    fn wheel_scrolls_scrollback_and_output_holds_scrolled_view() {
         // Mouse-less panes (mode None) drop wheel events at the router;
         // the viewport below is what the router drives instead, so every
         // session scrolls whether or not its app reports mouse.
@@ -951,20 +954,34 @@ mod tests {
         let rows = pane.styled_rows();
         let text: String = rows.iter().map(|r| row_text(r)).collect::<Vec<String>>().concat();
         assert!(text.contains("line-40"), "clamped to live: {text:?}");
-        // Fresh output returns a scrolled view to live on its own.
+        // Fresh output holds a scrolled view instead of yanking it to
+        // live: scrolling a busy pane must not fight the refresh.
         pane.scroll_viewport(6);
         pane.write_all(b"echo back-to-live\n").unwrap();
         let deadline = Instant::now() + TIMEOUT;
+        // PTY echo splits the line across chunks: accumulate until the
+        // full line has passed through the reader (which is what proves
+        // the viewport survived fresh output).
+        let mut seen = Vec::new();
         loop {
-            let rows = pane.styled_rows();
-            let text: String = rows.iter().map(|r| row_text(r)).collect::<Vec<String>>().concat();
-            if text.contains("back-to-live") && text.contains("line-40") {
+            while let Ok((_, PtyEvent::Output(bytes))) = rx.try_recv() {
+                seen.extend_from_slice(&bytes);
+            }
+            if seen.windows(12).any(|w| w == b"back-to-live") {
                 break;
             }
-            assert!(Instant::now() < deadline, "never returned to live: {text:?}");
-            while rx.try_recv().is_ok() {}
+            assert!(Instant::now() < deadline, "output never processed");
             std::thread::sleep(Duration::from_millis(5));
         }
+        let rows = pane.styled_rows();
+        let text: String = rows.iter().map(|r| row_text(r)).collect::<Vec<String>>().concat();
+        assert!(!text.contains("line-40"), "viewport held off the tail: {text:?}");
+        assert!(!text.contains("back-to-live"), "fresh line stays at live: {text:?}");
+        // Scrolling back down re-engages the live tail, new line included.
+        pane.scroll_viewport(-100);
+        let rows = pane.styled_rows();
+        let text: String = rows.iter().map(|r| row_text(r)).collect::<Vec<String>>().concat();
+        assert!(text.contains("back-to-live") && text.contains("line-40"), "live again: {text:?}");
         pane.close();
     }
 
