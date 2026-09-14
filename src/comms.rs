@@ -25,6 +25,10 @@ pub const INJECT_DEBOUNCE: Duration = Duration::from_secs(2);
 /// parses as one paste in some CLIs and the submit never fires. 300 ms:
 /// shorter beats get eaten by prompt redraws on slower machines.
 pub const INJECT_ENTER_DELAY: Duration = Duration::from_millis(300);
+/// Quiet period after hook activity before an injection goes out: hook
+/// verdicts land mid-tool-use, and a body racing them interleaves with
+/// the agent's own input. Same gate as the human-typing debounce.
+pub const INJECT_HOOK_DEBOUNCE: Duration = Duration::from_millis(500);
 /// The staged Enter byte.
 pub const INJECT_ENTER_CR: u8 = b'\r';
 
@@ -101,6 +105,32 @@ impl Injection {
             out.push_str(&guidance);
         }
         out.into_bytes()
+    }
+
+    /// Delivery bytes for one injection: the whole payload in a single
+    /// bracketed-paste transaction (`ESC[200~` … `ESC[201~`) when the pane
+    /// opted into paste mode, raw otherwise. Embedded terminators are
+    /// stripped from framed payloads so hostile text cannot break out of
+    /// the paste early and leave the tail to execute. Either way the
+    /// result goes out through exactly one `write_all`.
+    pub fn render_framed(&self, bracketed: bool) -> Vec<u8> {
+        let body = self.render_body();
+        if !bracketed {
+            return body;
+        }
+        let mut framed = Vec::with_capacity(body.len() + 12);
+        framed.extend_from_slice(b"\x1b[200~");
+        let mut rest = body.as_slice();
+        while let Some(pos) = rest
+            .windows(6)
+            .position(|w| w == b"\x1b[201~")
+        {
+            framed.extend_from_slice(&rest[..pos]);
+            rest = &rest[pos + 6..];
+        }
+        framed.extend_from_slice(rest);
+        framed.extend_from_slice(b"\x1b[201~");
+        framed
     }
 
     /// Full pane sequence: body plus the staged Enter. Delivery writes
@@ -1152,6 +1182,51 @@ mod tests {
         // The body/Enter split only works when the CR trails by enough
         // for a prompt redraw to settle; pin the tuned value.
         assert_eq!(INJECT_ENTER_DELAY, Duration::from_millis(300));
+    }
+
+    #[test]
+    fn hook_debounce_is_500ms() {
+        // Injections hold this long after hook activity so a body never
+        // races a mid-tool-use verdict; pin the tuned value.
+        assert_eq!(INJECT_HOOK_DEBOUNCE, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn framed_render_wraps_strips_and_passes_through() {
+        let tell = Injection {
+            conv: "conv-9".to_string(),
+            kind: InjectKind::Tell,
+            from: "a".to_string(),
+            text: "fyi".to_string(),
+        };
+        // Unbracketed panes take the raw body, byte for byte.
+        assert_eq!(tell.render_framed(false), tell.render_body());
+        // Bracketed panes take one paste transaction around the body.
+        let framed = tell.render_framed(true);
+        assert!(framed.starts_with(b"\x1b[200~"), "opens paste");
+        assert!(framed.ends_with(b"\x1b[201~"), "closes paste");
+        assert_eq!(
+            &framed[6..framed.len() - 6],
+            tell.render_body().as_slice(),
+            "payload intact inside"
+        );
+        // A hostile payload cannot break out early: embedded terminators
+        // are stripped, leaving exactly one — the real closer.
+        let hostile = Injection {
+            conv: "conv-9".to_string(),
+            kind: InjectKind::Tell,
+            from: "a".to_string(),
+            text: "part1\x1b[201~; rm -rf ~".to_string(),
+        };
+        let bytes = hostile.render_framed(true);
+        assert!(bytes.starts_with(b"\x1b[200~"));
+        assert!(bytes.ends_with(b"\x1b[201~"));
+        let inner = &bytes[6..bytes.len() - 6];
+        assert!(
+            !inner.windows(6).any(|w| w == b"\x1b[201~"),
+            "no inner terminator: {inner:?}"
+        );
+        assert!(inner.windows(8).any(|w| w == b"; rm -rf"), "tail kept, only the break removed");
     }
 
     #[test]

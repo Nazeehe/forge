@@ -38,6 +38,10 @@ pub struct AppState {
     /// Last human key/paste forwarded to a pane. Injections wait out a short
     /// debounce after typing so they never interleave with user input.
     pub last_human_input: Option<std::time::Instant>,
+    /// Last hook verdict or queued hook request. Injections wait out
+    /// [`crate::comms::INJECT_HOOK_DEBOUNCE`] after hook activity so a
+    /// body never races a mid-tool-use verdict into the same pane.
+    pub last_hook_activity: Option<std::time::Instant>,
     /// Sessions owed a staged Enter: an injection body went out and its CR
     /// follows after [`crate::comms::INJECT_ENTER_DELAY`], staged per
     /// session and re-armed by newer bodies.
@@ -73,6 +77,7 @@ impl AppState {
             permission_mode: crate::config::PermissionMode::Yolo,
             broker: crate::comms::Broker::new(),
             last_human_input: None,
+            last_hook_activity: None,
             pending_enter: std::collections::HashMap::new(),
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
@@ -936,14 +941,23 @@ impl AppState {
     /// Deliver due injections into idle, non-recently-typed panes. Targets
     /// whose hook activity is Thinking/ToolUse/Waiting keep waiting, as do
     /// panes the human just typed into.
+    /// Delivery gate for bodies and staged Enters alike: quiet human
+    /// hands plus quiet hooks. Either recent activity holds everything.
+    fn injection_settled(&self, now: std::time::Instant) -> bool {
+        let hands_off = self.last_human_input.is_none_or(|t| {
+            now.duration_since(t) >= crate::comms::INJECT_DEBOUNCE
+        });
+        let hooks_quiet = self.last_hook_activity.is_none_or(|t| {
+            now.duration_since(t) >= crate::comms::INJECT_HOOK_DEBOUNCE
+        });
+        hands_off && hooks_quiet
+    }
+
     pub fn settle_comms(&mut self) {
         use crate::session::Activity;
         let now = std::time::Instant::now();
         self.broker.tick(now);
-        let settled = self.last_human_input.is_none_or(|t| {
-            now.duration_since(t) >= crate::comms::INJECT_DEBOUNCE
-        });
-        if !settled {
+        if !self.injection_settled(now) {
             return;
         }
         let order = self.manager.order().to_vec();
@@ -959,8 +973,12 @@ impl AppState {
             }
             let due = self.broker.take_due(id, usize::MAX);
             let mut wrote = false;
+            // Panes that opted into paste mode (DECSET 2004) take the
+            // whole payload as one bracketed-paste transaction; the rest
+            // take it raw, exactly as before.
+            let bracketed = self.manager.bracketed_paste(id);
             for inj in due {
-                if self.manager.inject_write(id, &inj.render_body()).is_ok() {
+                if self.manager.inject_write(id, &inj.render_framed(bracketed)).is_ok() {
                     wrote = true;
                     self.dirty = true;
                 }
@@ -980,9 +998,7 @@ impl AppState {
     /// Sessions that exited meanwhile are pruned.
     fn settle_enters(&mut self, now: std::time::Instant) {
         use crate::session::Activity;
-        let settled = self.last_human_input.is_none_or(|t| {
-            now.duration_since(t) >= crate::comms::INJECT_DEBOUNCE
-        });
+        let settled = self.injection_settled(now);
         let due: Vec<crate::session::SessionId> = self
             .pending_enter
             .iter()
@@ -1142,6 +1158,7 @@ impl AppState {
             let (decision, reason) = policy.decide(&req.hook, &req.body);
             let line = crate::policy::decision_line(&req.hook, decision, reason);
             let _ = req.reply.send(line);
+            self.last_hook_activity = Some(std::time::Instant::now());
             // Attribute the verdict to the sender's sidebar counters.
             if let Some(id) = self.manager.lookup_run(&req.run_id) {
                 self.manager.note_verdict(id, decision);
@@ -1256,6 +1273,7 @@ impl AppState {
                 }
                 if self.pending_hooks.len() < crate::listener::MAX_PENDING_HOOKS {
                     self.pending_hooks.push_back(req);
+                    self.last_hook_activity = Some(std::time::Instant::now());
                 }
                 self.dirty = true;
             }
@@ -1813,6 +1831,13 @@ mod tests {
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 1, "busy target holds the ask");
         hook(&mut s, "Stop", run_b.to_string());
+        // The Stop hook stamped hook activity; age it past the debounce
+        // beat so this settle tests activity gating, not hook timing.
+        s.last_hook_activity = Some(
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 0, "turn end delivers the ask");
         // B answers; A is still mid-turn so the reply waits.
@@ -1829,6 +1854,11 @@ mod tests {
         assert_eq!(s.broker.queued(a), 1, "reply waits while A works");
         // A's turn ends: the reply lands in A's pane.
         hook(&mut s, "Stop", run_a.to_string());
+        s.last_hook_activity = Some(
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
         s.settle_comms();
         assert_eq!(s.broker.queued(a), 0, "turn end delivers the reply");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1895,6 +1925,13 @@ mod tests {
         s.settle_comms();
         assert_eq!(s.broker.queued(a), 1, "generating target waits");
         hook(&mut s, "Stop", run_a.to_string());
+        // The Stop hook stamped hook activity; age it past the debounce
+        // beat so this settle tests activity gating, not hook timing.
+        s.last_hook_activity = Some(
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
         s.settle_comms();
         assert_eq!(s.broker.queued(a), 0, "turn end delivers");
         assert!(s.manager.remove(a));
@@ -2052,6 +2089,76 @@ mod tests {
         assert!(!s.pending_enter.contains_key(&b), "human owns the prompt");
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn settle_comms_holds_after_hook_activity() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","message":"wait"}"#.to_string(),
+            reply: reply_tx,
+        }));
+        // Fresh hook activity holds delivery even to an idle target.
+        s.last_hook_activity = Some(std::time::Instant::now());
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "hook debounce holds delivery");
+        // Past the beat the same settle delivers.
+        s.last_hook_activity = Some(
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn hook_requests_and_verdicts_stamp_hook_activity() {
+        use crate::config::PermissionMode;
+        let mut s = AppState::new();
+        assert_eq!(s.last_hook_activity, None);
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: "{}".to_string(),
+            run_id: String::new(),
+            sync: true,
+            reply: reply_tx,
+            timed_out: Default::default(),
+        }));
+        assert!(s.last_hook_activity.is_some(), "enqueue stamps");
+        // A verdict re-stamps: backdate first so only the settle can renew.
+        s.last_hook_activity =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(3600));
+        let audit = std::env::temp_dir().join(format!(
+            "forge-hook-stamp-test-{}",
+            std::process::id()
+        ));
+        let mut yolo =
+            crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+        s.settle_hooks(&mut yolo, &audit);
+        let age = std::time::Instant::now()
+            .duration_since(s.last_hook_activity.unwrap());
+        assert!(age < std::time::Duration::from_secs(5), "verdict stamps: {age:?}");
+        let _ = std::fs::remove_file(&audit);
     }
 
     #[test]
