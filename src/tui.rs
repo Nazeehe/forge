@@ -282,6 +282,9 @@ fn loop_until_quit(
         state.settle_hooks(policy, audit_path);
         state.settle_comms();
         if state.dirty {
+            if state.grid_mode {
+                fit_grid_panes(state);
+            }
             let views = state.views();
             let info = state.sidebar_info();
             let chrome = ui::Chrome {
@@ -405,6 +408,11 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             }
             UserCommand::ToggleGrid => {
                 state.toggle_grid();
+                // Leaving grid restores the focused pane to full size;
+                // entering syncs every pane on the next dirty frame.
+                if !state.grid_mode {
+                    fit_active_pane(state);
+                }
             }
         },
         RoutedKey::PrefixPending | RoutedKey::Cancelled => {
@@ -768,6 +776,26 @@ fn fit_active_pane(state: &mut AppState) {
     let pane_rows = main.height.saturating_sub(2).max(1);
     let pane_cols = main.width.saturating_sub(2).max(1);
     let _ = state.manager.resize(active, pane_rows, pane_cols);
+}
+
+/// Fit every session to its grid cell inner area, skipping cells with no
+/// room and panes already at size (exited panes report none). Runs on
+/// every dirty frame in grid mode, so spawns, exits, resizes, and the
+/// toggle itself can never leave a tile showing an un-resized pane.
+fn fit_grid_panes(state: &mut AppState) {
+    let (rows, cols) = state.term_size;
+    let grid = ui::grid_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let order = state.manager.order().to_vec();
+    let cells = ui::grid_cells(grid, order.len());
+    for (id, cell) in order.iter().zip(cells.iter()) {
+        if cell.width <= 2 || cell.height <= 2 {
+            continue;
+        }
+        let target = (cell.height - 2, cell.width - 2);
+        if state.manager.pane_size(*id) != Some(target) {
+            let _ = state.manager.resize(*id, target.0, target.1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1287,6 +1315,38 @@ mod tests {
             },
         );
         assert_eq!(state.manager.active(), Some(order[1]));
+        assert!(state.manager.remove(order[0]));
+        assert!(state.manager.remove(order[1]));
+    }
+
+    #[test]
+    fn grid_enter_fits_panes_to_cells_and_exit_restores() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let order = state.manager.order().to_vec();
+        assert_eq!(order.len(), 2);
+        let active = state.manager.active().unwrap();
+        assert_eq!(state.manager.pane_size(active), Some((20, 62)), "spawn fits main");
+        // Grid enter fits every pane to its 40x23 tile inner.
+        state.toggle_grid();
+        fit_grid_panes(&mut state);
+        assert_eq!(state.manager.pane_size(order[0]), Some((21, 38)));
+        assert_eq!(state.manager.pane_size(order[1]), Some((21, 38)));
+        // Idempotent and resize-aware: terminal growth refits all tiles.
+        fit_grid_panes(&mut state);
+        assert_eq!(state.manager.pane_size(order[1]), Some((21, 38)), "same size skips");
+        state.apply(AppEvent::Resize(30, 100));
+        fit_grid_panes(&mut state);
+        assert_eq!(state.manager.pane_size(order[0]), Some((27, 48)));
+        assert_eq!(state.manager.pane_size(order[1]), Some((27, 48)));
+        // Grid exit restores the focused pane to full size.
+        state.apply(AppEvent::Resize(24, 80));
+        state.toggle_grid();
+        fit_active_pane(&mut state);
+        let active = state.manager.active().unwrap();
+        assert_eq!(state.manager.pane_size(active), Some((20, 62)));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
     }
