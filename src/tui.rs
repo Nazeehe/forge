@@ -558,7 +558,9 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     let (rows, cols) = state.term_size;
     let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
     // Tab strip: click-to-activate like the sessions bar, hover ignored.
-    if areas.topbar.height > 0
+    // Grid mode draws no tab strip, so row 0 belongs to the tiles there.
+    if !state.grid_mode
+        && areas.topbar.height > 0
         && mev.row >= areas.topbar.y
         && mev.row < areas.topbar.y + areas.topbar.height
     {
@@ -1263,7 +1265,7 @@ mod tests {
         let order = state.manager.order().to_vec();
         assert_eq!(order.len(), 2);
         state.toggle_grid();
-        // Click the middle of the first tile (cells tile 40x22 from y 1).
+        // Click the middle of the first tile (cells tile 40x23 from y 0).
         forward_mouse(
             &mut state,
             MouseEvent {

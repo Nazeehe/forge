@@ -726,20 +726,11 @@ pub fn grid_dims(n: usize) -> (usize, usize) {
     (cols, n.div_ceil(cols))
 }
 
-/// Full-width grid area: content rows under a full-width tab strip, above
-/// the session bar. Mirrors [`chrome_areas`] heights with zero sidebar.
+/// Full-width grid area: every content row above the session bar, with
+/// no tab strip and no sidebar, so tiles get maximal room.
 pub fn grid_area(area: Rect) -> Rect {
     let bar_h = if area.height >= 3 { 1 } else { 0 };
-    let content_h = area.height.saturating_sub(bar_h);
-    let topbar_h = if content_h > 4 { 1 } else { 0 };
-    Rect::new(area.x, area.y + topbar_h, area.width, content_h.saturating_sub(topbar_h))
-}
-
-/// The grid's tab strip: full width, same height rule as [`grid_area`].
-pub fn grid_topbar(area: Rect) -> Rect {
-    let bar_h = if area.height >= 3 { 1 } else { 0 };
-    let content_h = area.height.saturating_sub(bar_h);
-    Rect::new(area.x, area.y, area.width, if content_h > 4 { 1 } else { 0 })
+    Rect::new(area.x, area.y, area.width, area.height.saturating_sub(bar_h))
 }
 
 /// Cell rects in session order: width/height split evenly, the remainder
@@ -822,11 +813,7 @@ fn clip_spans(row: &[SpanView], width: usize) -> Vec<Span<'static>> {
 /// width, name in the frame, the focused frame highlighted. Cells show
 /// the tail of each pane (latest output first); panes are never resized,
 /// so entering grid never reflows an agent's terminal.
-fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome) {
-    let topbar = grid_topbar(area);
-    if topbar.height > 0 {
-        render_topbar(frame, topbar, &chrome.topbar.tabs);
-    }
+fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], _chrome: &Chrome) {
     let grid = grid_area(area);
     let cells = grid_cells(grid, panes.len());
     if cells.is_empty() {
@@ -1553,10 +1540,11 @@ mod tests {
 
     #[test]
     fn grid_cell_at_hits_frames_only() {
-        let cells = grid_cells(Rect::new(0, 1, 80, 22), 2);
+        // No tab strip in grid: tiles own row 0 through the session bar.
+        let cells = grid_cells(Rect::new(0, 0, 80, 23), 2);
         assert_eq!(grid_cell_at(&cells, 5, 5), Some(0));
-        assert_eq!(grid_cell_at(&cells, 40, 1), Some(1), "borders count");
-        assert_eq!(grid_cell_at(&cells, 10, 0), None, "tab strip is dead");
+        assert_eq!(grid_cell_at(&cells, 10, 0), Some(0), "row 0 is tiles");
+        assert_eq!(grid_cell_at(&cells, 40, 0), Some(1), "borders count");
         assert_eq!(grid_cell_at(&cells, 10, 23), None, "session bar is dead");
     }
 
@@ -1575,15 +1563,16 @@ mod tests {
         assert!(text.contains("alpha output"), "first cell body");
         assert!(text.contains("bravo output"), "second cell body");
         assert!(!text.contains("status"), "sidebar hidden in grid");
+        assert!(!text.contains("Terminal"), "tab strip hidden in grid");
         let buf = terminal.backend().buffer();
-        // Titles sit inside the top borders: `● a` at x 1, `● b` at x 41.
-        assert_eq!(buf.get(3, 1).symbol(), "a");
-        assert_eq!(buf.get(43, 1).symbol(), "b");
+        // Titles sit inside the top borders on row 0: `● a`, `● b`.
+        assert_eq!(buf.get(3, 0).symbol(), "a");
+        assert_eq!(buf.get(43, 0).symbol(), "b");
         // The focused name reverses; the other frame stays plain.
-        assert!(buf.get(1, 1).modifier.contains(Modifier::REVERSED), "focused name");
-        assert!(!buf.get(41, 1).modifier.contains(Modifier::REVERSED), "plain name");
+        assert!(buf.get(1, 0).modifier.contains(Modifier::REVERSED), "focused name");
+        assert!(!buf.get(41, 0).modifier.contains(Modifier::REVERSED), "plain name");
         // Full-width tiles: the second frame opens mid-screen.
-        assert_eq!(buf.get(40, 1).symbol(), "┌");
+        assert_eq!(buf.get(40, 0).symbol(), "┌");
     }
 
     #[test]
