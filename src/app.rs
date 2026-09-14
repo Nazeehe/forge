@@ -48,6 +48,9 @@ pub struct AppState {
     /// walkthrough_* tools; the overlay opens on start and the human
     /// steps through with j/k, asking with Enter.
     pub walkthroughs: std::collections::HashMap<crate::session::SessionId, crate::walkthrough::Walkthrough>,
+    /// Grid mode (`Ctrl-b w`): the main area tiles every session in
+    /// framed cells instead of showing only the focused one.
+    pub grid_mode: bool,
 }
 
 /// Overlay slot past the PTY tabs: Events, Tasks, Visual, Walkthrough.
@@ -73,7 +76,14 @@ impl AppState {
             pending_enter: std::collections::HashMap::new(),
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
+            grid_mode: false,
         }
+    }
+
+    /// Flip grid mode; selecting a session by number leaves it.
+    pub fn toggle_grid(&mut self) {
+        self.grid_mode = !self.grid_mode;
+        self.dirty = true;
     }
 
     /// Set the live permission mode; true when it changed. Non Off/Yolo
@@ -1019,6 +1029,8 @@ impl AppState {
             Some(&id) => {
                 self.manager.switch(id);
                 self.overlay_view = None;
+                // Picking a number always returns to the focused view.
+                self.grid_mode = false;
                 self.dirty = true;
                 true
             }
@@ -2243,6 +2255,34 @@ mod tests {
         assert!(!s.broker.is_member(a, "other"), "left other");
         assert_eq!(s.manager.active(), Some(b), "focus falls through");
         assert!(!s.terminate_session(a), "unknown id is a no-op");
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn toggle_grid_flips_and_select_exits() {
+        let mut s = AppState::new();
+        assert!(!s.grid_mode);
+        s.toggle_grid();
+        assert!(s.grid_mode);
+        s.toggle_grid();
+        assert!(!s.grid_mode);
+        // Picking a number always returns to the focused view.
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        s.toggle_grid();
+        assert!(s.select_session(1));
+        assert!(!s.grid_mode, "select exits grid");
+        assert_eq!(s.manager.active(), Some(b));
+        s.toggle_grid();
+        assert!(!s.select_session(9), "out of range");
+        assert!(s.grid_mode, "failed select stays in grid");
+        assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
     }
 

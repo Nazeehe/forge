@@ -290,6 +290,7 @@ fn loop_until_quit(
                 detail: info.session,
                 pending: state.pending_hooks.len(),
                 mode: policy.mode().as_str(),
+                grid: state.grid_mode,
             };
             let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
             terminal.draw(|f| {
@@ -401,6 +402,9 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
                     fit_active_pane(state);
                 }
                 state.dirty = true;
+            }
+            UserCommand::ToggleGrid => {
+                state.toggle_grid();
             }
         },
         RoutedKey::PrefixPending | RoutedKey::Cancelled => {
@@ -580,8 +584,10 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         return;
     }
     // Sidebar settings row: click-to-switch Off/Yolo like the bars; hover
-    // and drags must never flip the live permission mode.
-    if areas.sidebar.width > 0
+    // and drags must never flip the live permission mode. Grid mode hides
+    // the sidebar, so this whole region belongs to the tiles instead.
+    if !state.grid_mode
+        && areas.sidebar.width > 0
         && areas.sidebar.height > 0
         && mev.column >= areas.sidebar.x
         && mev.column < areas.sidebar.x + areas.sidebar.width
@@ -665,6 +671,45 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                 }
             }
             _ => {}
+        }
+        return;
+    }
+    // Grid mode owns the main area: a left-click focuses the clicked
+    // tile and the wheel scrolls the focused pane's scrollback. App
+    // mouse protocols stay quiet here: tile coordinates don't map onto
+    // full-size panes, so forwarding them would mis-deliver.
+    if state.grid_mode {
+        let full = ratatui::layout::Rect::new(0, 0, cols, rows);
+        let grid = ui::grid_area(full);
+        let in_grid = mev.column >= grid.x
+            && mev.column < grid.right()
+            && mev.row >= grid.y
+            && mev.row < grid.bottom();
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+            let order = state.manager.order().to_vec();
+            let cells = ui::grid_cells(grid, order.len());
+            if let Some(index) = ui::grid_cell_at(&cells, mev.column, mev.row) {
+                if let Some(&id) = order.get(index) {
+                    state.manager.switch(id);
+                    state.dirty = true;
+                }
+            }
+        } else if in_grid {
+            match mev.kind {
+                event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
+                    if let Some(active) = state.manager.active() {
+                        let step = crate::pty::PtyPane::SCROLL_LINES_PER_NOTCH;
+                        let delta = if matches!(mev.kind, event::MouseEventKind::ScrollUp) {
+                            step
+                        } else {
+                            -step
+                        };
+                        state.manager.scroll_view(active, delta);
+                        state.dirty = true;
+                    }
+                }
+                _ => {}
+            }
         }
         return;
     }
@@ -1190,6 +1235,58 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
         );
         assert!(state.create_dialog.is_some());
+    }
+
+    #[test]
+    fn prefix_w_toggles_grid() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let prefix = || KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key(&mut state, &mut router, prefix());
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('w'), none));
+        assert!(state.grid_mode);
+        handle_key(&mut state, &mut router, prefix());
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('w'), none));
+        assert!(!state.grid_mode);
+    }
+
+    #[test]
+    fn grid_click_focuses_cell() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let none = KeyModifiers::NONE;
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let order = state.manager.order().to_vec();
+        assert_eq!(order.len(), 2);
+        state.toggle_grid();
+        // Click the middle of the first tile (cells tile 40x22 from y 1).
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 12,
+                modifiers: none,
+            },
+        );
+        assert_eq!(state.manager.active(), Some(order[0]));
+        // Click the second tile.
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 60,
+                row: 12,
+                modifiers: none,
+            },
+        );
+        assert_eq!(state.manager.active(), Some(order[1]));
+        assert!(state.manager.remove(order[0]));
+        assert!(state.manager.remove(order[1]));
     }
 
     #[test]

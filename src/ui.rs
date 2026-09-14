@@ -710,14 +710,204 @@ pub struct Chrome {
     pub detail: Option<SessionDetail>,
     pub pending: usize,
     pub mode: &'static str,
+    /// Grid mode: the main area shows every session in framed cells and
+    /// the sidebar hides for full-width tiles.
+    pub grid: bool,
+}
+
+/// Grid tiling for grid mode: the blueprint's 1x1, 2x1, 2x2, 3x2, 3x3
+/// for up to nine sessions, then keeps widening (4x3, 4x4, ...) past it.
+pub fn grid_dims(n: usize) -> (usize, usize) {
+    if n == 0 {
+        return (0, 0);
+    }
+    let root = n.isqrt();
+    let cols = (if root * root < n { root + 1 } else { root }).max(1);
+    (cols, n.div_ceil(cols))
+}
+
+/// Full-width grid area: content rows under a full-width tab strip, above
+/// the session bar. Mirrors [`chrome_areas`] heights with zero sidebar.
+pub fn grid_area(area: Rect) -> Rect {
+    let bar_h = if area.height >= 3 { 1 } else { 0 };
+    let content_h = area.height.saturating_sub(bar_h);
+    let topbar_h = if content_h > 4 { 1 } else { 0 };
+    Rect::new(area.x, area.y + topbar_h, area.width, content_h.saturating_sub(topbar_h))
+}
+
+/// The grid's tab strip: full width, same height rule as [`grid_area`].
+pub fn grid_topbar(area: Rect) -> Rect {
+    let bar_h = if area.height >= 3 { 1 } else { 0 };
+    let content_h = area.height.saturating_sub(bar_h);
+    Rect::new(area.x, area.y, area.width, if content_h > 4 { 1 } else { 0 })
+}
+
+/// Cell rects in session order: width/height split evenly, the remainder
+/// dealt to the leading columns/rows so tiles never overlap or gap.
+pub fn grid_cells(area: Rect, n: usize) -> Vec<Rect> {
+    let (cols, rows) = grid_dims(n);
+    if cols == 0 || rows == 0 || area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let cols_u16 = cols as u16;
+    let base_w = area.width / cols_u16;
+    let extra_w = (area.width % cols_u16) as usize;
+    let rows_u16 = rows as u16;
+    let base_h = area.height / rows_u16;
+    let extra_h = (area.height % rows_u16) as usize;
+    let mut out = Vec::with_capacity(n);
+    let mut y = area.y;
+    for r in 0..rows {
+        let h = base_h + u16::from(r < extra_h);
+        let mut x = area.x;
+        for c in 0..cols {
+            if r * cols + c >= n {
+                break;
+            }
+            let w = base_w + u16::from(c < extra_w);
+            out.push(Rect::new(x, y, w, h));
+            x += w;
+        }
+        y += h;
+    }
+    out
+}
+
+/// Index of the cell holding a point, if any (borders count as hits, so
+/// clicking a frame still focuses its session).
+pub fn grid_cell_at(cells: &[Rect], col: u16, row: u16) -> Option<usize> {
+    cells.iter().position(|cell| {
+        col >= cell.x && col < cell.right() && row >= cell.y && row < cell.bottom()
+    })
 }
 
 /// Render one focused session in the main pane with sidebar and session
 /// bar. Titles and bodies are untrusted PTY output, so both pass
 /// through display encoding: raw escape sequences must never reach the
 /// outer terminal.
+/// One tab-strip row: `[label]` buttons, the active tab reversed.
+fn render_topbar(frame: &mut Frame, bar: Rect, tabs: &[TopTab]) {
+    let buttons = layout_topbar(bar, tabs);
+    for button in &buttons {
+        let tab = &tabs[button.index];
+        let style = if tab.active {
+            theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+        } else {
+            theme::style(theme::Role::Text)
+        };
+        let mut control = ChromeButton::new(&format!("[{}]", tab.label), style);
+        control.view(frame, Rect::new(button.start, bar.y,
+            button.end - button.start, 1));
+    }
+}
+
+/// Clip one styled row to a cell width, preserving per-span styles.
+fn clip_spans(row: &[SpanView], width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut room = width;
+    for span in row {
+        if room == 0 {
+            break;
+        }
+        let take: String = span.text.chars().take(room).collect();
+        room -= take.chars().count();
+        if !take.is_empty() {
+            out.push(Span::styled(take, span.style));
+        }
+    }
+    out
+}
+
+/// Grid mode: every session in its own framed cell across the full
+/// width, name in the frame, the focused frame highlighted. Cells show
+/// the tail of each pane (latest output first); panes are never resized,
+/// so entering grid never reflows an agent's terminal.
+fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome) {
+    let topbar = grid_topbar(area);
+    if topbar.height > 0 {
+        render_topbar(frame, topbar, &chrome.topbar.tabs);
+    }
+    let grid = grid_area(area);
+    let cells = grid_cells(grid, panes.len());
+    if cells.is_empty() {
+        let hint =
+            Paragraph::new("No sessions yet — press Ctrl-b c to create one.\nCtrl-b q quits.")
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(theme::style(theme::Role::BorderUnfocused))
+                        .title(" forge "),
+                );
+        frame.render_widget(hint, grid);
+        return;
+    }
+    for (view, cell) in panes.iter().zip(cells.iter()) {
+        let (glyph, _role) = if view.live {
+            theme::status_glyph_running()
+        } else {
+            theme::status_glyph_exited()
+        };
+        let title = format!("{} {} ", glyph, safe_text::encode_for_display(&view.title));
+        let (border, name_style) = if view.focused {
+            (
+                theme::style(theme::Role::BorderFocused),
+                theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED),
+            )
+        } else {
+            (theme::style(theme::Role::BorderUnfocused), theme::style(theme::Role::Text))
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border)
+            .title(Span::styled(title, name_style));
+        let inner = block.inner(*cell);
+        frame.render_widget(block, *cell);
+        if inner.width < 1 || inner.height < 1 {
+            continue;
+        }
+        let h = inner.height as usize;
+        let rows: Vec<Line> = view
+            .lines
+            .iter()
+            .rev()
+            .take(h)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|row| Line::from(clip_spans(row, inner.width as usize)))
+            .collect();
+        frame.render_widget(Paragraph::new(Text::from(rows)), inner);
+        if view.focused {
+            if let Some((row, col)) = view.cursor {
+                // Rows are bottom-anchored: shift pane coordinates down
+                // by the skipped head rows before placing the cursor.
+                let skipped = view.lines.len().saturating_sub(h) as u16;
+                if let Some(pos) =
+                    cursor_screen_pos(*cell, Some((row.saturating_sub(skipped), col)))
+                {
+                    frame.set_cursor_position(pos);
+                }
+            }
+        }
+    }
+}
+
 pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome) {
     let areas = chrome_areas(area);
+    if chrome.grid {
+        render_grid(frame, area, panes, chrome);
+    } else {
+        render_focused(frame, &areas, panes);
+        if areas.topbar.height > 0 {
+            render_topbar(frame, areas.topbar, &chrome.topbar.tabs);
+        }
+        render_sidebar(frame, &areas, chrome);
+    }
+    render_session_bar(frame, &areas, chrome);
+}
+
+/// Focused-session view: one framed pane plus sidebar.
+fn render_focused(frame: &mut Frame, areas: &ChromeAreas, panes: &[PaneView]) {
     let focused = panes.iter().find(|p| p.focused).or(panes.first());
     match focused {
         Some(view) => {
@@ -752,20 +942,10 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
             frame.render_widget(hint, areas.main);
         }
     }
-    if areas.topbar.height > 0 {
-        let buttons = layout_topbar(areas.topbar, &chrome.topbar.tabs);
-        for button in &buttons {
-            let tab = &chrome.topbar.tabs[button.index];
-            let style = if tab.active {
-                theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
-            } else {
-                theme::style(theme::Role::Text)
-            };
-            let mut control = ChromeButton::new(&format!("[{}]", tab.label), style);
-            control.view(frame, Rect::new(button.start, areas.topbar.y,
-                button.end - button.start, 1));
-        }
-    }
+}
+
+/// Sidebar panel with mode buttons and timer cancels.
+fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
     if areas.sidebar.width > 0 && areas.sidebar.height > 0 {
         let info = SidebarInfo {
             session: chrome.detail.clone(),
@@ -811,6 +991,10 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
             .view(frame, area);
         }
     }
+}
+
+/// Numbered session bar, kept in grid mode: digits exit grid and focus.
+fn render_session_bar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
     if areas.session_bar.height > 0 {
         let segments = session_bar_segments_for_area(&chrome.tabs, areas.session_bar);
         let buttons = layout_session_bar(areas.session_bar, &segments);
@@ -1275,6 +1459,7 @@ mod tests {
             detail: None,
             pending: 0,
             mode: "off",
+            grid: false,
         }
     }
 
@@ -1334,6 +1519,80 @@ mod tests {
         let rows = buffer_rows(&terminal);
         assert!(rows[23].contains("1 agent-1"), "bar owns last row: {:?}", rows[23]);
         assert!(!text.contains("prefix Ctrl-b"), "help line is gone");
+    }
+
+    #[test]
+    fn grid_dims_follow_blueprint_then_widen() {
+        assert_eq!(grid_dims(0), (0, 0));
+        assert_eq!(grid_dims(1), (1, 1));
+        assert_eq!(grid_dims(2), (2, 1));
+        assert_eq!(grid_dims(3), (2, 2));
+        assert_eq!(grid_dims(4), (2, 2));
+        assert_eq!(grid_dims(5), (3, 2));
+        assert_eq!(grid_dims(6), (3, 2));
+        assert_eq!(grid_dims(7), (3, 3));
+        assert_eq!(grid_dims(9), (3, 3));
+        assert_eq!(grid_dims(10), (4, 3));
+        assert_eq!(grid_dims(12), (4, 3));
+        assert_eq!(grid_dims(13), (4, 4));
+    }
+
+    #[test]
+    fn grid_cells_tile_without_overlap_or_gap() {
+        let area = Rect::new(0, 1, 80, 22);
+        let cells = grid_cells(area, 5);
+        assert_eq!(cells.len(), 5);
+        // 80 across 3 columns deals the remainder to the leaders.
+        assert_eq!(cells[0], Rect::new(0, 1, 27, 11));
+        assert_eq!(cells[1], Rect::new(27, 1, 27, 11));
+        assert_eq!(cells[2], Rect::new(54, 1, 26, 11));
+        assert_eq!(cells[3], Rect::new(0, 12, 27, 11));
+        assert_eq!(cells[4], Rect::new(27, 12, 27, 11));
+        assert!(grid_cells(area, 0).is_empty());
+    }
+
+    #[test]
+    fn grid_cell_at_hits_frames_only() {
+        let cells = grid_cells(Rect::new(0, 1, 80, 22), 2);
+        assert_eq!(grid_cell_at(&cells, 5, 5), Some(0));
+        assert_eq!(grid_cell_at(&cells, 40, 1), Some(1), "borders count");
+        assert_eq!(grid_cell_at(&cells, 10, 0), None, "tab strip is dead");
+        assert_eq!(grid_cell_at(&cells, 10, 23), None, "session bar is dead");
+    }
+
+    #[test]
+    fn render_grid_frames_every_session_without_sidebar() {
+        use ratatui::style::Modifier;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut c = chrome();
+        c.grid = true;
+        let mut b = pane("b", "bravo output", true);
+        b.focused = false;
+        terminal
+            .draw(|f| render(f, area(), &[pane("a", "alpha output", true), b], &c))
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("alpha output"), "first cell body");
+        assert!(text.contains("bravo output"), "second cell body");
+        assert!(!text.contains("status"), "sidebar hidden in grid");
+        let buf = terminal.backend().buffer();
+        // Titles sit inside the top borders: `● a` at x 1, `● b` at x 41.
+        assert_eq!(buf.get(3, 1).symbol(), "a");
+        assert_eq!(buf.get(43, 1).symbol(), "b");
+        // The focused name reverses; the other frame stays plain.
+        assert!(buf.get(1, 1).modifier.contains(Modifier::REVERSED), "focused name");
+        assert!(!buf.get(41, 1).modifier.contains(Modifier::REVERSED), "plain name");
+        // Full-width tiles: the second frame opens mid-screen.
+        assert_eq!(buf.get(40, 1).symbol(), "┌");
+    }
+
+    #[test]
+    fn render_grid_empty_shows_hint() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut c = chrome();
+        c.grid = true;
+        terminal.draw(|f| render(f, area(), &[], &c)).unwrap();
+        assert!(buffer_text(&terminal).contains("No sessions yet"));
     }
 
     fn buffer_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {

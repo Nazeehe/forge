@@ -31,6 +31,8 @@ pub enum UserCommand {
     /// Terminate the active session: it leaves its groups and drops out
     /// of the UI at once.
     TerminateSession,
+    /// Toggle grid mode: every session tiles the main area at once.
+    ToggleGrid,
 }
 
 /// Encode a forwarded key as PTY input bytes (xterm-style). `app_cursor`
@@ -307,6 +309,7 @@ impl InputRouter {
                     KeyCode::Char('t') => RoutedKey::Command(UserCommand::SwitchTab),
                     KeyCode::Char('y') => RoutedKey::Command(UserCommand::TogglePermissionMode),
                     KeyCode::Char('x') => RoutedKey::Command(UserCommand::TerminateSession),
+                    KeyCode::Char('w') => RoutedKey::Command(UserCommand::ToggleGrid),
                     KeyCode::Char(d @ '1'..='9') => {
                         RoutedKey::Command(UserCommand::SelectSession(d as usize - '1' as usize))
                     }
@@ -418,6 +421,12 @@ mod tests {
         assert_eq!(
             r.feed(key(KeyCode::Char('x'))),
             RoutedKey::Command(UserCommand::TerminateSession)
+        );
+
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('w'))),
+            RoutedKey::Command(UserCommand::ToggleGrid)
         );
     }
 
