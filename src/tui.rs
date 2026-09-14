@@ -180,7 +180,11 @@ fn loop_until_quit(
     }
     fit_active_pane(state);
     let mut cursor_shown = true;
+    // OS theme watcher: a switch repaints with the new map next frame,
+    // no restart. Missing state (non-Omarchy, SSH) polls false forever.
+    let mut theme_watcher = crate::theme::ThemeWatcher::omarchy();
     while !state.should_quit {
+        state.dirty |= theme_watcher.poll();
         // Live mode switches (sidebar buttons, `y` key) rebuild policy and
         // persist the config; a failed save keeps the live mode and warns.
         if state.permission_mode != policy.mode() {
@@ -248,7 +252,6 @@ fn loop_until_quit(
         state.settle_comms();
         if state.dirty {
             let views = state.views();
-            let status = state.status_text();
             let info = state.sidebar_info();
             let chrome = ui::Chrome {
                 tabs: state.tabs(),
@@ -256,7 +259,6 @@ fn loop_until_quit(
                 detail: info.session,
                 pending: state.pending_hooks.len(),
                 mode: policy.mode().as_str(),
-                status,
             };
             let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
             terminal.draw(|f| {
@@ -485,7 +487,9 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                     .click(mev.column, mev.row, area)
             {
                 if state.manager.active().is_some() {
-                    if state.select_top_tab(index) && index < 2 {
+                    // Refit whenever a live pane tab wins: lazy tabs are
+                    // born 24x80 and would otherwise render cornered.
+                    if state.select_top_tab(index) && !state.overlay_active() {
                         fit_active_pane(state);
                     }
                     state.dirty = true;
@@ -552,6 +556,26 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     if state.overlay_active() { return; }
     let mode = state.manager.mouse_mode(active);
     if mode == vt100::MouseProtocolMode::None {
+        // No mouse protocol: the wheel scrolls this pane instead of dying
+        // silently, so every session scrolls whether or not its app
+        // reports mouse. Normal screen moves the scrollback viewport;
+        // the alternate screen has none, so scroll_view sends Up/Down
+        // arrows for fullscreen apps that never take the mouse (codex,
+        // claude). Other buttons still do nothing.
+        if ui::translate_mouse(ui::pane_grid_area(&areas), mev.column, mev.row).is_some() {
+            let step = crate::pty::PtyPane::SCROLL_LINES_PER_NOTCH;
+            match mev.kind {
+                event::MouseEventKind::ScrollUp => {
+                    state.manager.scroll_view(active, step);
+                    state.dirty = true;
+                }
+                event::MouseEventKind::ScrollDown => {
+                    state.manager.scroll_view(active, -step);
+                    state.dirty = true;
+                }
+                _ => {}
+            }
+        }
         return;
     }
     let Some((col, row)) = ui::translate_mouse(ui::pane_grid_area(&areas), mev.column, mev.row) else {
@@ -592,8 +616,8 @@ mod tests {
         spawn_shell_cmd(&mut state, "exec sleep 30");
         let order = state.manager.order().to_vec();
         assert_eq!(order.len(), 1);
-        // 80x24 less top strip, session bar, status row, main-pane borders.
-        assert_eq!(state.manager.pane_size(order[0]), Some((19, 62)));
+        // 80x24 less top strip, session bar, and main-pane borders.
+        assert_eq!(state.manager.pane_size(order[0]), Some((20, 62)));
         spawn_shell_cmd(&mut state, "exec sleep 30");
         let order = state.manager.order().to_vec();
         assert_eq!(order.len(), 2);
@@ -602,7 +626,7 @@ mod tests {
         // ...then take the main area on selection.
         assert!(state.select_session(1));
         fit_active_pane(&mut state);
-        assert_eq!(state.manager.pane_size(order[1]), Some((19, 62)));
+        assert_eq!(state.manager.pane_size(order[1]), Some((20, 62)));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
     }
@@ -614,17 +638,17 @@ mod tests {
         state.apply(AppEvent::Resize(24, 80));
         spawn_shell_cmd(&mut state, "exec sleep 30");
         spawn_shell_cmd(&mut state, "exec sleep 30");
-        // Session bar is row 22; second button starts at column 11.
+        // Session bar owns the last row; second button starts at column 11.
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 12,
-            row: 22,
+            row: 23,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         forward_mouse(&mut state, click);
         let order = state.manager.order().to_vec();
         assert_eq!(state.manager.active(), Some(order[1]));
-        assert_eq!(state.manager.pane_size(order[1]), Some((19, 62)));
+        assert_eq!(state.manager.pane_size(order[1]), Some((20, 62)));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
     }
@@ -646,7 +670,7 @@ mod tests {
             .unwrap();
         // Top strip is row 0: "[Codex]" then "[Terminal]" from column 10.
         let bar = state.topbar();
-        assert_eq!(bar.tabs.len(), 2);
+        assert_eq!(bar.tabs.len(), 3);
         assert!(bar.tabs[0].active);
         forward_mouse(
             &mut state,
@@ -690,12 +714,41 @@ mod tests {
             kind: MouseEventKind::Down(MouseButton::Left), column, row: areas.topbar.y,
             modifiers: KeyModifiers::NONE,
         };
-        forward_mouse(&mut state, click(buttons[2].start));
+        // Index 2 is the live SCM tab; Events overlay sits at 3.
+        forward_mouse(&mut state, click(buttons[3].start));
         assert!(state.overlay_active());
-        assert!(state.topbar().tabs[2].active);
+        assert!(state.topbar().tabs[3].active);
         forward_mouse(&mut state, click(buttons[0].start));
         assert!(!state.overlay_active());
         assert!(state.topbar().tabs[0].active);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn topbar_click_fits_lazy_scm_pane_to_main() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            RunId::generate(), "codex",
+        ).unwrap();
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs);
+        // Click the SCM tab: the pane is born 24x80 and must take the
+        // main area at once (180x40 less top strip, session bar, and
+        // main-pane borders), not render cornered.
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: buttons[2].start,
+                row: areas.topbar.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.manager.active_tab_kind(id), Some(crate::session::TabKind::Scm));
+        assert_eq!(state.manager.pane_size(id), Some((36, 133)));
         assert!(state.manager.remove(id));
     }
 
@@ -719,7 +772,7 @@ mod tests {
                 MouseEvent {
                     kind,
                     column: 12,
-                    row: 22,
+                    row: 23,
                     modifiers: crossterm::event::KeyModifiers::NONE,
                 },
             );
@@ -728,6 +781,122 @@ mod tests {
         assert!(!state.dirty, "hover leaves no work");
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
+    }
+
+    #[test]
+    fn wheel_scrolls_pane_scrollback_when_mouse_is_off() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(
+            &mut state,
+            "for i in $(seq 1 40); do echo line-$i; done; exec cat",
+        );
+        let id = state.manager.active().unwrap();
+        assert_eq!(
+            state.manager.mouse_mode(id),
+            vt100::MouseProtocolMode::None
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let tail = state
+                .manager
+                .styled_rows(id)
+                .last()
+                .map(|r| r.iter().map(|c| c.text.clone()).collect::<String>())
+                .unwrap_or_default();
+            if tail.contains("line-40") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "history never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let grid = crate::ui::pane_grid_area(&areas);
+        let at = |kind| MouseEvent {
+            kind,
+            column: grid.x + grid.width / 2,
+            row: grid.y + grid.height / 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let screen_text = |state: &AppState| {
+            state
+                .manager
+                .styled_rows(id)
+                .iter()
+                .flat_map(|r| r.iter().map(|c| c.text.clone()))
+                .collect::<String>()
+        };
+        state.dirty = false;
+        forward_mouse(&mut state, at(MouseEventKind::ScrollUp));
+        assert!(state.dirty, "wheel marks redraw");
+        assert!(
+            !screen_text(&state).contains("line-40"),
+            "wheel up leaves the live tail"
+        );
+        forward_mouse(&mut state, at(MouseEventKind::ScrollDown));
+        assert!(
+            screen_text(&state).contains("line-40"),
+            "wheel down returns to live"
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn wheel_on_alt_screen_without_mouse_sends_arrows() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        // cat never takes the mouse; the escapes put its screen on the
+        // alternate buffer like codex/claude, cursor parked at (9, 19).
+        // Raw mode first: every real fullscreen app takes it, and without
+        // it the line discipline echoes ESC back as `^[`, which the parser
+        // prints instead of driving the cursor.
+        spawn_shell_cmd(
+            &mut state,
+            "stty raw -echo; printf '\\033[?1049h\\033[10;20H'; exec cat",
+        );
+        let id = state.manager.active().unwrap();
+        assert_eq!(
+            state.manager.mouse_mode(id),
+            vt100::MouseProtocolMode::None
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if state.manager.cursor(id) == Some((9, 19)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "alt screen never engaged");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(state.manager.alternate_screen(id));
+        let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let grid = crate::ui::pane_grid_area(&areas);
+        let at = |kind| MouseEvent {
+            kind,
+            column: grid.x + grid.width / 2,
+            row: grid.y + grid.height / 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        // Wheel up arrives as 3 Up arrows echoed back through cat and
+        // lifts the cursor 3 rows; wheel down returns it.
+        forward_mouse(&mut state, at(MouseEventKind::ScrollUp));
+        loop {
+            if state.manager.cursor(id) == Some((6, 19)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "wheel up never moved the cursor");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        forward_mouse(&mut state, at(MouseEventKind::ScrollDown));
+        loop {
+            if state.manager.cursor(id) == Some((9, 19)) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "wheel down never moved the cursor");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(state.manager.remove(id));
     }
 
     #[test]
@@ -839,7 +1008,7 @@ mod tests {
         // Prefix o opens the group dialog.
         let mut router = InputRouter::new();
         handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
-        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('o'), none));
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('g'), none));
         assert!(state.group_dialog.is_some());
         // n + typed name + Enter creates the group and stays open.
         let gkey = |code| KeyEvent::new(code, none);

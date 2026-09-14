@@ -53,6 +53,12 @@ impl Parser {
     pub fn screen(&self) -> &crate::screen::Screen {
         &self.screen
     }
+
+    /// Forge patch: mutable screen access so forge can drive the
+    /// scrollback viewport (wheel scrolling on mouse-less panes).
+    pub fn screen_mut(&mut self) -> &mut crate::screen::Screen {
+        &mut self.screen
+    }
 }
 
 impl Default for Parser {

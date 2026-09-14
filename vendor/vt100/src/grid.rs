@@ -117,12 +117,24 @@ impl Grid {
     }
 
     pub fn visible_rows(&self) -> impl Iterator<Item = &crate::row::Row> {
-        let scrollback_len = self.scrollback.len();
         let rows_len = self.rows.len();
+        // Forge patch: window the last `rows_len` rows ending
+        // `scrollback_offset` rows above the live tail, with saturating
+        // math. The forge viewport clamp keys the offset to buffered
+        // history, which can exceed the screen height, and the plain
+        // subtractions above underflowed there (wheel deep into a long
+        // scrollback panicked the render path).
+        let end = self
+            .scrollback
+            .len()
+            .saturating_add(rows_len)
+            .saturating_sub(self.scrollback_offset);
+        let start = end.saturating_sub(rows_len);
         self.scrollback
             .iter()
-            .skip(scrollback_len - self.scrollback_offset)
-            .chain(self.rows.iter().take(rows_len - self.scrollback_offset))
+            .chain(self.rows.iter())
+            .skip(start)
+            .take(rows_len)
     }
 
     pub fn drawing_rows(&self) -> impl Iterator<Item = &crate::row::Row> {

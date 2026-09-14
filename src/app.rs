@@ -86,8 +86,9 @@ impl AppState {
         self.set_permission_mode(next)
     }
 
-    /// Per-session tab strip for the focused session: the agent CLI tab
-    /// plus the human terminal tab. Empty when nothing is focused.
+    /// Per-session tab strip for the focused session: agent CLI, human
+    /// terminal, and lazygit SCM tabs, plus read-only overlay views.
+    /// Empty when nothing is focused.
     pub fn topbar(&self) -> crate::ui::TopBar {
         let Some(id) = self.manager.active() else {
             return crate::ui::TopBar::default();
@@ -111,23 +112,28 @@ impl AppState {
                         }
                     }
                     crate::session::TabKind::Terminal => "Terminal".to_string(),
+                    crate::session::TabKind::Scm => "SCM".to_string(),
                 },
                 active: i == rec.active_tab,
             })
             .collect();
         if rec.tabs.len() > 1 && self.term_size.1 >= 100 {
-            for (index, label) in ["Events", "Tasks", "Visual", "SCM"].iter().enumerate() {
+            for (index, label) in ["Events", "Tasks", "Visual"].iter().enumerate() {
                 tabs.push(crate::ui::TopTab {
                     label: (*label).to_string(),
-                    active: self.overlay_view == Some((id, index + 2)),
+                    active: self.overlay_view == Some((id, index + rec.tabs.len())),
                 });
             }
             if self.overlay_view.is_some_and(|(view_id, _)| view_id == id) {
-                for tab in tabs.iter_mut().take(2) { tab.active = false; }
+                for tab in tabs.iter_mut().take(rec.tabs.len()) { tab.active = false; }
             }
         }
+        // Emoji icons: each is one codepoint with default emoji
+        // presentation, so every icon is unambiguously two cells wide
+        // (no VS16, no ambiguous-width glyphs) and `Line::width`
+        // measures the buttons exactly.
         if self.term_size.1 >= 100 {
-            for (tab, icon) in tabs.iter_mut().zip(["◉", "▣", "▤", "☑", "▧", "✣"]) {
+            for (tab, icon) in tabs.iter_mut().zip(["🤖", "💻", "🔀", "🔔", "📝", "📷"]) {
                 tab.label = format!("{icon} {}", tab.label);
             }
         }
@@ -169,7 +175,7 @@ impl AppState {
                 let live = rec.state.is_live();
                 if let Some((view_id, index)) = self.overlay_view {
                     if Some(id) == active && view_id == id {
-                        let label = ["", "", "Events", "Tasks", "Visual", "SCM"]
+                        let label = ["", "", "", "Events", "Tasks", "Visual"]
                             .get(index).copied().unwrap_or("View");
                         return crate::ui::PaneView {
                             title: format!("{} · {label}", rec.name),
@@ -212,46 +218,6 @@ impl AppState {
                 }
             })
             .collect()
-    }
-
-    /// One-row status bar text.
-    pub fn status_text(&self) -> String {
-        let n = self.manager.len();
-        let noun = if n == 1 { "session" } else { "sessions" };
-        let active = self
-            .manager
-            .active()
-            .and_then(|id| self.manager.get(id))
-            .map(|rec| rec.name.clone())
-            .unwrap_or_else(|| "-".to_string());
-        let group = self
-            .manager
-            .active()
-            .and_then(|id| self.broker.primary_group(id))
-            .map(|g| format!(" | group:{g}"))
-            .unwrap_or_default();
-        // Dual-tab sessions name the visible tab; single-tab shells omit it.
-        let tab = self.overlay_view
-            .filter(|(id, _)| self.manager.active() == Some(*id))
-            .and_then(|(_, index)| ["", "", "events", "tasks", "visual", "scm"].get(index).copied())
-            .filter(|label| !label.is_empty())
-            .map(|label| format!(" [{label}]"))
-            .or_else(|| self
-            .manager
-            .active()
-            .filter(|&id| self.manager.tab_count(id) > 1)
-            .and_then(|id| self.manager.active_tab_kind(id))
-            .map(|k| {
-                format!(
-                    " [{}]",
-                    match k {
-                        crate::session::TabKind::Agent => "agent",
-                        crate::session::TabKind::Terminal => "terminal",
-                    }
-                )
-            }))
-            .unwrap_or_default();
-        format!("{active}{tab} | {n} {noun} | prefix Ctrl-b (q quit, c new, n/p switch, t tab, g peers, o groups, y yolo){group}")
     }
 
     /// Record human typing into one session: injections debounce until it
@@ -485,6 +451,9 @@ impl AppState {
         if let Some(group) = spec.group.as_deref() {
             let _ = self.broker.join(&self.manager, id, group);
         }
+        // Creating focuses the new session: the user just asked for it,
+        // and the caller fits the active pane to the dialog's area.
+        self.manager.switch(id);
         Ok(id)
     }
 
@@ -1588,6 +1557,24 @@ mod tests {
     }
 
     #[test]
+    fn create_session_focuses_the_new_session() {
+        let mut s = AppState::new();
+        let spec = |name: &str| crate::create::SessionSpec {
+            kind: crate::create::SessionKind::Shell,
+            name: name.to_string(),
+            cwd: std::env::temp_dir(),
+            model: String::new(),
+            group: None,
+        };
+        let first = s.create_session(&spec("a")).unwrap();
+        assert_eq!(s.manager.active(), Some(first));
+        let second = s.create_session(&spec("b")).unwrap();
+        assert_eq!(s.manager.active(), Some(second), "creating focuses the new one");
+        assert!(s.manager.remove(first));
+        assert!(s.manager.remove(second));
+    }
+
+    #[test]
     fn create_session_with_group_joins_at_birth() {
         let mut s = AppState::new();
         s.broker.create_group("team").unwrap();
@@ -1696,9 +1683,6 @@ mod tests {
         assert_eq!(views[1].title, "two");
         assert!(views[0].focused && !views[1].focused);
         assert!(views.iter().all(|v| v.live));
-        let status = s.status_text();
-        assert!(status.contains("2 sessions"), "status: {status:?}");
-        assert!(status.contains("Ctrl-b"), "status: {status:?}");
         s.step_session(1);
         assert_eq!(s.manager.active(), Some(b));
         s.step_session(1);
@@ -1842,12 +1826,8 @@ mod tests {
             })
             .unwrap();
         std::env::remove_var("CODEX_BIN");
-        assert_eq!(s.manager.tab_count(agent), 2);
-        let status = s.status_text();
-        assert!(status.contains("[agent]"), "status: {status:?}");
+        assert_eq!(s.manager.tab_count(agent), 3);
         assert!(s.manager.switch_tab(agent));
-        let status = s.status_text();
-        assert!(status.contains("[terminal]"), "status: {status:?}");
         let shell = s
             .create_session(&crate::create::SessionSpec {
                 kind: crate::create::SessionKind::Shell,
@@ -1871,15 +1851,34 @@ mod tests {
             crate::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-        assert_eq!(labels, ["◉ Codex", "▣ Terminal", "▤ Events", "☑ Tasks", "▧ Visual", "✣ SCM"]);
-        assert!(state.select_top_tab(2));
-        assert!(state.topbar().tabs[2].active);
-        assert!(state.status_text().contains("[events]"));
+        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "🔔 Events", "📝 Tasks", "📷 Visual"]);
+        assert!(state.select_top_tab(3));
+        assert!(state.topbar().tabs[3].active);
         let view = state.views().into_iter().find(|v| v.focused).unwrap();
         assert!(view.lines.iter().flatten().any(|span| span.text.contains("Events")));
         assert!(view.lines.iter().flatten().any(|span| span.text.contains("unavailable")));
         assert!(state.select_top_tab(0));
         assert!(state.topbar().tabs[0].active);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn scm_tab_selects_a_live_lazygit_pane() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        // Index 2 is a real PTY tab now, not an overlay: selecting it
+        // lazily spawns the pane (the shell reports a missing binary as
+        // an exited child, so this holds with or without lazygit).
+        assert!(state.select_top_tab(2));
+        assert!(state.topbar().tabs[2].active);
+        assert_eq!(
+            state.manager.active_tab_kind(id),
+            Some(crate::session::TabKind::Scm)
+        );
         assert!(state.manager.remove(id));
     }
 
@@ -1892,12 +1891,12 @@ mod tests {
             crate::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-        assert!(labels[0].starts_with("◉ "));
-        assert!(labels[1].starts_with("▣ "));
-        assert!(labels[2].starts_with("▤ "));
-        assert!(labels[3].starts_with("☑ "));
-        assert!(labels[4].starts_with("▧ "));
-        assert!(labels[5].starts_with("✣ "));
+        assert!(labels[0].starts_with("🤖 "));
+        assert!(labels[1].starts_with("💻 "));
+        assert!(labels[2].starts_with("🔀 "));
+        assert!(labels[3].starts_with("🔔 "));
+        assert!(labels[4].starts_with("📝 "));
+        assert!(labels[5].starts_with("📷 "));
         assert!(state.manager.remove(id));
     }
 
@@ -1909,10 +1908,10 @@ mod tests {
             "agent", &std::env::temp_dir(), "exec cat",
             crate::ids::RunId::generate(), "codex",
         ).unwrap();
-        assert!(state.select_top_tab(2));
+        assert!(state.select_top_tab(3));
         state.apply(AppEvent::Resize(24, 80));
         assert!(!state.overlay_active());
-        assert_eq!(state.topbar().tabs.len(), 2);
+        assert_eq!(state.topbar().tabs.len(), 3);
         assert!(state.manager.remove(id));
     }
 
@@ -1941,7 +1940,7 @@ mod tests {
             hook: "PreToolUse".into(), body: "{}".into(), run_id: run.as_str().into(),
             sync: false, reply, timed_out: Default::default(),
         }));
-        assert_eq!(state.topbar().tabs[2].label, "▤ Events");
+        assert_eq!(state.topbar().tabs[3].label, "🔔 Events");
         assert!(state.manager.remove(id));
     }
 

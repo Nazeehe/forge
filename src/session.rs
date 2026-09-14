@@ -7,6 +7,8 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -91,19 +93,35 @@ pub fn activity_for_hook(hook: &str) -> Option<Activity> {
     }
 }
 
-/// One tab inside a session: the agent CLI or the human terminal.
-/// Tab 0 is primary and decides session liveness.
+/// One tab inside a session: the agent CLI, the human terminal, or the
+/// lazygit SCM view. Tab 0 is primary and decides session liveness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TabKind {
     Agent,
     Terminal,
+    Scm,
 }
 
-/// One tab: its kind plus its pane while alive. The terminal tab starts
-/// panelless and spawns lazily on first switch.
+/// One tab: its kind plus its pane while alive. The terminal and SCM
+/// tabs start panelless and spawn lazily on first switch.
 pub struct Tab {
     pub kind: TabKind,
     pane: Option<crate::pty::PtyPane>,
+}
+
+/// Lazy-tab command plus harness tag. The agent tab always spawns with
+/// the session, so it has no lazy command.
+fn lazy_tab_cmd(kind: TabKind) -> Option<(String, &'static str)> {
+    match kind {
+        TabKind::Terminal => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+            Some((format!("exec {shell} -i"), "shell"))
+        }
+        // Missing binary is fine: the shell reports it and the pane
+        // exits, which the tab renders like any dead child.
+        TabKind::Scm => Some(("exec lazygit".to_string(), "lazygit")),
+        TabKind::Agent => None,
+    }
 }
 
 /// One session: identity, human-facing metadata, lifecycle, live run
@@ -257,8 +275,9 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Spawn an agent session: the CLI on tab 0, a panelless terminal tab
-    /// waiting for its first switch. Tab 0 decides session liveness.
+    /// Spawn an agent session: the CLI on tab 0, a panelless terminal
+    /// tab and a panelless lazygit tab waiting for their first switch.
+    /// Tab 0 decides session liveness.
     pub fn spawn_agent(
         &mut self,
         name: &str,
@@ -279,13 +298,46 @@ impl SessionManager {
                 kind: TabKind::Terminal,
                 pane: None,
             },
+            Tab {
+                kind: TabKind::Scm,
+                pane: None,
+            },
         ];
         self.insert_record(id, name, cwd, run_id, cli_tool, tabs);
         Ok(id)
     }
 
-    /// Show one tab directly (top-bar clicks), lazily spawning the
-    /// terminal pane on first view. False for unknown sessions, single-tab
+    /// Spawn a panelless lazy tab (terminal shell or lazygit). False
+    /// when the tab is gone, already live, not lazily spawnable, or the
+    /// spawn fails.
+    fn spawn_lazy_tab(&mut self, id: SessionId, index: usize) -> bool {
+        let (name, cwd, run, kind) = match self.sessions.get(&id) {
+            Some(rec) => (
+                rec.name.clone(),
+                rec.cwd.clone(),
+                rec.run_id.as_str().to_string(),
+                rec.tabs.get(index).map(|tab| tab.kind),
+            ),
+            None => return false,
+        };
+        let Some(kind) = kind else { return false };
+        let Some((cmd, tool)) = lazy_tab_cmd(kind) else {
+            return false;
+        };
+        let pane = match self.spawn_pane(id, &name, &cwd, &cmd, &run, tool, index) {
+            Ok(pane) => pane,
+            Err(_) => return false,
+        };
+        if let Some(rec) = self.sessions.get_mut(&id) {
+            if let Some(tab) = rec.tabs.get_mut(index) {
+                tab.pane = Some(pane);
+            }
+        }
+        true
+    }
+
+    /// Show one tab directly (top-bar clicks), lazily spawning panelless
+    /// tabs on first view. False for unknown sessions, single-tab
     /// sessions, out-of-range tabs, and the already-visible tab.
     pub fn select_tab(&mut self, id: SessionId, index: usize) -> bool {
         let spawn_lazy = match self.sessions.get(&id) {
@@ -294,31 +346,8 @@ impl SessionManager {
             Some(rec) if index >= rec.tabs.len() || index == rec.active_tab => return false,
             Some(rec) => rec.tabs[index].pane.is_none(),
         };
-        if spawn_lazy {
-            let (name, cwd, run) = match self.sessions.get(&id) {
-                Some(rec) => (
-                    rec.name.clone(),
-                    rec.cwd.clone(),
-                    rec.run_id.as_str().to_string(),
-                ),
-                None => return false,
-            };
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-            let pane = match self.spawn_pane(
-                id,
-                &name,
-                &cwd,
-                &format!("exec {shell} -i"),
-                &run,
-                "shell",
-                index,
-            ) {
-                Ok(pane) => pane,
-                Err(_) => return false,
-            };
-            if let Some(rec) = self.sessions.get_mut(&id) {
-                rec.tabs[index].pane = Some(pane);
-            }
+        if spawn_lazy && !self.spawn_lazy_tab(id, index) {
+            return false;
         }
         if let Some(rec) = self.sessions.get_mut(&id) {
             rec.active_tab = index;
@@ -326,7 +355,7 @@ impl SessionManager {
         true
     }
 
-    /// Cycle the active tab, lazily spawning the terminal pane on first
+    /// Cycle the active tab, lazily spawning panelless tabs on first
     /// switch. No-op for single-tab sessions.
     pub fn switch_tab(&mut self, id: SessionId) -> bool {
         let (next, spawn_lazy) = match self.sessions.get(&id) {
@@ -337,31 +366,8 @@ impl SessionManager {
                 (next, rec.tabs[next].pane.is_none())
             }
         };
-        if spawn_lazy {
-            let (name, cwd, run) = match self.sessions.get(&id) {
-                Some(rec) => (
-                    rec.name.clone(),
-                    rec.cwd.clone(),
-                    rec.run_id.as_str().to_string(),
-                ),
-                None => return false,
-            };
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-            let pane = match self.spawn_pane(
-                id,
-                &name,
-                &cwd,
-                &format!("exec {shell} -i"),
-                &run,
-                "shell",
-                next,
-            ) {
-                Ok(pane) => pane,
-                Err(_) => return false,
-            };
-            if let Some(rec) = self.sessions.get_mut(&id) {
-                rec.tabs[next].pane = Some(pane);
-            }
+        if spawn_lazy && !self.spawn_lazy_tab(id, next) {
+            return false;
         }
         if let Some(rec) = self.sessions.get_mut(&id) {
             rec.active_tab = next;
@@ -375,7 +381,7 @@ impl SessionManager {
         rec.tabs.get(rec.active_tab).map(|t| t.kind)
     }
 
-    /// Tab count (1 for plain shells, 2 for agent sessions).
+    /// Tab count (1 for plain shells, 3 for agent sessions).
     pub fn tab_count(&self, id: SessionId) -> usize {
         self.sessions.get(&id).map(|rec| rec.tabs.len()).unwrap_or(0)
     }
@@ -697,7 +703,42 @@ impl SessionManager {
         self.active_pane(id).map(|pane| pane.screen_text())
     }
 
-    /// Write bytes to the visible tab's child.
+    /// Whether the visible tab is on the alternate screen; false when gone.
+    pub fn alternate_screen(&self, id: SessionId) -> bool {
+        self.active_pane(id)
+            .is_some_and(|pane| pane.alternate_screen())
+    }
+
+    /// Scroll the visible tab: positive climbs, negative returns toward
+    /// live. On the normal screen this moves the scrollback viewport
+    /// (see [`crate::pty::PtyPane::scroll_viewport`]); on the alternate
+    /// screen there is no scrollback, so the wheel becomes Up/Down arrows
+    /// instead — fullscreen apps that never take the mouse (codex,
+    /// claude) scroll with those, and a dead wheel would strand the user.
+    pub fn scroll_view(&mut self, id: SessionId, lines: i32) {
+        let (alt, app_cursor) = match self.active_pane(id) {
+            None => return,
+            Some(pane) => (pane.alternate_screen(), pane.application_cursor()),
+        };
+        if !alt {
+            if let Some(pane) = self.active_pane(id) {
+                pane.scroll_viewport(lines);
+            }
+            return;
+        }
+        let code = if lines >= 0 {
+            KeyCode::Up
+        } else {
+            KeyCode::Down
+        };
+        let key = KeyEvent::new(code, KeyModifiers::NONE);
+        if let Some(seq) = crate::input::encode_key(&key, app_cursor) {
+            let _ = self.pane_write(id, &seq.repeat(lines.unsigned_abs() as usize));
+        }
+    }
+
+    /// Write bytes to the visible tab's child. Typing returns a scrolled
+    /// view to the live tail first: input means the human is back.
     pub fn pane_write(&mut self, id: SessionId, bytes: &[u8]) -> std::io::Result<()> {
         match self.active_pane_mut(id) {
             None => Err(if self.sessions.contains_key(&id) {
@@ -708,7 +749,10 @@ impl SessionManager {
             } else {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "no such session")
             }),
-            Some(pane) => pane.write_all(bytes),
+            Some(pane) => {
+                pane.reset_viewport();
+                pane.write_all(bytes)
+            }
         }
     }
 
@@ -731,7 +775,12 @@ impl SessionManager {
             .position(|t| t.kind == TabKind::Agent && t.pane.is_some());
         let tab = agent.unwrap_or(rec.active_tab);
         match rec.tabs.get_mut(tab).and_then(|t| t.pane.as_mut()) {
-            Some(pane) => pane.write_all(bytes),
+            Some(pane) => {
+                // An injection is news: show it live rather than under a
+                // scrolled-back view.
+                pane.reset_viewport();
+                pane.write_all(bytes)
+            }
             None => Err(missing),
         }
     }
@@ -1004,6 +1053,9 @@ mod tests {
         assert!(!m.select_tab(SessionId::fresh(), 0));
         assert!(m.select_tab(id, 0));
         assert_eq!(m.active_tab_kind(id), Some(TabKind::Agent));
+        // The SCM tab lazily spawns its lazygit pane on first view.
+        assert!(m.select_tab(id, 2));
+        assert_eq!(m.active_tab_kind(id), Some(TabKind::Scm));
         let solo = m
             .spawn("s", &workdir(), "exec sleep 30", RunId::generate(), "shell")
             .unwrap();
@@ -1013,12 +1065,12 @@ mod tests {
     }
 
     #[test]
-    fn agent_session_opens_dual_tabs_with_lazy_terminal() {
+    fn agent_session_opens_three_tabs_with_lazy_extras() {
         let mut m = SessionManager::new();
         let id = m
             .spawn_agent("agent", &workdir(), "exec cat", RunId::generate(), "codex")
             .unwrap();
-        assert_eq!(m.tab_count(id), 2);
+        assert_eq!(m.tab_count(id), 3);
         assert_eq!(m.active_tab_kind(id), Some(TabKind::Agent));
         // Single-tab shells refuse to cycle.
         let solo = m
@@ -1031,7 +1083,9 @@ mod tests {
         assert!(m.switch_tab(id));
         assert_eq!(m.active_tab_kind(id), Some(TabKind::Terminal));
         assert!(m.pane_size(id).is_some());
-        // Cycling wraps back to the agent tab.
+        // Next comes the lazygit tab, then cycling wraps to the agent.
+        assert!(m.switch_tab(id));
+        assert_eq!(m.active_tab_kind(id), Some(TabKind::Scm));
         assert!(m.switch_tab(id));
         assert_eq!(m.active_tab_kind(id), Some(TabKind::Agent));
         assert!(m.remove(id));
@@ -1047,8 +1101,8 @@ mod tests {
         assert!(m.switch_tab(id)); // now looking at the human shell
         m.inject_write(id, b"to-agent\n").unwrap();
         assert!(m.inject_write(SessionId::fresh(), b"x").is_err());
-        // Cycle back to the agent tab and read its screen: cat echoed it.
-        assert!(m.switch_tab(id));
+        // Back to the agent tab and read its screen: cat echoed it.
+        assert!(m.select_tab(id, 0));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(text) = m.screen_text(id) {

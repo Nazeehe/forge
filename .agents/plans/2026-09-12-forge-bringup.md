@@ -269,3 +269,69 @@ pulled per-slice as needed.
   fix), `session` manager (rebind/revoke/retain), `app` reducer, `input` router
   v1. 60 green (56+4). Deps add: `portable-pty 0.8`, `vt100 0.15` (parser not
   wired yet). Next: vt100 screen + grid render, main loop, tuirealm host.
+- 2026-09-13/14: terminal fidelity + session UX (unplanned, off-phase).
+  `vt100` vendored to `vendor/vt100` (upstream 0.15.2 + forge patches: faint
+  SGR 2 so agent ghost/prediction text renders dim not full-bright, public
+  `set_scrollback`/`screen_mut` for viewport driving — see
+  `vendor/vt100/FORGE-PATCHES.md`). Group modal (`Ctrl-b g`): typed group
+  names (`n`), checkbox session picker (`a`), up/down selects member rows so
+  `r` removes from group. New sessions auto-focus on create. Broker
+  injections wait 300 ms before the Enter key sequence.
+- 2026-09-14: mouse scrolling for all sessions (terminal + harness).
+  Mouse-off normal screen moves the scrollback viewport (3 lines/notch,
+  output/input snap back to live); mouse-on apps keep SGR passthrough;
+  alt-screen mouse-off sends Up/Down arrows (DECCKM-aware), which is the
+  only affordance for codex/claude — verified codex 0.154.0 never enables
+  mouse reporting (no EnableMouseCapture strings; init emits only
+  focus/bracketed-paste/sync-output/kitty/DSR/DA queries, no `?1000h`).
+  Fixed `Grid::visible_rows` subtract-overflow crash on offsets deeper than
+  the screen (saturating window; regression tests reproduce the exact
+  `grid.rs:125:42` panic on unfixed code). Test gotcha: cooked-pty children
+  echo ESC back as `^[` (ECHOCTL), so wheel tests drive `stty raw -echo`
+  children like real fullscreen apps. Suite now 284 unit + 7 integration,
+  all green; `cargo fmt` not enforced (whole repo unformatted, Makefile
+  gates are build+test only).
+- Queued (user-requested, not started): graceful SIGTERM of agents on quit
+  so they can save state. Uncommitted work sits in the tree (scroll feature
+  + crash/arrows fixes); commit/push on user request.
+- 2026-09-14: dialog restyle per `ui_guidance.md` + status bar removed.
+  New Session / Communication Groups (+ name prompt, member picker) are
+  opaque now (`Clear` + `BorderModal` cyan border; the yellow flood was the
+  yellow `Block` style painting the whole rect). Focus is `>` + reverse
+  cyan (`theme::focus_row`, additive — chrome `Role::Focus` untouched);
+  selection is `(o)`/`[√]` in accent yellow, default `[Create*]`; values
+  no longer button-styled; errors carry `! `. Rows render by hand from
+  component state (stdlib views bypassed). Status bar gone: session bar
+  owns the last row, `status_text`/`Chrome.status` deleted, main grows one
+  row. Suite 288 unit + 7 integration green (new render-style tests assert
+  cell fg/modifier per mark; `▸` replaced by `>`).
+- 2026-09-14: create form trimmed to Directory/Name/CLI Tool/Comm Group
+  (internet/model/connection rows deleted; spec hardcodes model "" so the
+  CLI default applies; dialog shrunk to 78x12). Topbar tabs use emoji
+  icons (🤖💻🔔📝📷🔀 — single codepoints, default emoji presentation, no
+  VS16; layout already measures display width, locked by a wide-char hit
+  test). Suite stays 288 + 7 green.
+- 2026-09-14: Omarchy theme support, live without restart. `theme.rs`
+  reads `current/theme/colors.toml` (`mode`, else background luminance)
+  but only overrides absolute roles (Text/KeyDesc/modal fill — hue roles
+  already track the terminal palette, which Omarchy redefines per theme).
+  Dark setups are pixel-identical to builtin; light setups get black
+  text + opaque light modal fill. A `ThemeWatcher` owned by the main
+  loop polls `theme.name` per tick and repaints on change (torn reads
+  retry next tick; missing state polls false forever). Thread-local
+  ambient map keeps parallel tests race-free (`hold_delta` guard
+  restores on drop). Verified against the live aqua-glass file. Suite
+  296 + 7 green.
+- 2026-09-14: SCM sizing fix. Lazygit rendered cornered at 80x24 because
+  the topbar click handler only refit tabs 0-1 after select; the lazily
+  spawned SCM pane never took the main area. Refit now runs for every
+  live pane tab (`!overlay_active`), proven by a click test asserting
+  (36,133) that fails with (24,80) on the old condition. Suite 298+7.
+- 2026-09-14: SCM tab loads lazygit. New `TabKind::Scm`: agent sessions
+  are born with [Agent, Terminal, Scm], the SCM pane spawning lazily on
+  first view in the session cwd (same panelless pattern as the terminal
+  tab; lazy spawn shared via `spawn_lazy_tab`, missing binary renders as
+  an exited child). Strip is Agent/Terminal/SCM + Events/Tasks/Visual
+  overlays. Proven end-to-end: lazygit 0.65 renders its full TUI through
+  a forge pane in ~1s (needs /dev/tty, which portable-pty provides; no
+  extra query answering required). Suite 297 + 7 green.

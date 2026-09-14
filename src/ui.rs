@@ -85,8 +85,8 @@ pub struct PaneView {
 }
 
 /// Translate outer 0-based mouse coordinates into 1-based pane-grid cells.
-/// `None` when the event lands on borders, the status bar, or outside the
-/// pane: chrome keeps those events.
+/// `None` when the event lands on borders, the session bar, or outside
+/// the pane: chrome keeps those events.
 pub fn translate_mouse(area: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
     if area.width < 3 || area.height < 3 {
         return None;
@@ -121,20 +121,20 @@ pub fn cursor_screen_pos(area: Rect, cursor: Option<(u16, u16)>) -> Option<Posit
 }
 
 /// Chrome geometry: one focused session fills the 80% main pane (with a
-/// one-row tab strip pinned to its top), the sidebar keeps 20%, and two
-/// bottom rows hold the session bar plus the status bar. Tiny terminals
-/// sacrifice chrome for content.
+/// one-row tab strip pinned to its top), the sidebar keeps 20%, and one
+/// bottom row holds the session bar. There is no status bar: dialogs
+/// carry their own key hints. Tiny terminals sacrifice chrome for
+/// content.
 pub struct ChromeAreas {
     pub main: Rect,
     pub topbar: Rect,
     pub sidebar: Rect,
     pub session_bar: Rect,
-    pub status: Rect,
 }
 
 pub fn chrome_areas(area: Rect) -> ChromeAreas {
-    let (bar_h, status_h) = if area.height >= 3 { (1, 1) } else { (0, 0) };
-    let content_h = area.height.saturating_sub(bar_h + status_h);
+    let bar_h = if area.height >= 3 { 1 } else { 0 };
+    let content_h = area.height.saturating_sub(bar_h);
     let topbar_h = if content_h > 4 { 1 } else { 0 };
     let main_w = if area.width >= 160 { area.width * 3 / 4 } else { area.width * 4 / 5 };
     let inset_tabs = area.width >= 160 && topbar_h > 0;
@@ -147,7 +147,6 @@ pub fn chrome_areas(area: Rect) -> ChromeAreas {
         topbar: Rect::new(area.x, area.y + inset_tabs as u16, main_w, topbar_h),
         sidebar: Rect::new(area.x + main_w, area.y, area.width.saturating_sub(main_w), content_h),
         session_bar: Rect::new(area.x, area.y + content_h, area.width, bar_h),
-        status: Rect::new(area.x, area.y + content_h + bar_h, area.width, status_h),
     }
 }
 
@@ -588,18 +587,17 @@ pub fn mode_at(buttons: &ModeButtons, col: u16, row: u16) -> Option<&'static str
     }
 }
 
-/// Chrome snapshots: session-bar tabs plus sidebar and status text.
+/// Chrome snapshots: session-bar tabs plus sidebar state.
 pub struct Chrome {
     pub tabs: Vec<SessionTab>,
     pub topbar: TopBar,
     pub detail: Option<SessionDetail>,
     pub pending: usize,
     pub mode: &'static str,
-    pub status: String,
 }
 
-/// Render one focused session in the main pane with sidebar, session bar,
-/// and status bar. Titles and bodies are untrusted PTY output, so both pass
+/// Render one focused session in the main pane with sidebar and session
+/// bar. Titles and bodies are untrusted PTY output, so both pass
 /// through display encoding: raw escape sequences must never reach the
 /// outer terminal.
 pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome) {
@@ -709,9 +707,6 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
             }
         }
     }
-    if areas.status.height > 0 {
-        frame.render_widget(Paragraph::new(chrome.status.clone()), areas.status);
-    }
 }
 
 fn pane_text(view: &PaneView) -> Text<'static> {
@@ -741,20 +736,21 @@ mod tests {
 
     #[test]
     fn chrome_splits_main_sidebar_and_bars() {
+        // No status bar: the session bar owns the last row.
         let c = chrome_areas(Rect::new(0, 0, 80, 24));
         assert_eq!(c.topbar, Rect::new(0, 0, 64, 1));
-        assert_eq!(c.main, Rect::new(0, 1, 64, 21));
-        assert_eq!(c.sidebar, Rect::new(64, 0, 16, 22));
-        assert_eq!(c.session_bar, Rect::new(0, 22, 80, 1));
-        assert_eq!(c.status, Rect::new(0, 23, 80, 1));
+        assert_eq!(c.main, Rect::new(0, 1, 64, 22));
+        assert_eq!(c.sidebar, Rect::new(64, 0, 16, 23));
+        assert_eq!(c.session_bar, Rect::new(0, 23, 80, 1));
         let wide = chrome_areas(Rect::new(0, 0, 120, 40));
         assert_eq!(wide.topbar, Rect::new(0, 0, 96, 1));
-        assert_eq!(wide.main, Rect::new(0, 1, 96, 37));
-        assert_eq!(wide.sidebar, Rect::new(96, 0, 24, 38));
+        assert_eq!(wide.main, Rect::new(0, 1, 96, 38));
+        assert_eq!(wide.sidebar, Rect::new(96, 0, 24, 39));
+        assert_eq!(wide.session_bar, Rect::new(0, 39, 120, 1));
         // Tiny terminals keep content over chrome.
         let tiny = chrome_areas(Rect::new(0, 0, 80, 2));
         assert_eq!(tiny.main.height, 2);
-        assert_eq!(tiny.status.height, 0);
+        assert_eq!(tiny.session_bar.height, 0);
     }
 
     fn tab(title: &str, focused: bool) -> SessionTab {
@@ -892,7 +888,7 @@ mod tests {
         let mut tall = Terminal::new(TestBackend::new(120, 40)).unwrap();
         tall.draw(|f| render(f, Rect::new(0, 0, 120, 40), &[], &chrome())).unwrap();
         let tall_rows = buffer_rows(&tall);
-        assert!(tall_rows[34].contains("[Off] [Yolo]"));
+        assert!(tall_rows[35].contains("[Off] [Yolo]"));
         assert!(!tall_rows[11].contains("[Off]"));
     }
 
@@ -901,7 +897,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
         terminal.draw(|f| render(f, Rect::new(0, 0, 80, 14), &[], &chrome())).unwrap();
         let rows = buffer_rows(&terminal);
-        assert!(!rows[11].contains("[Off]"));
+        // Taller sidebar earns its button row; the bottom border stays clean.
+        assert!(rows[11].contains("[Off]"), "buttons visible: {:?}", rows[11]);
+        assert!(!rows[12].contains("[Off]"), "border clean: {:?}", rows[12]);
     }
 
     #[test]
@@ -1048,7 +1046,6 @@ mod tests {
             detail: None,
             pending: 0,
             mode: "off",
-            status: "status".to_string(),
         }
     }
 
@@ -1073,20 +1070,41 @@ mod tests {
     }
 
     #[test]
-    fn render_shows_titles_bodies_and_status() {
+    fn topbar_layout_measures_wide_emoji_icons() {
+        // Emoji icons are two cells: hit areas must use display width,
+        // not char count, or clicks land one cell off per icon.
+        let tabs = vec![
+            TopTab { label: "🤖 Codex".to_string(), active: true },
+            TopTab { label: "💻 Terminal".to_string(), active: false },
+        ];
+        let buttons = layout_topbar(Rect::new(0, 0, 40, 1), &tabs);
+        assert_eq!(buttons.len(), 2);
+        // "[🤖 Codex]" spans 10 cells: brackets + icon + space + name.
+        assert_eq!((buttons[0].start, buttons[0].end), (1, 11));
+        // "[💻 Terminal]" spans 13 cells starting after the 2-cell gap.
+        assert_eq!((buttons[1].start, buttons[1].end), (13, 26));
+        assert_eq!(topbar_at(&buttons, 11), None, "gap is dead");
+        assert_eq!(topbar_at(&buttons, 13), Some(1));
+    }
+
+    #[test]
+    fn render_shows_titles_bodies_and_session_bar() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut c = chrome();
         c.tabs = vec![tab("agent-1", true)];
-        c.status = "2 sessions | prefix Ctrl-b".to_string();
         terminal
             .draw(|f| render(f, area(), &[pane("agent-1", "hello out", true)], &c))
             .unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("agent-1"), "title visible");
         assert!(text.contains("hello out"), "body visible");
-        assert!(text.contains("prefix Ctrl-b"), "status visible");
         assert!(text.contains("1 agent-1"), "session button visible");
+        // No status bar: the last row is the session bar, and no help
+        // line is rendered anywhere.
+        let rows = buffer_rows(&terminal);
+        assert!(rows[23].contains("1 agent-1"), "bar owns last row: {:?}", rows[23]);
+        assert!(!text.contains("prefix Ctrl-b"), "help line is gone");
     }
 
     fn buffer_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {

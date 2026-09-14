@@ -306,6 +306,27 @@ impl PtyPane {
         lock_screen(&self.screen).screen().mouse_protocol_encoding()
     }
 
+    /// Lines moved per wheel notch when the pane owns the wheel.
+    pub const SCROLL_LINES_PER_NOTCH: i32 = 3;
+
+    /// Move the scrollback viewport: positive climbs into history,
+    /// negative returns toward live; the grid clamps to buffered
+    /// history. No-op on the alternate screen, which has no scrollback.
+    pub fn scroll_viewport(&self, lines: i32) {
+        let mut parser = lock_screen(&self.screen);
+        let screen = parser.screen_mut();
+        if screen.alternate_screen() {
+            return;
+        }
+        let pos = screen.scrollback() as i32;
+        screen.set_scrollback(pos.saturating_add(lines).max(0) as usize);
+    }
+
+    /// Return the viewport to the live tail.
+    pub fn reset_viewport(&self) {
+        lock_screen(&self.screen).screen_mut().set_scrollback(0);
+    }
+
     /// Whether the application requested application-cursor keys (`DECCKM`):
     /// arrows must arrive as SS3 (`\x1bOA`) rather than CSI (`\x1b[A`).
     pub fn application_cursor(&self) -> bool {
@@ -351,7 +372,13 @@ impl PtyPane {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        lock_screen(&screen).process(&buf[..n]);
+                        let mut parser = lock_screen(&screen);
+                        parser.process(&buf[..n]);
+                        // Live output returns a scrolled view to the tail:
+                        // the viewport is a quiet-pane peek, never a frozen
+                        // stream.
+                        parser.screen_mut().set_scrollback(0);
+                        drop(parser);
                         Self::answer_device_queries(&screen, &writer, &mut carry, &buf[..n]);
                         if tx.send((id, PtyEvent::Output(buf[..n].to_vec()))).is_err() {
                             break;
@@ -453,6 +480,7 @@ mod tests {
         let (_, code) = run_until_exit(&mut pane, &rx);
         assert_eq!(code, Some(42));
     }
+
 
     #[test]
     fn write_reaches_child() {
@@ -740,6 +768,60 @@ mod tests {
                     pane.screen_text()
                 );
             }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        pane.close();
+    }
+
+    #[test]
+    fn wheel_scrolls_scrollback_and_output_resets_to_live() {
+        // Mouse-less panes (mode None) drop wheel events at the router;
+        // the viewport below is what the router drives instead, so every
+        // session scrolls whether or not its app reports mouse.
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "for i in $(seq 1 40); do echo line-$i; done; exec cat",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let rows = pane.styled_rows();
+            if row_text(rows.last().unwrap_or(&Vec::new())).contains("line-40") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "history never arrived");
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(pane.mouse_mode(), vt100::MouseProtocolMode::None);
+        pane.scroll_viewport(6);
+        let rows = pane.styled_rows();
+        let text: String = rows.iter().map(|r| row_text(r)).collect::<Vec<String>>().concat();
+        assert!(!text.contains("line-40"), "scrolled off the live tail");
+        assert!(text.contains("line-17"), "older history in view: {text:?}");
+        // Down past the bottom clamps back to live.
+        pane.scroll_viewport(-100);
+        let rows = pane.styled_rows();
+        let text: String = rows.iter().map(|r| row_text(r)).collect::<Vec<String>>().concat();
+        assert!(text.contains("line-40"), "clamped to live: {text:?}");
+        // Fresh output returns a scrolled view to live on its own.
+        pane.scroll_viewport(6);
+        pane.write_all(b"echo back-to-live\n").unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let rows = pane.styled_rows();
+            let text: String = rows.iter().map(|r| row_text(r)).collect::<Vec<String>>().concat();
+            if text.contains("back-to-live") && text.contains("line-40") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never returned to live: {text:?}");
             while rx.try_recv().is_ok() {}
             std::thread::sleep(Duration::from_millis(5));
         }

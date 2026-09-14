@@ -299,8 +299,8 @@ impl InputRouter {
                     KeyCode::Char('n') => RoutedKey::Command(UserCommand::NextSession),
                     KeyCode::Char('p') => RoutedKey::Command(UserCommand::PrevSession),
                     KeyCode::Char('c') => RoutedKey::Command(UserCommand::CreateSession),
-                    KeyCode::Char('g') => RoutedKey::Command(UserCommand::TogglePeerGroup),
-                    KeyCode::Char('o') => RoutedKey::Command(UserCommand::ManageGroups),
+                    KeyCode::Char('g') => RoutedKey::Command(UserCommand::ManageGroups),
+                    KeyCode::Char('o') => RoutedKey::Command(UserCommand::TogglePeerGroup),
                     KeyCode::Char('t') => RoutedKey::Command(UserCommand::SwitchTab),
                     KeyCode::Char('y') => RoutedKey::Command(UserCommand::TogglePermissionMode),
                     KeyCode::Char(d @ '1'..='9') => {
@@ -389,13 +389,13 @@ mod tests {
         assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
         assert_eq!(
             r.feed(key(KeyCode::Char('g'))),
-            RoutedKey::Command(UserCommand::TogglePeerGroup)
+            RoutedKey::Command(UserCommand::ManageGroups)
         );
 
         assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
         assert_eq!(
             r.feed(key(KeyCode::Char('o'))),
-            RoutedKey::Command(UserCommand::ManageGroups)
+            RoutedKey::Command(UserCommand::TogglePeerGroup)
         );
 
         assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);

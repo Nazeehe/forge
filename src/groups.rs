@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use tui_realm_stdlib::components::{Checkbox, List};
+use tui_realm_stdlib::components::Checkbox;
 use tuirealm::command::Cmd;
 use tuirealm::component::Component;
 
@@ -61,11 +61,14 @@ enum Mode {
 }
 
 /// Group dialog state: a mode, a selected group name (stable across
-/// mutations, unlike an index), a row cursor, a name buffer, and the
-/// checkbox set for member editing.
+/// mutations, unlike an index), a flat row cursor over the overview
+/// (group headers AND member rows, so `r` can remove the member under
+/// the cursor), the selected member name when the cursor sits on one, a
+/// name buffer, and the checkbox set for member editing.
 pub struct GroupDialog {
     mode: Mode,
     selected: String,
+    member: Option<String>,
     cursor: usize,
     name_buf: String,
     checked: HashSet<SessionId>,
@@ -77,6 +80,7 @@ impl GroupDialog {
         GroupDialog {
             mode: Mode::List,
             selected: String::new(),
+            member: None,
             cursor: 0,
             name_buf: String::new(),
             checked: HashSet::new(),
@@ -93,6 +97,11 @@ impl GroupDialog {
         &self.selected
     }
 
+    /// Member name under the cursor, if the cursor sits on a member row.
+    pub fn selected_member(&self) -> Option<&str> {
+        self.member.as_deref()
+    }
+
     /// Group under the cursor, if the selection names a live group.
     fn current<'a>(&self, ctx: &'a GroupCtx) -> Option<&'a str> {
         ctx.groups
@@ -102,9 +111,10 @@ impl GroupDialog {
     }
 
     /// Reconcile selection with a fresh snapshot: a deleted selection
-    /// falls to the cursor row, and the cursor clamps into range. In
-    /// member-edit mode the cursor walks the session list instead, so it
-    /// only clamps there and never snaps back to the group row.
+    /// falls to the cursor row, a removed member falls back to its group
+    /// header, and the cursor clamps into range. In member-edit mode the
+    /// cursor walks the session list instead, so it only clamps there
+    /// and never snaps back to the group row.
     fn reconcile(&mut self, ctx: &GroupCtx) {
         if self.mode == Mode::Members {
             if !ctx.sessions.is_empty() {
@@ -114,27 +124,74 @@ impl GroupDialog {
             }
             return;
         }
+        let rows = overview_rows(ctx);
         if ctx.groups.iter().all(|g| g.name != self.selected) {
             self.selected = ctx
                 .groups
                 .get(self.cursor.min(ctx.groups.len().saturating_sub(1)))
                 .map(|g| g.name.clone())
                 .unwrap_or_default();
+            self.member = None;
         }
-        if let Some(pos) = ctx.groups.iter().position(|g| g.name == self.selected) {
-            self.cursor = pos;
-        } else {
-            self.cursor = 0;
+        match ctx.groups.iter().position(|g| g.name == self.selected) {
+            None => {
+                self.cursor = 0;
+                self.member = None;
+            }
+            Some(pos) => {
+                let header = rows
+                    .iter()
+                    .position(|r| r.group == pos && r.member.is_none());
+                let landed = match self.member.clone() {
+                    Some(name) => rows
+                        .iter()
+                        .position(|r| r.group == pos && r.member.as_deref() == Some(&name))
+                        .or(header),
+                    None => header,
+                };
+                match landed {
+                    Some(index) => {
+                        self.cursor = index;
+                        self.member = rows[index].member.clone();
+                    }
+                    None => {
+                        self.cursor = 0;
+                        self.member = None;
+                    }
+                }
+            }
         }
     }
 
+    /// Point the cursor at the selected group's header row. Used right
+    /// after a removal so the next frame (drawn from a stale snapshot
+    /// until the caller applies and rebuilds) never highlights a gone
+    /// row. Header indices are stable under member removal because
+    /// member rows always follow their header.
+    fn snap_to_header(&mut self, ctx: &GroupCtx) {
+        self.member = None;
+        self.cursor = ctx
+            .groups
+            .iter()
+            .position(|g| g.name == self.selected)
+            .and_then(|pos| {
+                overview_rows(ctx)
+                    .iter()
+                    .position(|r| r.group == pos && r.member.is_none())
+            })
+            .unwrap_or(0);
+    }
+
     fn move_cursor(&mut self, ctx: &GroupCtx, dir: i32) {
-        if ctx.groups.is_empty() {
+        let rows = overview_rows(ctx);
+        if rows.is_empty() {
             return;
         }
-        let len = ctx.groups.len() as i32;
+        let len = rows.len() as i32;
         self.cursor = (self.cursor as i32 + dir).rem_euclid(len) as usize;
-        self.selected = ctx.groups[self.cursor].name.clone();
+        let row = &rows[self.cursor];
+        self.selected = ctx.groups[row.group].name.clone();
+        self.member = row.member.clone();
         self.error = None;
     }
 
@@ -171,6 +228,27 @@ impl GroupDialog {
                     self.error = Some("no group selected — n creates one".to_string());
                     return GroupOutcome::Pending;
                 };
+                // On a member row `r` removes that session from the group
+                // via an exact-membership set; on a header it renames.
+                if let Some(member) = self.member.clone() {
+                    let Some(id) = ctx.sessions.iter().find(|s| s.name == member).map(|s| s.id)
+                    else {
+                        self.error = Some(format!("{member:?} already left"));
+                        return GroupOutcome::Pending;
+                    };
+                    let members: Vec<SessionId> = ctx
+                        .members
+                        .iter()
+                        .copied()
+                        .filter(|kept| kept != &id)
+                        .collect();
+                    self.snap_to_header(ctx);
+                    self.error = None;
+                    return GroupOutcome::SetMembers {
+                        group: current,
+                        members,
+                    };
+                }
                 self.mode = Mode::Name { rename: true };
                 self.name_buf = current;
                 self.error = None;
@@ -193,6 +271,7 @@ impl GroupDialog {
                     .get(self.cursor.min(rest.len().saturating_sub(1)))
                     .map(|s| s.to_string())
                     .unwrap_or_default();
+                self.snap_to_header(ctx);
                 self.error = None;
                 return GroupOutcome::Delete(current);
             }
@@ -365,22 +444,23 @@ impl GroupDialog {
         match self.mode {
             Mode::List => {
                 let rows = overview_rows(ctx);
-                let selected_row = overview_selected_row(ctx, self.cursor);
-                let start = visible_start(selected_row, visible_rows);
+                let start = visible_start(self.cursor, visible_rows);
                 if index >= visible_rows {
                     return false;
                 }
-                if let Some((group_index, _)) = rows.get(start + index) {
-                    self.cursor = *group_index;
-                    let group = &ctx.groups[*group_index];
-                    self.selected = group.name.clone();
+                if let Some(hit) = rows.get(start + index) {
+                    self.cursor = start + index;
+                    self.selected = ctx.groups[hit.group].name.clone();
+                    self.member = hit.member.clone();
                     self.error = None;
                     return true;
                 }
             }
             Mode::Members => {
-                if let Some(index) = index.checked_sub(1).filter(|i| *i < visible_rows) {
-                    let selected = visible_start(self.cursor, visible_rows) + index;
+                // One header row plus the footer row are not sessions.
+                let body_rows = visible_rows.saturating_sub(1);
+                if let Some(index) = index.checked_sub(1).filter(|i| *i < body_rows) {
+                    let selected = visible_start(self.cursor, body_rows) + index;
                     if let Some(session) = ctx.sessions.get(selected) {
                         self.cursor = selected;
                         self.toggle_member(session);
@@ -393,125 +473,200 @@ impl GroupDialog {
         false
     }
 
-    /// Render the centered dialog from the same snapshot `key` used.
+    /// Render the centered dialog per the UI guidance: an opaque modal,
+    /// `>` plus reverse video on the cursor row, selection marks in
+    /// accent yellow, and key-hint footers. Rows are drawn by hand from
+    /// the same top-down order `click` hit-tests, so mouse and keyboard
+    /// never disagree.
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect, ctx: &GroupCtx) {
-        use ratatui::widgets::{Block, Borders, Paragraph};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+        use crate::theme::{Role, focus_row, style};
+        // Opaque: the live grid must not show through the modal.
+        frame.render_widget(Clear, area);
         let hint = match self.mode {
-            Mode::List => " Communication Groups ",
+            Mode::List | Mode::Members => " Communication Groups ",
             Mode::Name { rename: false } => " new group (Enter create • Esc back) ",
             Mode::Name { rename: true } => " rename group (Enter apply • Esc back) ",
-            Mode::Members => " members (Space toggle • Enter apply • Esc back) ",
         };
         let block = Block::default()
             .borders(Borders::ALL)
             .title(hint)
-            .style(crate::theme::style(crate::theme::Role::BorderFocused));
+            .style(crate::theme::modal_fill())
+            .border_style(style(Role::BorderModal));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.height < 5 || inner.width < 20 {
             return;
         }
+        let text = style(Role::Text);
         let mut row = inner.y;
         let end = inner.y + inner.height;
         match self.mode {
             Mode::List => {
                 if ctx.groups.is_empty() {
                     frame.render_widget(
-                        Paragraph::new("No groups yet. n creates one."),
+                        Paragraph::new("No groups yet. n creates one.").style(text),
                         Rect::new(inner.x, row, inner.width, 1),
                     );
                 } else {
                     let visible_rows = inner.height.saturating_sub(1) as usize;
                     let all_rows = overview_rows(ctx);
-                    let selected_row = overview_selected_row(ctx, self.cursor);
+                    // Clamp: a removal can shrink the rows under a stale
+                    // cursor for one frame before the next reconcile.
+                    let selected_row = self.cursor.min(all_rows.len().saturating_sub(1));
                     let start = visible_start(selected_row, visible_rows);
-                    let rows = all_rows.iter().skip(start).take(visible_rows)
-                        .map(|(_, text)| text.clone());
-                    let mut list = List::default()
-                        .rows(rows)
-                        .always_active()
-                        .scroll(true)
-                        .selected_line(selected_row.saturating_sub(start))
-                        .highlight_str("▸");
-                    list.view(
-                        frame,
-                        Rect::new(inner.x, row, inner.width, inner.height.saturating_sub(1)),
-                    );
-                    for (offset, (group_index, text)) in all_rows.iter().skip(start)
-                        .take(visible_rows).enumerate()
-                    {
-                        if text.starts_with("    ● ") && inner.width > 6 {
-                            let color = crate::ui::group_palette(ctx.groups[*group_index].color);
-                            let mut dot = tui_realm_stdlib::components::Label::default()
-                                .text("●")
-                                .style(ratatui::style::Style::default().fg(color));
-                            dot.view(frame, Rect::new(inner.x + 5, row + offset as u16, 1, 1));
+                    for (pos, over) in all_rows.iter().enumerate().skip(start).take(visible_rows) {
+                        let y = row + (pos - start) as u16;
+                        if y >= end.saturating_sub(1) {
+                            break;
                         }
+                        let focused = pos == selected_row;
+                        let row_style = if focused { focus_row() } else { text };
+                        let mut spans = vec![if focused {
+                            Span::styled("> ", focus_row())
+                        } else {
+                            Span::raw("  ")
+                        }];
+                        match &over.member {
+                            None => {
+                                let label = fit_row(&over.text, inner.width as usize - 2);
+                                spans.push(Span::styled(label, row_style));
+                            }
+                            Some(member) => {
+                                let color = crate::ui::group_palette(ctx.groups[over.group].color);
+                                let name = fit_row(member, inner.width as usize - 8);
+                                spans.push(Span::styled("    ", row_style));
+                                spans.push(Span::styled("●", style(Role::Text).fg(color)));
+                                spans.push(Span::styled(format!(" {name}"), row_style));
+                            }
+                        }
+                        frame.render_widget(
+                            Paragraph::new(Line::from(spans)),
+                            Rect::new(inner.x, y, inner.width, 1),
+                        );
                     }
                 }
                 row = row.saturating_add(overview_rows(ctx).len().min(inner.height as usize) as u16);
             }
             Mode::Name { rename } => {
-                let verb = if rename { "Rename to" } else { "New group" };
+                let verb = if rename { "Rename to" } else { "Group name" };
+                let room = (inner.width as usize)
+                    .saturating_sub(verb.chars().count() + 7);
+                let buf = fit_row(&safe_name(&self.name_buf), room);
                 frame.render_widget(
-                    Paragraph::new(format!("{verb}: {}▌", safe_name(&self.name_buf))),
+                    Paragraph::new(Line::from(vec![
+                        Span::styled("> ", focus_row()),
+                        Span::styled(format!("{verb}: "), text),
+                        Span::styled(format!("[{buf}▌]"), focus_row()),
+                    ])),
                     Rect::new(inner.x, row, inner.width, 1),
                 );
                 row += 1;
             }
             Mode::Members => {
+                // Reference look (screens/group_select.jpeg): dotted
+                // "Add sessions" header, `> [√] name` rows with the
+                // checked box in accent yellow, and a key-hint footer.
                 frame.render_widget(
-                    Paragraph::new(format!("{}:", safe_name(&self.selected))),
+                    Paragraph::new(dotted_header(inner.width as usize, "Add sessions"))
+                        .style(style(Role::Muted)),
                     Rect::new(inner.x, row, inner.width, 1),
                 );
                 row += 1;
                 if ctx.sessions.is_empty() {
                     frame.render_widget(
-                        Paragraph::new("  (no sessions)"),
+                        Paragraph::new("  (no sessions)").style(text),
                         Rect::new(inner.x, row, inner.width, 1),
                     );
                     row += 1;
                 }
-                let visible_rows = inner.height.saturating_sub(1) as usize;
+                let visible_rows = inner.height.saturating_sub(2) as usize;
                 let start = visible_start(self.cursor, visible_rows);
                 for (i, s) in ctx.sessions.iter().enumerate().skip(start).take(visible_rows) {
-                    if row >= end {
+                    if row >= end.saturating_sub(1) {
                         break;
                     }
-                    let selected = if self.checked.contains(&s.id) {
-                        vec![0]
+                    let checked = self.checked.contains(&s.id);
+                    let focused = i == self.cursor;
+                    let name = fit_row(&safe_name(&s.name), inner.width as usize - 8);
+                    let (box_glyph, box_style, name_style) = if focused {
+                        ("[√] ", focus_row(), focus_row())
+                    } else if checked {
+                        ("[√] ", style(Role::Brand), text.add_modifier(ratatui::style::Modifier::BOLD))
                     } else {
-                        vec![]
+                        ("[ ] ", style(Role::Muted), text)
                     };
-                    let mut checkbox = Checkbox::default()
-                        .choices([safe_name(&s.name)])
-                        .values(&selected)
-                        .style(if i == self.cursor {
-                            crate::theme::style(crate::theme::Role::Focus)
+                    // Unchecked boxes still show `[ ]` when focused so the
+                    // row keeps its checkbox shape in reverse video.
+                    let (box_glyph, box_style) = if focused && !checked {
+                        ("[ ] ", focus_row())
+                    } else {
+                        (box_glyph, box_style)
+                    };
+                    let line = Line::from(vec![
+                        if focused {
+                            Span::styled("> ", focus_row())
                         } else {
-                            crate::theme::style(crate::theme::Role::Text)
-                        });
-                    checkbox.view(frame, Rect::new(inner.x, row, inner.width, 1));
+                            Span::raw("  ")
+                        },
+                        Span::styled(box_glyph, box_style),
+                        Span::styled(name, name_style),
+                    ]);
+                    frame.render_widget(
+                        Paragraph::new(line),
+                        Rect::new(inner.x, row, inner.width, 1),
+                    );
                     row += 1;
                 }
             }
         }
-        if self.mode == Mode::List && inner.height > 0 {
-            use ratatui::text::{Line, Span};
-            let key = crate::theme::style(crate::theme::Role::KeyHint);
-            let footer = Line::from(vec![
-                Span::styled("n", key), Span::raw(" new group   "),
-                Span::styled("a", key), Span::raw(" add session   "),
-                Span::styled("r", key), Span::raw(" rename   "),
-                Span::styled("d", key), Span::raw(" delete group"),
-            ]);
-            frame.render_widget(Paragraph::new(footer), Rect::new(inner.x, end - 1, inner.width, 1));
+        // Both pickers keep a key-hint footer; the name prompt spends
+        // its last row on the input instead.
+        let footer_hints: Option<Vec<ratatui::text::Span>> = match self.mode {
+            Mode::List => {
+                use ratatui::text::Span;
+                let key = crate::theme::style(crate::theme::Role::KeyHint);
+                // `r` follows the cursor: a member row removes that
+                // session from the group, a header renames the group.
+                let r_hint = if self.member.is_some() {
+                    " remove member   "
+                } else {
+                    " rename   "
+                };
+                Some(vec![
+                    Span::styled("n", key), Span::raw(" new group   "),
+                    Span::styled("a", key), Span::raw(" add session   "),
+                    Span::styled("r", key), Span::raw(r_hint),
+                    Span::styled("d", key), Span::raw(" delete group"),
+                ])
+            }
+            Mode::Members => {
+                use ratatui::text::Span;
+                let key = crate::theme::style(crate::theme::Role::KeyHint);
+                Some(vec![
+                    Span::styled("↑↓", key), Span::raw(" navigate   "),
+                    Span::styled("Space", key), Span::raw(" toggle   "),
+                    Span::styled("Enter", key), Span::raw(" confirm   "),
+                    Span::styled("Esc", key), Span::raw(" back"),
+                ])
+            }
+            Mode::Name { .. } => None,
+        };
+        let has_footer = footer_hints.is_some();
+        if let Some(hints) = footer_hints {
+            if inner.height > 0 {
+                use ratatui::text::Line;
+                frame.render_widget(
+                    Paragraph::new(Line::from(hints)),
+                    Rect::new(inner.x, end - 1, inner.width, 1),
+                );
+            }
         }
         if let Some(err) = &self.error {
-            if row < end.saturating_sub((self.mode == Mode::List) as u16) {
+            if row < end.saturating_sub(has_footer as u16) {
                 frame.render_widget(
-                    Paragraph::new(err.clone())
-                        .style(crate::theme::style(crate::theme::Role::Danger)),
+                    Paragraph::new(format!("! {err}")).style(style(Role::Danger)),
                     Rect::new(inner.x, row, inner.width, 1),
                 );
             }
@@ -523,23 +678,61 @@ fn safe_name(raw: &str) -> String {
     crate::safe_text::encode_for_display(raw)
 }
 
+/// Truncate a row to a cell width, marking cuts with an ellipsis so
+/// long names can never wrap the one-row-per-entry layout.
+fn fit_row(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Centered `········ Add sessions ········` header for the member
+/// picker, dotted out to the available width.
+fn dotted_header(width: usize, label: &str) -> String {
+    let label = format!(" {label} ");
+    if width <= label.len() + 2 {
+        return label;
+    }
+    let fill = width - label.len();
+    let left = fill / 2;
+    format!("{}{label}{}", "·".repeat(left), "·".repeat(fill - left))
+}
+
 fn visible_start(cursor: usize, rows: usize) -> usize {
     cursor.saturating_sub(rows.saturating_sub(1))
 }
 
-fn overview_rows(ctx: &GroupCtx) -> Vec<(usize, String)> {
+/// One flat overview row: the owning group index, the raw member name
+/// for member rows (None for headers), and the rendered text.
+struct OverRow {
+    group: usize,
+    member: Option<String>,
+    text: String,
+}
+
+fn overview_rows(ctx: &GroupCtx) -> Vec<OverRow> {
     let mut rows = Vec::new();
     for (index, group) in ctx.groups.iter().enumerate() {
-        rows.push((index, format!("Group {}: {}", index + 1, safe_name(&group.name))));
+        rows.push(OverRow {
+            group: index,
+            member: None,
+            text: format!("Group {}: {}", index + 1, safe_name(&group.name)),
+        });
         for name in &group.member_names {
-            rows.push((index, format!("    ● {}", safe_name(name))));
+            rows.push(OverRow {
+                group: index,
+                member: Some(name.clone()),
+                text: format!("    ● {}", safe_name(name)),
+            });
         }
     }
     rows
-}
-
-fn overview_selected_row(ctx: &GroupCtx, group_index: usize) -> usize {
-    ctx.groups.iter().take(group_index).map(|g| 1 + g.member_names.len()).sum()
 }
 
 impl Default for GroupDialog {
@@ -662,6 +855,48 @@ mod tests {
     }
 
     #[test]
+    fn arrows_walk_member_rows_and_r_removes_member() {
+        let (a, _b, ctx) = fixture();
+        // Flat rows: [codex-proj, a1, other]. j lands on the member.
+        let mut d = GroupDialog::new();
+        assert!(matches!(d.key(&ch('j'), &ctx), GroupOutcome::Pending));
+        assert_eq!(d.selected_name(), "codex-proj");
+        assert_eq!(d.selected_member(), Some("a1"));
+        // r on a member drops it via exact-membership set, not rename.
+        match d.key(&ch('r'), &ctx) {
+            GroupOutcome::SetMembers { group, members } => {
+                assert_eq!(group, "codex-proj");
+                assert!(!members.contains(&a), "a1 removed");
+            }
+            other => panic!("expected member removal, got {other:?}"),
+        }
+        // Cursor fell back to the group header, where r renames again.
+        assert_eq!(d.selected_member(), None);
+        assert!(matches!(d.key(&ch('r'), &ctx), GroupOutcome::Pending));
+        typed(&mut d, "-v2", &ctx);
+        match d.key(&key(KeyCode::Enter), &ctx) {
+            GroupOutcome::Rename { from, to } => {
+                assert_eq!((from.as_str(), to.as_str()), ("codex-proj", "codex-proj-v2"));
+            }
+            other => panic!("expected rename, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn d_on_member_row_deletes_the_whole_group() {
+        // Reference footer: `d` is delete-group unconditionally; `r` is
+        // the member remover.
+        let (_, _, ctx) = fixture();
+        let mut d = GroupDialog::new();
+        let _ = d.key(&ch('j'), &ctx);
+        assert_eq!(d.selected_member(), Some("a1"));
+        match d.key(&ch('d'), &ctx) {
+            GroupOutcome::Delete(name) => assert_eq!(name, "codex-proj"),
+            other => panic!("expected group delete, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn d_delete_falls_to_neighbor() {
         let (_, _, ctx) = fixture();
         let mut d = GroupDialog::new();
@@ -726,16 +961,27 @@ mod tests {
     }
 
     #[test]
-    fn member_picker_renders_tuirealm_checkboxes() {
+    fn member_picker_matches_add_sessions_reference() {
+        // screens/group_select.jpeg: dotted "Add sessions" header,
+        // `> [√] name` rows, and an ↑↓/Space/Enter/Esc footer. The
+        // tui-realm Checkbox glyphs (☑/☐) were replaced to match it,
+        // and the UI guidance mandates `>` (not `▸`) for focus.
         use ratatui::{backend::TestBackend, Terminal};
         let (_, _, ctx) = fixture();
         let mut d = GroupDialog::new();
         let _ = d.key(&ch('a'), &ctx);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, group_area(f.area()), &ctx)).unwrap();
-        let cells = &terminal.backend().buffer().content;
-        assert!(cells.iter().any(|c| c.symbol() == "☑"));
-        assert!(cells.iter().any(|c| c.symbol() == "☐"));
+        let text = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(text.contains("Add sessions"), "header: {text:?}");
+        assert!(text.contains("[√]"), "checked box: {text:?}");
+        assert!(text.contains("[ ]"), "unchecked box: {text:?}");
+        assert!(!text.contains("▸"), "old marker is gone: {text:?}");
+        assert!(text.contains("> [√]"), "focused row: {text:?}");
+        for hint in ["navigate", "toggle", "confirm"] {
+            assert!(text.contains(hint), "footer {hint:?}: {text:?}");
+        }
     }
 
     #[test]
@@ -757,7 +1003,10 @@ mod tests {
         assert!(content.contains("member-24"), "selected member must be visible");
         assert!(d.click(area.x + 2, area.y + 2, area, &ctx));
         match d.key(&key(KeyCode::Enter), &ctx) {
-            GroupOutcome::SetMembers { members, .. } => assert_eq!(members, vec![ctx.sessions[8].id]),
+            // The footer hints row leaves 16 body rows (was 17), so the
+            // scrolled window starts at session 9; the click still hits
+            // the rendered first row.
+            GroupOutcome::SetMembers { members, .. } => assert_eq!(members, vec![ctx.sessions[9].id]),
             other => panic!("expected members, got {other:?}"),
         }
     }
@@ -787,9 +1036,12 @@ mod tests {
         assert!(content.contains("jarvis_cdx"));
         assert!(content.contains("jarvis_dev"));
         assert!(content.contains("Group 2: forge"));
-        let selected_row = terminal.backend().buffer().content.chunks(80).nth(6).unwrap()
+        // One Down from the first header lands on its first member row
+        // (flat navigation), not the next group header.
+        assert_eq!(dialog.selected_member(), Some("jarvis_cdx"));
+        let selected_row = terminal.backend().buffer().content.chunks(80).nth(4).unwrap()
             .iter().map(|cell| cell.symbol()).collect::<String>();
-        assert!(selected_row.contains("▸"), "{selected_row:?}");
+        assert!(selected_row.contains(">"), "{selected_row:?}");
         assert!(content.contains("n new group"));
         assert!(content.contains("a add session"));
         let dot = terminal.backend().buffer().content.chunks(80).nth(4).unwrap()
@@ -797,6 +1049,57 @@ mod tests {
         assert_eq!(dot.fg, crate::ui::group_palette(2));
         assert!(dialog.click(area.x + 4, area.y + 4, area, &ctx));
         assert_eq!(dialog.selected_name(), "forge");
+    }
+
+    #[test]
+    fn overview_marks_cursor_cyan_and_keeps_dots_colored() {
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::style::{Color, Modifier};
+        let (_, _, ctx) = fixture();
+        let mut d = GroupDialog::new();
+        // One Down lands on the first member row (flat navigation).
+        let _ = d.key(&key(KeyCode::Down), &ctx);
+        let area = Rect::new(8, 2, 64, 20);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, area, &ctx)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Inner rows start at (9, 3): header above, cursor on the member.
+        let mark = buf.get(9, 4);
+        assert_eq!(mark.symbol(), ">");
+        assert_eq!(mark.fg, Color::Cyan, "focus is cyan, not yellow");
+        assert!(mark.modifier.contains(Modifier::REVERSED));
+        let name = buf.get(17, 4);
+        assert_eq!(name.symbol(), "a");
+        assert!(name.modifier.contains(Modifier::REVERSED), "cursor row reverses");
+        // The group dot keeps its identity color under focus.
+        assert_eq!(buf.get(15, 4).symbol(), "●");
+        assert_eq!(buf.get(15, 4).fg, crate::ui::group_palette(0));
+        // The header row above stays plain white text.
+        assert_eq!(buf.get(9, 3).symbol(), " ");
+        assert_eq!(buf.get(11, 3).fg, Color::White);
+    }
+
+    #[test]
+    fn name_prompt_boxes_the_buffer_in_focus_style() {
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::style::{Color, Modifier};
+        let (_, _, ctx) = fixture();
+        let mut d = GroupDialog::new();
+        let _ = d.key(&ch('n'), &ctx);
+        typed(&mut d, "ab", &ctx);
+        let area = Rect::new(8, 2, 64, 20);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, area, &ctx)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(text.contains("Group name: [ab▌]"), "boxed input: {text:?}");
+        let mark = buf.get(9, 3);
+        assert_eq!(mark.symbol(), ">");
+        assert_eq!(mark.fg, Color::Cyan);
+        let open = buf.get(9 + 2 + 12, 3);
+        assert_eq!(open.symbol(), "[");
+        assert!(open.modifier.contains(Modifier::REVERSED), "field reverses");
     }
 
     #[test]
@@ -825,3 +1128,4 @@ pub fn group_area(term: Rect) -> Rect {
         h,
     )
 }
+

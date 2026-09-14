@@ -19,8 +19,9 @@ pub const COURTESY_GRACE: Duration = Duration::from_secs(30);
 pub const INJECT_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Beat between an injection body and its Enter: one input event at a
 /// time, like a human typing then pressing Enter. A burst ending in CR
-/// parses as one paste in some CLIs and the submit never fires.
-pub const INJECT_ENTER_DELAY: Duration = Duration::from_millis(150);
+/// parses as one paste in some CLIs and the submit never fires. 300 ms:
+/// shorter beats get eaten by prompt redraws on slower machines.
+pub const INJECT_ENTER_DELAY: Duration = Duration::from_millis(300);
 /// The staged Enter byte.
 pub const INJECT_ENTER_CR: u8 = b'\r';
 
@@ -945,6 +946,13 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert!(matches!(due[0].kind, InjectKind::Response));
         assert_eq!(p.state.broker.pressure(&p.state.manager, p.b), 0);
+    }
+
+    #[test]
+    fn staged_enter_beat_is_300ms() {
+        // The body/Enter split only works when the CR trails by enough
+        // for a prompt redraw to settle; pin the tuned value.
+        assert_eq!(INJECT_ENTER_DELAY, Duration::from_millis(300));
     }
 
     #[test]

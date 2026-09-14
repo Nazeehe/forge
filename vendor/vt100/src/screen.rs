@@ -134,7 +134,10 @@ impl Screen {
         self.grid().scrollback()
     }
 
-    pub(crate) fn set_scrollback(&mut self, rows: usize) {
+    /// Forge patch: public so forge can drive the scrollback viewport
+    /// for mouse-less panes (wheel scrolling). Clamped to the buffered
+    /// history by the grid; 0 is the live tail.
+    pub fn set_scrollback(&mut self, rows: usize) {
         self.grid_mut().set_scrollback(rows);
     }
 

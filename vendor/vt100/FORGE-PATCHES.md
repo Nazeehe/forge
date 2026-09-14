@@ -15,6 +15,16 @@ delta lives here until one does.
 - `src/cell.rs`: `Cell::dim()` passthrough.
 - `src/screen.rs`: SGR `2` sets faint; SGR `22` now clears bold AND
   faint (upstream cleared bold only).
+- `src/screen.rs`: `set_scrollback` widened from `pub(crate)` to `pub`
+  so forge can move the scrollback viewport for wheel scrolling on
+  panes whose app never enables mouse reporting.
+- `src/parser.rs`: added `screen_mut()` (upstream exposes only `screen()`)
+  for the same viewport driving.
+- `src/grid.rs`: `visible_rows` now windows with saturating math. The
+  forge viewport clamp keys the offset to buffered history, which can
+  exceed the screen height, and upstream's plain subtractions
+  underflowed there (`attempt to subtract with overflow` when wheeling
+  deep into a long scrollback).
 
 ## Refreshing
 
