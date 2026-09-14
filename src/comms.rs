@@ -639,6 +639,26 @@ impl Broker {
         Ok(format!(r#"{{"timer_id":"{timer}"}}"#))
     }
 
+    /// Armed timers for one session, soonest first: (timer ID, due).
+    /// The sidebar countdowns and cancel buttons read this.
+    pub fn timers_for(&self, id: SessionId) -> Vec<(String, Instant)> {
+        let mut out: Vec<(String, Instant)> = self
+            .timers
+            .iter()
+            .filter(|(_, timer)| timer.target == id)
+            .map(|(timer_id, timer)| (timer_id.clone(), timer.due))
+            .collect();
+        out.sort_by_key(|(_, due)| *due);
+        out
+    }
+
+    /// Human cancel from the sidebar: any armed timer drops. The UI
+    /// only offers the focused session's timers; the tool path keeps
+    /// its owner check in `cancel_scheduled`.
+    pub fn cancel_timer(&mut self, timer_id: &str) -> bool {
+        self.timers.remove(timer_id).is_some()
+    }
+
     /// Cancel an armed timer. Fired or unknown IDs fail rather than
     /// confirming thin air; only the owning session cancels.
     fn cancel_scheduled(&mut self, caller: SessionId, args: &str) -> Result<String, String> {
@@ -1478,6 +1498,24 @@ mod tests {
             .call(&p.run_a.clone(), "cancel_scheduled_prompt", &format!(r#"{{"timer_id":"{timer}"}}"#))
             .expect_err("fired timers stay unknown");
         assert!(again.contains("unknown timer"), "again: {again}");
+    }
+
+    #[test]
+    fn timers_for_lists_soonest_first_per_session() {
+        let mut p = live_pair();
+        let run_a = p.run_a.clone();
+        p.call(&run_a, "schedule_prompt", r#"{"prompt":"slow","delay_seconds":60}"#)
+            .expect("slow arms");
+        let _ = p
+            .call(&run_a, "schedule_prompt", r#"{"prompt":"fast","delay_seconds":0}"#)
+            .expect("fast arms");
+        let listed = p.state.broker.timers_for(p.a);
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].1 <= listed[1].1, "soonest first");
+        assert!(p.state.broker.timers_for(p.b).is_empty(), "per-session");
+        assert!(p.state.broker.cancel_timer(&listed[0].0), "human cancel drops");
+        assert!(!p.state.broker.cancel_timer("nope"), "unknown stays false");
+        assert_eq!(p.state.broker.timers_for(p.a).len(), 1);
     }
 
     #[test]

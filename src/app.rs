@@ -305,6 +305,17 @@ impl AppState {
         Some(value as u32)
     }
 
+    /// Cancel an armed timer from the sidebar button. True when one
+    /// was armed; repaint follows only then.
+    pub fn cancel_timer(&mut self, timer_id: &str) -> bool {
+        if self.broker.cancel_timer(timer_id) {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Resolve a tool caller to its live session, rebound IDs included:
     /// the run must still belong to the record that holds it.
     fn resolve_tool_caller(&self, run_id: &str) -> Result<crate::session::SessionId, String> {
@@ -1043,6 +1054,7 @@ impl AppState {
     /// Sidebar content: the focused session's detail plus pending hooks
     /// and the live permission mode.
     pub fn sidebar_info(&self) -> crate::ui::SidebarInfo {
+        let now = std::time::Instant::now();
         let session = self.manager.active().and_then(|id| {
             self.manager.get(id).map(|rec| {
                 let state = if rec.state.is_live() {
@@ -1062,6 +1074,19 @@ impl AppState {
                     cwd: rec.cwd.to_string_lossy().into_owned(),
                     state,
                     status: rec.status.as_ref().map(|s| s.display()),
+                    // Armed timers show for the focused session only;
+                    // other sessions keep their own countdowns hidden.
+                    timers: self
+                        .broker
+                        .timers_for(id)
+                        .into_iter()
+                        .map(|(timer_id, due)| crate::ui::TimerView {
+                            id: timer_id,
+                            remaining: crate::ui::format_countdown(
+                                due.saturating_duration_since(now),
+                            ),
+                        })
+                        .collect(),
                     uptime_secs: rec.spawned_at.elapsed().as_secs(),
                     tool_calls: rec.tool_calls,
                     approvals: rec.approvals,
@@ -2445,6 +2470,39 @@ mod tests {
         assert!(cleared.contains(r#""status_cleared":true"#), "cleared: {cleared}");
         assert!(state.manager.get(id).unwrap().status.is_none());
         assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn sidebar_shows_timers_only_for_focused_session() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let a = state.manager.spawn_agent(
+            "a", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let b = state.manager.spawn_agent(
+            "b", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let run_a = state.manager.get(a).unwrap().run_id.as_str().to_string();
+        let out = comms_reply(
+            &mut state, &run_a, "schedule_prompt",
+            r#"{"prompt":"later","delay_seconds":600}"#,
+        );
+        let timer = crate::policy::json_string_field(out.as_bytes(), &["timer_id"]).unwrap();
+        assert_eq!(state.manager.active(), Some(a));
+        let focused = state.sidebar_info().session.expect("detail renders");
+        assert_eq!(focused.timers.len(), 1, "focused session shows its timer");
+        assert_eq!(focused.timers[0].id, timer);
+        state.manager.switch(b);
+        let other = state.sidebar_info().session.expect("detail renders");
+        assert!(other.timers.is_empty(), "unfocused timers stay hidden");
+        assert!(state.cancel_timer(&timer), "sidebar cancel drops it");
+        assert!(state.broker.timers_for(a).is_empty());
+        assert!(!state.cancel_timer(&timer), "second cancel stays false");
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
     }
 
     #[test]

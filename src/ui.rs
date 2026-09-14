@@ -398,6 +398,14 @@ pub fn session_at(buttons: &[SessionButton], col: u16) -> Option<usize> {
         .and_then(|b| b.index)
 }
 
+/// One armed self-injection timer for the sidebar: stable ID plus a
+/// preformatted countdown (`9:55`), soonest first.
+#[derive(Clone, Debug)]
+pub struct TimerView {
+    pub id: String,
+    pub remaining: String,
+}
+
 /// Sidebar content source: the focused session's detail plus stats,
 /// pending hooks, and the permission mode buttons.
 #[derive(Clone, Debug)]
@@ -408,12 +416,15 @@ pub struct SessionDetail {
     pub state: String,
     /// Caller sticky status text (`kind: message`), if one is set.
     pub status: Option<String>,
+    /// Armed timers of the focused session only; empty hides the section.
+    pub timers: Vec<TimerView>,
     pub uptime_secs: u64,
     pub tool_calls: u32,
     pub approvals: u32,
     pub denials: u32,
 }
 
+#[derive(Clone, Debug)]
 pub struct SidebarInfo {
     pub session: Option<SessionDetail>,
     pub pending: usize,
@@ -439,6 +450,17 @@ pub fn format_uptime(secs: u64) -> String {
 
 /// Compact sidebar mode-button row. Taller sidebars pin it to the bottom.
 pub const SETTINGS_ROW: u16 = 11;
+
+/// Compact countdown: `0:07`, `9:55`, `1:00:00`. Past-due saturates.
+pub fn format_countdown(remaining: std::time::Duration) -> String {
+    let secs = remaining.as_secs();
+    let (hours, mins, secs) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if hours > 0 {
+        format!("{hours}:{mins:02}:{secs:02}")
+    } else {
+        format!("{mins}:{secs:02}")
+    }
+}
 
 /// Sidebar lines. Never blank: with no sessions it still guides. The
 /// active mode button renders highlighted.
@@ -486,6 +508,13 @@ fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize) -> Vec<Line<'static>> {
                 "  ✓ {} × {}",
                 detail.approvals, detail.denials
             )));
+            if !detail.timers.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from("Scheduled"));
+                for timer in &detail.timers {
+                    lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
+                }
+            }
         }
     }
     while lines.len() < mode_row.saturating_sub(1) {
@@ -543,6 +572,15 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
                 Span::raw("   "),
                 Span::styled(format!("× {}", detail.denials), theme::style(theme::Role::Danger)),
             ]));
+            if !detail.timers.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "Scheduled",
+                    theme::style(theme::Role::Text).add_modifier(Modifier::BOLD),
+                )));
+                for timer in &detail.timers {
+                    lines.push(Line::from(format!("◷ in {}", timer.remaining)));
+                }
+            }
             lines.push(Line::from("─".repeat(width.saturating_sub(4) as usize)));
         }
         None => {
@@ -569,6 +607,64 @@ fn stat_line(label: &str, value: &str, width: u16) -> Line<'static> {
 pub struct ModeButtons {
     pub off: Rect,
     pub yolo: Rect,
+}
+
+/// Cancel-button rects for the painted Scheduled rows, keyed by timer
+/// ID. Recomputed from live info by the render and mouse paths alike,
+/// so both always agree on which row cancels which timer. The header
+/// matches exactly plus a timer-row lookahead, so a session literally
+/// named "Scheduled" can never hijack it; clipped rows get no button.
+pub(crate) fn timer_cancel_rects(sidebar: Rect, info: &SidebarInfo) -> Vec<(String, Rect)> {
+    let Some(detail) = info.session.as_ref() else {
+        return Vec::new();
+    };
+    if detail.timers.is_empty() {
+        return Vec::new();
+    }
+    let mode_areas = mode_button_areas(sidebar);
+    let mode_row = mode_areas.off.y.saturating_sub(sidebar.y + 1) as usize;
+    let lines = if sidebar.width >= 40 && sidebar.height >= 30 {
+        rich_sidebar_lines(info, mode_row, sidebar.width)
+    } else {
+        sidebar_lines_at(info, mode_row)
+    };
+    let mut header = None;
+    for (idx, line) in lines.iter().enumerate() {
+        let exact = line.spans.len() == 1 && line.spans[0].content == "Scheduled";
+        let next_row = lines.get(idx + 1).is_some_and(|next| {
+            let text: String = next.spans.iter().map(|s| s.content.as_ref()).collect();
+            text.starts_with("  ◷ in ") || text.starts_with("◷ in ")
+        });
+        if exact && next_row {
+            header = Some(idx);
+            break;
+        }
+    }
+    let Some(header) = header else {
+        return Vec::new();
+    };
+    // "[Cancel]" is 8 cells, right-aligned inside the border.
+    let x = sidebar.right().saturating_sub(9).max(sidebar.x + 1);
+    let width = sidebar.right().saturating_sub(1).saturating_sub(x);
+    if width < 8 {
+        return Vec::new();
+    }
+    detail
+        .timers
+        .iter()
+        .enumerate()
+        .filter_map(|(i, timer)| {
+            let row = header + 1 + i;
+            if row >= lines.len() {
+                return None;
+            }
+            let y = sidebar.y + 1 + row as u16;
+            if y + 1 >= sidebar.bottom() {
+                return None;
+            }
+            Some((timer.id.clone(), Rect::new(x, y, 8, 1)))
+        })
+        .collect()
 }
 
 pub fn mode_button_areas(sidebar: Rect) -> ModeButtons {
@@ -696,6 +792,14 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
                 };
                 ChromeButton::new(label, style).view(frame, area);
             }
+        }
+        // One red Cancel per armed timer, over its own countdown row.
+        for (_, area) in timer_cancel_rects(areas.sidebar, &info) {
+            ChromeButton::new(
+                "[Cancel]",
+                theme::style(theme::Role::Danger).add_modifier(Modifier::REVERSED),
+            )
+            .view(frame, area);
         }
     }
     if areas.session_bar.height > 0 {
@@ -921,7 +1025,7 @@ mod tests {
         c.detail = Some(SessionDetail {
             name: "jarvis_senior".into(), cli_tool: "Codex".into(),
             cwd: "/work/jarvis".into(), state: "PROGRESS".into(),
-            status: None,
+            status: None, timers: Vec::new(),
             uptime_secs: 3600, tool_calls: 489, approvals: 345, denials: 8,
         });
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
@@ -985,6 +1089,7 @@ mod tests {
                 cwd: "/tmp/proj".to_string(),
                 state: "running · Thinking".to_string(),
                 status: Some("blocked: waiting on review".to_string()),
+                timers: Vec::new(),
                 uptime_secs: 65,
                 tool_calls: 4,
                 approvals: 3,
@@ -1005,6 +1110,16 @@ mod tests {
         assert!(has(&lines, "[Off]"), "off highlighted: {lines:?}");
         assert!(has(&lines, "Yolo"), "yolo offered: {lines:?}");
         assert!(!has(&lines, "safe-only"), "no third mode: {lines:?}");
+        // Armed timers add a Scheduled section; empty hides it.
+        let mut timed = info.clone();
+        timed.session.as_mut().unwrap().timers = vec![
+            TimerView { id: "t1".to_string(), remaining: "9:55".to_string() },
+            TimerView { id: "t2".to_string(), remaining: "1:00:05".to_string() },
+        ];
+        let timed_lines = sidebar_lines(&timed);
+        assert!(has(&timed_lines, "Scheduled"), "section: {timed_lines:?}");
+        assert!(has(&timed_lines, "◷ in 9:55"), "countdown: {timed_lines:?}");
+        assert!(!has(&lines, "Scheduled"), "hidden when empty: {lines:?}");
         // Yolo highlights instead when active.
         let yolo = SidebarInfo { session: info.session.clone(), pending: 0, mode: "yolo" };
         let yolo_lines = sidebar_lines(&yolo);
@@ -1012,6 +1127,69 @@ mod tests {
         // Never blank: empty state still guides.
         let empty = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off" });
         assert!(has(&empty, "Ctrl-b c"), "guides: {empty:?}");
+    }
+
+    #[test]
+    fn format_countdown_matches_reference_shapes() {
+        use std::time::Duration;
+        assert_eq!(format_countdown(Duration::from_secs(595)), "9:55");
+        assert_eq!(format_countdown(Duration::from_secs(3605)), "1:00:05");
+        assert_eq!(format_countdown(Duration::from_secs(7)), "0:07");
+        assert_eq!(format_countdown(Duration::ZERO), "0:00");
+    }
+
+    fn timed_detail() -> SessionDetail {
+        SessionDetail {
+            name: "agent".into(), cli_tool: "Codex".into(),
+            cwd: "/work".into(), state: "running".into(),
+            status: None,
+            timers: vec![
+                TimerView { id: "t1".into(), remaining: "9:55".into() },
+                TimerView { id: "t2".into(), remaining: "1:00:05".into() },
+            ],
+            uptime_secs: 60, tool_calls: 1, approvals: 0, denials: 0,
+        }
+    }
+
+    #[test]
+    fn scheduled_timers_render_countdowns_and_cancel_buttons() {
+        let mut c = chrome();
+        c.detail = Some(timed_detail());
+        let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
+        terminal.draw(|f| render(f, Rect::new(0, 0, 180, 40), &[], &c)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Scheduled"), "section: {text:?}");
+        assert!(text.contains("9:55"), "countdown: {text:?}");
+        assert!(text.contains("[Cancel]"), "button: {text:?}");
+    }
+
+    #[test]
+    fn timer_cancel_rects_match_painted_rows() {
+        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off" };
+        let areas = chrome_areas(Rect::new(0, 0, 180, 40));
+        let rects = timer_cancel_rects(areas.sidebar, &info);
+        assert_eq!(rects.len(), 2);
+        assert_eq!((rects[0].0.as_str(), rects[1].0.as_str()), ("t1", "t2"), "soonest first");
+        assert_eq!(rects[1].1.y, rects[0].1.y + 1, "stacked rows");
+        for (_, area) in &rects {
+            assert_eq!(area.width, 8, "Cancel width");
+            assert!(area.right() <= areas.sidebar.right().saturating_sub(1), "inside border");
+        }
+        // The painted button labels sit exactly on the rects.
+        let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
+        let mut c = chrome();
+        c.detail = Some(timed_detail());
+        terminal.draw(|f| render(f, Rect::new(0, 0, 180, 40), &[], &c)).unwrap();
+        let buf = terminal.backend().buffer();
+        for (_, area) in &rects {
+            assert_eq!(buf[(area.x, area.y)].symbol(), "[", "button at {area:?}");
+        }
+        // A session literally named Scheduled cannot hijack the rows.
+        let mut impostor = timed_detail();
+        impostor.name = "Scheduled".to_string();
+        impostor.timers.clear();
+        let bare = SidebarInfo { session: Some(impostor), pending: 0, mode: "off" };
+        assert!(timer_cancel_rects(areas.sidebar, &bare).is_empty());
     }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {

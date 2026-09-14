@@ -581,6 +581,20 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row >= areas.sidebar.y
         && mev.row < areas.sidebar.y + areas.sidebar.height
     {
+        // Armed-timer Cancel buttons: same rects the render paints,
+        // recomputed live, so a repaint can never desync them.
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+            let info = state.sidebar_info();
+            for (timer_id, area) in ui::timer_cancel_rects(areas.sidebar, &info) {
+                if ui::ChromeButton::new("[Cancel]", ratatui::style::Style::default())
+                    .click(mev.column, mev.row, area)
+                {
+                    state.cancel_timer(&timer_id);
+                    state.dirty = true;
+                    return;
+                }
+            }
+        }
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let buttons = ui::mode_button_areas(areas.sidebar);
             match ui::mode_at(&buttons, mev.column, mev.row) {
@@ -908,6 +922,33 @@ mod tests {
         });
         assert!(!state.walkthrough_overlay_active());
         assert!(state.topbar().tabs[0].active);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn sidebar_cancel_click_drops_armed_timer() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        std::env::set_var("CODEX_BIN", "cat");
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let now = std::time::Instant::now();
+        state.broker.call(&state.manager, &run, "schedule_prompt",
+            r#"{"prompt":"later","delay_seconds":600}"#, now).expect("arms");
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let rects = ui::timer_cancel_rects(areas.sidebar, &state.sidebar_info());
+        assert_eq!(rects.len(), 1, "one armed timer, one button");
+        let (_, area) = &rects[0];
+        forward_mouse(&mut state, MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1, row: area.y, modifiers: KeyModifiers::NONE,
+        });
+        assert!(state.sidebar_info().session.unwrap().timers.is_empty(), "click cancels");
         assert!(state.manager.remove(id));
     }
 
