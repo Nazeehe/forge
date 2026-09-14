@@ -247,7 +247,17 @@ fn loop_until_quit(
                         && state.create_dialog.is_none()
                         && state.group_dialog.is_none()
                     {
-                        if let Some(active) = state.manager.active() {
+                        // A tour draft takes the paste single-line, like
+                        // typed input; the pane path below stays untouched.
+                        if state
+                            .walkthrough_overlay_mut()
+                            .is_some_and(|tour| tour.input.is_some())
+                        {
+                            if let Some(tour) = state.walkthrough_overlay_mut() {
+                                tour.push_paste(&text);
+                                state.dirty = true;
+                            }
+                        } else if let Some(active) = state.manager.active() {
                             let bracketed = state.manager.bracketed_paste(active);
                             let bytes = input::paste_bytes(&text, bracketed);
                             if state.manager.pane_write(active, &bytes).is_ok() {
@@ -298,6 +308,11 @@ fn loop_until_quit(
                 if let Some(picker) = state.restore_picker.as_ref() {
                     picker.view(f, crate::checkpoint::RestorePicker::picker_area(area));
                 }
+                // The tour takes over the main area above every dialog:
+                // it is opaque and owns input while open.
+                if let Some(tour) = state.walkthrough_overlay() {
+                    tour.view(f, crate::walkthrough::walk_area(area));
+                }
             })?;
             if cursor_visible != cursor_shown {
                 if cursor_visible {
@@ -314,6 +329,12 @@ fn loop_until_quit(
 }
 
 fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEvent) {
+    // An open tour captures every key, including prefix chords: the
+    // overlay owns input while open and Esc leaves it.
+    if state.walkthrough_overlay_active() {
+        handle_walkthrough_key(state, key);
+        return;
+    }
     match router.feed(key) {
         RoutedKey::Forward(k) => {
             if state.overlay_active() { return; }
@@ -378,6 +399,38 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
         RoutedKey::PrefixPending | RoutedKey::Cancelled => {
             state.dirty = true;
         }
+    }
+}
+
+/// One key inside an open tour: step/scroll chords repaint, a
+/// submitted draft injects into the agent pane, browse-mode Esc leaves
+/// the overlay. Everything else stays swallowed.
+fn handle_walkthrough_key(state: &mut AppState, key: event::KeyEvent) {
+    use crate::walkthrough::WalkKey;
+    let Some(active) = state.manager.active() else {
+        return;
+    };
+    let outcome = match state.walkthrough_overlay_mut() {
+        Some(tour) => tour.key(&key),
+        None => return,
+    };
+    match outcome {
+        WalkKey::Moved | WalkKey::Edited | WalkKey::CancelledInput => {
+            state.dirty = true;
+        }
+        WalkKey::Submitted => {
+            if !state.submit_walkthrough_question(active) {
+                if let Some(tour) = state.walkthrough_overlay_mut() {
+                    tour.status = Some("session is not live".to_string());
+                }
+                state.dirty = true;
+            }
+        }
+        WalkKey::Closed => {
+            state.overlay_view = None;
+            state.dirty = true;
+        }
+        WalkKey::Ignored => {}
     }
 }
 
@@ -742,6 +795,54 @@ mod tests {
         forward_mouse(&mut state, click(buttons[0].start));
         assert!(!state.overlay_active());
         assert!(state.topbar().tabs[0].active);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn walkthrough_keys_drive_input_submit_and_leave() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            RunId::generate(), "codex",
+        ).unwrap();
+        let content = (1..=40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let tour = crate::walkthrough::Walkthrough::start(
+            "Tour".to_string(),
+            "f.rs".to_string(),
+            &content,
+            vec![crate::walkthrough::Step {
+                start: 1,
+                end: 3,
+                explanation: "first".to_string(),
+            }],
+        ).unwrap();
+        state.walkthroughs.insert(id, tour);
+        // Walkthrough is the last overlay slot past the three PTY tabs.
+        assert!(state.select_top_tab(6));
+        assert!(state.walkthrough_overlay_active());
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        // Step chord on a single step clamps; the tour stays open.
+        handle_walkthrough_key(&mut state, ch('j'));
+        assert!(state.walkthrough_overlay_active());
+        // Enter opens the ask prompt; typing fills the draft.
+        handle_walkthrough_key(&mut state, enter);
+        assert!(state.walkthrough_overlay().unwrap().input.is_some());
+        handle_walkthrough_key(&mut state, ch('h'));
+        handle_walkthrough_key(&mut state, ch('i'));
+        assert_eq!(state.walkthrough_overlay().unwrap().input.as_deref(), Some("hi"));
+        // Enter submits into the live pane; Esc in browse mode leaves.
+        handle_walkthrough_key(&mut state, enter);
+        let tour = state.walkthrough_overlay().unwrap();
+        assert_eq!(tour.questions.len(), 1);
+        assert_eq!(tour.questions[0].question, "hi");
+        assert!(state.pending_enter.contains_key(&id));
+        handle_walkthrough_key(&mut state, esc);
+        assert!(state.walkthrough_overlay().is_none());
+        assert!(!state.walkthrough_overlay_active());
         assert!(state.manager.remove(id));
     }
 

@@ -24,6 +24,7 @@ mod session;
 mod theme;
 mod tui;
 mod ui;
+mod walkthrough;
 
 const VERSION: &str = "1.0.0";
 

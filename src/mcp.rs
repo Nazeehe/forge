@@ -50,6 +50,49 @@ pub struct CallCtx {
     pub timeout: std::time::Duration,
 }
 
+/// Decode a JSON string interior (surrounding quotes already off):
+/// the standard escapes plus `\uXXXX`. Lone surrogates and malformed
+/// escapes stay literal so tool args never fail on syntax trivia.
+pub(crate) fn decode_json_string(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('b') => out.push('\u{08}'),
+            Some('f') => out.push('\u{0C}'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(decoded) => out.push(decoded),
+                    None => {
+                        out.push_str("\\u");
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Escape a string as a JSON string literal, quotes included.
 pub fn escape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -329,7 +372,9 @@ fn instructions(srv: &ServerCtx) -> String {
     let base = "You run inside forge, a terminal control plane for AI coding agents. \
         Use ask to question a peer session, send_response to answer, tell to inform, \
         ack to confirm, list_sessions to discover peers. Sessions only communicate \
-        when they share a group; address peers by name, authority comes from run IDs.";
+        when they share a group; address peers by name, authority comes from run IDs. \
+        Use walkthrough_start to tour the operator through a file, walkthrough_answer \
+        for their waiting tour questions, walkthrough_end to close the tour.";
     if srv.instructions_extra.is_empty() {
         base.to_string()
     } else {
@@ -343,8 +388,9 @@ struct ToolDef {
     schema: &'static str,
 }
 
-/// Phase 4 serves the five comms tools on every platform. Unix terminal
-/// tools join this list in Phase 7.
+/// Phase 4 serves the five comms tools on every platform, plus the
+/// walkthrough trio for agent-led file tours. Unix terminal tools join
+/// this list in Phase 7.
 fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
@@ -371,6 +417,21 @@ fn tool_defs() -> Vec<ToolDef> {
             name: "list_sessions",
             description: "List live peer sessions visible to this session.",
             schema: r#"{"type":"object","properties":{}}"#,
+        },
+        ToolDef {
+            name: "walkthrough_start",
+            description: "Open a file tour for the operator: steps is one start:end:explanation per line, file resolves against the session cwd. The overlay opens on the tour at once.",
+            schema: r#"{"type":"object","properties":{"file":{"type":"string"},"steps":{"type":"string"},"title":{"type":"string"}},"required":["file","steps"]}"#,
+        },
+        ToolDef {
+            name: "walkthrough_answer",
+            description: "Answer the operator's latest waiting walkthrough question; it renders as Markdown under the question. Errors when nothing is waiting.",
+            schema: r#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#,
+        },
+        ToolDef {
+            name: "walkthrough_end",
+            description: "Close the tour with an optional summary line.",
+            schema: r#"{"type":"object","properties":{"summary":{"type":"string"}}}"#,
         },
     ]
 }
@@ -613,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_names_the_five_comms_tools() {
+    fn tools_list_names_the_comms_and_walkthrough_tools() {
         let res = handle_line(
             r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
             &ctx(),
@@ -621,9 +682,29 @@ mod tests {
             &call_ctx(),
         )
         .expect("tools/list answers");
-        for tool in ["ask_session", "send_response", "tell_session", "ack_message", "list_sessions"] {
+        for tool in [
+            "ask_session",
+            "send_response",
+            "tell_session",
+            "ack_message",
+            "list_sessions",
+            "walkthrough_start",
+            "walkthrough_answer",
+            "walkthrough_end",
+        ] {
             assert!(res.contains(&format!(r#""name":"{tool}""#)), "res: {res}");
         }
+    }
+
+    #[test]
+    fn decode_json_string_handles_escapes_and_keeps_garbage_literal() {
+        assert_eq!(decode_json_string("a\\nb"), "a\nb");
+        assert_eq!(decode_json_string("\\\"q\\\" \\\\ \\/"), "\"q\" \\ /");
+        assert_eq!(decode_json_string("\\u0041"), "A");
+        assert_eq!(decode_json_string("plain"), "plain");
+        assert_eq!(decode_json_string("trail\\"), "trail\\");
+        assert_eq!(decode_json_string("\\ud83d"), "\\ud83d");
+        assert_eq!(decode_json_string("\\q"), "\\q");
     }
 
     #[test]

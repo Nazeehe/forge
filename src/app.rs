@@ -44,7 +44,17 @@ pub struct AppState {
     pub pending_enter: std::collections::HashMap<crate::session::SessionId, std::time::Instant>,
     /// One read-only chrome view, scoped to the currently focused session.
     pub overlay_view: Option<(crate::session::SessionId, usize)>,
+    /// Live walkthroughs by session. Entered agent-side through the
+    /// walkthrough_* tools; the overlay opens on start and the human
+    /// steps through with j/k, asking with Enter.
+    pub walkthroughs: std::collections::HashMap<crate::session::SessionId, crate::walkthrough::Walkthrough>,
 }
+
+/// Overlay slot past the PTY tabs: Events, Tasks, Visual, Walkthrough.
+/// Agent sessions always carry exactly three PTY tabs, so absolute
+/// indices stay stable (3/4/5/6); other overlays are unreachable on
+/// single-tab shells by the same gate as the topbar.
+pub const OVERLAY_TABS: [&str; 4] = ["Events", "Tasks", "Visual", "Walkthrough"];
 
 impl AppState {
     pub fn new() -> Self {
@@ -62,6 +72,7 @@ impl AppState {
             last_human_input: None,
             pending_enter: std::collections::HashMap::new(),
             overlay_view: None,
+            walkthroughs: std::collections::HashMap::new(),
         }
     }
 
@@ -118,7 +129,7 @@ impl AppState {
             })
             .collect();
         if rec.tabs.len() > 1 && self.term_size.1 >= 100 {
-            for (index, label) in ["Events", "Tasks", "Visual"].iter().enumerate() {
+            for (index, label) in OVERLAY_TABS.iter().enumerate() {
                 tabs.push(crate::ui::TopTab {
                     label: (*label).to_string(),
                     active: self.overlay_view == Some((id, index + rec.tabs.len())),
@@ -133,7 +144,7 @@ impl AppState {
         // (no VS16, no ambiguous-width glyphs) and `Line::width`
         // measures the buttons exactly.
         if self.term_size.1 >= 100 {
-            for (tab, icon) in tabs.iter_mut().zip(["🤖", "💻", "🔀", "🔔", "📝", "📷"]) {
+            for (tab, icon) in tabs.iter_mut().zip(["🤖", "💻", "🔀", "🔔", "📝", "📷", "📖"]) {
                 tab.label = format!("{icon} {}", tab.label);
             }
         }
@@ -164,6 +175,207 @@ impl AppState {
         self.overlay_view.is_some_and(|(id, _)| self.manager.active() == Some(id))
     }
 
+    /// Absolute topbar index of the Walkthrough overlay slot for one
+    /// session, or `None` for an unknown session.
+    fn walkthrough_slot(&self, id: crate::session::SessionId) -> Option<usize> {
+        let rec = self.manager.get(id)?;
+        OVERLAY_TABS
+            .iter()
+            .position(|tab| *tab == "Walkthrough")
+            .map(|slot| rec.tabs.len() + slot)
+    }
+
+    /// The focused walkthrough, if the active session sits on the
+    /// Walkthrough overlay slot and the agent opened a tour. The TUI
+    /// renders it immediate-mode over the pane grid.
+    pub fn walkthrough_overlay(&self) -> Option<&crate::walkthrough::Walkthrough> {
+        let active = self.manager.active()?;
+        let (view_id, index) = self.overlay_view?;
+        if view_id != active || Some(index) != self.walkthrough_slot(active) {
+            return None;
+        }
+        self.walkthroughs.get(&active)
+    }
+
+    /// Mutable twin of [`Self::walkthrough_overlay`], for key routing.
+    pub fn walkthrough_overlay_mut(
+        &mut self,
+    ) -> Option<&mut crate::walkthrough::Walkthrough> {
+        let active = self.manager.active()?;
+        let (view_id, index) = self.overlay_view?;
+        if view_id != active || Some(index) != self.walkthrough_slot(active) {
+            return None;
+        }
+        self.walkthroughs.get_mut(&active)
+    }
+
+    /// True while walkthrough keys own input: the overlay slot is
+    /// focused and a tour is open for the active session.
+    pub fn walkthrough_overlay_active(&self) -> bool {
+        self.walkthrough_overlay().is_some()
+    }
+
+    /// Placeholder pane behind the immediate-mode tour render: the TUI
+    /// draws the walkthrough over the grid, so this only carries the
+    /// title (and a hint when no tour is open yet).
+    pub fn walkthrough_view(&self, id: crate::session::SessionId) -> crate::ui::PaneView {
+        let rec = self.manager.get(id).expect("ordered session exists");
+        let live = rec.state.is_live();
+        let hint = if self.walkthroughs.contains_key(&id) {
+            "Walkthrough tour"
+        } else {
+            "No walkthrough started for this session"
+        };
+        crate::ui::PaneView {
+            title: format!("{} · Walkthrough", rec.name),
+            lines: vec![vec![crate::ui::SpanView {
+                text: hint.to_string(),
+                style: crate::theme::style(crate::theme::Role::Muted),
+            }]],
+            live,
+            focused: true,
+            cursor: None,
+        }
+    }
+
+    /// Submit the overlay draft as a question: the markup goes straight
+    /// into the agent pane and the Enter stages for a later tick — the
+    /// same split write comms injections use. The question is logged
+    /// only after the pane write lands, so the overlay never claims an
+    /// undelivered ask. No human-input note: that would drop the staged
+    /// CR we just armed.
+    pub fn submit_walkthrough_question(&mut self, id: crate::session::SessionId) -> bool {
+        let Some(wt) = self.walkthroughs.get(&id) else {
+            return false;
+        };
+        let draft = match wt.input.as_ref() {
+            Some(buf) if !buf.trim().is_empty() => buf.trim().to_string(),
+            _ => return false,
+        };
+        let markup = crate::walkthrough::Walkthrough::question_markup(
+            &wt.title,
+            wt.index,
+            wt.steps.len(),
+            wt.current_step(),
+            &draft,
+        );
+        if self.manager.inject_write(id, markup.as_bytes()).is_err() {
+            return false;
+        }
+        self.pending_enter.insert(id, std::time::Instant::now());
+        let Some(wt) = self.walkthroughs.get_mut(&id) else {
+            return false;
+        };
+        wt.take_draft();
+        wt.push_question(draft);
+        self.dirty = true;
+        true
+    }
+
+    /// One string tool arg: JSON escapes decoded (agents must escape
+    /// newlines, so multi-line steps and Markdown answers arrive
+    /// intact), blanked to missing.
+    fn tool_arg(args: &str, name: &str) -> Option<String> {
+        crate::policy::json_string_field(args.as_bytes(), &[name])
+            .map(|s| crate::mcp::decode_json_string(&s))
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Resolve a tool caller to its live session, rebound IDs included:
+    /// the run must still belong to the record that holds it.
+    fn resolve_tool_caller(&self, run_id: &str) -> Result<crate::session::SessionId, String> {
+        let id = self
+            .manager
+            .lookup_run(run_id)
+            .ok_or_else(|| "unknown or stale run ID".to_string())?;
+        self.manager
+            .get(id)
+            .filter(|rec| rec.run_id.as_str() == run_id)
+            .map(|rec| rec.id)
+            .ok_or_else(|| "unknown or stale run ID".to_string())
+    }
+
+    /// Execute one walkthrough MCP tool. `None` when the name is not a
+    /// walkthrough tool and the broker should answer instead.
+    fn walkthrough_tool(
+        &mut self,
+        run_id: &str,
+        tool: &str,
+        args: &str,
+    ) -> Option<Result<String, String>> {
+        match tool {
+            "walkthrough_start" | "walkthrough_answer" | "walkthrough_end" => {}
+            _ => return None,
+        }
+        let id = match self.resolve_tool_caller(run_id) {
+            Ok(id) => id,
+            Err(e) => return Some(Err(e)),
+        };
+        match tool {
+            "walkthrough_start" => Some(self.walkthrough_start(id, args)),
+            "walkthrough_answer" => {
+                let answer = match Self::tool_arg(args, "answer") {
+                    Some(answer) => answer,
+                    None => return Some(Err("walkthrough_answer needs an answer".to_string())),
+                };
+                let Some(wt) = self.walkthroughs.get_mut(&id) else {
+                    return Some(Err("no walkthrough for this session".to_string()));
+                };
+                if wt.answer_latest(&answer) {
+                    self.dirty = true;
+                    Some(Ok(r#"{"answered":true}"#.to_string()))
+                } else {
+                    Some(Err("no walkthrough question waiting".to_string()))
+                }
+            }
+            _ => {
+                let summary = Self::tool_arg(args, "summary");
+                let Some(wt) = self.walkthroughs.get_mut(&id) else {
+                    return Some(Err("no walkthrough for this session".to_string()));
+                };
+                wt.end(summary);
+                self.dirty = true;
+                Some(Ok(r#"{"ended":true}"#.to_string()))
+            }
+        }
+    }
+
+    /// Open a tour over a file: relative paths resolve against the
+    /// session cwd, oversize files are refused, and the overlay opens
+    /// on the tour at once so the human sees it.
+    fn walkthrough_start(&mut self, id: crate::session::SessionId, args: &str) -> Result<String, String> {
+        let file = Self::tool_arg(args, "file")
+            .ok_or_else(|| "walkthrough_start needs a file".to_string())?;
+        let steps_text = Self::tool_arg(args, "steps")
+            .ok_or_else(|| "walkthrough_start needs steps".to_string())?;
+        let title = Self::tool_arg(args, "title").unwrap_or_else(|| file.clone());
+        let cwd = self
+            .manager
+            .get(id)
+            .map(|rec| rec.cwd.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let path = std::path::PathBuf::from(&file);
+        let path = if path.is_relative() { cwd.join(path) } else { path };
+        let bytes = std::fs::read(&path)
+            .map_err(|_| format!("cannot read walkthrough file {file:?}"))?;
+        if bytes.len() > crate::walkthrough::MAX_FILE_BYTES {
+            return Err(format!(
+                "walkthrough file {file:?} exceeds {} bytes",
+                crate::walkthrough::MAX_FILE_BYTES
+            ));
+        }
+        let content = String::from_utf8_lossy(&bytes);
+        let steps = crate::walkthrough::Walkthrough::parse_steps(&steps_text, content.lines().count())?;
+        let tour = crate::walkthrough::Walkthrough::start(title, file, &content, steps)?;
+        let count = tour.step_count();
+        self.walkthroughs.insert(id, tour);
+        if let Some(slot) = self.walkthrough_slot(id) {
+            self.overlay_view = Some((id, slot));
+        }
+        self.dirty = true;
+        Ok(format!(r#"{{"started":true,"steps":{count}}}"#))
+    }
+
     /// Snapshot the grid: one view per session in manager order.
     pub fn views(&self) -> Vec<crate::ui::PaneView> {
         let active = self.manager.active();
@@ -175,8 +387,11 @@ impl AppState {
                 let live = rec.state.is_live();
                 if let Some((view_id, index)) = self.overlay_view {
                     if Some(id) == active && view_id == id {
-                        let label = ["", "", "", "Events", "Tasks", "Visual"]
+                        let label = ["", "", "", "Events", "Tasks", "Visual", "Walkthrough"]
                             .get(index).copied().unwrap_or("View");
+                        if label == "Walkthrough" {
+                            return self.walkthrough_view(id);
+                        }
                         return crate::ui::PaneView {
                             title: format!("{} · {label}", rec.name),
                             lines: vec![vec![crate::ui::SpanView {
@@ -676,18 +891,22 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::CommsRequest(req) => {
-                // The broker answers at once; the verdict goes straight back
-                // to `mcp-serve`. Failures stay single-line JSON, escaped.
+                // Walkthrough tools answer here (they own overlay state
+                // the broker cannot see); everything else goes to the
+                // broker at once. The verdict goes straight back to
+                // `mcp-serve`. Failures stay single-line JSON, escaped.
                 let now = std::time::Instant::now();
-                let line =
-                    match self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now)
-                    {
-                        Ok(result) => format!("{{\"ok\":true,\"result\":{result}}}\n"),
-                        Err(e) => format!(
-                            "{{\"ok\":false,\"error\":{}}}\n",
-                            crate::mcp::escape_json(&e)
-                        ),
-                    };
+                let verdict = match self.walkthrough_tool(&req.run_id, &req.tool, &req.args) {
+                    Some(verdict) => verdict,
+                    None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                };
+                let line = match verdict {
+                    Ok(result) => format!("{{\"ok\":true,\"result\":{result}}}\n"),
+                    Err(e) => format!(
+                        "{{\"ok\":false,\"error\":{}}}\n",
+                        crate::mcp::escape_json(&e)
+                    ),
+                };
                 let _ = req.reply.send(line);
                 self.dirty = true;
             }
@@ -1851,7 +2070,7 @@ mod tests {
             crate::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "🔔 Events", "📝 Tasks", "📷 Visual"]);
+        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "🔔 Events", "📝 Tasks", "📷 Visual", "📖 Walkthrough"]);
         assert!(state.select_top_tab(3));
         assert!(state.topbar().tabs[3].active);
         let view = state.views().into_iter().find(|v| v.focused).unwrap();
@@ -1859,6 +2078,90 @@ mod tests {
         assert!(view.lines.iter().flatten().any(|span| span.text.contains("unavailable")));
         assert!(state.select_top_tab(0));
         assert!(state.topbar().tabs[0].active);
+        assert!(state.manager.remove(id));
+    }
+
+    fn comms_reply(state: &mut AppState, run: &str, tool: &str, args: &str) -> String {
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run.to_string(),
+            tool: tool.to_string(),
+            args: args.to_string(),
+            reply: tx,
+        }));
+        rx.recv().expect("comms verdict arrives")
+    }
+
+    #[test]
+    fn walkthrough_tools_drive_tour_lifecycle() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        // The fake harness calls with the record's own run ID.
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let path = std::env::temp_dir().join(format!("forge-walk-test-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            (1..=10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+        ).unwrap();
+        let args = format!(
+            r#"{{"file":{},"steps":"1:3:first\n5:5:second"}}"#,
+            crate::mcp::escape_json(&path.to_string_lossy()),
+        );
+        let started = comms_reply(&mut state, &live_run, "walkthrough_start", &args);
+        assert!(started.contains(r#""ok":true"#), "started: {started}");
+        assert!(started.contains(r#""steps":2"#), "started: {started}");
+        assert!(state.walkthrough_overlay_active());
+        assert_eq!(state.walkthrough_overlay().unwrap().title, path.to_string_lossy());
+        // Answering with nothing waiting fails instead of inventing Q&A.
+        let early = comms_reply(&mut state, &live_run, "walkthrough_answer", r#"{"answer":"x"}"#);
+        assert!(early.contains("no walkthrough question waiting"), "early: {early}");
+        // Ask through the overlay: the draft submits, the markup stages
+        // an Enter, and the question waits for the agent.
+        state.walkthrough_overlay_mut().unwrap().input = Some("why three?".to_string());
+        assert!(state.submit_walkthrough_question(id));
+        assert!(state.pending_enter.contains_key(&id));
+        let tour = state.walkthrough_overlay().unwrap();
+        assert_eq!(tour.questions.len(), 1);
+        assert_eq!(tour.questions[0].question, "why three?");
+        assert!(tour.questions[0].answer.is_none());
+        assert!(tour.input.is_none());
+        let answered = comms_reply(&mut state, &live_run, "walkthrough_answer", r#"{"answer":"because"}"#);
+        assert!(answered.contains(r#""answered":true"#), "answered: {answered}");
+        assert_eq!(
+            state.walkthrough_overlay().unwrap().questions[0].answer.as_deref(),
+            Some("because")
+        );
+        let ended = comms_reply(&mut state, &live_run, "walkthrough_end", r#"{"summary":"done"}"#);
+        assert!(ended.contains(r#""ended":true"#), "ended: {ended}");
+        assert!(state.walkthrough_overlay().unwrap().completed);
+        std::fs::remove_file(&path).ok();
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn walkthrough_start_rejects_bad_calls() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let missing = comms_reply(
+            &mut state, &live_run, "walkthrough_start",
+            r#"{"file":"/no/such/forge-walk-missing.rs","steps":"1:1:x"}"#,
+        );
+        assert!(missing.contains(r#""ok":false"#), "missing: {missing}");
+        assert!(missing.contains("cannot read"), "missing: {missing}");
+        assert!(!state.walkthrough_overlay_active());
+        let stale = comms_reply(&mut state, "bogus-run", "walkthrough_answer", r#"{"answer":"x"}"#);
+        assert!(stale.contains("unknown or stale run ID"), "stale: {stale}");
+        let no_tour = comms_reply(&mut state, &live_run, "walkthrough_end", "{}");
+        assert!(no_tour.contains("no walkthrough for this session"), "no_tour: {no_tour}");
         assert!(state.manager.remove(id));
     }
 
@@ -1923,9 +2226,9 @@ mod tests {
             "agent", &std::env::temp_dir(), "exec cat",
             crate::ids::RunId::generate(), "codex",
         ).unwrap();
-        assert_eq!(state.topbar().tabs.len(), 6);
+        assert_eq!(state.topbar().tabs.len(), 7);
         let bar = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
-        assert_eq!(crate::ui::layout_topbar(bar, &state.topbar().tabs).len(), 6);
+        assert_eq!(crate::ui::layout_topbar(bar, &state.topbar().tabs).len(), 7);
         assert!(state.manager.remove(id));
     }
 
