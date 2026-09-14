@@ -356,3 +356,16 @@ pulled per-slice as needed.
   required), portable-pty maps signal-death to code 1 (not None), and
   `poll_exit`-style per-id drains eat other sessions' Exited events —
   collect multi-session exits in one drain. Suite 301 + 7 green.
+- 2026-09-14: codex scroll research + fix (user's approach, implemented
+  here). Verified live: codex main chat runs on the normal screen (no
+  alt/mouse/DECCKM) through top-anchored DECSTBM regions; Up/PageUp
+  drive composer history, never the transcript (main view has no scroll
+  binding — upstream gap, openai/codex#34716); Ctrl+T pager scrolls
+  with Up/PageDown and uses alt-screen (forge arrows already work
+  there). Root cause: vendored vt100 discarded region scrolls
+  (xterm-correct), so transcript history never reached scrollback and
+  the wheel viewport had nothing to reveal. Fix: `scroll_up` now
+  preserves top-anchored region scrolls (`scroll_top == 0`) into
+  scrollback; bottom-anchored churn still discards, alt grid never
+  feeds (scrollback_len 0). Tests + FORGE-PATCHES.md updated. Suite
+  301 + 7 green, vt100 viewport suite 5 green.

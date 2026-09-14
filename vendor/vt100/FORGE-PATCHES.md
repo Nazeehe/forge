@@ -25,9 +25,20 @@ delta lives here until one does.
   exceed the screen height, and upstream's plain subtractions
   underflowed there (`attempt to subtract with overflow` when wheeling
   deep into a long scrollback).
+- `src/grid.rs`: `scroll_up` preserves lines scrolled off the top of
+  top-anchored regions (`scroll_top == 0`) into scrollback. Upstream
+  discards all region scrolls, matching xterm — but a region-driven
+  app like codex then keeps its transcript history only in its own
+  memory and forge's wheel viewport can never reveal it.
+  Bottom-anchored regions (composer/status churn) still discard, the
+  alternate grid (`scrollback_len 0`) never feeds, and the now-unused
+  `scroll_region_active` helper is removed. Covered by
+  `tests/scrollback_viewport.rs` (`top_anchored_region_scroll_feeds_
+  scrollback`, `bottom_anchored_region_scroll_still_discards`).
 
 ## Refreshing
 
 To re-vendor a newer upstream: copy the new `src/` + `Cargo.toml` over
-this directory, re-apply the four items above, and run
-`cargo test styled_rows_carry_dim` to prove faint survives the parser.
+this directory, re-apply the items above, and run
+`cargo test styled_rows_carry_dim` to prove faint survives the parser
+plus the `scrollback_viewport` suite for the scrollback behavior.

@@ -560,7 +560,15 @@ impl Grid {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
             let removed = self.rows.remove(usize::from(self.scroll_top));
-            if self.scrollback_len > 0 && !self.scroll_region_active() {
+            // Forge patch: preserve lines scrolled off the top of a
+            // top-anchored region (scroll_top == 0 with a narrowed
+            // bottom, e.g. codex's transcript pane). Upstream discards
+            // them, matching xterm — but then a region-driven app's
+            // history lives only in the app's memory and forge's wheel
+            // viewport can never reveal it. Bottom-anchored regions
+            // (composer/status churn, not history) still discard, and
+            // the alternate grid (scrollback_len 0) never feeds.
+            if self.scrollback_len > 0 && self.scroll_top == 0 {
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
@@ -600,9 +608,9 @@ impl Grid {
         self.pos.row >= self.scroll_top && self.pos.row <= self.scroll_bottom
     }
 
-    fn scroll_region_active(&self) -> bool {
-        self.scroll_top != 0 || self.scroll_bottom != self.size.rows - 1
-    }
+    // Forge patch: `scroll_region_active` removed with the
+    // top-anchored preservation change above; scrollback now keys on
+    // `scroll_top == 0` instead.
 
     pub fn set_origin_mode(&mut self, mode: bool) {
         self.origin_mode = mode;
