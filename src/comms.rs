@@ -477,7 +477,7 @@ impl Broker {
             "send_response" => self.send_response(sessions, caller, args, now),
             "tell_session" => self.tell(sessions, caller, args, now),
             "ack_message" => self.ack(sessions, caller, args, now),
-            "list_sessions" => Ok(self.list_sessions(sessions)),
+            "list_sessions" => Ok(self.list_sessions(sessions, caller)),
             "compact_session" => self.compact(sessions, caller, args),
             "schedule_prompt" => self.schedule(sessions, caller, args, now),
             "cancel_scheduled_prompt" => self.cancel_scheduled(caller, args),
@@ -850,8 +850,13 @@ impl Broker {
         Ok(format!(r#"{{"conversation":"{id}","acknowledged":true}}"#))
     }
 
-    fn list_sessions(&self, sessions: &SessionManager) -> String {
-        let mut out = String::from(r#"{"sessions":["#);
+    /// The `you` field names the calling session first, so a session
+    /// reading the list can spot its own entry without guessing.
+    fn list_sessions(&self, sessions: &SessionManager, caller: SessionId) -> String {
+        let mut out = format!(
+            r#"{{"you":{},"sessions":["#,
+            crate::mcp::escape_json(&self.names(sessions, caller)),
+        );
         let mut first = true;
         for &id in sessions.order() {
             let Some(rec) = sessions.get(id) else {
@@ -1438,6 +1443,12 @@ mod tests {
         assert!(res.contains(r#""name":"a""#), "res: {res}");
         assert!(res.contains(r#""name":"b""#), "res: {res}");
         assert!(res.contains(r#""live":true"#), "res: {res}");
+        // The caller sees its own name up front in `you`.
+        assert!(res.starts_with(r#"{"you":"a","#), "res: {res}");
+        let res_b = p
+            .call(&p.run_b.clone(), "list_sessions", "{}")
+            .expect("listing works for b too");
+        assert!(res_b.starts_with(r#"{"you":"b","#), "res: {res_b}");
     }
 
     #[test]

@@ -418,7 +418,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_sessions",
-            description: "List live peer sessions visible to this session.",
+            description: "List live peer sessions visible to this session. The `you` field names the calling session.",
             schema: r#"{"type":"object","properties":{}}"#,
         },
         ToolDef {
