@@ -3,21 +3,23 @@
 Source: `error_logs.md` §11. Tick the box (`[ ]` → `[x]`) next to every
 tool to build next. DONE tools are already in `src/mcp.rs`.
 
-## Communication and control (5/15 done)
+## Communication and control (11/15 done)
 
 DONE: `ask_session`, `send_response`, `tell_session`, `ack_message`,
-`list_sessions`
+`list_sessions`, `compact_session`, `schedule_prompt`,
+`cancel_scheduled_prompt`, `start_session`, `set_session_status`,
+`clear_session_status`
 
 - [ ] #6 `send_file` — offer one bounded relative file
 - [ ] #7 `accept_file` — atomic private non-overwriting receive
-- [ ] #8 `compact_session` — queue `/compact` through idle injection
-- [ ] #9 `schedule_prompt` — future self-injection timer
-- [ ] #10 `cancel_scheduled_prompt` — cancel the timer
+- [x] #8 `compact_session` — queue `/compact` through idle injection
+- [x] #9 `schedule_prompt` — future self-injection timer
+- [x] #10 `cancel_scheduled_prompt` — cancel the timer
 - [ ] #11 `message_user` — badge the TUI, optional remote forward
 - [ ] #12 `screenshot` — macOS window match to PNG image block
-- [ ] #13 `start_session` — create validated session, return ID/name
-- [ ] #14 `set_session_status` — replace caller sticky status
-- [ ] #15 `clear_session_status` — clear it
+- [x] #13 `start_session` — create validated session, return ID/name
+- [x] #14 `set_session_status` — replace caller sticky status
+- [x] #15 `clear_session_status` — clear it
 
 ## Memory (0/7 done)
 
@@ -42,12 +44,10 @@ DONE: `ask_session`, `send_response`, `tell_session`, `ack_message`,
 - [ ] #31 `task_reorder` — transactional reorder
 - [ ] #32 `task_add_note` — attributed note
 
-## Walkthrough (3/5 done)
+## Walkthrough (5/5 done)
 
-DONE: `walkthrough_start`, `walkthrough_answer`, `walkthrough_end`
-
-- [ ] #34 `walkthrough_add_step` — insert step (model method exists)
-- [ ] #35 `walkthrough_update` — update step (model method exists)
+DONE: `walkthrough_start`, `walkthrough_answer`, `walkthrough_end`,
+`walkthrough_add_step`, `walkthrough_update`
 
 ## Whiteboard (0/9 done)
 

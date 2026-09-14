@@ -374,7 +374,10 @@ fn instructions(srv: &ServerCtx) -> String {
         ack to confirm, list_sessions to discover peers. Sessions only communicate \
         when they share a group; address peers by name, authority comes from run IDs. \
         Use walkthrough_start to tour the operator through a file, walkthrough_answer \
-        for their waiting tour questions, walkthrough_end to close the tour.";
+        for their waiting tour questions, walkthrough_end to close the tour. \
+        Use compact_session to compact context, schedule_prompt for delayed \
+        self-injection, start_session to spawn local agent sessions, and \
+        set/clear_session_status for your sticky sidebar status.";
     if srv.instructions_extra.is_empty() {
         base.to_string()
     } else {
@@ -432,6 +435,46 @@ fn tool_defs() -> Vec<ToolDef> {
             name: "walkthrough_end",
             description: "Close the tour with an optional summary line.",
             schema: r#"{"type":"object","properties":{"summary":{"type":"string"}}}"#,
+        },
+        ToolDef {
+            name: "compact_session",
+            description: "Queue /compact for a session; omit target to compact yourself, name a peer in a shared group otherwise. Delivers when the target is idle.",
+            schema: r#"{"type":"object","properties":{"target":{"type":"string"}}}"#,
+        },
+        ToolDef {
+            name: "schedule_prompt",
+            description: "Arm a self-injection timer: the prompt lands in your own queue after delay_seconds (0 to 86400) and delivers when idle. clear_context starts it with /clear.",
+            schema: r#"{"type":"object","properties":{"prompt":{"type":"string"},"delay_seconds":{"type":"number"},"clear_context":{"type":"boolean"}},"required":["prompt"]}"#,
+        },
+        ToolDef {
+            name: "cancel_scheduled_prompt",
+            description: "Cancel an armed self-injection timer by timer_id.",
+            schema: r#"{"type":"object","properties":{"timer_id":{"type":"string"}},"required":["timer_id"]}"#,
+        },
+        ToolDef {
+            name: "start_session",
+            description: "Create a local agent session: harness is claude, codex, or muse; path defaults to your cwd; an opening prompt queues as the first idle injection. Remote flavors are unsupported.",
+            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"},"harness":{"type":"string"},"prompt":{"type":"string"},"communication_group":{"type":"string"}}}"#,
+        },
+        ToolDef {
+            name: "set_session_status",
+            description: "Replace your sticky sidebar status; kind is info, progress, success, warning, blocked, or question, message at most 80 characters with no newlines.",
+            schema: r#"{"type":"object","properties":{"kind":{"type":"string"},"message":{"type":"string"}},"required":["kind","message"]}"#,
+        },
+        ToolDef {
+            name: "clear_session_status",
+            description: "Clear your sticky sidebar status.",
+            schema: r#"{"type":"object","properties":{}}"#,
+        },
+        ToolDef {
+            name: "walkthrough_add_step",
+            description: "Insert one step into the open tour: start_line, end_line, and explanation (Markdown, may span lines); position is 1-based like the displayed counter and appends when absent.",
+            schema: r#"{"type":"object","properties":{"start_line":{"type":"integer"},"end_line":{"type":"integer"},"explanation":{"type":"string"},"file_path":{"type":"string"},"position":{"type":"integer"}},"required":["start_line","end_line","explanation"]}"#,
+        },
+        ToolDef {
+            name: "walkthrough_update",
+            description: "Update one step of the open tour: step_index is 1-based like the displayed counter; absent fields keep their values.",
+            schema: r#"{"type":"object","properties":{"step_index":{"type":"integer"},"start_line":{"type":"integer"},"end_line":{"type":"integer"},"explanation":{"type":"string"}},"required":["step_index"]}"#,
         },
     ]
 }
@@ -674,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_names_the_comms_and_walkthrough_tools() {
+    fn tools_list_names_all_sixteen_tools() {
         let res = handle_line(
             r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
             &ctx(),
@@ -691,6 +734,14 @@ mod tests {
             "walkthrough_start",
             "walkthrough_answer",
             "walkthrough_end",
+            "compact_session",
+            "schedule_prompt",
+            "cancel_scheduled_prompt",
+            "start_session",
+            "set_session_status",
+            "clear_session_status",
+            "walkthrough_add_step",
+            "walkthrough_update",
         ] {
             assert!(res.contains(&format!(r#""name":"{tool}""#)), "res: {res}");
         }

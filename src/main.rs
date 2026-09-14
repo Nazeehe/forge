@@ -21,6 +21,7 @@ mod pty;
 mod relay;
 mod safe_text;
 mod session;
+mod session_status;
 mod theme;
 mod tui;
 mod ui;

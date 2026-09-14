@@ -281,6 +281,30 @@ impl AppState {
             .filter(|s| !s.is_empty())
     }
 
+    /// One boolean tool arg from a bare JSON literal.
+    fn tool_bool(args: &str, name: &str) -> Option<bool> {
+        match crate::mcp::top_raw(args, name)?.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// One integer tool arg: bare JSON numbers, quoted ones read
+    /// liberally too. Fractions, negatives, and overflow never pass.
+    fn tool_u32(args: &str, name: &str) -> Option<u32> {
+        let raw = crate::mcp::top_raw(args, name)?.trim();
+        let bare = raw
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(raw);
+        let value = bare.parse::<f64>().ok()?;
+        if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u32::MAX as f64 {
+            return None;
+        }
+        Some(value as u32)
+    }
+
     /// Resolve a tool caller to its live session, rebound IDs included:
     /// the run must still belong to the record that holds it.
     fn resolve_tool_caller(&self, run_id: &str) -> Result<crate::session::SessionId, String> {
@@ -304,7 +328,7 @@ impl AppState {
         args: &str,
     ) -> Option<Result<String, String>> {
         match tool {
-            "walkthrough_start" | "walkthrough_answer" | "walkthrough_end" => {}
+            "walkthrough_start" | "walkthrough_answer" | "walkthrough_end" | "walkthrough_add_step" | "walkthrough_update" => {}
             _ => return None,
         }
         let id = match self.resolve_tool_caller(run_id) {
@@ -313,6 +337,8 @@ impl AppState {
         };
         match tool {
             "walkthrough_start" => Some(self.walkthrough_start(id, args)),
+            "walkthrough_add_step" => Some(self.walkthrough_add_step(id, args)),
+            "walkthrough_update" => Some(self.walkthrough_update(id, args)),
             "walkthrough_answer" => {
                 let answer = match Self::tool_arg(args, "answer") {
                     Some(answer) => answer,
@@ -374,6 +400,220 @@ impl AppState {
         }
         self.dirty = true;
         Ok(format!(r#"{{"started":true,"steps":{count}}}"#))
+    }
+
+    /// Insert one step into the open tour. A `file_path` that is not
+    /// the tour file fails: tours cover one file. `position` is
+    /// 1-based like the displayed counter and appends when absent.
+    fn walkthrough_add_step(
+        &mut self,
+        id: crate::session::SessionId,
+        args: &str,
+    ) -> Result<String, String> {
+        let start = Self::tool_u32(args, "start_line")
+            .ok_or_else(|| "walkthrough_add_step needs start_line".to_string())?;
+        let end = Self::tool_u32(args, "end_line")
+            .ok_or_else(|| "walkthrough_add_step needs end_line".to_string())?;
+        let explanation = Self::tool_arg(args, "explanation").unwrap_or_default();
+        let position = Self::tool_u32(args, "position")
+            .map(|p| (p.max(1) as usize).saturating_sub(1));
+        let Some(tour) = self.walkthroughs.get_mut(&id) else {
+            return Err("no walkthrough for this session".to_string());
+        };
+        if let Some(file) = Self::tool_arg(args, "file_path") {
+            if file != tour.file_path {
+                return Err("walkthrough_add_step targets the open tour file only".to_string());
+            }
+        }
+        tour.add_step(
+            crate::walkthrough::Step { start, end, explanation },
+            position,
+        )?;
+        let count = tour.step_count();
+        self.dirty = true;
+        Ok(format!(r#"{{"added":true,"steps":{count}}}"#))
+    }
+
+    /// Update one step of the open tour. `step_index` is 1-based like
+    /// the displayed counter; absent fields keep their values.
+    fn walkthrough_update(
+        &mut self,
+        id: crate::session::SessionId,
+        args: &str,
+    ) -> Result<String, String> {
+        let one_based = Self::tool_u32(args, "step_index")
+            .ok_or_else(|| "walkthrough_update needs step_index".to_string())?;
+        let Some(index) = one_based.checked_sub(1) else {
+            return Err("step_index starts at 1".to_string());
+        };
+        let start = Self::tool_u32(args, "start_line");
+        let end = Self::tool_u32(args, "end_line");
+        let explanation = Self::tool_arg(args, "explanation");
+        let Some(tour) = self.walkthroughs.get_mut(&id) else {
+            return Err("no walkthrough for this session".to_string());
+        };
+        tour.update_step(index as usize, start, end, explanation.as_deref())?;
+        self.dirty = true;
+        Ok(r#"{"updated":true}"#.to_string())
+    }
+
+    /// Execute one session-lifecycle MCP tool. `None` when the name is
+    /// not a session tool and the broker should answer instead.
+    fn session_tool(
+        &mut self,
+        run_id: &str,
+        tool: &str,
+        args: &str,
+    ) -> Option<Result<String, String>> {
+        match tool {
+            "start_session" | "set_session_status" | "clear_session_status" => {}
+            _ => return None,
+        }
+        let id = match self.resolve_tool_caller(run_id) {
+            Ok(id) => id,
+            Err(e) => return Some(Err(e)),
+        };
+        match tool {
+            "start_session" => Some(self.start_session_tool(id, args)),
+            "set_session_status" => Some(self.set_session_status(id, args)),
+            _ => Some(self.clear_session_status(id)),
+        }
+    }
+
+    /// Create a local agent session: validated name/cwd/harness, an
+    /// optional comm-group join (else the caller's primary group), and
+    /// an optional opening prompt queued as the first idle injection.
+    /// Remote flavors, internet sessions, and focus theft are refused:
+    /// tool births never steal the human view.
+    fn start_session_tool(
+        &mut self,
+        caller: crate::session::SessionId,
+        args: &str,
+    ) -> Result<String, String> {
+        for (param, what) in [
+            ("connection", "remote connections"),
+            ("host", "remote hosts"),
+            ("od_preset", "OD presets"),
+            ("od_type", "OD session types"),
+        ] {
+            if Self::tool_arg(args, param).is_some() {
+                return Err(format!("{what} are unsupported (local sessions only)"));
+            }
+        }
+        if Self::tool_bool(args, "internet").unwrap_or(false) {
+            return Err("internet sessions are unsupported (local sessions only)".to_string());
+        }
+        let harness_name = Self::tool_arg(args, "harness").unwrap_or_else(|| "claude".to_string());
+        let harness = crate::harness::Harness::from_name(&harness_name)
+            .ok_or_else(|| format!("unknown harness {harness_name:?} (claude/codex/muse)"))?;
+        let cwd = match Self::tool_arg(args, "path") {
+            Some(path) => {
+                let cwd = std::path::PathBuf::from(&path);
+                if !cwd.is_dir() {
+                    return Err(format!("session path {path:?} is not a directory"));
+                }
+                cwd
+            }
+            None => self
+                .manager
+                .get(caller)
+                .map(|rec| rec.cwd.clone())
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        };
+        let name = match Self::tool_arg(args, "name") {
+            Some(name) => {
+                if self.live_names().iter().any(|taken| taken == &name) {
+                    return Err(format!("session name {name:?} is taken"));
+                }
+                name
+            }
+            None => {
+                let stem = harness.as_str();
+                let mut n = self.manager.len() + 1;
+                loop {
+                    let candidate = format!("{stem}-{n}");
+                    if !self.live_names().iter().any(|taken| taken == &candidate) {
+                        break candidate;
+                    }
+                    n += 1;
+                }
+            }
+        };
+        let group = Self::tool_arg(args, "communication_group")
+            .or_else(|| self.broker.primary_group(caller).map(str::to_string));
+        let previous = self.manager.active();
+        let id = self
+            .create_session(&crate::create::SessionSpec {
+                kind: crate::create::SessionKind::Agent(harness),
+                name: name.clone(),
+                cwd,
+                model: String::new(),
+                group,
+            })
+            .map_err(|e| format!("cannot start session: {e}"))?;
+        if let Some(prompt) = Self::tool_arg(args, "prompt") {
+            let from = self
+                .manager
+                .get(caller)
+                .map(|rec| rec.name.clone())
+                .unwrap_or_default();
+            self.broker.push(
+                id,
+                crate::comms::Injection {
+                    conv: crate::ids::ConversationId::generate().to_string(),
+                    kind: crate::comms::InjectKind::Tell,
+                    from,
+                    text: prompt,
+                },
+            );
+        }
+        if let Some(active) = previous {
+            if active != id {
+                self.manager.switch(active);
+            }
+        }
+        self.dirty = true;
+        Ok(format!(
+            r#"{{"session_id":"{id}","name":{}}}"#,
+            crate::mcp::escape_json(&name),
+        ))
+    }
+
+    /// Replace the caller's sticky status: closed kind set, message
+    /// bounded with no controls or newlines.
+    fn set_session_status(
+        &mut self,
+        caller: crate::session::SessionId,
+        args: &str,
+    ) -> Result<String, String> {
+        let kind = Self::tool_arg(args, "kind")
+            .ok_or_else(|| "set_session_status needs a kind".to_string())?;
+        let kind = crate::session_status::StatusKind::from_name(&kind).ok_or_else(|| {
+            "unknown status kind (info/progress/success/warning/blocked/question)".to_string()
+        })?;
+        let message = Self::tool_arg(args, "message")
+            .ok_or_else(|| "set_session_status needs a message".to_string())?;
+        let message = crate::session_status::validate(&message)?;
+        let Some(rec) = self.manager.get_mut(caller) else {
+            return Err("unknown or stale run ID".to_string());
+        };
+        rec.status = Some(crate::session_status::SessionStatus { kind, message: message.clone() });
+        self.dirty = true;
+        Ok(format!(
+            r#"{{"kind":{},"message":{}}}"#,
+            crate::mcp::escape_json(kind.as_str()),
+            crate::mcp::escape_json(&message),
+        ))
+    }
+
+    /// Clear the caller's sticky status; already-clear stays success.
+    fn clear_session_status(&mut self, caller: crate::session::SessionId) -> Result<String, String> {
+        let Some(rec) = self.manager.get_mut(caller) else {
+            return Err("unknown or stale run ID".to_string());
+        };
+        rec.status = None;
+        self.dirty = true;
+        Ok(r#"{"status_cleared":true}"#.to_string())
     }
 
     /// Snapshot the grid: one view per session in manager order.
@@ -821,6 +1061,7 @@ impl AppState {
                     cli_tool: rec.cli_tool.clone(),
                     cwd: rec.cwd.to_string_lossy().into_owned(),
                     state,
+                    status: rec.status.as_ref().map(|s| s.display()),
                     uptime_secs: rec.spawned_at.elapsed().as_secs(),
                     tool_calls: rec.tool_calls,
                     approvals: rec.approvals,
@@ -891,14 +1132,18 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::CommsRequest(req) => {
-                // Walkthrough tools answer here (they own overlay state
-                // the broker cannot see); everything else goes to the
-                // broker at once. The verdict goes straight back to
-                // `mcp-serve`. Failures stay single-line JSON, escaped.
+                // Walkthrough and session tools answer here (they own
+                // overlay and manager state the broker cannot see);
+                // everything else goes to the broker at once. The
+                // verdict goes straight back to `mcp-serve`. Failures
+                // stay single-line JSON, escaped.
                 let now = std::time::Instant::now();
                 let verdict = match self.walkthrough_tool(&req.run_id, &req.tool, &req.args) {
                     Some(verdict) => verdict,
-                    None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                    None => match self.session_tool(&req.run_id, &req.tool, &req.args) {
+                        Some(verdict) => verdict,
+                        None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                    },
                 };
                 let line = match verdict {
                     Ok(result) => format!("{{\"ok\":true,\"result\":{result}}}\n"),
@@ -2162,6 +2407,150 @@ mod tests {
         assert!(stale.contains("unknown or stale run ID"), "stale: {stale}");
         let no_tour = comms_reply(&mut state, &live_run, "walkthrough_end", "{}");
         assert!(no_tour.contains("no walkthrough for this session"), "no_tour: {no_tour}");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn session_status_round_trips_to_sidebar() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let set = comms_reply(
+            &mut state, &live_run, "set_session_status",
+            r#"{"kind":"progress","message":"compiling"}"#,
+        );
+        assert!(set.contains(r#""ok":true"#), "set: {set}");
+        let detail = state.sidebar_info().session.expect("detail renders");
+        assert!(detail.status.as_deref() == Some("progress: compiling"), "detail: {detail:?}");
+        let lines = crate::ui::sidebar_lines(&state.sidebar_info());
+        assert!(lines.iter().any(|l| {
+            l.spans.iter().any(|s| s.content.contains("progress: compiling"))
+        }), "sidebar shows status");
+        let bad_kind = comms_reply(
+            &mut state, &live_run, "set_session_status",
+            r#"{"kind":"urgent","message":"x"}"#,
+        );
+        assert!(bad_kind.contains("unknown status kind"), "bad_kind: {bad_kind}");
+        let long = comms_reply(
+            &mut state, &live_run, "set_session_status",
+            &format!(r#"{{"kind":"info","message":"{}"}}"#, "x".repeat(81)),
+        );
+        assert!(long.contains("over 80"), "long: {long}");
+        let cleared = comms_reply(&mut state, &live_run, "clear_session_status", "{}");
+        assert!(cleared.contains(r#""status_cleared":true"#), "cleared: {cleared}");
+        assert!(state.manager.get(id).unwrap().status.is_none());
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn start_session_validates_creates_and_keeps_focus() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        for (args, needle) in [
+            (r#"{"harness":"nope"}"#, "unknown harness"),
+            (r#"{"path":"/no/such/dir"}"#, "not a directory"),
+            (r#"{"name":"agent"}"#, "is taken"),
+            (r#"{"host":"remote"}"#, "unsupported"),
+            (r#"{"internet":true}"#, "unsupported"),
+        ] {
+            let err = comms_reply(&mut state, &live_run, "start_session", args);
+            assert!(err.contains(r#""ok":false"#), "args {args}: {err}");
+            assert!(err.contains(needle), "args {args}: {err}");
+        }
+        std::env::set_var("CODEX_BIN", "cat");
+        let started = comms_reply(
+            &mut state, &live_run, "start_session",
+            r#"{"name":"helper-1","harness":"codex","prompt":"hello"}"#,
+        );
+        std::env::remove_var("CODEX_BIN");
+        assert!(started.contains(r#""ok":true"#), "started: {started}");
+        assert!(started.contains(r#""name":"helper-1""#), "started: {started}");
+        assert_eq!(state.manager.active(), Some(id), "tool birth keeps focus");
+        let new = state.manager.order().iter()
+            .find(|&&cand| cand != id).copied().expect("second session exists");
+        assert_eq!(state.broker.queued(new), 1, "prompt queued for the birth");
+        let due = state.broker.take_due(new, 10);
+        assert_eq!(due[0].text, "hello");
+        // Default naming plus the caller's group carry over.
+        state.broker.join(&state.manager, id, "team").unwrap();
+        std::env::set_var("CODEX_BIN", "cat");
+        let auto = comms_reply(&mut state, &live_run, "start_session", r#"{"harness":"codex"}"#);
+        std::env::remove_var("CODEX_BIN");
+        assert!(auto.contains("codex-"), "auto name: {auto}");
+        let third = state.manager.order().iter()
+            .find(|&&cand| cand != id && cand != new).copied().expect("third exists");
+        assert_eq!(state.broker.primary_group(third), Some("team"));
+        assert!(state.manager.remove(id));
+        assert!(state.manager.remove(new));
+        assert!(state.manager.remove(third));
+    }
+
+    #[test]
+    fn walkthrough_add_and_update_steps() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        std::env::set_var("CODEX_BIN", "cat");
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let path = std::env::temp_dir().join(format!("forge-walk-steps-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            (1..=10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+        ).unwrap();
+        let start = format!(
+            r#"{{"file":{},"steps":"1:3:first\n5:5:second"}}"#,
+            crate::mcp::escape_json(&path.to_string_lossy()),
+        );
+        comms_reply(&mut state, &live_run, "walkthrough_start", &start);
+        let added = comms_reply(
+            &mut state, &live_run, "walkthrough_add_step",
+            r#"{"start_line":7,"end_line":8,"explanation":"new"}"#,
+        );
+        assert!(added.contains(r#""added":true"#), "added: {added}");
+        assert!(added.contains(r#""steps":3"#), "added: {added}");
+        let first = comms_reply(
+            &mut state, &live_run, "walkthrough_add_step",
+            r#"{"start_line":9,"end_line":9,"explanation":"top","position":1}"#,
+        );
+        assert!(first.contains(r#""steps":4"#), "first: {first}");
+        let tour = state.walkthrough_overlay().unwrap();
+        assert_eq!(tour.steps[0].explanation, "top");
+        assert_eq!(tour.index, 1, "insert before current shifts it");
+        let wrong_file = comms_reply(
+            &mut state, &live_run, "walkthrough_add_step",
+            r#"{"start_line":1,"end_line":1,"explanation":"x","file_path":"other.rs"}"#,
+        );
+        assert!(wrong_file.contains("open tour file only"), "wrong_file: {wrong_file}");
+        let updated = comms_reply(
+            &mut state, &live_run, "walkthrough_update",
+            r#"{"step_index":1,"explanation":"revised"}"#,
+        );
+        assert!(updated.contains(r#""updated":true"#), "updated: {updated}");
+        assert_eq!(state.walkthrough_overlay().unwrap().steps[0].explanation, "revised");
+        for (args, needle) in [
+            (r#"{"step_index":0}"#, "starts at 1"),
+            (r#"{"step_index":99}"#, "no walkthrough step"),
+            (r#"{"step_index":1,"start_line":9,"end_line":2}"#, "bad walkthrough range"),
+        ] {
+            let err = comms_reply(&mut state, &live_run, "walkthrough_update", args);
+            assert!(err.contains(needle), "args {args}: {err}");
+        }
+        std::fs::remove_file(&path).ok();
         assert!(state.manager.remove(id));
     }
 

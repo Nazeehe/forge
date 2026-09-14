@@ -406,6 +406,8 @@ pub struct SessionDetail {
     pub cli_tool: String,
     pub cwd: String,
     pub state: String,
+    /// Caller sticky status text (`kind: message`), if one is set.
+    pub status: Option<String>,
     pub uptime_secs: u64,
     pub tool_calls: u32,
     pub approvals: u32,
@@ -467,6 +469,12 @@ fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize) -> Vec<Line<'static>> {
                 "  {}",
                 safe_text::encode_for_display(&detail.cwd)
             )));
+            if let Some(status) = detail.status.as_deref() {
+                lines.push(Line::from(format!(
+                    "  {}",
+                    safe_text::encode_for_display(status)
+                )));
+            }
             lines.push(Line::from(""));
             lines.push(Line::from("Stats"));
             lines.push(Line::from(format!(
@@ -513,6 +521,9 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
                 safe_text::encode_for_display(&detail.name), theme::style(theme::Role::Focus))));
             lines.push(Line::from(safe_text::encode_for_display(&detail.cli_tool)));
             lines.push(Line::from(safe_text::encode_for_display(&detail.cwd)));
+            if let Some(status) = detail.status.as_deref() {
+                lines.push(Line::from(safe_text::encode_for_display(status)));
+            }
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::raw("Status  "),
@@ -910,6 +921,7 @@ mod tests {
         c.detail = Some(SessionDetail {
             name: "jarvis_senior".into(), cli_tool: "Codex".into(),
             cwd: "/work/jarvis".into(), state: "PROGRESS".into(),
+            status: None,
             uptime_secs: 3600, tool_calls: 489, approvals: 345, denials: 8,
         });
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
@@ -972,6 +984,7 @@ mod tests {
                 cli_tool: "shell".to_string(),
                 cwd: "/tmp/proj".to_string(),
                 state: "running · Thinking".to_string(),
+                status: Some("blocked: waiting on review".to_string()),
                 uptime_secs: 65,
                 tool_calls: 4,
                 approvals: 3,
@@ -984,6 +997,7 @@ mod tests {
         assert!(has(&lines, "shell-1"), "name: {lines:?}");
         assert!(has(&lines, "shell"), "tool: {lines:?}");
         assert!(has(&lines, "/tmp/proj"), "cwd: {lines:?}");
+        assert!(has(&lines, "blocked: waiting on review"), "status: {lines:?}");
         assert!(has(&lines, "running"), "state: {lines:?}");
         assert!(has(&lines, "1m"), "uptime: {lines:?}");
         assert!(has(&lines, "4"), "calls: {lines:?}");

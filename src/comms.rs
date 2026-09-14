@@ -13,6 +13,9 @@ use crate::session::{SessionId, SessionManager};
 /// Per-target message pressure cap: undelivered injections plus delivered
 /// asks awaiting response. Delivered tells no longer count.
 pub const PRESSURE_CAP: usize = 5;
+/// Longest self-injection delay in seconds: a day. Beyond that the TUI
+/// the timer belongs to is long gone, and `Instant` math would overflow.
+pub const MAX_SCHEDULE_DELAY_SECS: f64 = 86_400.0;
 /// Silence after an ack before the one courtesy reminder goes out.
 pub const COURTESY_GRACE: Duration = Duration::from_secs(30);
 /// Human typing holds injections for this long after the last key/paste.
@@ -35,6 +38,9 @@ pub enum InjectKind {
     Ack,
     Failed,
     Reminder,
+    /// A CLI command (`/compact`, a scheduled prompt): no conversation,
+    /// no reply guidance, just the text plus the staged Enter.
+    Command,
 }
 
 impl InjectKind {
@@ -48,6 +54,7 @@ impl InjectKind {
             InjectKind::Ack => "ack_message",
             InjectKind::Failed => "failed",
             InjectKind::Reminder => "reminder",
+            InjectKind::Command => "command",
         }
     }
 }
@@ -79,7 +86,8 @@ impl Injection {
             InjectKind::Response
             | InjectKind::Ack
             | InjectKind::Reminder
-            | InjectKind::Failed => None,
+            | InjectKind::Failed
+            | InjectKind::Command => None,
         }
     }
 
@@ -142,6 +150,16 @@ struct Group {
     color: usize,
 }
 
+/// One pending self-injection: fires into the target queue at `due`,
+/// then delivers through the normal idle path. `from` is resolved at
+/// schedule time because the tick that fires it sees no sessions.
+struct Timer {
+    target: SessionId,
+    from: String,
+    text: String,
+    due: Instant,
+}
+
 /// Ephemeral ACLs, conversations, and per-session injection queues.
 /// Liveness always comes from [`SessionManager`]; this struct never caches
 /// it, so an exit is visible on the very next call.
@@ -150,6 +168,7 @@ pub struct Broker {
     membership: HashMap<SessionId, Vec<String>>,
     convs: HashMap<String, Conv>,
     queue: HashMap<SessionId, VecDeque<Injection>>,
+    timers: HashMap<String, Timer>,
     /// Monotonic palette cursor: each created group takes the next index,
     /// deleted ones never hand theirs back (stable chips, no reuse).
     next_color: usize,
@@ -162,6 +181,7 @@ impl Broker {
             membership: HashMap::new(),
             convs: HashMap::new(),
             queue: HashMap::new(),
+            timers: HashMap::new(),
             next_color: 0,
         }
     }
@@ -371,7 +391,7 @@ impl Broker {
         out
     }
 
-    fn push(&mut self, id: SessionId, inj: Injection) {
+    pub(crate) fn push(&mut self, id: SessionId, inj: Injection) {
         self.queue.entry(id).or_default().push_back(inj);
     }
 
@@ -458,6 +478,9 @@ impl Broker {
             "tell_session" => self.tell(sessions, caller, args, now),
             "ack_message" => self.ack(sessions, caller, args, now),
             "list_sessions" => Ok(self.list_sessions(sessions)),
+            "compact_session" => self.compact(sessions, caller, args),
+            "schedule_prompt" => self.schedule(sessions, caller, args, now),
+            "cancel_scheduled_prompt" => self.cancel_scheduled(caller, args),
             _ => Err("unknown tool".to_string()),
         }
     }
@@ -512,6 +535,122 @@ impl Broker {
             },
         );
         Ok(format!(r#"{{"conversation":"{conv}"}}"#))
+    }
+
+    /// Raw numeric arg: JSON numbers arrive bare, quoted ones read
+    /// liberally too. Non-finite values never pass.
+    fn arg_num(args: &str, name: &str) -> Option<f64> {
+        let raw = crate::mcp::top_raw(args, name)?.trim();
+        let bare = raw
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(raw);
+        bare.parse::<f64>().ok().filter(|v| v.is_finite())
+    }
+
+    fn arg_bool(args: &str, name: &str) -> Option<bool> {
+        match crate::mcp::top_raw(args, name)?.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Queue `/compact` for a session: self is always allowed, another
+    /// target needs a shared group like any peer write. Delivery waits
+    /// for the idle path, so the command never lands mid-turn.
+    fn compact(
+        &mut self,
+        sessions: &SessionManager,
+        caller: SessionId,
+        args: &str,
+    ) -> Result<String, String> {
+        let target = match Self::arg(args, "target").filter(|s| !s.is_empty()) {
+            None => caller,
+            Some(name) => {
+                let target = self.resolve_target(sessions, &name)?;
+                if target != caller && !self.shared_group(caller, target) {
+                    return Err("no shared group with target".to_string());
+                }
+                target
+            }
+        };
+        if self.pressure(sessions, target) >= PRESSURE_CAP {
+            return Err("pressure cap reached".to_string());
+        }
+        self.push(
+            target,
+            Injection {
+                conv: crate::ids::ConversationId::generate().to_string(),
+                kind: InjectKind::Command,
+                from: self.names(sessions, caller),
+                text: "/compact".to_string(),
+            },
+        );
+        Ok(r#"{"queued":true}"#.to_string())
+    }
+
+    /// Arm a self-injection timer: the prompt fires into the caller's
+    /// own queue after the delay and delivers when idle. `clear_context`
+    /// prefixes `/clear` so the prompt starts a fresh context.
+    fn schedule(
+        &mut self,
+        sessions: &SessionManager,
+        caller: SessionId,
+        args: &str,
+        now: Instant,
+    ) -> Result<String, String> {
+        let prompt = Self::arg(args, "prompt").filter(|s| !s.is_empty())
+            .ok_or_else(|| "schedule_prompt needs a prompt".to_string())?;
+        if crate::mcp::top_raw(args, "delay_seconds").is_some()
+            && Self::arg_num(args, "delay_seconds").is_none()
+        {
+            return Err("delay_seconds must be a number of seconds".to_string());
+        }
+        let delay = Self::arg_num(args, "delay_seconds").unwrap_or(0.0);
+        if !(0.0..=MAX_SCHEDULE_DELAY_SECS).contains(&delay) {
+            return Err("delay_seconds must sit between 0 and 86400".to_string());
+        }
+        if crate::mcp::top_raw(args, "clear_context").is_some()
+            && Self::arg_bool(args, "clear_context").is_none()
+        {
+            return Err("clear_context must be true or false".to_string());
+        }
+        let clear = Self::arg_bool(args, "clear_context").unwrap_or(false);
+        let own = self.timers.values().filter(|t| t.target == caller).count();
+        if own + self.queued(caller) >= PRESSURE_CAP {
+            return Err("pressure cap reached".to_string());
+        }
+        let text = if clear {
+            format!("/clear\n{prompt}")
+        } else {
+            prompt
+        };
+        let timer = crate::ids::ConversationId::generate().to_string();
+        self.timers.insert(
+            timer.clone(),
+            Timer {
+                target: caller,
+                from: self.names(sessions, caller),
+                text,
+                due: now + Duration::from_secs_f64(delay),
+            },
+        );
+        Ok(format!(r#"{{"timer_id":"{timer}"}}"#))
+    }
+
+    /// Cancel an armed timer. Fired or unknown IDs fail rather than
+    /// confirming thin air; only the owning session cancels.
+    fn cancel_scheduled(&mut self, caller: SessionId, args: &str) -> Result<String, String> {
+        let timer = Self::arg(args, "timer_id").filter(|s| !s.is_empty())
+            .ok_or_else(|| "cancel_scheduled_prompt needs a timer_id".to_string())?;
+        match self.timers.get(&timer) {
+            Some(pending) if pending.target == caller => {
+                self.timers.remove(&timer);
+                Ok(r#"{"cancelled":true}"#.to_string())
+            }
+            _ => Err("unknown timer".to_string()),
+        }
     }
 
     fn send_response(
@@ -729,6 +868,7 @@ impl Broker {
     /// loudly (their sources are told); sources fail silently.
     pub fn target_exited(&mut self, _sessions: &SessionManager, id: SessionId) {
         self.queue.remove(&id);
+        self.timers.retain(|_, timer| timer.target != id);
         let mut notify = Vec::new();
         for (conv_id, conv) in self.convs.iter_mut() {
             if conv.state != ConvState::Open {
@@ -781,6 +921,27 @@ impl Broker {
                     text: "no update since your ack; the source is still waiting".to_string(),
                 },
             );
+        }
+        // Fire due self-injection timers into their queues; the idle
+        // path delivers them like any other injection.
+        let mut fired = Vec::new();
+        for (timer_id, timer) in self.timers.iter() {
+            if now >= timer.due {
+                fired.push(timer_id.clone());
+            }
+        }
+        for timer_id in fired {
+            if let Some(timer) = self.timers.remove(&timer_id) {
+                self.push(
+                    timer.target,
+                    Injection {
+                        conv: timer_id,
+                        kind: InjectKind::Command,
+                        from: timer.from,
+                        text: timer.text,
+                    },
+                );
+            }
         }
     }
 }
@@ -1257,5 +1418,84 @@ mod tests {
         assert!(res.contains(r#""name":"a""#), "res: {res}");
         assert!(res.contains(r#""name":"b""#), "res: {res}");
         assert!(res.contains(r#""live":true"#), "res: {res}");
+    }
+
+    #[test]
+    fn compact_self_needs_no_group_peer_needs_one() {
+        let mut p = live_pair();
+        let out = p
+            .call(&p.run_a.clone(), "compact_session", "{}")
+            .expect("self compact queues");
+        assert!(out.contains(r#""queued":true"#), "out: {out}");
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].kind, InjectKind::Command);
+        assert_eq!(due[0].text, "/compact");
+        let body = String::from_utf8(due[0].render_body()).unwrap();
+        assert!(body.contains("/compact"), "body: {body}");
+        assert!(!body.contains("send_response"), "commands carry no reply guidance: {body}");
+        let err = p
+            .call(&p.run_a.clone(), "compact_session", r#"{"target":"b"}"#)
+            .expect_err("groupless peer compact fails");
+        assert!(err.contains("no shared group"), "err: {err}");
+        let mut grouped = p.grouped();
+        grouped
+            .call(&grouped.run_a.clone(), "compact_session", r#"{"target":"b"}"#)
+            .expect("grouped peer compact queues");
+        assert_eq!(grouped.state.broker.queued(grouped.b), 1);
+    }
+
+    #[test]
+    fn schedule_fires_clear_text_then_cancel_drops() {
+        let mut p = live_pair();
+        let out = p
+            .call(&p.run_a.clone(), "schedule_prompt", r#"{"prompt":"nudge","delay_seconds":0}"#)
+            .expect("schedules");
+        assert!(out.contains("timer_id"), "out: {out}");
+        assert_eq!(p.state.broker.queued(p.a), 0, "timers wait for the tick");
+        p.state.broker.tick(std::time::Instant::now());
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!((due[0].kind, due[0].text.as_str()), (InjectKind::Command, "nudge"));
+        p.call(&p.run_a.clone(), "schedule_prompt",
+            r#"{"prompt":"fresh","delay_seconds":0,"clear_context":true}"#)
+            .expect("clear-context schedules");
+        p.state.broker.tick(std::time::Instant::now());
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].text, "/clear\nfresh", "clear prefixes the prompt");
+        let out = p
+            .call(&p.run_a.clone(), "schedule_prompt", r#"{"prompt":"later","delay_seconds":60}"#)
+            .expect("future schedules");
+        let timer = crate::policy::json_string_field(out.as_bytes(), &["timer_id"]).unwrap();
+        let cancelled = p
+            .call(&p.run_a.clone(), "cancel_scheduled_prompt", &format!(r#"{{"timer_id":"{timer}"}}"#))
+            .expect("cancel works");
+        assert!(cancelled.contains("cancelled"), "cancelled: {cancelled}");
+        p.state.broker.tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert_eq!(p.state.broker.queued(p.a), 0, "cancelled timer never fires");
+        let again = p
+            .call(&p.run_a.clone(), "cancel_scheduled_prompt", &format!(r#"{{"timer_id":"{timer}"}}"#))
+            .expect_err("fired timers stay unknown");
+        assert!(again.contains("unknown timer"), "again: {again}");
+    }
+
+    #[test]
+    fn schedule_rejects_blank_prompt_and_bad_delays() {
+        let mut p = live_pair();
+        let blank = p
+            .call(&p.run_a.clone(), "schedule_prompt", "{}")
+            .expect_err("blank prompt fails");
+        assert!(blank.contains("needs a prompt"), "blank: {blank}");
+        for args in [
+            r#"{"prompt":"x","delay_seconds":-1}"#,
+            r#"{"prompt":"x","delay_seconds":86401}"#,
+            r#"{"prompt":"x","delay_seconds":"soon"}"#,
+        ] {
+            let err = p
+                .call(&p.run_a.clone(), "schedule_prompt", args)
+                .expect_err("bad delay fails");
+            assert!(err.contains("delay_seconds"), "args {args}: {err}");
+        }
     }
 }

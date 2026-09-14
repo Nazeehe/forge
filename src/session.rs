@@ -143,6 +143,9 @@ pub struct SessionRecord {
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
     pub exit_code: Option<i32>,
+    /// Caller sticky status (blueprint #14/#15): one replaceable
+    /// `kind: message` pair, shown in the sidebar.
+    pub status: Option<crate::session_status::SessionStatus>,
     /// Sidebar stats: spawn instant plus hook/settlement counters. A tool
     /// hook (Pre/PostToolUse, PermissionRequest, Before/AfterTool) counts
     /// one call; every Allow/Deny verdict counts once.
@@ -247,6 +250,7 @@ impl SessionManager {
                 tabs,
                 active_tab: 0,
                 exit_code: None,
+                status: None,
                 spawned_at: std::time::Instant::now(),
                 tool_calls: 0,
                 approvals: 0,
@@ -825,6 +829,10 @@ impl SessionManager {
 
     pub fn get(&self, id: SessionId) -> Option<&SessionRecord> {
         self.sessions.get(&id)
+    }
+
+    pub fn get_mut(&mut self, id: SessionId) -> Option<&mut SessionRecord> {
+        self.sessions.get_mut(&id)
     }
 
     pub fn active(&self) -> Option<SessionId> {
