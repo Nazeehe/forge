@@ -420,7 +420,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "walkthrough_start",
-            description: "Open a file tour for the operator: steps is one start:end:explanation per line, file resolves against the session cwd. The overlay opens on the tour at once.",
+            description: "Open a file tour for the operator: steps is one start:end:explanation per line, file resolves against the session cwd. The overlay opens on the tour at once. Write each explanation like a coworker walking through their code out loud: a few sentences of context, what these lines do, and why it matters — never a bare label.",
             schema: r#"{"type":"object","properties":{"file":{"type":"string"},"steps":{"type":"string"},"title":{"type":"string"}},"required":["file","steps"]}"#,
         },
         ToolDef {
