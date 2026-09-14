@@ -130,18 +130,15 @@ fn startup() -> i32 {
     let mut state = app::AppState::new();
     let code = tui::run(&mut state, &mut loaded, &home, &audit);
     // Quitting serializes the live agent sessions for the next startup's
-    // restore picker. An empty topology deletes the file so no stale
-    // offer survives; failures warn instead of failing the exit.
-    let path = branding::sessions_file(&home);
-    let sessions = state.snapshot_sessions();
-    if sessions.is_empty() {
-        let _ = std::fs::remove_file(&path);
-    } else {
-        let mut file = checkpoint::SessionsFile::load(&path);
-        file.push(checkpoint::make_entry(sessions, checkpoint::now_unix()));
-        if let Err(e) = file.save(&path) {
-            eprintln!("warning: cannot save sessions: {e}");
-        }
+    // restore picker; failures warn instead of failing the exit. An
+    // empty quit leaves the file alone: it may hold older entries from
+    // before (Esc + quit-empty is a normal flow), and the picker shows
+    // each entry's age.
+    if let Err(e) = checkpoint::save_quit_snapshot(
+        &branding::sessions_file(&home),
+        state.snapshot_sessions(),
+    ) {
+        eprintln!("warning: cannot save sessions: {e}");
     }
     code
 }

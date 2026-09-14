@@ -573,6 +573,7 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
                 Span::styled(format!("× {}", detail.denials), theme::style(theme::Role::Danger)),
             ]));
             if !detail.timers.is_empty() {
+                lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "Scheduled",
                     theme::style(theme::Role::Text).add_modifier(Modifier::BOLD),
@@ -597,7 +598,9 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
 }
 
 fn stat_line(label: &str, value: &str, width: u16) -> Line<'static> {
-    let available = width.saturating_sub(2) as usize;
+    // Values end exactly at the divider edge below them: both span
+    // width-4, so nothing overshoots the rules.
+    let available = width.saturating_sub(4) as usize;
     let spaces = available.saturating_sub(label.chars().count() + value.chars().count());
     Line::from(format!("{label}{}{value}", " ".repeat(spaces.max(1))))
 }
@@ -643,10 +646,16 @@ pub(crate) fn timer_cancel_rects(sidebar: Rect, info: &SidebarInfo) -> Vec<(Stri
     let Some(header) = header else {
         return Vec::new();
     };
-    // "[Cancel]" is 8 cells, right-aligned inside the border.
-    let x = sidebar.right().saturating_sub(9).max(sidebar.x + 1);
-    let width = sidebar.right().saturating_sub(1).saturating_sub(x);
-    if width < 8 {
+    // "[Cancel]" is 8 cells. Rich sidebars right-align it to the
+    // divider edge (4 shy of the rect); compact ones have no rules,
+    // so the button hugs the border instead.
+    let edge = if sidebar.width >= 40 && sidebar.height >= 30 {
+        sidebar.right().saturating_sub(3)
+    } else {
+        sidebar.right().saturating_sub(1)
+    };
+    let x = edge.saturating_sub(8).max(sidebar.x + 1);
+    if edge.saturating_sub(x) < 8 {
         return Vec::new();
     }
     detail
@@ -1130,6 +1139,18 @@ mod tests {
     }
 
     #[test]
+    fn stat_values_end_at_divider_edge() {
+        // Dividers span width-4; values must end on the same column,
+        // never overshoot the rules the way the screenshot showed.
+        for width in [30u16, 45, 60] {
+            let line = stat_line("◷ Uptime", "41s", width);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text.chars().count(), (width - 4) as usize, "width {width}");
+            assert!(text.ends_with("41s"));
+        }
+    }
+
+    #[test]
     fn format_countdown_matches_reference_shapes() {
         use std::time::Duration;
         assert_eq!(format_countdown(Duration::from_secs(595)), "9:55");
@@ -1149,6 +1170,18 @@ mod tests {
             ],
             uptime_secs: 60, tool_calls: 1, approvals: 0, denials: 0,
         }
+    }
+
+    #[test]
+    fn scheduled_section_breathes_after_approvals() {
+        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off" };
+        let lines = rich_sidebar_lines(&info, 30, 45);
+        let header = lines
+            .iter()
+            .position(|l| l.spans.len() == 1 && l.spans[0].content == "Scheduled")
+            .expect("section renders");
+        let blank = lines[header - 1].spans.iter().all(|s| s.content.is_empty());
+        assert!(blank, "breathing room above Scheduled");
     }
 
     #[test]
@@ -1173,7 +1206,11 @@ mod tests {
         assert_eq!(rects[1].1.y, rects[0].1.y + 1, "stacked rows");
         for (_, area) in &rects {
             assert_eq!(area.width, 8, "Cancel width");
-            assert!(area.right() <= areas.sidebar.right().saturating_sub(1), "inside border");
+            assert_eq!(
+                area.right(),
+                areas.sidebar.right() - 3,
+                "button ends at the divider edge: {area:?}"
+            );
         }
         // The painted button labels sit exactly on the rects.
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();

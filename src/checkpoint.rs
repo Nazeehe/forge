@@ -117,6 +117,19 @@ impl SessionsFile {
     }
 }
 
+/// Quit-time persist: appends one snapshot when sessions are live,
+/// leaves the file alone when none are. An empty quit must never
+/// destroy older entries: dismissing the picker (Esc) then quitting
+/// fresh would otherwise eat the very offer it skipped.
+pub fn save_quit_snapshot(path: &Path, sessions: Vec<SavedSession>) -> std::io::Result<()> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let mut file = SessionsFile::load(path);
+    file.push(make_entry(sessions, now_unix()));
+    file.save(path)
+}
+
 fn parse(text: &str) -> Option<SessionsFile> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let mut entries = Vec::new();
@@ -313,6 +326,28 @@ mod tests {
         assert_eq!(back.entries.len(), 1);
         assert_eq!(back.entries[0].sessions[0].harness_session_id.as_deref(), Some("harness-1"));
         assert!(back.entries[0].label.contains('a'));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_quit_keeps_older_entries_live_quit_appends() {
+        let dir = std::env::temp_dir().join(format!("forge-ckpt-quit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions");
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved("old")], 1_700_000_000));
+        file.save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // Esc then quit-empty: the skipped offer must survive.
+        save_quit_snapshot(&path, Vec::new()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before, "empty quit writes nothing");
+        assert!(path.exists(), "empty quit deletes nothing");
+        // Quitting with live agents appends beside the old entry.
+        save_quit_snapshot(&path, vec![saved("new")]).unwrap();
+        let back = SessionsFile::load(&path);
+        assert_eq!(back.entries.len(), 2);
+        assert_eq!(back.entries[0].sessions[0].name, "old");
+        assert_eq!(back.entries[1].sessions[0].name, "new");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
