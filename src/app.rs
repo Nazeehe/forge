@@ -85,6 +85,30 @@ pub struct AppState {
     /// Drain end of the raster channel; see `drain_visual`.
     #[cfg(feature = "visual")]
     visual_rx: std::sync::mpsc::Receiver<VisualDone>,
+    /// Terminal image on screen now; see `visual_take_show`.
+    #[cfg(feature = "visual")]
+    pub visual_shown: Option<VisualShown>,
+    /// Placement id source; monotonic so retransmits never collide.
+    #[cfg(feature = "visual")]
+    visual_image_seq: u32,
+}
+
+/// Terminal image currently on screen, if any. The TUI writes the
+/// transmit/delete escapes; this only tracks what the screen holds so
+/// repeats and orphans never happen.
+#[cfg(feature = "visual")]
+pub struct VisualShown {
+    pub session: crate::session::SessionId,
+    pub generation: u64,
+    pub image_id: u32,
+}
+
+/// Claim for one transmit: the TUI positions the cursor and writes it.
+#[cfg(feature = "visual")]
+pub struct VisualShowSpec {
+    pub image_id: u32,
+    pub session: crate::session::SessionId,
+    pub generation: u64,
 }
 
 /// One finished background raster, headed for a session slot.
@@ -102,6 +126,7 @@ pub struct VisualDone {
 pub struct VisualSlot {
     pub generation: u64,
     pub png: Vec<u8>,
+    pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub title: String,
@@ -158,6 +183,10 @@ impl AppState {
             visual_tx,
             #[cfg(feature = "visual")]
             visual_rx,
+            #[cfg(feature = "visual")]
+            visual_shown: None,
+            #[cfg(feature = "visual")]
+            visual_image_seq: 0,
         }
     }
 
@@ -304,6 +333,144 @@ impl AppState {
     /// focused and a tour is open for the active session.
     pub fn walkthrough_overlay_active(&self) -> bool {
         self.walkthrough_overlay().is_some()
+    }
+
+    /// Overlay slot index of the Visual tab for one session.
+    #[cfg(feature = "visual")]
+    fn visual_slot(&self, id: crate::session::SessionId) -> Option<usize> {
+        let rec = self.manager.get(id)?;
+        OVERLAY_TABS
+            .iter()
+            .position(|tab| *tab == "Visual")
+            .map(|slot| rec.tabs.len() + slot)
+    }
+
+    /// The active session's stored visual, if it sits on its Visual
+    /// slot: the (session, generation) the terminal should show.
+    #[cfg(feature = "visual")]
+    fn visual_overlay_active(&self) -> Option<(crate::session::SessionId, u64)> {
+        let active = self.manager.active()?;
+        let (view_id, index) = self.overlay_view?;
+        if view_id != active || Some(index) != self.visual_slot(active) {
+            return None;
+        }
+        let slot = self.visual_slots.get(&active)?;
+        Some((active, slot.generation))
+    }
+
+    /// Claim the next terminal transmit, if the overlay wants an image
+    /// the screen does not already show. The TUI positions the cursor
+    /// and writes the escape; `None` means nothing to do.
+    #[cfg(feature = "visual")]
+    pub fn visual_take_show(&mut self, kitty: bool) -> Option<VisualShowSpec> {
+        if !kitty {
+            return None;
+        }
+        let (session, generation) = self.visual_overlay_active()?;
+        if matches!(&self.visual_shown, Some(s) if s.session == session && s.generation == generation)
+        {
+            return None;
+        }
+        self.visual_image_seq += 1;
+        let spec = VisualShowSpec {
+            image_id: self.visual_image_seq,
+            session,
+            generation,
+        };
+        self.visual_shown = Some(VisualShown {
+            session,
+            generation,
+            image_id: spec.image_id,
+        });
+        Some(spec)
+    }
+
+    /// Release the terminal image when the overlay no longer wants it:
+    /// tab moved away, newer generation stored, or session gone.
+    /// Returns the placement id for the TUI to delete.
+    #[cfg(feature = "visual")]
+    pub fn visual_take_hide(&mut self) -> Option<u32> {
+        let shown = self.visual_shown.as_ref()?;
+        if self.visual_overlay_active() == Some((shown.session, shown.generation)) {
+            return None;
+        }
+        let image_id = shown.image_id;
+        self.visual_shown = None;
+        Some(image_id)
+    }
+
+    /// PNG bytes of the image the terminal currently shows, if any.
+    #[cfg(feature = "visual")]
+    pub fn visual_shown_png(&self) -> Option<&[u8]> {
+        let shown = self.visual_shown.as_ref()?;
+        self.visual_slots.get(&shown.session).map(|s| s.png.as_slice())
+    }
+
+    /// Unconditional take of the shown image id, for shutdown cleanup
+    /// while the overlay still wants it.
+    #[cfg(feature = "visual")]
+    pub fn visual_take_shown(&mut self) -> Option<u32> {
+        self.visual_shown.take().map(|s| s.image_id)
+    }
+
+    /// Visual pane content: title and alt text always; half-block art
+    /// when the terminal cannot take a Kitty image (the image paints
+    /// over the pane in Kitty mode, so no art is emitted there).
+    #[cfg(feature = "visual")]
+    pub fn visual_view(&self, id: crate::session::SessionId, kitty: bool) -> crate::ui::PaneView {
+        use ratatui::style::{Color, Style};
+        let rec = self.manager.get(id).expect("ordered session exists");
+        let live = rec.state.is_live();
+        let title = format!("{} · Visual", rec.name);
+        let text = crate::theme::style(crate::theme::Role::Text);
+        let muted = crate::theme::style(crate::theme::Role::Muted);
+        let line = |content: &str, style: Style| {
+            vec![crate::ui::SpanView {
+                text: content.to_string(),
+                style,
+            }]
+        };
+        let Some(slot) = self.visual_slots.get(&id) else {
+            return crate::ui::PaneView {
+                title,
+                lines: vec![line(
+                    "No visualization yet — ask this session to show one",
+                    muted,
+                )],
+                live,
+                focused: true,
+                cursor: None,
+            };
+        };
+        let mut lines = Vec::new();
+        if !slot.title.is_empty() {
+            lines.push(line(&slot.title, text));
+        }
+        if !kitty {
+            let cols = self.term_size.1.max(1) as usize;
+            for row in crate::visual::halfblock_rows(&slot.rgba, slot.width, slot.height, cols) {
+                lines.push(
+                    row.into_iter()
+                        .map(|cell| crate::ui::SpanView {
+                            text: cell.ch.to_string(),
+                            style: Style::default()
+                                .fg(Color::Rgb(cell.fg.0, cell.fg.1, cell.fg.2))
+                                .bg(Color::Rgb(cell.bg.0, cell.bg.1, cell.bg.2)),
+                        })
+                        .collect(),
+                );
+            }
+        }
+        if !slot.alt.is_empty() {
+            lines.push(line(&slot.alt, muted));
+        }
+        crate::ui::PaneView {
+            title,
+            lines,
+            live,
+            focused: true,
+            cursor: None,
+        }
     }
 
     /// Placeholder pane behind the immediate-mode tour render: the TUI
@@ -662,6 +829,7 @@ impl AppState {
             VisualSlot {
                 generation: done.generation,
                 png: frame.png,
+                rgba: frame.rgba,
                 width: frame.width,
                 height: frame.height,
                 title: done.title,
@@ -672,10 +840,13 @@ impl AppState {
         self.dirty = true;
     }
 
-    /// Decoded bytes held across all slots.
+    /// Image bytes held across all slots: transmit PNG plus fallback RGBA.
     #[cfg(feature = "visual")]
     fn visual_bytes(&self) -> usize {
-        self.visual_slots.values().map(|slot| slot.png.len()).sum()
+        self.visual_slots
+            .values()
+            .map(|slot| slot.png.len() + slot.rgba.len())
+            .sum()
     }
 
     /// Enforce the budget: oldest sessions first, but never the
@@ -850,6 +1021,10 @@ impl AppState {
                             .get(index).copied().unwrap_or("View");
                         if label == "Walkthrough" {
                             return self.walkthrough_view(id);
+                        }
+                        #[cfg(feature = "visual")]
+                        if label == "Visual" {
+                            return self.visual_view(id, crate::visual::kitty_supported_env());
                         }
                         return crate::ui::PaneView {
                             title: format!("{} · {label}", rec.name),
@@ -2857,7 +3032,12 @@ mod tests {
             generation,
             title: String::new(),
             alt: String::new(),
-            result: Ok(crate::visual::RasterFrame { png, width, height }),
+            result: Ok(crate::visual::RasterFrame {
+                png,
+                rgba: Vec::new(),
+                width,
+                height,
+            }),
         });
     }
 
@@ -2945,6 +3125,7 @@ mod tests {
             alt: String::new(),
             result: Ok(crate::visual::RasterFrame {
                 png: fake_png(64, 10, 10),
+                rgba: Vec::new(),
                 width: 10,
                 height: 10,
             }),
@@ -2990,6 +3171,72 @@ mod tests {
             r#"{"content":"flowchart LR\n    A-->B"}"#,
         );
         assert!(out.contains("stale run ID"), "stale: {out}");
+    }
+
+    #[cfg(feature = "visual")]
+    fn show_visual_overlay(state: &mut AppState, id: crate::session::SessionId) {
+        // Selection clears the overlay, so focus first, then open it.
+        state.select_session(0);
+        let slot = state.visual_slot(id).expect("visual slot exists");
+        state.overlay_view = Some((id, slot));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_take_show_hide_tracks_terminal_image() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        show_visual_overlay(&mut state, id);
+        let spec = state.visual_take_show(true).expect("show once");
+        assert_eq!(spec.generation, 1);
+        assert!(state.visual_take_show(true).is_none(), "already shown");
+        assert!(state.visual_take_show(false).is_none(), "no kitty no show");
+        assert_eq!(state.visual_shown_png().unwrap().len(), 64);
+        // New generation hides the old image, then shows the new one.
+        complete(&mut state, id, 2, fake_png(64, 10, 10));
+        assert_eq!(state.visual_take_hide(), Some(spec.image_id));
+        let spec2 = state.visual_take_show(true).expect("reshow");
+        assert_ne!(spec2.image_id, spec.image_id, "fresh placement id");
+        // Overlay away hides; double hide is silent.
+        state.overlay_view = None;
+        assert_eq!(state.visual_take_hide(), Some(spec2.image_id));
+        assert_eq!(state.visual_take_hide(), None);
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_view_falls_back_to_halfblock_with_alt() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        // 2x2: red/green over blue/white, titled with alt text.
+        let mut rgba = Vec::new();
+        for p in [[255u8, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]] {
+            rgba.extend_from_slice(&p);
+        }
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba,
+            width: 2,
+            height: 2,
+            title: "flow".to_string(),
+            alt: "a diagram".to_string(),
+        });
+        let view = state.visual_view(id, false);
+        assert!(view.title.contains("Visual"), "pane title: {}", view.title);
+        let text: String = view.lines.iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
+        assert!(text.contains("flow"), "title line: {text:?}");
+        assert!(text.contains("a diagram"), "alt line: {text:?}");
+        assert!(text.contains('▀'), "half-block art: {text:?}");
+        let cell = &view.lines[1][0];
+        assert_eq!(cell.style.fg, Some(ratatui::style::Color::Rgb(255, 0, 0)));
+        assert_eq!(cell.style.bg, Some(ratatui::style::Color::Rgb(0, 0, 255)));
+        // Kitty mode carries title and alt for the record, no art.
+        let view = state.visual_view(id, true);
+        let text: String = view.lines.iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
+        assert!(text.contains("flow") && text.contains("a diagram"));
+        assert!(!text.contains('▀'), "image paints over the pane");
     }
 
     #[test]

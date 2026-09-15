@@ -172,6 +172,14 @@ pub fn run(
             ));
         }
     }
+    // Image cleanup while the alternate screen is still up: the
+    // overlay may still want its visual at quit, so take unconditionally.
+    #[cfg(feature = "visual")]
+    if let Some(image_id) = state.visual_take_shown() {
+        use std::io::Write as _;
+        let _ = write!(io::stdout(), "{}", crate::visual::kitty_delete(image_id));
+        let _ = io::stdout().flush();
+    }
     if let Err(e) = result {
         eprintln!("error: main loop failed: {e}");
         crate::relay::clear_endpoint_file(home);
@@ -179,6 +187,40 @@ pub fn run(
     }
     crate::relay::clear_endpoint_file(home);
     0
+}
+
+/// Kitty image sync, after the ratatui draw flushed: hide first (a
+/// replacement emits both sides), then position the cursor at the
+/// overlay origin and transmit `c` cell columns wide. Best effort —
+/// a dead terminal means we are quitting anyway.
+#[cfg(feature = "visual")]
+fn sync_visual_terminal(
+    state: &mut AppState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> io::Result<()> {
+    use std::io::Write as _;
+    if let Some(image_id) = state.visual_take_hide() {
+        write!(io::stdout(), "{}", crate::visual::kitty_delete(image_id))?;
+    }
+    if let Some(spec) = state.visual_take_show(crate::visual::kitty_supported_env()) {
+        if let Some(png) = state.visual_shown_png() {
+            let size = terminal.size()?;
+            let area = crate::walkthrough::walk_area(ratatui::layout::Rect::new(
+                0,
+                0,
+                size.width,
+                size.height,
+            ));
+            crossterm::execute!(io::stdout(), crossterm::cursor::MoveTo(area.x, area.y))?;
+            write!(
+                io::stdout(),
+                "{}",
+                crate::visual::kitty_transmit(png, spec.image_id, area.width)
+            )?;
+        }
+    }
+    io::stdout().flush()?;
+    Ok(())
 }
 
 fn loop_until_quit(
@@ -327,6 +369,8 @@ fn loop_until_quit(
                     tour.view(f, crate::walkthrough::walk_area(area));
                 }
             })?;
+            #[cfg(feature = "visual")]
+            sync_visual_terminal(state, &mut *terminal)?;
             if cursor_visible != cursor_shown {
                 if cursor_visible {
                     terminal.show_cursor()?;

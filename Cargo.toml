@@ -24,7 +24,9 @@ tuirealm = "4.1.0"
 vt100 = { path = "vendor/vt100" }
 # Mermaid diagrams for the Visual tab (U1 spike): library only, no CLI.
 mermaid-rs-renderer = { version = "0.3", default-features = false, features = ["png"], optional = true }
+# PNG decode for the half-block fallback (pure Rust).
+png = { version = "0.17", optional = true }
 
 [features]
 default = ["visual"]
-visual = ["mermaid-rs-renderer/png"]
+visual = ["mermaid-rs-renderer/png", "png"]
