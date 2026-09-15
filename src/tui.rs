@@ -147,6 +147,15 @@ pub fn run(
             return 1;
         }
     };
+    // Reclaim placements leaked while the delete escape was malformed
+    // (`a=D`): those ids are untracked, so clear them once up front.
+    // Forge owns the fullscreen terminal; nothing else paints images.
+    #[cfg(feature = "visual")]
+    if crate::visual::kitty_supported_env() {
+        use std::io::Write as _;
+        let _ = write!(io::stdout(), "{}", crate::visual::kitty_delete_all());
+        let _ = io::stdout().flush();
+    }
     let result = loop_until_quit(
         state,
         &mut terminal,

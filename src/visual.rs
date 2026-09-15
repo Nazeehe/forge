@@ -162,9 +162,19 @@ pub fn kitty_transmit(png: &[u8], image_id: u32, cols: u16, rows: u16) -> String
     out
 }
 
-/// Delete escape that also frees the image data (`a=D,d=I`).
+/// Delete one image by id, freeing its data too (`a=d,d=I`). The
+/// action is lowercase: an uppercase action is ignored and the
+/// placement leaks, ghosting over later tabs and stacking a fresh
+/// copy on every revisit.
 pub fn kitty_delete(image_id: u32) -> String {
-    format!("\x1b_Ga=D,d=I,i={image_id}\x1b\\")
+    format!("\x1b_Ga=d,d=I,i={image_id}\x1b\\")
+}
+
+/// Delete all visible placements (`a=d` alone). Startup purge for
+/// placements leaked while the delete above was malformed: those ids
+/// are untracked, so only a blanket clear reclaims them.
+pub fn kitty_delete_all() -> String {
+    "\x1b_Ga=d\x1b\\".to_string()
 }
 
 /// One half-block cell: upper pixel on lower pixel.
@@ -465,7 +475,16 @@ mod tests {
 
     #[test]
     fn kitty_delete_frees_by_id() {
-        assert_eq!(kitty_delete(9), "\x1b_Ga=D,d=I,i=9\x1b\\");
+        // Spec section "How are images deleted": the action is
+        // lowercase `a=d`; uppercase `d=I` also frees the image data.
+        // An uppercase action is ignored, leaking the placement.
+        assert_eq!(kitty_delete(9), "\x1b_Ga=d,d=I,i=9\x1b\\");
+    }
+
+    #[test]
+    fn kitty_delete_all_clears_visible_placements() {
+        // Spec example: `a=d` alone deletes all visible placements.
+        assert_eq!(kitty_delete_all(), "\x1b_Ga=d\x1b\\");
     }
 
     fn px(r: u8, g: u8, b: u8) -> [u8; 4] {
