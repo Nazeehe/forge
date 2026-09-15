@@ -63,7 +63,28 @@ Rules:
 - Semantic theme APIs only (`src/theme.rs`). No inline RGB. Rounded borders,
   never blank panels.
 
-## 5. Scope (locked for this bring-up)
+## 5. UX design guidance (follow for all UI work)
+
+- Hierarchy comes from spacing and placement first, color last. Never
+  make color carry meaning alone.
+- One alignment grid per view: every element aligns to a shared column
+  or row. Nothing sits at an arbitrary offset.
+- Content never touches chrome: minimum 2 cells of side padding and 1
+  row of top padding inside any bordered container.
+- Modals own the center: primary action rows center in the content
+  width. Everywhere else, align to the grid — never center body text.
+- Stable layout: conditional rows (errors, empty states) get fixed
+  slots; footers and hints pin to fixed rows. State changes must never
+  shove surrounding content around.
+- Degrade gracefully below thresholds: cramped terminals fall back to
+  compact stacking, and hints pick their long/short form from measured
+  content width — text never wraps or clips silently.
+- Mouse hit areas recompute live from the same rects the render paints,
+  so clicks can never desync from what is on screen.
+- Render tests pin the geometry: coordinates, centering math, pinned
+  rows, and both layout modes live as colocated buffer assertions.
+
+## 6. Scope (locked for this bring-up)
 
 - **BUILD:** Rust `forge` only — TUI, sessions/PTY, hooks/permissions (Off,
   Safe-Only, YOLO first; AI-Assisted later), MCP broker + local tool surface,
@@ -78,7 +99,7 @@ Rules:
   `cli_tool` registry (name, binary, env override, flags, hook capabilities).
   Adding a harness MUST be a data record + hook mapping, never a refactor.
 
-## 6. Verification before "done"
+## 7. Verification before "done"
 
 - `bash -lc 'cargo build'` and `bash -lc 'cargo test'` green in-session.
   Multi-filter runs need `--`: `cargo test -- session:: event::` (bare extra
