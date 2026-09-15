@@ -214,7 +214,7 @@ fn visual_viewport(
     let (id, _) = state.visual_focused_frame()?;
     let (rows, cols) = state.term_size;
     let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
-    let chrome = ui::visual_chrome(ui::pane_content_area(&areas));
+    let chrome = ui::visual_chrome(ui::pane_content_area(&areas), state.pill_tabs);
     let cell = match crossterm::terminal::window_size() {
         Ok(ws) => crate::visual::cell_px(cols, rows, ws.width as u32, ws.height as u32),
         Err(_) => crate::visual::FALLBACK_CELL_PX,
@@ -244,9 +244,9 @@ fn sync_visual_terminal(
             if state.visual_current_paint() != Some(paint) {
                 if let Some(png) = state.visual_frame_png(id, generation, paint) {
                     if let Some(spec) = state.visual_take_show(true, paint) {
-                        if spec.replace {
-                            write!(io::stdout(), "{}", crate::visual::kitty_delete(spec.image_id))?;
-                        }
+                        // No delete before a same-id re-display: the
+                        // fixed placement id swaps it in place, while
+                        // delete-then-show flashes the bare pane.
                         let placed = spec.paint;
                         if placed.out_cols > 0 && placed.out_rows > 0 {
                             crossterm::execute!(
@@ -1155,7 +1155,7 @@ mod tests {
         state.apply(AppEvent::Resize(40, 180));
         let id = open_visual_overlay(&mut state);
         let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let chrome = ui::visual_chrome(ui::pane_content_area(&areas));
+        let chrome = ui::visual_chrome(ui::pane_content_area(&areas), state.pill_tabs);
         let (area_cols, area_rows) = (chrome.image.width, chrome.image.height);
         for _ in 0..3 {
             assert!(state.visual_zoom(id, ui::VisualButton::ZoomIn, area_cols, area_rows, 8.0, 16.0));

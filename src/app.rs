@@ -111,9 +111,6 @@ pub struct VisualShowSpec {
     pub session: crate::session::SessionId,
     pub generation: u64,
     pub paint: crate::visual::VisualPaint,
-    /// Same placement id, new pixels: the TUI deletes before
-    /// re-transmitting instead of claiming a fresh id.
-    pub replace: bool,
 }
 
 /// One finished background raster, headed for a session slot.
@@ -372,9 +369,10 @@ impl AppState {
     /// Claim the next terminal transmit, if the overlay wants an image
     /// the screen does not already show. The paint fingerprint covers
     /// zoom, scroll, crop, and cursor, so scrolling or zooming
-    /// re-transmits under the same placement id (`replace`) while an
-    /// untouched frame claims nothing. The TUI positions the cursor
-    /// and writes the escape; `None` means nothing to do.
+    /// re-transmits under the same image id while an untouched frame
+    /// claims nothing. The fixed placement id swaps the re-display in
+    /// place without flicker. The TUI positions the cursor and writes
+    /// the escape; `None` means nothing to do.
     #[cfg(feature = "visual")]
     pub fn visual_take_show(
         &mut self,
@@ -389,17 +387,20 @@ impl AppState {
         if same_slot && matches!(&self.visual_shown, Some(s) if s.paint == paint) {
             return None;
         }
-        let (image_id, replace) = match &self.visual_shown {
+        // Same frame, new viewport: reuse the image id so the fixed
+        // placement id swaps it in place; anything else is a fresh
+        // placement.
+        let image_id = match &self.visual_shown {
             Some(shown) if shown.session == session && shown.generation == generation => {
-                (shown.image_id, true)
+                shown.image_id
             }
             _ => {
                 self.visual_image_seq += 1;
-                (self.visual_image_seq, false)
+                self.visual_image_seq
             }
         };
         self.visual_shown = Some(VisualShown { session, generation, image_id, paint });
-        Some(VisualShowSpec { image_id, session, generation, paint, replace })
+        Some(VisualShowSpec { image_id, session, generation, paint })
     }
 
     /// Whether the focused tab is a session Visual tab: arrows,
@@ -639,24 +640,12 @@ impl AppState {
         // Row zero is always the zoom strip, in both backends: the
         // Kitty image paints only the region below it, and the mouse
         // hit test assumes these exact columns.
-        lines.push(vec![
-            crate::ui::SpanView {
-                text: crate::ui::VISUAL_ZOOM_IN_LABEL.to_string(),
-                style: crate::theme::style(crate::theme::Role::Focus),
-            },
-            crate::ui::SpanView {
-                text: "  ".to_string(),
-                style: Style::default(),
-            },
-            crate::ui::SpanView {
-                text: crate::ui::VISUAL_ZOOM_OUT_LABEL.to_string(),
-                style: crate::theme::style(crate::theme::Role::Focus),
-            },
-            crate::ui::SpanView {
-                text: "  ←→↑↓ scroll · wheel scrolls".to_string(),
-                style: muted,
-            },
-        ]);
+        let mut strip = crate::ui::visual_button_spans(self.pill_tabs);
+        strip.push(crate::ui::SpanView {
+            text: "  ←→↑↓ scroll · wheel scrolls".to_string(),
+            style: muted,
+        });
+        lines.push(strip);
         if !slot.title.is_empty() {
             lines.push(line(&slot.title, text));
         }
@@ -667,7 +656,11 @@ impl AppState {
             // capped at the tab image region like the Kitty paint.
             let (rows, cols) = self.term_size;
             let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
-            let image = crate::ui::visual_chrome(crate::ui::pane_content_area(&areas)).image;
+            let chrome = crate::ui::visual_chrome(
+                crate::ui::pane_content_area(&areas),
+                self.pill_tabs,
+            );
+            let image = chrome.image;
             if let Some(paint) =
                 self.visual_paint(id, image, crate::visual::FALLBACK_CELL_PX.0, crate::visual::FALLBACK_CELL_PX.1)
             {
@@ -3441,7 +3434,6 @@ mod tests {
         let paint = paint_for(&state, id);
         let spec = state.visual_take_show(true, paint).expect("show once");
         assert_eq!(spec.generation, 1);
-        assert!(!spec.replace, "first claim takes a fresh id");
         assert!(state.visual_take_show(true, paint).is_none(), "already shown");
         assert!(state.visual_take_show(false, paint).is_none(), "no kitty no show");
         assert_eq!(state.visual_frame_png(id, 1, paint).unwrap().len(), 64);
@@ -3465,13 +3457,14 @@ mod tests {
         show_visual_overlay(&mut state, id);
         let paint = paint_for(&state, id);
         let spec = state.visual_take_show(true, paint).expect("show");
-        // Zooming changes the fingerprint: same placement id, replace.
+        // Zooming changes the fingerprint but reuses the image id, so
+        // the fixed placement id swaps the re-display without a
+        // delete flash in between.
         assert!(state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
         let zoomed = paint_for(&state, id);
         assert_ne!(zoomed, paint, "zoom moves the paint");
         let reshow = state.visual_take_show(true, zoomed).expect("repaint");
         assert_eq!(reshow.image_id, spec.image_id, "no fresh id for a viewport change");
-        assert!(reshow.replace, "TUI deletes before re-transmitting");
         assert!(state.visual_take_show(true, zoomed).is_none(), "paint now current");
     }
 

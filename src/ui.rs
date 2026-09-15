@@ -176,10 +176,64 @@ pub fn pane_content_area(areas: &ChromeAreas) -> Rect {
 }
 
 /// Visual tab zoom buttons: fixed labels, so hit rects stay stable.
+/// Bracketed legacy text; pills use the bare text below with caps.
 #[cfg(feature = "visual")]
 pub const VISUAL_ZOOM_IN_LABEL: &str = "[+ zoom in]";
 #[cfg(feature = "visual")]
 pub const VISUAL_ZOOM_OUT_LABEL: &str = "[- zoom out]";
+
+/// Pill inner text for the zoom buttons (caps and pads wrap it).
+#[cfg(feature = "visual")]
+pub const VISUAL_ZOOM_IN_TEXT: &str = "+ zoom in";
+#[cfg(feature = "visual")]
+pub const VISUAL_ZOOM_OUT_TEXT: &str = "- zoom out";
+
+/// Zoom button widths in cells: pills add caps plus inner pads, like
+/// the sidebar mode pills; legacy is the bare bracketed label.
+#[cfg(feature = "visual")]
+pub fn visual_button_widths(pills: bool) -> (u16, u16) {
+    if pills {
+        (
+            VISUAL_ZOOM_IN_TEXT.len() as u16 + 4,
+            VISUAL_ZOOM_OUT_TEXT.len() as u16 + 4,
+        )
+    } else {
+        (
+            VISUAL_ZOOM_IN_LABEL.len() as u16,
+            VISUAL_ZOOM_OUT_LABEL.len() as u16,
+        )
+    }
+}
+
+/// Zoom button strip spans (both buttons plus the two-space gap),
+/// pill or legacy to match the active chrome. Widths equal
+/// [`visual_button_widths`], so the hit rects never desync.
+#[cfg(feature = "visual")]
+pub fn visual_button_spans(pills: bool) -> Vec<SpanView> {
+    if pills {
+        let cap = Style::default().fg(Color::DarkGray);
+        let label = theme::style(theme::Role::TabInactive);
+        let mut spans = Vec::new();
+        for text in [VISUAL_ZOOM_IN_TEXT, VISUAL_ZOOM_OUT_TEXT] {
+            if !spans.is_empty() {
+                spans.push(SpanView { text: "  ".to_string(), style: Style::default() });
+            }
+            spans.push(SpanView { text: PILL_LEFT.to_string(), style: cap });
+            spans.push(SpanView { text: " ".to_string(), style: label });
+            spans.push(SpanView { text: text.to_string(), style: label });
+            spans.push(SpanView { text: " ".to_string(), style: label });
+            spans.push(SpanView { text: PILL_RIGHT.to_string(), style: cap });
+        }
+        spans
+    } else {
+        let button = theme::style(theme::Role::Focus);
+        vec![
+            SpanView { text: VISUAL_ZOOM_IN_LABEL.to_string(), style: button },
+            SpanView { text: "  ".to_string(), style: Style::default() },
+            SpanView { text: VISUAL_ZOOM_OUT_LABEL.to_string(), style: button },
+        ]
+    }
+}
 
 /// Which Visual tab zoom button a click hit, if any.
 #[cfg(feature = "visual")]
@@ -201,7 +255,7 @@ pub struct VisualChrome {
 }
 
 #[cfg(feature = "visual")]
-pub fn visual_chrome(content: Rect) -> VisualChrome {
+pub fn visual_chrome(content: Rect, pills: bool) -> VisualChrome {
     let row_h = if content.height > 0 { 1 } else { 0 };
     let image = Rect::new(
         content.x,
@@ -209,10 +263,10 @@ pub fn visual_chrome(content: Rect) -> VisualChrome {
         content.width,
         content.height.saturating_sub(row_h),
     );
-    let zin_w = (VISUAL_ZOOM_IN_LABEL.len() as u16).min(content.width);
+    let (zin_full, zout_full) = visual_button_widths(pills);
+    let zin_w = zin_full.min(content.width);
     let zout_x = content.x.saturating_add(zin_w + 2);
-    let zout_w = (VISUAL_ZOOM_OUT_LABEL.len() as u16)
-        .min(content.width.saturating_sub(zin_w + 2));
+    let zout_w = zout_full.min(content.width.saturating_sub(zin_w + 2));
     VisualChrome {
         image,
         zoom_in: Rect::new(content.x, content.y, zin_w, row_h),
@@ -1588,7 +1642,7 @@ mod tests {
     #[cfg(feature = "visual")]
     #[test]
     fn visual_chrome_splits_buttons_row_and_image_region() {
-        let chrome = visual_chrome(Rect::new(10, 5, 60, 20));
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false);
         assert_eq!(
             (chrome.zoom_in.x, chrome.zoom_in.y),
             (10, 5),
@@ -1612,10 +1666,49 @@ mod tests {
 
     #[cfg(feature = "visual")]
     #[test]
+    fn visual_chrome_pills_widen_the_buttons() {
+        // Pill text plus caps and pads: "+ zoom in" fills 13 cells,
+        // "- zoom out" 14, like the sidebar mode pills.
+        assert_eq!(visual_button_widths(true), (13, 14));
+        assert_eq!(visual_button_widths(false), (11, 12));
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), true);
+        assert_eq!((chrome.zoom_in.x, chrome.zoom_in.width), (10, 13));
+        assert_eq!((chrome.zoom_out.x, chrome.zoom_out.width), (25, 14));
+        assert_eq!(visual_button_at(&chrome, 22, 5), Some(VisualButton::ZoomIn));
+        assert_eq!(visual_button_at(&chrome, 23, 5), None, "gap is dead");
+        assert_eq!(visual_button_at(&chrome, 25, 5), Some(VisualButton::ZoomOut));
+        assert_eq!(visual_button_at(&chrome, 38, 5), Some(VisualButton::ZoomOut));
+        assert_eq!(visual_button_at(&chrome, 39, 5), None, "past the cap");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_button_spans_match_the_active_style() {
+        let strip: String = visual_button_spans(true)
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(strip.contains(PILL_LEFT), "pill caps: {strip:?}");
+        assert!(strip.contains("+ zoom in") && strip.contains("- zoom out"));
+        assert!(!strip.contains('['), "no legacy brackets: {strip:?}");
+        let width: usize = visual_button_spans(true).iter().map(|s| s.text.chars().count()).sum();
+        assert_eq!(width, 13 + 2 + 14, "buttons plus gap");
+        let legacy: String = visual_button_spans(false)
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(legacy.contains("[+ zoom in]") && legacy.contains("[- zoom out]"));
+        assert!(!legacy.contains(PILL_LEFT), "no caps: {legacy:?}");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
     fn visual_chrome_degrades_on_tiny_content() {
-        let chrome = visual_chrome(Rect::new(0, 0, 0, 0));
-        assert_eq!(chrome.image.height, 0);
-        assert_eq!(visual_button_at(&chrome, 0, 0), None);
+        for pills in [false, true] {
+            let chrome = visual_chrome(Rect::new(0, 0, 0, 0), pills);
+            assert_eq!(chrome.image.height, 0);
+            assert_eq!(visual_button_at(&chrome, 0, 0), None);
+        }
     }
 
     fn text_of(line: &Line) -> String {

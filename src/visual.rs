@@ -148,8 +148,11 @@ pub fn kitty_transmit(png: &[u8], image_id: u32, cols: u16, rows: u16) -> String
     for (i, chunk) in chunks.iter().enumerate() {
         let more = if i + 1 < total { 1 } else { 0 };
         if i == 0 {
+            // Fixed placement id: re-transmitting the same (image,
+            // placement) pair replaces in place without flicker, per
+            // the spec. Without `p`, a same-id re-display flashes.
             out.push_str(&format!(
-                "\x1b_Ga=T,f=100,t=d,S={},V={},i={image_id},c={cols},r={rows},m={more};",
+                "\x1b_Ga=T,f=100,t=d,S={},V={},i={image_id},p=1,c={cols},r={rows},m={more};",
                 png.len(),
                 png.len()
             ));
@@ -461,7 +464,7 @@ mod tests {
         let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4];
         let esc = kitty_transmit(&png, 7, 80, 24);
         assert!(esc.starts_with("\x1b_G"), "APC open");
-        for key in ["a=T", "f=100", "t=d", "i=7", "c=80", "r=24"] {
+        for key in ["a=T", "f=100", "t=d", "i=7", "p=1", "c=80", "r=24"] {
             assert!(esc.contains(key), "carries {key}: {esc:?}");
         }
         assert!(esc.contains(&base64_encode(&png)), "payload rides");
