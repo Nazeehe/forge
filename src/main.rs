@@ -293,6 +293,10 @@ mod tests {
             "hook-relay",
             "install-hooks",
             "uninstall-hooks",
+            "mcp-serve",
+            "FORGE_IPC_ENDPOINT",
+            "FORGE_RUN_ID",
+            "SKILL.md",
         ] {
             assert!(
                 DEFAULT_AGENTS_MD.contains(needle),

@@ -110,10 +110,20 @@ Rules the parser enforces (violations are startup errors):
 
 ### Adding a new agent CLI
 
-Back up `agents.json` first, then work top to bottom. You are
-expected to run shell commands for discovery (`--help`, `--version`,
-inspecting settings files) but never to bypass validation: an
-invalid file is a startup error naming the field — fix it and retry.
+You are running inside forge, and you do the whole job: discover the
+CLI, write its `agents.json` entry, install hooks/MCP/skills directly
+into the CLI's own configuration files, verify, and report. Back up
+every file before you edit it. `forge install-hooks` / `install-mcp`
+/ `install-skills` only cover the built-in agents — for a new CLI,
+your hands are the installer. Never bypass validation: an invalid
+`agents.json` is a startup error naming the field — fix it and retry.
+
+File rules for every settings file you touch (these mirror the
+installer exactly): a missing file starts as `{}`; a corrupt file is
+a hard stop, never clobber it; preserve every foreign entry; match
+existing forge entries by the `hook-relay` command substring (hooks)
+or the `"forge"` server key (MCP) so re-running never duplicates;
+write atomically (temp file plus rename).
 
 1. **Launch.** From `<bin> --help`: the model flag (usually
    `--model`) and any env-var binary override convention. If the CLI
@@ -124,8 +134,7 @@ invalid file is a startup error naming the field — fix it and retry.
    with a no-id fallback flag) or subcommand style (`resume [<id>]`
    with `resume --last`). Fill `subcommand`, `with_id`, and a
    non-empty `without_id`.
-3. **Hooks — discover, then decide.** Forge needs three capabilities
-   from the hook system, and all three are mandatory:
+3. **Hooks.** Forge needs three capabilities, all mandatory:
    - a session-start event reporting the harness conversation id
      (restore resumes with it; without this, sessions cannot
      reconnect after a restart — use `session_attribution:
@@ -134,44 +143,56 @@ invalid file is a startup error naming the field — fix it and retry.
    - turn-start and turn-end events (queued peer replies deliver on
      the turn edges; without them sessions wedge after tool calls);
    - hook commands execute with the event JSON on stdin and can
-     invoke `<forge-bin> hook-relay` (find the forge binary with
-     `command -v forge`; the command itself takes no shell
-     metacharacters).
-   - If the settings document is
-     `{hooks: {Event: [{matcher, hooks: [{command}]}]}}`, write the
-     `hooks` block (`format: "claude-hooks"`) with the discovered
-     file path (relative to `~`, or `{env, default}` based when the
-     CLI honors a home override), the exact event names, and
-     `timeout: 10` unless the CLI forbids per-hook timeouts.
-     `matcher` stays `""`.
-   - **Any other mechanism — CLI-managed hooks (e.g. a `hooks`
-     subcommand), TOML hooks, anything needing a shell — is a hard
-     stop.** Do not hand-write settings files and do not improvise
-     installer behavior. Report that `install-hooks` needs a new
-     format in code; launching and resume still work, hooks do not.
-4. **Write the entry** following the template above. No approval
-   bypasses anywhere (`yolo`, `dangerously`, and friends are
-   rejected at parse). Restart forge; the create dialog lists agents
-   in file order.
-5. **Install hooks.** Run `forge install-hooks` (the all-agents
-   path, not a per-harness alias) and confirm the new agent's
-   outcome line reads `installed` or `unchanged` — never `error` or
-   `skipped`. `skipped` means the block did not take; recheck step 3.
-6. **Verify end to end.** Create a session with the new agent and
-   confirm it binds (the harness id flows via SessionStart).
-   Quit, relaunch, confirm the restore picker offers it, and confirm
-   resume reconnects. Then `forge uninstall-hooks` followed by
-   `forge install-hooks` to confirm a clean round-trip.
-7. **Report.** What was added, the discovery evidence for each
-   resume/hook claim (exact `--help` text or settings path), the
-   verification performed, and anything left for code (e.g. a new
-   hook format, a per-harness install alias).
+     invoke `<forge-bin> hook-relay` — the absolute forge binary
+     from `command -v forge` plus `hook-relay`, no shell
+     metacharacters (some CLIs run hook commands without a shell).
+   Find where the CLI reads hooks (`--help`, docs, settings files).
+   For a `{hooks: {Event: [{matcher, hooks: [{command}]}]}}`
+   document, add one `{matcher: "", hooks: [{type: "command",
+   command: "<forge-bin> hook-relay"}]}` group per event, plus
+   `"timeout": 10` inside the handler unless the CLI forbids
+   per-hook timeouts. Then record the same path, events, and timeout
+   in the entry's `hooks` block (`format: "claude-hooks"`) so
+   future installer runs manage what you installed.
+   **Any other mechanism — CLI-managed hooks, TOML hooks, anything
+   needing a shell — is a hard stop.** Do not improvise. Omit the
+   `hooks` block and report that `install-hooks` needs a new format
+   in code; launching and resume still work, hooks do not.
+4. **MCP.** Forge exposes one server: name `"forge"`, stdio
+   transport, command = absolute forge binary, args `["mcp-serve"]`,
+   requiring `FORGE_IPC_ENDPOINT` and `FORGE_RUN_ID` in its
+   environment. Find the CLI's server registration (a settings JSON
+   map — key it `"forge"` — or a CLI command like `mcp add`) and
+   register exactly that. If the CLI scrubs MCP server environments
+   (comms fail with no route after an otherwise good install), find
+   its passthrough/allowlist mechanism and allowlist both variables.
+5. **Skills.** If the CLI has a skills-directory convention (check
+   its docs), copy `SKILL.md` from an already-installed harness
+   (`~/.claude/skills/forge/SKILL.md` or
+   `~/.codex/skills/forge/SKILL.md`, whichever exists) into the new
+   CLI's equivalent path. If none exists and no convention is
+   documented, skip skills and say so in your report.
+6. **Write the entry and restart.** Following the template above. No
+   approval bypasses anywhere (`yolo`, `dangerously`, and friends
+   are rejected at parse). The create dialog lists agents in file
+   order.
+7. **Verify end to end.** Re-read every file you wrote and confirm
+   exactly one forge entry per event/server, with foreign entries
+   intact. Create a session with the new agent and confirm it binds
+   (the harness id flows via SessionStart) and peer comms work over
+   MCP. Quit, relaunch, confirm the restore picker offers it, and
+   confirm resume reconnects. Remove your forge entries and re-add
+   them to confirm a clean round-trip. (`forge uninstall-hooks` /
+   `install-hooks` do this round-trip for the built-in agents, but
+   they do not know about a CLI you installed by hand — redo your
+   own edits.)
+8. **Report.** What was added, the discovery evidence for each
+   resume/hook/MCP claim (exact `--help` text or settings path),
+   the verification performed, and anything left for code.
 
 Renaming an agent orphans its saved snapshots (restore skips unknown
 names with a reason instead of failing). Removing one is safe under
-the same rule. MCP/skills installers are still keyed by name in
-code, so a brand-new agent gets launching, resume, and hooks but not
-`install-mcp` / `install-skills` support yet.
+the same rule.
 
 ## Applying changes
 
