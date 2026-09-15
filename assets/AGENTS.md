@@ -110,19 +110,68 @@ Rules the parser enforces (violations are startup errors):
 
 ### Adding a new agent CLI
 
-1. Confirm the CLI's resume form with `--help`: flag style
-   (`--resume <id>`, fallback flag) or subcommand style
-   (`resume [<id>]`, fallback `resume --last`).
-2. Append one entry following the template above.
-3. Restart forge. The create dialog lists agents in file order.
-4. Verify: create a session with the new agent, quit, relaunch, and
-   confirm the restore picker offers it and resume reconnects.
+Back up `agents.json` first, then work top to bottom. You are
+expected to run shell commands for discovery (`--help`, `--version`,
+inspecting settings files) but never to bypass validation: an
+invalid file is a startup error naming the field — fix it and retry.
+
+1. **Launch.** From `<bin> --help`: the model flag (usually
+   `--model`) and any env-var binary override convention. If the CLI
+   has no model flag, leave both `model_flag` and `default_model`
+   out — an empty `default_model` means the CLI's own default, and a
+   set one is passed with `model_flag` on every fresh launch.
+2. **Resume.** Find the continue form: flag style (`--resume <id>`
+   with a no-id fallback flag) or subcommand style (`resume [<id>]`
+   with `resume --last`). Fill `subcommand`, `with_id`, and a
+   non-empty `without_id`.
+3. **Hooks — discover, then decide.** Forge needs three capabilities
+   from the hook system, and all three are mandatory:
+   - a session-start event reporting the harness conversation id
+     (restore resumes with it; without this, sessions cannot
+     reconnect after a restart — use `session_attribution:
+     "cwd_window"` only when the CLI additionally scrubs the hook
+     environment, and say so in your report);
+   - turn-start and turn-end events (queued peer replies deliver on
+     the turn edges; without them sessions wedge after tool calls);
+   - hook commands execute with the event JSON on stdin and can
+     invoke `<forge-bin> hook-relay` (find the forge binary with
+     `command -v forge`; the command itself takes no shell
+     metacharacters).
+   - If the settings document is
+     `{hooks: {Event: [{matcher, hooks: [{command}]}]}}`, write the
+     `hooks` block (`format: "claude-hooks"`) with the discovered
+     file path (relative to `~`, or `{env, default}` based when the
+     CLI honors a home override), the exact event names, and
+     `timeout: 10` unless the CLI forbids per-hook timeouts.
+     `matcher` stays `""`.
+   - **Any other mechanism — CLI-managed hooks (e.g. a `hooks`
+     subcommand), TOML hooks, anything needing a shell — is a hard
+     stop.** Do not hand-write settings files and do not improvise
+     installer behavior. Report that `install-hooks` needs a new
+     format in code; launching and resume still work, hooks do not.
+4. **Write the entry** following the template above. No approval
+   bypasses anywhere (`yolo`, `dangerously`, and friends are
+   rejected at parse). Restart forge; the create dialog lists agents
+   in file order.
+5. **Install hooks.** Run `forge install-hooks` (the all-agents
+   path, not a per-harness alias) and confirm the new agent's
+   outcome line reads `installed` or `unchanged` — never `error` or
+   `skipped`. `skipped` means the block did not take; recheck step 3.
+6. **Verify end to end.** Create a session with the new agent and
+   confirm it binds (the harness id flows via SessionStart).
+   Quit, relaunch, confirm the restore picker offers it, and confirm
+   resume reconnects. Then `forge uninstall-hooks` followed by
+   `forge install-hooks` to confirm a clean round-trip.
+7. **Report.** What was added, the discovery evidence for each
+   resume/hook claim (exact `--help` text or settings path), the
+   verification performed, and anything left for code (e.g. a new
+   hook format, a per-harness install alias).
 
 Renaming an agent orphans its saved snapshots (restore skips unknown
 names with a reason instead of failing). Removing one is safe under
-the same rule. Hook/MCP/skills installers are still keyed by name in
-code, so a brand-new agent gets launching and resume but not
-`install-*` support yet.
+the same rule. MCP/skills installers are still keyed by name in
+code, so a brand-new agent gets launching, resume, and hooks but not
+`install-mcp` / `install-skills` support yet.
 
 ## Applying changes
 

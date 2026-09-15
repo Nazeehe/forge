@@ -290,6 +290,9 @@ mod tests {
             "positional",
             "safe-only",
             "ai-assisted",
+            "hook-relay",
+            "install-hooks",
+            "uninstall-hooks",
         ] {
             assert!(
                 DEFAULT_AGENTS_MD.contains(needle),

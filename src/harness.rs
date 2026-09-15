@@ -58,6 +58,7 @@ impl Harness {
             binary: &def.binary,
             env_override: &def.env_override,
             model_flag: &def.model_flag,
+            default_model: &def.default_model,
             extra_args: &def.extra_args,
         }
     }
@@ -104,6 +105,7 @@ pub struct HarnessSpec {
     pub binary: &'static str,
     pub env_override: &'static str,
     pub model_flag: &'static str,
+    pub default_model: &'static str,
     pub extra_args: &'static [String],
 }
 
@@ -117,11 +119,14 @@ impl HarnessSpec {
             .unwrap_or_else(|| self.binary.to_string())
     }
 
-    /// Interactive argv: binary, an optional model override, then the
-    /// agent's extra args.
+    /// Interactive argv: binary, the model (explicit, else the
+    /// registry default, else nothing), then the agent's extra args.
     pub fn launch_argv(&self, binary: &str, model: Option<&str>) -> Vec<String> {
         let mut argv = vec![binary.to_string()];
-        if let Some(m) = model.filter(|m| !m.is_empty()) {
+        let model = model
+            .filter(|m| !m.is_empty())
+            .or_else(|| (!self.default_model.is_empty()).then_some(self.default_model));
+        if let Some(m) = model {
             argv.push(self.model_flag.to_string());
             argv.push(m.to_string());
         }
@@ -157,6 +162,7 @@ mod tests {
             binary: "claude",
             env_override: "FORGE_HARNESS_TEST_BIN",
             model_flag: "--model",
+            default_model: "",
             extra_args: &[],
         };
         assert_eq!(spec.resolve_binary(), "/custom/claude");
@@ -210,6 +216,31 @@ mod tests {
         assert_eq!(
             muse.resume_argv("muse", None),
             vec!["muse", "resume", "--last"]
+        );
+    }
+
+    #[test]
+    fn launch_argv_falls_back_to_registry_default_model() {
+        let spec = HarnessSpec {
+            binary: "gem",
+            env_override: "GEM_BIN",
+            model_flag: "--model",
+            default_model: "auto",
+            extra_args: &[],
+        };
+        assert_eq!(
+            spec.launch_argv("gem", None),
+            vec!["gem", "--model", "auto"]
+        );
+        assert_eq!(
+            spec.launch_argv("gem", Some("pro")),
+            vec!["gem", "--model", "pro"],
+            "explicit model wins"
+        );
+        assert_eq!(
+            spec.launch_argv("gem", Some("")),
+            vec!["gem", "--model", "auto"],
+            "empty model falls back"
         );
     }
 
