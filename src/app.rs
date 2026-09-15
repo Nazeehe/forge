@@ -1224,6 +1224,27 @@ impl AppState {
                 let _ = req.reply.send(line);
                 self.dirty = true;
             }
+            AppEvent::BotRequest(req) => {
+                let now = std::time::Instant::now();
+                let line = match self.broker.bot_call(
+                    &self.manager,
+                    &req.name,
+                    &req.token,
+                    &req.tool,
+                    &req.args,
+                    now,
+                ) {
+                    Ok(result) => format!("{{\"ok\":true,\"result\":{result}}}\n"),
+                    Err(e) => {
+                        let mut line = String::from("{\"ok\":false,\"error\":");
+                        line.push_str(&e.to_json());
+                        line.push_str("}\n");
+                        line
+                    }
+                };
+                let _ = req.reply.send(line);
+                self.dirty = true;
+            }
             AppEvent::Resize(rows, cols) => {
                 self.term_size = (rows, cols);
                 if cols < 100 { self.overlay_view = None; }
@@ -2545,6 +2566,60 @@ mod tests {
             reply: tx,
         }));
         rx.recv().expect("comms verdict arrives")
+    }
+
+    fn bot_reply(
+        state: &mut AppState,
+        name: &str,
+        token: &str,
+        tool: &str,
+        args: &str,
+    ) -> String {
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.apply(AppEvent::BotRequest(crate::listener::BotRequest {
+            name: name.to_string(),
+            token: token.to_string(),
+            tool: tool.to_string(),
+            args: args.to_string(),
+            reply: tx,
+        }));
+        rx.recv().expect("bot verdict arrives")
+    }
+
+    const BOT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    fn bot_state() -> AppState {
+        let mut state = AppState::new();
+        let run = RunId::generate();
+        let id = state
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run, "shell")
+            .unwrap();
+        state.broker.join(&state.manager, id, "peers").unwrap();
+        state
+            .broker
+            .register_client(
+                &state.manager,
+                "skippy",
+                vec!["peers".to_string()],
+                BOT_TOKEN,
+                Vec::new(),
+            )
+            .expect("registration validates");
+        state
+    }
+
+    #[test]
+    fn bot_dispatch_answers_and_object_errors() {
+        let mut state = bot_state();
+        let list = bot_reply(&mut state, "skippy", BOT_TOKEN, "list_sessions", "{}");
+        assert!(list.contains(r#""ok":true"#), "list: {list}");
+        assert!(list.contains(r#""you":"skippy""#), "list: {list}");
+        assert!(list.contains("\"epoch\":"), "list: {list}");
+        let bad = bot_reply(&mut state, "skippy", "wrong-credential-0000000000000000", "list_sessions", "{}");
+        assert!(bad.contains(r#""ok":false"#), "bad: {bad}");
+        assert!(bad.contains(r#""code":"unauthorized""#), "bad: {bad}");
+        assert!(state.manager.remove(state.manager.order()[0]));
     }
 
     #[test]

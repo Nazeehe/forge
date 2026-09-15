@@ -1,5 +1,6 @@
 mod app;
 mod audit;
+mod bot;
 mod branding;
 mod comms;
 mod config;
@@ -128,6 +129,22 @@ fn startup() -> i32 {
         ));
     }
     let mut state = app::AppState::new();
+    // Operator bot clients come from config only (never self-registered):
+    // each entry binds a token file, and bad entries warn instead of
+    // failing the boot. Calls still fail closed per-call.
+    for reg in &loaded.config.bots {
+        let path = create::expand_folder(&reg.token_file, &home);
+        match state.broker.register_client_file(
+            &state.manager,
+            &reg.name,
+            reg.groups.clone(),
+            reg.grants.clone(),
+            path,
+        ) {
+            Ok(()) => {}
+            Err(e) => eprintln!("warning: skipping bot {:?}: {}", reg.name, e.message),
+        }
+    }
     let code = tui::run(&mut state, &mut loaded, &home, &audit);
     // Quitting serializes the live agent sessions for the next startup's
     // restore picker; failures warn instead of failing the exit. An

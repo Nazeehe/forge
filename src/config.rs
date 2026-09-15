@@ -57,6 +57,19 @@ pub struct AiConfig {
     pub key_env: String,
 }
 
+/// One operator-registered external bot client (`[[bots]]`): a routing
+/// name, group grants, reserved tool grants, and the path of the file
+/// holding its credential. Secrets never live in this document; the
+/// broker reads the token file and fails closed when it is missing.
+/// Grants are parsed and stored but not enforced in this release.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BotRegistration {
+    pub name: String,
+    pub token_file: String,
+    pub groups: Vec<String>,
+    pub grants: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub theme: String,
@@ -67,6 +80,7 @@ pub struct Config {
     pub telemetry_enabled: bool,
     pub clikan_enabled: bool,
     pub messaging_idle_minutes: u64,
+    pub bots: Vec<BotRegistration>,
 }
 
 impl Default for Config {
@@ -91,6 +105,7 @@ impl Default for Config {
             telemetry_enabled: true,
             clikan_enabled: false,
             messaging_idle_minutes: 10,
+            bots: Vec::new(),
         }
     }
 }
@@ -282,7 +297,47 @@ fn extract(raw: &toml::Table) -> Result<Config, ConfigError> {
                 )
             })?
             .unwrap_or(10),
+        bots: if raw.contains_key("bots") {
+            extract_bots(raw)?
+        } else {
+            Vec::new()
+        },
     })
+}
+
+/// Parse the operator `[[bots]]` table into registrations. Name and
+/// token file are required; groups default empty (registration still
+/// refuses groupless clients) and grants default to messaging-only.
+fn extract_bots(raw: &toml::Table) -> Result<Vec<BotRegistration>, ConfigError> {
+    let items = raw
+        .get("bots")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ConfigError::BadValue("[[bots]] must be an array of tables".to_string()))?;
+    let mut out = Vec::new();
+    for item in items {
+        let table = item
+            .as_table()
+            .ok_or_else(|| ConfigError::BadValue("[[bots]] entries must be tables".to_string()))?;
+        let name = table
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ConfigError::BadValue("[[bots]] entries need a name".to_string()))?;
+        let token_file = table
+            .get("token_file")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                ConfigError::BadValue("[[bots]] entries need a token_file".to_string())
+            })?;
+        out.push(BotRegistration {
+            name: name.to_string(),
+            token_file: token_file.to_string(),
+            groups: str_list(table, "groups", "[[bots]]")?,
+            grants: str_list(table, "grants", "[[bots]]")?,
+        });
+    }
+    Ok(out)
 }
 
 fn merge(raw: &mut toml::Table, config: &Config) {
@@ -419,6 +474,45 @@ mod tests {
             Err(ConfigError::Parse(_))
         ));
         std::fs::write(&path, "[permission]\nmode = \"super-yolo\"\n").unwrap();
+        assert!(matches!(
+            LoadedConfig::load(&path),
+            Err(ConfigError::BadValue(_))
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn bots_table_parses_registrations() {
+        let home = scratch_home();
+        let path = branding::config_file(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[[bots]]\nname = \"skippy\"\ntoken_file = \"~/.forge/bots/skippy.token\"\ngroups = [\"peers\"]\n\
+             [[bots]]\nname = \"house\"\ntoken_file = \"/run/house.token\"\ngroups = [\"peers\", \"ops\"]\ngrants = [\"start_session\"]\n",
+        )
+        .unwrap();
+        let loaded = LoadedConfig::load(&path).unwrap();
+        assert_eq!(loaded.config.bots.len(), 2);
+        assert_eq!(loaded.config.bots[0].name, "skippy");
+        assert_eq!(loaded.config.bots[0].token_file, "~/.forge/bots/skippy.token");
+        assert_eq!(loaded.config.bots[0].groups, vec!["peers".to_string()]);
+        assert!(loaded.config.bots[0].grants.is_empty(), "grants default empty");
+        assert_eq!(loaded.config.bots[1].grants, vec!["start_session".to_string()]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn bots_table_rejects_nameless_or_fileless_entries() {
+        let home = scratch_home();
+        let path = branding::config_file(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[[bots]]\ngroups = [\"peers\"]\ntoken_file = \"/x\"\n").unwrap();
+        assert!(matches!(
+            LoadedConfig::load(&path),
+            Err(ConfigError::BadValue(_))
+        ));
+        std::fs::write(&path, "[[bots]]\nname = \"skippy\"\ngroups = [\"peers\"]\n").unwrap();
         assert!(matches!(
             LoadedConfig::load(&path),
             Err(ConfigError::BadValue(_))

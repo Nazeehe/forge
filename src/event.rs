@@ -22,6 +22,11 @@ pub enum AppEvent {
     /// A comms tool call from `mcp-serve`. The broker answers at once; the
     /// one-line verdict travels back through `reply`.
     CommsRequest(crate::listener::CommsRequest),
+    /// An external bot call from the IPC listener. Auth is the client
+    /// credential in the transport envelope; the broker answers at once
+    /// and the handler relays the one-line verdict with a typed error
+    /// object on failure.
+    BotRequest(crate::listener::BotRequest),
     Shutdown,
 }
 

@@ -61,6 +61,53 @@ pub struct CommsRequest {
     pub reply: std::sync::mpsc::Sender<String>,
 }
 
+/// One external bot call for the broker. Identity travels as the
+/// operator-issued credential (never a run ID); the loop answers at
+/// once and the handler relays the one-line verdict.
+#[derive(Debug)]
+pub struct BotRequest {
+    pub name: String,
+    pub token: String,
+    pub tool: String,
+    pub args: String,
+    pub reply: std::sync::mpsc::Sender<String>,
+}
+
+/// Parsed bot envelope parts: credential plus the tool call. Missing
+/// args default downstream; a missing tool routes to `not_found`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BotParts {
+    pub name: String,
+    pub token: String,
+    pub tool: String,
+    pub args: String,
+}
+
+/// Parse the bot object out of a comms envelope. `None` when no bot
+/// object rides along (a harness call, not a bot call).
+pub fn bot_parts(text: &str) -> Option<BotParts> {
+    let bot = crate::mcp::top_raw(text, "bot")?;
+    let name = crate::mcp::top_str(bot, "name").filter(|s| !s.is_empty())?;
+    // The credential forwards verbatim: absent reads as failed auth at
+    // the broker, never as a second parse error (no oracle either way).
+    let token = crate::mcp::top_str(bot, "token").unwrap_or_default();
+    let tool = crate::mcp::top_str(text, "tool").unwrap_or_default();
+    let args = crate::mcp::top_raw(text, "args").unwrap_or("{}").to_string();
+    Some(BotParts {
+        name,
+        token,
+        tool,
+        args,
+    })
+}
+
+/// Whether a pinned instance routes here: pins are exact process IDs
+/// and presence is enforced upstream, so only equality routes. Zero
+/// never matches, not even itself.
+pub fn instance_pinned_ok(pinned: u32, own: u32) -> bool {
+    pinned != 0 && pinned == own
+}
+
 /// Classify one header line. Comms envelopes match first on their parsed
 /// top-level `kind` so a hook body mentioning comms can never misroute;
 /// hook envelopes then match as before.
@@ -326,6 +373,9 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
     tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
 ) {
     let text = String::from_utf8_lossy(line).into_owned();
+    if crate::mcp::top_raw(&text, "bot").is_some() {
+        return handle_bot(conn, &text, tx);
+    }
     let (Some(run_id), Some(tool)) = (
         crate::mcp::top_str(&text, "run_id"),
         crate::mcp::top_str(&text, "tool"),
@@ -339,6 +389,80 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
             run_id,
             tool,
             args,
+            reply: reply_tx,
+        }))
+        .is_err()
+    {
+        return;
+    }
+    if let Ok(verdict) = reply_rx.recv_timeout(REPLY_WAIT) {
+        use std::io::Write;
+        let mut bytes = verdict.into_bytes();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        let _ = conn.write_all(&bytes);
+    }
+}
+
+/// Deliver one bot call to the broker and relay its one-line verdict.
+/// A foreign instance pin is refused with `unavailable` before any
+/// event exists; malformed envelopes fail closed the same way.
+/// One fail-closed refusal line without touching the loop.
+fn refuse_bot<S: std::io::Write>(
+    conn: &mut S,
+    code: crate::bot::ErrorCode,
+    message: &str,
+) {
+    let mut line = String::from("{\"ok\":false,\"error\":");
+    line.push_str(&crate::bot::BotError::new(code, message).to_json());
+    line.push_str("}\n");
+    let _ = conn.write_all(line.as_bytes());
+}
+
+fn handle_bot<S: std::io::Read + std::io::Write>(
+    mut conn: S,
+    text: &str,
+    tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
+) {
+    let Some(parts) = bot_parts(text) else {
+        refuse_bot(
+            &mut conn,
+            crate::bot::ErrorCode::InvalidArguments,
+            "bot envelope needs bot.name and a tool",
+        );
+        return;
+    };
+    // Every bot request pins its instance: a missing, zero, or
+    // unparsable pin is malformed, a well-formed foreign pin routes
+    // nowhere and refuses as unavailable.
+    let pinned = crate::mcp::top_raw(text, "forge_pid")
+        .map(|r| r.trim().trim_matches('"').to_string())
+        .and_then(|r| r.parse::<u32>().ok())
+        .filter(|p| *p > 0);
+    let Some(pinned) = pinned else {
+        refuse_bot(
+            &mut conn,
+            crate::bot::ErrorCode::InvalidArguments,
+            "bot envelope needs a positive forge_pid",
+        );
+        return;
+    };
+    if !instance_pinned_ok(pinned, std::process::id()) {
+        refuse_bot(
+            &mut conn,
+            crate::bot::ErrorCode::Unavailable,
+            "wrong forge instance",
+        );
+        return;
+    }
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    if tx
+        .send(crate::event::AppEvent::BotRequest(BotRequest {
+            name: parts.name,
+            token: parts.token,
+            tool: parts.tool,
+            args: parts.args,
             reply: reply_tx,
         }))
         .is_err()
@@ -664,6 +788,144 @@ mod tests {
         }
         assert_eq!(out, b"{\"ok\":true,\"result\":{}}\n");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bot_envelope_parses_credential_and_call() {
+        let line = r#"{"v":1,"kind":"comms","run_id":"","forge_pid":0,"tool":"bot_poll","args":{"cursor":3},"bot":{"name":"skippy","token":"tok-1"}}"#;
+        let parts = bot_parts(line).expect("bot envelope parses");
+        assert_eq!(parts.name, "skippy");
+        assert_eq!(parts.token, "tok-1");
+        assert_eq!(parts.tool, "bot_poll");
+        assert!(parts.args.contains("cursor"), "args: {:?}", parts.args);
+        assert!(
+            bot_parts(r#"{"v":1,"kind":"comms","run_id":"abc","tool":"list_sessions","args":{}}"#)
+                .is_none(),
+            "harness envelopes carry no bot parts"
+        );
+        assert!(
+            bot_parts(r#"{"v":1,"kind":"comms","bot":{"token":"tok-only"}}"#).is_none(),
+            "nameless envelopes parse nothing"
+        );
+        assert!(
+            bot_parts(r#"{"v":1,"kind":"comms","bot":{"name":"","token":"tok-only"}}"#).is_none(),
+            "empty names parse nothing"
+        );
+    }
+
+    #[test]
+    fn instance_pin_requires_an_exact_match() {
+        assert!(instance_pinned_ok(4242, 4242), "own pin routes here");
+        assert!(!instance_pinned_ok(424241, 424242), "foreign pin refused");
+        assert!(!instance_pinned_ok(0, 0), "absence never matches, even itself");
+    }
+
+    /// In-memory stand-in for a socket: writes are captured, reads hit
+    /// immediate EOF. Zero syscalls, so these tests run anywhere —
+    /// including sandboxes that deny socket IO outright.
+    #[derive(Clone, Default)]
+    struct MemConn {
+        written: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Read for MemConn {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl std::io::Write for MemConn {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Poll captured bytes until the fragment lands or time runs out.
+    fn await_text(reader: &MemConn, fragment: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let text =
+                String::from_utf8_lossy(&reader.written.lock().unwrap()).into_owned();
+            if text.contains(fragment) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no verdict relayed: {text:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn bot_record_reaches_the_loop_with_a_reply_path() {
+        let conn = MemConn::default();
+        let reader = conn.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let own = std::process::id();
+        let line = format!(
+            "{{\"v\":1,\"kind\":\"comms\",\"run_id\":\"\",\"forge_pid\":{own},\"tool\":\"bot_poll\",\"args\":{{\"cursor\":1}},\"bot\":{{\"name\":\"skippy\",\"token\":\"tok-1\"}}}}"
+        );
+        std::thread::spawn(move || handle_bot(conn, &line, &tx));
+        match rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("bot event arrives")
+        {
+            crate::event::AppEvent::BotRequest(req) => {
+                assert_eq!(req.name, "skippy");
+                assert_eq!(req.token, "tok-1");
+                assert_eq!(req.tool, "bot_poll");
+                assert!(req.args.contains("cursor"), "args: {:?}", req.args);
+                req.reply.send("{\"ok\":true,\"result\":{}}\n".to_string()).unwrap();
+            }
+            other => panic!("wrong event: {other:?}"),
+        }
+        await_text(&reader, "\"ok\":true");
+    }
+
+    #[test]
+    fn foreign_instance_bot_record_is_refused_without_an_event() {
+        // Refusals write synchronously without touching the loop: no
+        // thread needed, fully deterministic.
+        let conn = MemConn::default();
+        let reader = conn.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let line = "{\"v\":1,\"kind\":\"comms\",\"forge_pid\":424242,\"tool\":\"bot_poll\",\"args\":{},\"bot\":{\"name\":\"skippy\",\"token\":\"tok-1\"}}";
+        handle_bot(conn, line, &tx);
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "foreign pin emits no event"
+        );
+        await_text(&reader, "\"unavailable\"");
+    }
+
+    #[test]
+    fn bot_envelope_without_a_usable_pin_is_refused() {
+        for line in [
+            "{\"v\":1,\"kind\":\"comms\",\"tool\":\"bot_poll\",\"args\":{},\"bot\":{\"name\":\"skippy\",\"token\":\"tok-1\"}}",
+            "{\"v\":1,\"kind\":\"comms\",\"forge_pid\":\"soon\",\"tool\":\"bot_poll\",\"args\":{},\"bot\":{\"name\":\"skippy\",\"token\":\"tok-1\"}}",
+            "{\"v\":1,\"kind\":\"comms\",\"forge_pid\":0,\"tool\":\"bot_poll\",\"args\":{},\"bot\":{\"name\":\"skippy\",\"token\":\"tok-1\"}}",
+        ] {
+            let conn = MemConn::default();
+            let reader = conn.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            handle_bot(conn, line, &tx);
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+                "no event for unusable pin: {line}"
+            );
+            let text =
+                String::from_utf8_lossy(&reader.written.lock().unwrap()).into_owned();
+            assert!(
+                text.contains("\"invalid_arguments\""),
+                "fail closed: {text:?}"
+            );
+        }
     }
 
     #[test]

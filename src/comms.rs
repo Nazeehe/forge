@@ -8,6 +8,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use crate::bot::{
+    BotClient, BotConv, BotConvKind, BotConvState, BotError, BotKind, ErrorCode,
+};
 use crate::session::{SessionId, SessionManager};
 
 /// Per-target message pressure cap: undelivered injections plus delivered
@@ -202,6 +205,15 @@ pub struct Broker {
     /// Monotonic palette cursor: each created group takes the next index,
     /// deleted ones never hand theirs back (stable chips, no reuse).
     next_color: usize,
+    /// Broker epoch, reminted on every boot: cursors, session references,
+    /// conversations, and idempotency records are valid within one epoch
+    /// only. Restart drops the whole broker by construction.
+    epoch: u64,
+    /// Operator-registered bot peers (no panes, cursor inboxes only).
+    clients: HashMap<String, BotClient>,
+    /// Conversations with a bot peer as one party. Parallel to `convs`
+    /// so bot traffic never touches terminal queues.
+    bot_convs: HashMap<String, BotConv>,
 }
 
 impl Broker {
@@ -213,7 +225,15 @@ impl Broker {
             queue: HashMap::new(),
             timers: HashMap::new(),
             next_color: 0,
+            epoch: crate::bot::generate_epoch(),
+            clients: HashMap::new(),
+            bot_convs: HashMap::new(),
         }
+    }
+
+    /// Current broker epoch for poll responses and staleness checks.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Create an empty group (for the human group dialog). Fails on
@@ -409,7 +429,18 @@ impl Broker {
                     && c.delivered
             })
             .count();
-        self.queued(id) + asks
+        let bot_asks = self
+            .bot_convs
+            .values()
+            .filter(|c| {
+                c.state == BotConvState::Open
+                    && c.kind == BotConvKind::Ask
+                    && c.from_client
+                    && c.session == id
+                    && c.delivered
+            })
+            .count();
+        self.queued(id) + asks + bot_asks
     }
 
     /// Pop up to `limit` queued injections, oldest first. Popping an ask
@@ -427,6 +458,8 @@ impl Broker {
         for inj in &out {
             if inj.kind == InjectKind::Ask {
                 if let Some(conv) = self.convs.get_mut(&inj.conv) {
+                    conv.delivered = true;
+                } else if let Some(conv) = self.bot_convs.get_mut(&inj.conv) {
                     conv.delivered = true;
                 }
             }
@@ -481,27 +514,53 @@ impl Broker {
         found.ok_or_else(|| format!("no live session named {name:?}"))
     }
 
-    fn check_peer(
-        &self,
-        sessions: &SessionManager,
-        caller: SessionId,
-        target_name: &str,
-    ) -> Result<SessionId, String> {
-        let target = self.resolve_target(sessions, target_name)?;
-        if !self.shared_group(caller, target) {
-            return Err("no shared group with target".to_string());
-        }
-        if self.pressure(sessions, target) >= PRESSURE_CAP {
-            return Err(format!("pressure cap reached for {target_name:?}"));
-        }
-        Ok(target)
-    }
-
     fn names(&self, sessions: &SessionManager, id: SessionId) -> String {
         sessions
             .get(id)
             .map(|rec| rec.name.clone())
             .unwrap_or_default()
+    }
+
+    /// Human activity label for list output (sessions and bots share it).
+    fn activity_label(activity: crate::session::Activity) -> &'static str {
+        match activity {
+            crate::session::Activity::Idle => "Idle",
+            crate::session::Activity::Thinking => "Thinking",
+            crate::session::Activity::ToolUse => "ToolUse",
+            crate::session::Activity::Waiting => "Waiting",
+            crate::session::Activity::Stopped => "Stopped",
+        }
+    }
+
+    /// Parse an optional u64 tool arg: bare JSON numbers or quoted
+    /// digits. Absent reads as missing; present-but-garbled is a
+    /// client bug, never silent.
+    fn arg_u64(args: &str, name: &str) -> Option<Result<u64, BotError>> {
+        let raw = crate::mcp::top_raw(args, name)?.trim();
+        let bare = raw
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(raw);
+        Some(bare.parse::<u64>().map_err(|_| {
+            BotError::new(
+                ErrorCode::InvalidArguments,
+                format!("{name} must be a non-negative integer"),
+            )
+        }))
+    }
+
+    /// Reject calls presenting a stale epoch: cursors and references
+    /// from a previous broker run must never read as current.
+    fn check_epoch(&self, args: &str) -> Result<(), BotError> {
+        match Self::arg_u64(args, "epoch") {
+            None => Ok(()),
+            Some(Ok(e)) if e == self.epoch => Ok(()),
+            Some(Ok(_)) => Err(BotError::new(
+                ErrorCode::Conflict,
+                "epoch changed; re-list and resume",
+            )),
+            Some(Err(e)) => Err(e),
+        }
     }
 
     /// Execute one comms tool. Returns the JSON `result` fragment; every
@@ -528,6 +587,708 @@ impl Broker {
         }
     }
 
+    /// Operator registration of one bot peer: validated name, at least
+    /// one group grant, operator-minted credential, optional tool
+    /// grants (messaging is the default; nothing else is implied).
+    /// Rejects duplicates and collisions with live session names so
+    /// routing can never be ambiguous. No MCP path calls this.
+    pub fn register_client(
+        &mut self,
+        sessions: &SessionManager,
+        name: &str,
+        groups: Vec<String>,
+        token: &str,
+        grants: Vec<String>,
+    ) -> Result<(), BotError> {
+        crate::bot::validate_name(name)?;
+        if groups.is_empty() {
+            return Err(BotError::new(
+                ErrorCode::InvalidArguments,
+                "client needs at least one group",
+            ));
+        }
+        for g in &groups {
+            crate::bot::validate_group(g)?;
+        }
+        crate::bot::validate_token(token)?;
+        if self.clients.contains_key(name) {
+            return Err(BotError::new(
+                ErrorCode::Conflict,
+                "client already registered",
+            ));
+        }
+        for &id in sessions.order() {
+            let live =
+                sessions.get(id).is_some_and(|rec| rec.name == name && rec.state.is_live());
+            if live {
+                return Err(BotError::new(
+                    ErrorCode::Conflict,
+                    "name is taken by a live session",
+                ));
+            }
+        }
+        self.clients.insert(
+            name.to_string(),
+            BotClient::new(name, token, groups, grants),
+        );
+        Ok(())
+    }
+
+    /// Operator file-bound registration: validates name and grants
+    /// like [`Self::register_client`] but takes no inline secret — the
+    /// credential arrives exclusively through the bound token file
+    /// (empty never authenticates, so an unread file fails closed).
+    pub fn register_client_file(
+        &mut self,
+        sessions: &SessionManager,
+        name: &str,
+        groups: Vec<String>,
+        grants: Vec<String>,
+        token_file: std::path::PathBuf,
+    ) -> Result<(), BotError> {
+        crate::bot::validate_name(name)?;
+        if groups.is_empty() {
+            return Err(BotError::new(
+                ErrorCode::InvalidArguments,
+                "client needs at least one group",
+            ));
+        }
+        for g in &groups {
+            crate::bot::validate_group(g)?;
+        }
+        if self.clients.contains_key(name) {
+            return Err(BotError::new(
+                ErrorCode::Conflict,
+                "client already registered",
+            ));
+        }
+        for &id in sessions.order() {
+            let live =
+                sessions.get(id).is_some_and(|rec| rec.name == name && rec.state.is_live());
+            if live {
+                return Err(BotError::new(
+                    ErrorCode::Conflict,
+                    "name is taken by a live session",
+                ));
+            }
+        }
+        let mut client = BotClient::new(name, "", groups, grants);
+        client.set_token_file(token_file);
+        client.refresh_token();
+        self.clients.insert(name.to_string(), client);
+        Ok(())
+    }
+
+    /// Revoke one client: drops the inbox and fails its open
+    /// conversations, telling session peers loudly through their panes.
+    /// The credential stops working on the very next call.
+    pub fn revoke_client(&mut self, name: &str) -> bool {
+        if self.clients.remove(name).is_none() {
+            return false;
+        }
+        let mut notify = Vec::new();
+        for (conv_id, conv) in self.bot_convs.iter_mut() {
+            if conv.client != name || conv.state != BotConvState::Open {
+                continue;
+            }
+            conv.state = BotConvState::Failed;
+            notify.push((conv.session, conv_id.clone()));
+        }
+        for (session, conv_id) in notify {
+            self.push(
+                session,
+                Injection {
+                    conv: conv_id,
+                    kind: InjectKind::Failed,
+                    from: name.to_string(),
+                    text: "client revoked".to_string(),
+                },
+            );
+        }
+        true
+    }
+
+    /// Authenticate one bot call. Unknown names and wrong credentials
+    /// share one `unauthorized` answer (no oracle); the stored secret is
+    /// only ever constant-time compared, never logged or returned.
+    /// Called on every bot call, so rotation and revocation bite at once.
+    fn check_client(&self, name: &str, token: &str) -> Result<(), BotError> {
+        const DUMMY: &str = "0123456789abcdef0123456789abcdef";
+        match self.clients.get(name) {
+            Some(c) if c.check_token(token) => Ok(()),
+            Some(_) => Err(BotError::new(
+                ErrorCode::Unauthorized,
+                "unknown or revoked client",
+            )),
+            None => {
+                let _ = crate::bot::token_eq(DUMMY, token);
+                Err(BotError::new(
+                    ErrorCode::Unauthorized,
+                    "unknown or revoked client",
+                ))
+            }
+        }
+    }
+
+    /// Whether a session and a client grant list share a group.
+    fn shares_with_client(&self, id: SessionId, grants: &[String]) -> bool {
+        self.membership
+            .get(&id)
+            .is_some_and(|mine| mine.iter().any(|g| grants.iter().any(|h| h == g)))
+    }
+
+    /// Open client-originated conversations: asks plus unacked tells.
+    /// Mirrors pressure semantics at the client level (delivered tells
+    /// no longer count).
+    fn client_outstanding(&self, name: &str) -> usize {
+        self.bot_convs
+            .values()
+            .filter(|c| {
+                c.client == name
+                    && c.from_client
+                    && c.state == BotConvState::Open
+                    && (c.kind == BotConvKind::Ask || !c.acked)
+            })
+            .count()
+    }
+
+    /// Execute one bot tool under an authenticated client identity.
+    pub fn bot_call(
+        &mut self,
+        sessions: &SessionManager,
+        name: &str,
+        token: &str,
+        tool: &str,
+        args: &str,
+        now: Instant,
+    ) -> Result<String, BotError> {
+        // Bound token files re-read on every call: rotation and
+        // deletion bite at once, with no grant cache anywhere.
+        if let Some(client) = self.clients.get_mut(name) {
+            client.refresh_token();
+        }
+        self.check_client(name, token)?;
+        match tool {
+            "list_sessions" => Ok(self.bot_list_sessions(sessions, name)),
+            "ask_session" => self.bot_ask(sessions, name, args, now),
+            "tell_session" => self.bot_tell(sessions, name, args, now),
+            "send_response" => self.bot_respond(sessions, name, args, now),
+            "ack_message" => self.bot_ack_msg(sessions, name, args, now),
+            "bot_poll" => self.bot_poll(name, args),
+            "bot_ack" => self.bot_ack_cursor(name, args),
+            "start_session" => Err(BotError::new(
+                ErrorCode::Unauthorized,
+                "start_session is not enabled for external bots in this release",
+            )),
+            _ => Err(BotError::new(ErrorCode::NotFound, "unknown tool")),
+        }
+    }
+
+    /// Bot-visible discovery: only sessions sharing a grant group,
+    /// with epoch-scoped session IDs. Never the unscoped agent list.
+    fn bot_list_sessions(&self, sessions: &SessionManager, client: &str) -> String {
+        let grants = self
+            .clients
+            .get(client)
+            .map(|c| c.groups.clone())
+            .unwrap_or_default();
+        let mut out = format!(
+            r#"{{"you":{},"epoch":{},"sessions":["#,
+            crate::mcp::escape_json(client),
+            self.epoch,
+        );
+        let mut first = true;
+        for &id in sessions.order() {
+            let Some(rec) = sessions.get(id) else {
+                continue;
+            };
+            if !rec.state.is_live() {
+                continue;
+            }
+            if !self.shares_with_client(id, &grants) {
+                continue;
+            }
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            let activity = Self::activity_label(rec.activity);
+            let group = self
+                .primary_group(id)
+                .map(crate::mcp::escape_json)
+                .unwrap_or_else(|| "null".to_string());
+            out.push_str(&format!(
+                r#"{{"id":"{id}","name":{},"activity":"{activity}","group":{group}}}"#,
+                crate::mcp::escape_json(&rec.name),
+            ));
+        }
+        out.push_str("]}");
+        out
+    }
+
+    fn bot_ask(
+        &mut self,
+        sessions: &SessionManager,
+        client: &str,
+        args: &str,
+        now: Instant,
+    ) -> Result<String, BotError> {
+        let target_name = Self::arg(args, "target")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BotError::new(ErrorCode::InvalidArguments, "ask needs a target"))?;
+        let text = Self::arg2(args, &["message", "text"])
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BotError::new(ErrorCode::InvalidArguments, "ask needs text"))?;
+        let key = Self::arg(args, "idempotency_key").filter(|s| !s.is_empty());
+        let fp = crate::bot::fingerprint("ask_session", &[&target_name, &text, ""]);
+        if let Some(replay) = self
+            .clients
+            .get_mut(client)
+            .expect("caller authenticated")
+            .idem_check(key.as_deref(), fp, now)?
+        {
+            return Ok(replay);
+        }
+        let target = self.resolve_target(sessions, &target_name).map_err(|e| {
+            if e.starts_with("ambiguous") {
+                BotError::new(ErrorCode::AmbiguousTarget, e)
+            } else {
+                BotError::new(ErrorCode::NotFound, e)
+            }
+        })?;
+        {
+            let grants = self
+                .clients
+                .get(client)
+                .expect("caller authenticated")
+                .groups
+                .clone();
+            if !self.shares_with_client(target, &grants) {
+                return Err(BotError::new(
+                    ErrorCode::NoSharedGroup,
+                    "no shared group with target",
+                ));
+            }
+        }
+        if self.pressure(sessions, target) >= PRESSURE_CAP {
+            return Err(BotError::new(
+                ErrorCode::PressureLimit,
+                format!("pressure cap reached for {target_name:?}"),
+            ));
+        }
+        if self.client_outstanding(client) >= crate::bot::CLIENT_MAX_OUTSTANDING {
+            return Err(BotError::new(
+                ErrorCode::PressureLimit,
+                "client send cap reached",
+            ));
+        }
+        let conv = crate::ids::ConversationId::generate().to_string();
+        let target_name_live = self.names(sessions, target);
+        self.push(
+            target,
+            Injection {
+                conv: conv.clone(),
+                kind: InjectKind::Ask,
+                from: client.to_string(),
+                text,
+            },
+        );
+        self.bot_convs.insert(
+            conv.clone(),
+            BotConv {
+                kind: BotConvKind::Ask,
+                session: target,
+                session_name: target_name_live,
+                client: client.to_string(),
+                from_client: true,
+                state: BotConvState::Open,
+                acked: false,
+                delivered: false,
+                last_update: now,
+                reminded: false,
+            },
+        );
+        let result = format!(r#"{{"conversation":"{conv}","epoch":{}}}"#, self.epoch);
+        self.clients
+            .get_mut(client)
+            .expect("caller authenticated")
+            .idem_store(key.as_deref(), fp, &result, now);
+        Ok(result)
+    }
+
+    fn bot_tell(
+        &mut self,
+        sessions: &SessionManager,
+        client: &str,
+        args: &str,
+        now: Instant,
+    ) -> Result<String, BotError> {
+        let target_name = Self::arg(args, "target")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BotError::new(ErrorCode::InvalidArguments, "tell needs a target"))?;
+        let text = Self::arg2(args, &["message", "text"])
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BotError::new(ErrorCode::InvalidArguments, "tell needs text"))?;
+        let key = Self::arg(args, "idempotency_key").filter(|s| !s.is_empty());
+        if let Some(id) = Self::arg2(args, &["conversation_id", "conversation"])
+            .filter(|s| !s.is_empty())
+        {
+            let fp = crate::bot::fingerprint("tell_session", &[&target_name, &text, &id]);
+            if let Some(replay) = self
+                .clients
+                .get_mut(client)
+                .expect("caller authenticated")
+                .idem_check(key.as_deref(), fp, now)?
+            {
+                return Ok(replay);
+            }
+            let result = self.bot_tell_followup(sessions, client, &id, &target_name, &text, now)?;
+            self.clients
+                .get_mut(client)
+                .expect("caller authenticated")
+                .idem_store(key.as_deref(), fp, &result, now);
+            return Ok(result);
+        }
+        let fp = crate::bot::fingerprint("tell_session", &[&target_name, &text, ""]);
+        if let Some(replay) = self
+            .clients
+            .get_mut(client)
+            .expect("caller authenticated")
+            .idem_check(key.as_deref(), fp, now)?
+        {
+            return Ok(replay);
+        }
+        let target = self.resolve_target(sessions, &target_name).map_err(|e| {
+            if e.starts_with("ambiguous") {
+                BotError::new(ErrorCode::AmbiguousTarget, e)
+            } else {
+                BotError::new(ErrorCode::NotFound, e)
+            }
+        })?;
+        {
+            let grants = self
+                .clients
+                .get(client)
+                .expect("caller authenticated")
+                .groups
+                .clone();
+            if !self.shares_with_client(target, &grants) {
+                return Err(BotError::new(
+                    ErrorCode::NoSharedGroup,
+                    "no shared group with target",
+                ));
+            }
+        }
+        if self.pressure(sessions, target) >= PRESSURE_CAP {
+            return Err(BotError::new(
+                ErrorCode::PressureLimit,
+                format!("pressure cap reached for {target_name:?}"),
+            ));
+        }
+        if self.client_outstanding(client) >= crate::bot::CLIENT_MAX_OUTSTANDING {
+            return Err(BotError::new(
+                ErrorCode::PressureLimit,
+                "client send cap reached",
+            ));
+        }
+        let conv = crate::ids::ConversationId::generate().to_string();
+        let target_name_live = self.names(sessions, target);
+        self.push(
+            target,
+            Injection {
+                conv: conv.clone(),
+                kind: InjectKind::Tell,
+                from: client.to_string(),
+                text,
+            },
+        );
+        self.bot_convs.insert(
+            conv.clone(),
+            BotConv {
+                kind: BotConvKind::Tell,
+                session: target,
+                session_name: target_name_live,
+                client: client.to_string(),
+                from_client: true,
+                state: BotConvState::Open,
+                acked: false,
+                delivered: false,
+                last_update: now,
+                reminded: false,
+            },
+        );
+        let result = format!(r#"{{"conversation":"{conv}","epoch":{}}}"#, self.epoch);
+        self.clients
+            .get_mut(client)
+            .expect("caller authenticated")
+            .idem_store(key.as_deref(), fp, &result, now);
+        Ok(result)
+    }
+
+    /// Client follow-up on its own tell: the update reaches the session
+    /// pane. Conversations owned by another client read as unknown.
+    fn bot_tell_followup(
+        &mut self,
+        sessions: &SessionManager,
+        client: &str,
+        id: &str,
+        target_name: &str,
+        text: &str,
+        now: Instant,
+    ) -> Result<String, BotError> {
+        let (kind, state, session) = match self.bot_convs.get(id) {
+            Some(c) if c.client == client => (c.kind, c.state, c.session),
+            _ => {
+                return Err(BotError::new(
+                    ErrorCode::NotFound,
+                    "unknown conversation",
+                ));
+            }
+        };
+        if kind != BotConvKind::Tell {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "only a tell takes follow-ups",
+            ));
+        }
+        if state != BotConvState::Open {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "conversation is closed",
+            ));
+        }
+        let live = self.resolve_target(sessions, target_name).map_err(|e| {
+            if e.starts_with("ambiguous") {
+                BotError::new(ErrorCode::AmbiguousTarget, e)
+            } else {
+                BotError::new(ErrorCode::NotFound, e)
+            }
+        })?;
+        if live != session {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "follow-up target mismatch",
+            ));
+        }
+        {
+            let grants = self
+                .clients
+                .get(client)
+                .expect("caller authenticated")
+                .groups
+                .clone();
+            if !self.shares_with_client(session, &grants) {
+                return Err(BotError::new(
+                    ErrorCode::NoSharedGroup,
+                    "no shared group with target",
+                ));
+            }
+        }
+        if self.pressure(sessions, session) >= PRESSURE_CAP {
+            return Err(BotError::new(
+                ErrorCode::PressureLimit,
+                format!("pressure cap reached for {target_name:?}"),
+            ));
+        }
+        self.push(
+            session,
+            Injection {
+                conv: id.to_string(),
+                kind: InjectKind::FollowUp,
+                from: client.to_string(),
+                text: text.to_string(),
+            },
+        );
+        if let Some(conv) = self.bot_convs.get_mut(id) {
+            conv.last_update = now;
+        }
+        Ok(format!(
+            r#"{{"conversation":"{id}","followup":true,"epoch":{}}}"#,
+            self.epoch
+        ))
+    }
+
+    fn bot_respond(
+        &mut self,
+        sessions: &SessionManager,
+        client: &str,
+        args: &str,
+        now: Instant,
+    ) -> Result<String, BotError> {
+        let id = Self::arg2(args, &["conversation_id", "conversation"])
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                BotError::new(ErrorCode::InvalidArguments, "a conversation ID is required")
+            })?;
+        let text = Self::arg2(args, &["message", "text"])
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                BotError::new(ErrorCode::InvalidArguments, "send_response needs text")
+            })?;
+        let (kind, state, session, from_client) = match self.bot_convs.get(&id) {
+            Some(c) if c.client == client => (c.kind, c.state, c.session, c.from_client),
+            _ => {
+                return Err(BotError::new(
+                    ErrorCode::NotFound,
+                    "unknown conversation",
+                ));
+            }
+        };
+        if kind != BotConvKind::Ask {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "only an ask takes a response",
+            ));
+        }
+        if state != BotConvState::Open {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "conversation is closed",
+            ));
+        }
+        if from_client {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "only the target answers",
+            ));
+        }
+        self.push(
+            session,
+            Injection {
+                conv: id.clone(),
+                kind: InjectKind::Response,
+                from: client.to_string(),
+                text,
+            },
+        );
+        if let Some(conv) = self.bot_convs.get_mut(&id) {
+            conv.state = BotConvState::Done;
+            conv.last_update = now;
+        }
+        let _ = sessions;
+        Ok(format!(
+            r#"{{"conversation":"{id}","completed":true,"epoch":{}}}"#,
+            self.epoch
+        ))
+    }
+
+    fn bot_ack_msg(
+        &mut self,
+        sessions: &SessionManager,
+        client: &str,
+        args: &str,
+        now: Instant,
+    ) -> Result<String, BotError> {
+        let id = Self::arg2(args, &["conversation_id", "conversation"])
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                BotError::new(ErrorCode::InvalidArguments, "a conversation ID is required")
+            })?;
+        let (kind, state, session, from_client) = match self.bot_convs.get(&id) {
+            Some(c) if c.client == client => (c.kind, c.state, c.session, c.from_client),
+            _ => {
+                return Err(BotError::new(
+                    ErrorCode::NotFound,
+                    "unknown conversation",
+                ));
+            }
+        };
+        if kind != BotConvKind::Tell {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "nothing to acknowledge",
+            ));
+        }
+        if state != BotConvState::Open {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "conversation is closed",
+            ));
+        }
+        if from_client {
+            return Err(BotError::new(
+                ErrorCode::ConversationClosed,
+                "only the target acknowledges",
+            ));
+        }
+        self.push(
+            session,
+            Injection {
+                conv: id.clone(),
+                kind: InjectKind::Ack,
+                from: client.to_string(),
+                text: "ack_message".to_string(),
+            },
+        );
+        if let Some(conv) = self.bot_convs.get_mut(&id) {
+            conv.acked = true;
+            conv.last_update = now;
+        }
+        let _ = sessions;
+        Ok(format!(
+            r#"{{"conversation":"{id}","acknowledged":true,"epoch":{}}}"#,
+            self.epoch
+        ))
+    }
+
+    fn bot_poll(&mut self, client: &str, args: &str) -> Result<String, BotError> {
+        self.check_epoch(args)?;
+        let limit = match Self::arg_u64(args, "limit") {
+            None => crate::bot::POLL_MAX_EVENTS,
+            Some(Ok(n)) => usize::try_from(n)
+                .unwrap_or(crate::bot::POLL_MAX_EVENTS)
+                .clamp(1, crate::bot::POLL_MAX_EVENTS),
+            Some(Err(e)) => return Err(e),
+        };
+        let acked = self
+            .clients
+            .get(client)
+            .expect("caller authenticated")
+            .acked_cursor();
+        let start = match Self::arg_u64(args, "cursor") {
+            None => acked,
+            Some(Ok(c)) => c.max(acked),
+            Some(Err(e)) => return Err(e),
+        };
+        let events = self
+            .clients
+            .get_mut(client)
+            .expect("caller authenticated")
+            .poll(start, limit);
+        let next = events.last().map(|e| e.id).unwrap_or(start);
+        let mut out = String::from("{\"events\":[");
+        for (i, e) in events.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&e.to_json());
+        }
+        out.push_str(&format!(r#"],"next_cursor":{next},"epoch":{}}}"#, self.epoch));
+        Ok(out)
+    }
+
+    fn bot_ack_cursor(&mut self, client: &str, args: &str) -> Result<String, BotError> {
+        self.check_epoch(args)?;
+        let cursor = match Self::arg_u64(args, "cursor") {
+            Some(Ok(c)) => c,
+            _ => {
+                return Err(BotError::new(
+                    ErrorCode::InvalidArguments,
+                    "bot_ack needs a cursor",
+                ));
+            }
+        };
+        let acked = self
+            .clients
+            .get_mut(client)
+            .expect("caller authenticated")
+            .ack(cursor)?;
+        Ok(format!(
+            r#"{{"acknowledged":{acked},"epoch":{}}}"#,
+            self.epoch
+        ))
+    }
+
     fn arg(args: &str, name: &str) -> Option<String> {
         crate::policy::json_string_field(args.as_bytes(), &[name])
     }
@@ -549,7 +1310,24 @@ impl Broker {
             .ok_or_else(|| "ask needs a target".to_string())?;
         let text = Self::arg2(args, &["message", "text"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "ask needs text".to_string())?;
-        let target = self.check_peer(sessions, caller, &target_name)?;
+        let target = match self.resolve_target(sessions, &target_name) {
+            Ok(id) => {
+                if !self.shared_group(caller, id) {
+                    return Err("no shared group with target".to_string());
+                }
+                if self.pressure(sessions, id) >= PRESSURE_CAP {
+                    return Err(format!("pressure cap reached for {target_name:?}"));
+                }
+                id
+            }
+            Err(e) if e.starts_with("ambiguous") => return Err(e),
+            Err(e) => {
+                if !self.clients.contains_key(&target_name) {
+                    return Err(e);
+                }
+                return self.send_client(sessions, caller, &target_name, &text, now, BotConvKind::Ask);
+            }
+        };
         let conv = crate::ids::ConversationId::generate().to_string();
         let from = self.names(sessions, caller);
         let target_name_live = self.names(sessions, target);
@@ -575,6 +1353,73 @@ impl Broker {
                 last_update: now,
                 reminded: false,
                 delivered: false,
+            },
+        );
+        Ok(format!(r#"{{"conversation":"{conv}"}}"#))
+    }
+
+    /// Session sends to a bot peer (ask or new tell): same
+    /// shared-group and inbox-cap rules as any send, delivered as a
+    /// structured inbox event — never a pane write, so polling cannot
+    /// race terminal delivery.
+    fn send_client(
+        &mut self,
+        sessions: &SessionManager,
+        caller: SessionId,
+        target_name: &str,
+        text: &str,
+        now: Instant,
+        kind: BotConvKind,
+    ) -> Result<String, String> {
+        let groups = self
+            .clients
+            .get(target_name)
+            .map(|c| c.groups.clone())
+            .expect("caller checked registration");
+        if !self.shares_with_client(caller, &groups) {
+            return Err("no shared group with target".to_string());
+        }
+        if self
+            .clients
+            .get(target_name)
+            .expect("caller checked registration")
+            .unacked()
+            >= crate::bot::INBOX_CAP
+        {
+            return Err(format!("pressure cap reached for {target_name:?}"));
+        }
+        let conv = crate::ids::ConversationId::generate().to_string();
+        let from_name = self.names(sessions, caller);
+        let from_id = caller.to_string();
+        let event = match kind {
+            BotConvKind::Ask => BotKind::Ask,
+            BotConvKind::Tell => BotKind::Tell,
+        };
+        self.clients
+            .get_mut(target_name)
+            .expect("caller checked registration")
+            .deposit(
+                event,
+                &conv,
+                &from_id,
+                &from_name,
+                text,
+                crate::bot::now_unix_ms(),
+            )
+            .map_err(|_| format!("pressure cap reached for {target_name:?}"))?;
+        self.bot_convs.insert(
+            conv.clone(),
+            BotConv {
+                kind,
+                session: caller,
+                session_name: from_name,
+                client: target_name.to_string(),
+                from_client: false,
+                state: BotConvState::Open,
+                acked: false,
+                delivered: false,
+                last_update: now,
+                reminded: false,
             },
         );
         Ok(format!(r#"{{"conversation":"{conv}"}}"#))
@@ -727,6 +1572,9 @@ impl Broker {
             .ok_or_else(|| "a conversation ID is required".to_string())?;
         let text = Self::arg2(args, &["message", "text"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "send_response needs text".to_string())?;
+        if let Some(r) = self.respond_bot(sessions, caller, &id, &text, now) {
+            return r;
+        }
         let source = {
             let conv = self
                 .convs
@@ -772,6 +1620,9 @@ impl Broker {
         let text = Self::arg2(args, &["message", "text"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "tell needs text".to_string())?;
         if let Some(id) = Self::arg2(args, &["conversation_id", "conversation"]).filter(|s| !s.is_empty()) {
+            if let Some(r) = self.tell_bot_followup(sessions, caller, &id, &target_name, &text, now) {
+                return r;
+            }
             // Informational follow-up on an existing conversation: delivered
             // like a tell, but no new ack is expected. Either party can
             // follow up — this is the receiver's way back — delivering to
@@ -820,7 +1671,24 @@ impl Broker {
             }
             return Ok(format!(r#"{{"conversation":"{id}","followup":true}}"#));
         }
-        let target = self.check_peer(sessions, caller, &target_name)?;
+        let target = match self.resolve_target(sessions, &target_name) {
+            Ok(id) => {
+                if !self.shared_group(caller, id) {
+                    return Err("no shared group with target".to_string());
+                }
+                if self.pressure(sessions, id) >= PRESSURE_CAP {
+                    return Err(format!("pressure cap reached for {target_name:?}"));
+                }
+                id
+            }
+            Err(e) if e.starts_with("ambiguous") => return Err(e),
+            Err(e) => {
+                if !self.clients.contains_key(&target_name) {
+                    return Err(e);
+                }
+                return self.send_client(sessions, caller, &target_name, &text, now, BotConvKind::Tell);
+            }
+        };
         let conv = crate::ids::ConversationId::generate().to_string();
         let from = self.names(sessions, caller);
         let target_name_live = self.names(sessions, target);
@@ -851,6 +1719,165 @@ impl Broker {
         Ok(format!(r#"{{"conversation":"{conv}"}}"#))
     }
 
+    /// Session follow-up on a bot conversation: the peer is the client,
+    /// so the update lands in its inbox, never a pane. `None` when the
+    /// ID is not a bot conversation (the session path decides).
+    fn tell_bot_followup(
+        &mut self,
+        sessions: &SessionManager,
+        caller: SessionId,
+        id: &str,
+        target_name: &str,
+        text: &str,
+        now: Instant,
+    ) -> Option<Result<String, String>> {
+        let (kind, state, session, client) = match self.bot_convs.get(id) {
+            Some(c) => (c.kind, c.state, c.session, c.client.clone()),
+            None => return None,
+        };
+        if kind != BotConvKind::Tell {
+            return Some(Err("only a tell takes follow-ups".to_string()));
+        }
+        if state != BotConvState::Open {
+            return Some(Err("conversation is closed".to_string()));
+        }
+        if caller != session {
+            return Some(Err("only conversation parties can follow up".to_string()));
+        }
+        if target_name != client {
+            return Some(Err("follow-up target mismatch".to_string()));
+        }
+        let groups = self
+            .clients
+            .get(&client)
+            .map(|c| c.groups.clone())
+            .unwrap_or_default();
+        if !self.shares_with_client(caller, &groups) {
+            return Some(Err("no shared group with target".to_string()));
+        }
+        if self
+            .clients
+            .get(&client)
+            .is_some_and(|c| c.unacked() >= crate::bot::INBOX_CAP)
+        {
+            return Some(Err(format!("pressure cap reached for {target_name:?}")));
+        }
+        let from_name = self.names(sessions, caller);
+        let from_id = caller.to_string();
+        let deposit = self
+            .clients
+            .get_mut(&client)
+            .expect("conversation names its client")
+            .deposit(
+                BotKind::FollowUp,
+                id,
+                &from_id,
+                &from_name,
+                text,
+                crate::bot::now_unix_ms(),
+            );
+        if deposit.is_err() {
+            return Some(Err(format!("pressure cap reached for {target_name:?}")));
+        }
+        if let Some(conv) = self.bot_convs.get_mut(id) {
+            conv.last_update = now;
+        }
+        Some(Ok(format!(r#"{{"conversation":"{id}","followup":true}}"#)))
+    }
+
+    /// Session answers a bot's ask: the answer lands in the client
+    /// inbox. `None` when the ID is not a bot conversation.
+    fn respond_bot(
+        &mut self,
+        sessions: &SessionManager,
+        caller: SessionId,
+        id: &str,
+        text: &str,
+        now: Instant,
+    ) -> Option<Result<String, String>> {
+        let (kind, state, session, client) = match self.bot_convs.get(id) {
+            Some(c) => (c.kind, c.state, c.session, c.client.clone()),
+            None => return None,
+        };
+        if kind != BotConvKind::Ask {
+            return Some(Err("only an ask takes a response".to_string()));
+        }
+        if state != BotConvState::Open {
+            return Some(Err("conversation is closed".to_string()));
+        }
+        if caller != session {
+            return Some(Err("only the target answers".to_string()));
+        }
+        let from_name = self.names(sessions, caller);
+        let from_id = caller.to_string();
+        let deposit = self
+            .clients
+            .get_mut(&client)
+            .expect("conversation names its client")
+            .deposit(
+                BotKind::Response,
+                id,
+                &from_id,
+                &from_name,
+                text,
+                crate::bot::now_unix_ms(),
+            );
+        if deposit.is_err() {
+            return Some(Err(format!("pressure cap reached for {client:?}")));
+        }
+        if let Some(conv) = self.bot_convs.get_mut(id) {
+            conv.state = BotConvState::Done;
+            conv.last_update = now;
+        }
+        Some(Ok(format!(r#"{{"conversation":"{id}","completed":true}}"#)))
+    }
+
+    /// Session acknowledges a bot's tell. `None` when the ID is not a
+    /// bot conversation.
+    fn ack_bot(
+        &mut self,
+        sessions: &SessionManager,
+        caller: SessionId,
+        id: &str,
+        now: Instant,
+    ) -> Option<Result<String, String>> {
+        let (kind, state, session, client) = match self.bot_convs.get(id) {
+            Some(c) => (c.kind, c.state, c.session, c.client.clone()),
+            None => return None,
+        };
+        if kind != BotConvKind::Tell {
+            return Some(Err("nothing to acknowledge".to_string()));
+        }
+        if state != BotConvState::Open {
+            return Some(Err("conversation is closed".to_string()));
+        }
+        if caller != session {
+            return Some(Err("only the target acknowledges".to_string()));
+        }
+        let from_name = self.names(sessions, caller);
+        let from_id = caller.to_string();
+        let deposit = self
+            .clients
+            .get_mut(&client)
+            .expect("conversation names its client")
+            .deposit(
+                BotKind::Ack,
+                id,
+                &from_id,
+                &from_name,
+                "ack_message",
+                crate::bot::now_unix_ms(),
+            );
+        if deposit.is_err() {
+            return Some(Err(format!("pressure cap reached for {client:?}")));
+        }
+        if let Some(conv) = self.bot_convs.get_mut(id) {
+            conv.acked = true;
+            conv.last_update = now;
+        }
+        Some(Ok(format!(r#"{{"conversation":"{id}","acknowledged":true}}"#)))
+    }
+
     fn ack(
         &mut self,
         sessions: &SessionManager,
@@ -860,6 +1887,9 @@ impl Broker {
     ) -> Result<String, String> {
         let id = Self::arg2(args, &["conversation_id", "conversation"]).filter(|s| !s.is_empty())
             .ok_or_else(|| "a conversation ID is required".to_string())?;
+        if let Some(r) = self.ack_bot(sessions, caller, &id, now) {
+            return r;
+        }
         let source = {
             let conv = self
                 .convs
@@ -912,13 +1942,7 @@ impl Broker {
                 out.push(',');
             }
             first = false;
-            let activity = match rec.activity {
-                crate::session::Activity::Idle => "Idle",
-                crate::session::Activity::Thinking => "Thinking",
-                crate::session::Activity::ToolUse => "ToolUse",
-                crate::session::Activity::Waiting => "Waiting",
-                crate::session::Activity::Stopped => "Stopped",
-            };
+            let activity = Self::activity_label(rec.activity);
             let group = self
                 .primary_group(id)
                 .map(crate::mcp::escape_json)
@@ -926,6 +1950,37 @@ impl Broker {
             out.push_str(&format!(
                 r#"{{"name":{},"live":true,"activity":"{activity}","group":{group}}}"#,
                 crate::mcp::escape_json(&rec.name),
+            ));
+        }
+        // Bot peers sharing a group with the caller ride along, marked,
+        // so sessions can address the clients they may ask or tell.
+        // Nothing is listed when no clients exist: output is unchanged.
+        let mut bots: Vec<String> = self
+            .clients
+            .values()
+            .filter(|c| self.shares_with_client(caller, &c.groups))
+            .map(|c| c.name.clone())
+            .collect();
+        bots.sort();
+        for name in bots {
+            let group = self
+                .membership
+                .get(&caller)
+                .and_then(|mine| {
+                    self.clients.get(&name).and_then(|c| {
+                        mine.iter().find(|g| c.groups.contains(g)).map(|g| {
+                            crate::mcp::escape_json(g)
+                        })
+                    })
+                })
+                .unwrap_or_else(|| "null".to_string());
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push_str(&format!(
+                r#"{{"name":{},"live":true,"activity":"Idle","group":{group},"bot":true}}"#,
+                crate::mcp::escape_json(&name),
             ));
         }
         out.push_str("]}");
@@ -959,6 +2014,36 @@ impl Broker {
                     text: "target exited".to_string(),
                 },
             );
+        }
+        // Bot conversations touching the exited session fail too. A
+        // client that asked or told the session is told loudly through
+        // its inbox; a client the session asked keeps its inbox event
+        // but the conversation is over (late answers close).
+        let mut bot_notify = Vec::new();
+        for (conv_id, conv) in self.bot_convs.iter_mut() {
+            if conv.state != BotConvState::Open || conv.session != id {
+                continue;
+            }
+            conv.state = BotConvState::Failed;
+            if conv.from_client {
+                bot_notify.push((
+                    conv.client.clone(),
+                    conv_id.clone(),
+                    conv.session_name.clone(),
+                ));
+            }
+        }
+        for (client, conv_id, session_name) in bot_notify {
+            if let Some(c) = self.clients.get_mut(&client) {
+                let _ = c.deposit(
+                    BotKind::Failed,
+                    &conv_id,
+                    &id.to_string(),
+                    &session_name,
+                    "target exited",
+                    crate::bot::now_unix_ms(),
+                );
+            }
         }
     }
 
@@ -1008,6 +2093,56 @@ impl Broker {
                         from: timer.from,
                         text: timer.text,
                     },
+                );
+            }
+        }
+        // Bot courtesy reminders follow the same rule; the target side
+        // picks the delivery path (inbox event for clients, pane write
+        // for sessions).
+        let mut bot_due = Vec::new();
+        for (conv_id, conv) in self.bot_convs.iter_mut() {
+            if conv.kind != BotConvKind::Tell
+                || conv.state != BotConvState::Open
+                || !conv.acked
+                || conv.reminded
+            {
+                continue;
+            }
+            if now.duration_since(conv.last_update) >= COURTESY_GRACE {
+                conv.reminded = true;
+                let source = if conv.from_client {
+                    conv.client.clone()
+                } else {
+                    conv.session_name.clone()
+                };
+                bot_due.push((
+                    conv.session,
+                    conv.client.clone(),
+                    conv_id.clone(),
+                    source,
+                    conv.from_client,
+                ));
+            }
+        }
+        for (session, client, conv_id, source, to_session) in bot_due {
+            if to_session {
+                self.push(
+                    session,
+                    Injection {
+                        conv: conv_id,
+                        kind: InjectKind::Reminder,
+                        from: source,
+                        text: "no update since your ack; the source is still waiting".to_string(),
+                    },
+                );
+            } else if let Some(c) = self.clients.get_mut(&client) {
+                let _ = c.deposit(
+                    BotKind::Reminder,
+                    &conv_id,
+                    &session.to_string(),
+                    &source,
+                    "no update since your ack; the source is still waiting",
+                    crate::bot::now_unix_ms(),
                 );
             }
         }
@@ -1067,6 +2202,403 @@ mod tests {
             // Disjoint field borrows: the broker reads the manager.
             self.state.broker.call(&self.state.manager, run, tool, args, now)
         }
+
+        fn register_bot(&mut self, name: &str, groups: Vec<&str>) {
+            let groups = groups.into_iter().map(str::to_string).collect();
+            self.state
+                .broker
+                .register_client(&self.state.manager, name, groups, BOT_TOKEN, Vec::new())
+                .expect("registration validates");
+        }
+
+        fn bcall(
+            &mut self,
+            name: &str,
+            tool: &str,
+            args: &str,
+        ) -> Result<String, crate::bot::BotError> {
+            self.bcall_as(name, BOT_TOKEN, tool, args)
+        }
+
+        fn bcall_as(
+            &mut self,
+            name: &str,
+            token: &str,
+            tool: &str,
+            args: &str,
+        ) -> Result<String, crate::bot::BotError> {
+            let now = std::time::Instant::now();
+            self.state
+                .broker
+                .bot_call(&self.state.manager, name, token, tool, args, now)
+        }
+    }
+
+    const BOT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn bot_registration_validates_and_revocation_bites_at_once() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        assert!(p
+            .state
+            .broker
+            .register_client(&p.state.manager, "skippy", vec!["peers".into()], BOT_TOKEN, vec![])
+            .is_err(), "duplicate registration conflicts");
+        assert!(p
+            .state
+            .broker
+            .register_client(&p.state.manager, "a", vec!["peers".into()], BOT_TOKEN, vec![])
+            .is_err(), "live session name collision conflicts");
+        assert!(p
+            .state
+            .broker
+            .register_client(&p.state.manager, "tiny", vec!["peers".into()], "short", vec![])
+            .is_err(), "short credential refused");
+        assert!(p
+            .state
+            .broker
+            .register_client(&p.state.manager, "nogroups", vec![], BOT_TOKEN, vec![])
+            .is_err(), "group grant required");
+        // Unknown names and wrong credentials share one answer: no oracle.
+        assert_eq!(
+            p.bcall("ghost", "list_sessions", "{}").unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(
+            p.bcall_as("skippy", &"0".repeat(32), "list_sessions", "{}")
+                .unwrap_err()
+                .code,
+            ErrorCode::Unauthorized
+        );
+        assert!(p.state.broker.revoke_client("skippy"));
+        assert!(!p.state.broker.revoke_client("skippy"));
+        assert_eq!(
+            p.bcall("skippy", "list_sessions", "{}").unwrap_err().code,
+            ErrorCode::Unauthorized
+        );
+    }
+
+    #[test]
+    fn bot_list_is_scoped_to_shared_groups() {
+        let mut p = live_pair();
+        p.state.broker.join(&p.state.manager, p.a, "peers").unwrap();
+        p.state.broker.join(&p.state.manager, p.b, "elsewhere").unwrap();
+        p.register_bot("skippy", vec!["peers"]);
+        let list = p.bcall("skippy", "list_sessions", "{}").expect("scoped list validates");
+        assert!(list.contains(r#""you":"skippy""#), "list: {list}");
+        assert!(list.contains("\"epoch\":"), "list: {list}");
+        assert!(list.contains(r#""name":"a""#), "list: {list}");
+        assert!(!list.contains(r#""name":"b""#), "list: {list}");
+        assert!(list.contains(r#""id":"s"#), "list: {list}");
+    }
+
+    #[test]
+    fn bot_ask_response_roundtrip_never_touches_a_pane() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"ready?"}"#)
+            .expect("ask validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        assert!(res.contains("\"epoch\""), "res: {res}");
+        // The question reaches the session pane, never the client inbox.
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
+        assert!(p
+            .bcall("skippy", "bot_poll", "{}")
+            .unwrap()
+            .contains("\"events\":[]"));
+        // The session answers through its own tool; the answer lands in
+        // the inbox and nowhere else.
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("target answers");
+        assert!(p.state.broker.take_due(p.a, 10).is_empty());
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert!(poll.contains(r#""kind":"response""#), "poll: {poll}");
+        p.bcall("skippy", "bot_ack", r#"{"cursor":1}"#).expect("ack validates");
+        assert!(p
+            .bcall("skippy", "bot_poll", "{}")
+            .unwrap()
+            .contains("\"events\":[]"));
+    }
+
+    #[test]
+    fn session_ask_client_roundtrip_flows_through_the_inbox() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"skippy","message":"are you there?"}"#)
+            .expect("session asks client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        // No pane anywhere holds the question.
+        assert!(p.state.broker.take_due(p.a, 10).is_empty());
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert!(poll.contains(r#""kind":"ask""#), "poll: {poll}");
+        p.bcall("skippy", "bot_ack", r#"{"cursor":1}"#).unwrap();
+        p.bcall(
+            "skippy",
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("client answers");
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::Response));
+    }
+
+    #[test]
+    fn bot_tell_ack_roundtrip_confirms_receipt_not_work() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "tell_session", r#"{"target":"b","message":"deploy at dawn"}"#)
+            .expect("tell validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::Tell));
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("target acks");
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert!(poll.contains(r#""kind":"ack""#), "poll: {poll}");
+    }
+
+    #[test]
+    fn bot_retry_with_same_key_replays_and_conflicts() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let args = r#"{"target":"b","message":"ready?","idempotency_key":"k-1"}"#;
+        let first = p.bcall("skippy", "ask_session", args).expect("ask validates");
+        let again = p.bcall("skippy", "ask_session", args).expect("retry replays");
+        assert_eq!(first, again);
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "asked once");
+        let err = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"other","idempotency_key":"k-1"}"#)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Conflict);
+        let bad = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"x","idempotency_key":"has space"}"#)
+            .unwrap_err();
+        assert_eq!(bad.code, ErrorCode::InvalidArguments);
+    }
+
+    #[test]
+    fn bot_malformed_arguments_are_invalid_not_conflicts() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        for (tool, args) in [
+            ("ask_session", r#"{"message":"x"}"#),
+            ("ask_session", r#"{"target":"b"}"#),
+            ("tell_session", r#"{"target":"b"}"#),
+            ("send_response", r#"{"message":"x"}"#),
+            ("bot_ack", "{}"),
+            ("bot_poll", r#"{"epoch":"yesterday"}"#),
+            ("bot_poll", r#"{"cursor":"soon"}"#),
+            ("bot_poll", r#"{"limit":"plenty"}"#),
+        ] {
+            assert_eq!(
+                p.bcall("skippy", tool, args).unwrap_err().code,
+                ErrorCode::InvalidArguments,
+                "{tool} {args}"
+            );
+        }
+    }
+
+    #[test]
+    fn bot_answers_to_unknown_and_closed_conversations_fail_typed() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        assert_eq!(
+            p.bcall("skippy", "send_response", r#"{"conversation_id":"nope","message":"x"}"#)
+                .unwrap_err()
+                .code,
+            ErrorCode::NotFound
+        );
+        let res = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"q"}"#)
+            .unwrap();
+        let conv = json_field(&res, "conversation").unwrap();
+        p.state.broker.take_due(p.b, 10);
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"a"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            p.bcall(
+                "skippy",
+                "send_response",
+                &format!(r#"{{"conversation_id":"{conv}","message":"late"}}"#),
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::ConversationClosed
+        );
+    }
+
+    #[test]
+    fn bot_sends_fail_typed_on_routing_and_pressure() {
+        use crate::bot::ErrorCode;
+        // Ambiguous names fail rather than guess.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let run_c = crate::ids::RunId::generate();
+        let c = p
+            .state
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_c, "shell")
+            .unwrap();
+        p.state.broker.join(&p.state.manager, c, "peers").unwrap();
+        assert_eq!(
+            p.bcall("skippy", "ask_session", r#"{"target":"b","message":"q"}"#)
+                .unwrap_err()
+                .code,
+            ErrorCode::AmbiguousTarget
+        );
+        assert!(p.state.manager.remove(c));
+        // No shared group blocks transfer.
+        let mut q = live_pair();
+        q.register_bot("skippy", vec!["peers"]);
+        assert_eq!(
+            q.bcall("skippy", "ask_session", r#"{"target":"b","message":"q"}"#)
+                .unwrap_err()
+                .code,
+            ErrorCode::NoSharedGroup
+        );
+        // A full target queue rejects with pressure, not silence.
+        let mut r = live_pair().grouped();
+        r.register_bot("skippy", vec!["peers"]);
+        for i in 0..5 {
+            r.call(
+                &r.run_a.clone(),
+                "ask_session",
+                &format!(r#"{{"target":"b","message":"q{i}"}}"#),
+            )
+            .expect("fills pressure");
+        }
+        assert_eq!(
+            r.bcall("skippy", "ask_session", r#"{"target":"b","message":"q"}"#)
+                .unwrap_err()
+                .code,
+            ErrorCode::PressureLimit
+        );
+    }
+
+    #[test]
+    fn bot_target_exit_arrives_as_a_failed_event() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"q"}"#)
+            .expect("client asks session");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert!(poll.contains(r#""kind":"failed""#), "poll: {poll}");
+        // Late answers to the failed conversation close deterministically.
+        assert_eq!(
+            p.bcall(
+                "skippy",
+                "send_response",
+                &format!(r#"{{"conversation_id":"{conv}","message":"late"}}"#),
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::ConversationClosed
+        );
+    }
+
+    #[test]
+    fn bot_poll_with_a_stale_epoch_conflicts() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let epoch = p.state.broker.epoch();
+        p.bcall("skippy", "bot_poll", "{}").expect("current epoch polls");
+        let stale = epoch.wrapping_add(1);
+        let err = p
+            .bcall("skippy", "bot_poll", &format!(r#"{{"epoch":{stale}}}"#))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::Conflict);
+    }
+
+    #[test]
+    fn bot_control_tools_are_denied_and_unknown_is_not_found() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        assert_eq!(
+            p.bcall("skippy", "start_session", r#"{"harness":"codex"}"#)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(
+            p.bcall("skippy", "frobnicate", "{}").unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
+
+    #[test]
+    fn bot_file_registration_authenticates_through_the_file() {
+        let mut p = live_pair().grouped();
+        let dir = std::env::temp_dir().join(format!("forge-bot-reg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("skippy.token");
+        crate::bot::write_test_token(&path, BOT_TOKEN);
+        p.state
+            .broker
+            .register_client_file(
+                &p.state.manager,
+                "skippy",
+                vec!["peers".to_string()],
+                Vec::new(),
+                path.clone(),
+            )
+            .expect("file registration validates");
+        // The bound file supplies the credential on every call.
+        let list = p.bcall("skippy", "list_sessions", "{}").expect("file credential works");
+        assert!(list.contains(r#""you":"skippy""#), "list: {list}");
+        // Deleting the file revokes immediately.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            p.bcall("skippy", "list_sessions", "{}").unwrap_err().code,
+            crate::bot::ErrorCode::Unauthorized
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_list_shows_shared_bots_marked() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        p.register_bot("spy", vec!["elsewhere"]);
+        let list = p
+            .call(&p.run_a.clone(), "list_sessions", "{}")
+            .expect("list validates");
+        assert!(list.contains(r#""name":"skippy""#), "list: {list}");
+        assert!(list.contains(r#""bot":true"#), "list: {list}");
+        assert!(!list.contains("spy"), "list: {list}");
     }
 
     #[test]
