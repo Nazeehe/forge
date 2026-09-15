@@ -439,8 +439,17 @@ impl GroupDialog {
         {
             return false;
         }
-        let index = (row - area.y - 1) as usize;
-        let visible_rows = area.height.saturating_sub(3) as usize;
+        // Same padded origin the view paints: clicks on the pad row
+        // or border die here, so mouse and keyboard never disagree.
+        // The window also reserves the pad, error-slot, and footer
+        // rows the view holds back, matching its counts exactly.
+        let pad_top = pad_top_for(area.height.saturating_sub(2));
+        let raw = row - area.y - 1;
+        if raw < pad_top {
+            return false;
+        }
+        let index = (raw - pad_top) as usize;
+        let visible_rows = area.height.saturating_sub(3 + 2 * pad_top) as usize;
         match self.mode {
             Mode::List => {
                 let rows = overview_rows(ctx);
@@ -475,9 +484,11 @@ impl GroupDialog {
 
     /// Render the centered dialog per the UI guidance: an opaque modal,
     /// `>` plus reverse video on the cursor row, selection marks in
-    /// accent yellow, and key-hint footers. Rows are drawn by hand from
-    /// the same top-down order `click` hit-tests, so mouse and keyboard
-    /// never disagree.
+    /// accent yellow, and key-hint footers. Content keeps border
+    /// padding; pickers pin the footer with a fixed error slot above
+    /// it so failures never shift the list. Rows are drawn by hand
+    /// from the same padded top-down order `click` hit-tests, so
+    /// mouse and keyboard never disagree.
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect, ctx: &GroupCtx) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
@@ -500,17 +511,25 @@ impl GroupDialog {
             return;
         }
         let text = style(Role::Text);
-        let mut row = inner.y;
+        // Padded content origin; the scroll windows below reserve the
+        // same pad, error-slot, and footer rows `click` holds back.
+        let pad_top = pad_top_for(inner.height);
+        let pad_x = if inner.width >= 30 { 2 } else { 0 };
+        let roomy = pad_top > 0;
+        let cx = inner.x + pad_x;
+        let cw = inner.width.saturating_sub(pad_x * 2);
+        let mut row = inner.y + pad_top;
         let end = inner.y + inner.height;
         match self.mode {
             Mode::List => {
                 if ctx.groups.is_empty() {
                     frame.render_widget(
                         Paragraph::new("No groups yet. n creates one.").style(text),
-                        Rect::new(inner.x, row, inner.width, 1),
+                        Rect::new(cx, row, cw, 1),
                     );
                 } else {
-                    let visible_rows = inner.height.saturating_sub(1) as usize;
+                    let visible_rows =
+                        inner.height.saturating_sub(1 + 2 * pad_top) as usize;
                     let all_rows = overview_rows(ctx);
                     // Clamp: a removal can shrink the rows under a stale
                     // cursor for one frame before the next reconcile.
@@ -530,12 +549,12 @@ impl GroupDialog {
                         }];
                         match &over.member {
                             None => {
-                                let label = fit_row(&over.text, inner.width as usize - 2);
+                                let label = fit_row(&over.text, cw as usize - 2);
                                 spans.push(Span::styled(label, row_style));
                             }
                             Some(member) => {
                                 let color = crate::ui::group_palette(ctx.groups[over.group].color);
-                                let name = fit_row(member, inner.width as usize - 8);
+                                let name = fit_row(member, cw as usize - 8);
                                 spans.push(Span::styled("    ", row_style));
                                 spans.push(Span::styled("●", style(Role::Text).fg(color)));
                                 spans.push(Span::styled(format!(" {name}"), row_style));
@@ -543,7 +562,7 @@ impl GroupDialog {
                         }
                         frame.render_widget(
                             Paragraph::new(Line::from(spans)),
-                            Rect::new(inner.x, y, inner.width, 1),
+                            Rect::new(cx, y, cw, 1),
                         );
                     }
                 }
@@ -551,7 +570,7 @@ impl GroupDialog {
             }
             Mode::Name { rename } => {
                 let verb = if rename { "Rename to" } else { "Group name" };
-                let room = (inner.width as usize)
+                let room = (cw as usize)
                     .saturating_sub(verb.chars().count() + 7);
                 let buf = fit_row(&safe_name(&self.name_buf), room);
                 frame.render_widget(
@@ -560,7 +579,7 @@ impl GroupDialog {
                         Span::styled(format!("{verb}: "), text),
                         Span::styled(format!("[{buf}▌]"), focus_row()),
                     ])),
-                    Rect::new(inner.x, row, inner.width, 1),
+                    Rect::new(cx, row, cw, 1),
                 );
                 row += 1;
             }
@@ -569,19 +588,20 @@ impl GroupDialog {
                 // "Add sessions" header, `> [√] name` rows with the
                 // checked box in accent yellow, and a key-hint footer.
                 frame.render_widget(
-                    Paragraph::new(dotted_header(inner.width as usize, "Add sessions"))
+                    Paragraph::new(dotted_header(cw as usize, "Add sessions"))
                         .style(style(Role::Muted)),
-                    Rect::new(inner.x, row, inner.width, 1),
+                    Rect::new(cx, row, cw, 1),
                 );
                 row += 1;
                 if ctx.sessions.is_empty() {
                     frame.render_widget(
                         Paragraph::new("  (no sessions)").style(text),
-                        Rect::new(inner.x, row, inner.width, 1),
+                        Rect::new(cx, row, cw, 1),
                     );
                     row += 1;
                 }
-                let visible_rows = inner.height.saturating_sub(2) as usize;
+                let visible_rows =
+                    inner.height.saturating_sub(2 + 2 * pad_top) as usize;
                 let start = visible_start(self.cursor, visible_rows);
                 for (i, s) in ctx.sessions.iter().enumerate().skip(start).take(visible_rows) {
                     if row >= end.saturating_sub(1) {
@@ -589,7 +609,7 @@ impl GroupDialog {
                     }
                     let checked = self.checked.contains(&s.id);
                     let focused = i == self.cursor;
-                    let name = fit_row(&safe_name(&s.name), inner.width as usize - 8);
+                    let name = fit_row(&safe_name(&s.name), cw as usize - 8);
                     let (box_glyph, box_style, name_style) = if focused {
                         ("[√] ", focus_row(), focus_row())
                     } else if checked {
@@ -615,7 +635,7 @@ impl GroupDialog {
                     ]);
                     frame.render_widget(
                         Paragraph::new(line),
-                        Rect::new(inner.x, row, inner.width, 1),
+                        Rect::new(cx, row, cw, 1),
                     );
                     row += 1;
                 }
@@ -659,18 +679,33 @@ impl GroupDialog {
                 use ratatui::text::Line;
                 frame.render_widget(
                     Paragraph::new(Line::from(hints)),
-                    Rect::new(inner.x, end - 1, inner.width, 1),
+                    Rect::new(cx, end - 1, cw, 1),
                 );
             }
         }
+        // Fixed error slot above the footer when roomy, so a failure
+        // never shifts the list; the footer-less name prompt keeps the
+        // error right after its input, where nothing sits below it.
+        let error_at = if roomy && has_footer { end.saturating_sub(2) } else { row };
         if let Some(err) = &self.error {
-            if row < end.saturating_sub(has_footer as u16) {
+            if error_at < end.saturating_sub(has_footer as u16) {
                 frame.render_widget(
                     Paragraph::new(format!("! {err}")).style(style(Role::Danger)),
-                    Rect::new(inner.x, row, inner.width, 1),
+                    Rect::new(cx, error_at, cw, 1),
                 );
             }
         }
+    }
+}
+
+/// Padded-content top offset, shared by view and click: roomy
+/// dialogs rest content one row down from the border; cramped ones
+/// keep every row for the list.
+fn pad_top_for(inner_height: u16) -> u16 {
+    if inner_height >= 8 {
+        1
+    } else {
+        0
     }
 }
 
@@ -946,11 +981,12 @@ mod tests {
         let (_, b, mut ctx) = fixture();
         let mut d = GroupDialog::new();
         let area = Rect::new(8, 2, 64, 20);
-        assert!(d.click(12, 5, area, &ctx));
+        // Padded content starts one row lower in both modes.
+        assert!(d.click(12, 6, area, &ctx));
         assert_eq!(d.selected_name(), "other");
         ctx.members.clear(); // fresh membership snapshot for the selected group
         assert!(matches!(d.key(&ch('a'), &ctx), GroupOutcome::Pending));
-        assert!(d.click(12, 5, area, &ctx));
+        assert!(d.click(12, 6, area, &ctx));
         match d.key(&key(KeyCode::Enter), &ctx) {
             GroupOutcome::SetMembers { group, members } => {
                 assert_eq!(group, "other");
@@ -1001,12 +1037,14 @@ mod tests {
         let content = terminal.backend().buffer().content.iter()
             .map(|cell| cell.symbol()).collect::<String>();
         assert!(content.contains("member-24"), "selected member must be visible");
-        assert!(d.click(area.x + 2, area.y + 2, area, &ctx));
+        // Padded content: header sits one row down, so the first
+        // session row is area.y + 3, not + 2.
+        assert!(d.click(area.x + 2, area.y + 3, area, &ctx));
         match d.key(&key(KeyCode::Enter), &ctx) {
-            // The footer hints row leaves 16 body rows (was 17), so the
-            // scrolled window starts at session 9; the click still hits
-            // the rendered first row.
-            GroupOutcome::SetMembers { members, .. } => assert_eq!(members, vec![ctx.sessions[9].id]),
+            // Pad, header, error slot, and footer leave 14 body rows,
+            // so the scrolled window starts at session 11; the click
+            // still hits the rendered first row.
+            GroupOutcome::SetMembers { members, .. } => assert_eq!(members, vec![ctx.sessions[11].id]),
             other => panic!("expected members, got {other:?}"),
         }
     }
@@ -1039,15 +1077,17 @@ mod tests {
         // One Down from the first header lands on its first member row
         // (flat navigation), not the next group header.
         assert_eq!(dialog.selected_member(), Some("jarvis_cdx"));
-        let selected_row = terminal.backend().buffer().content.chunks(80).nth(4).unwrap()
+        // Padded one row down: cursor member renders on buffer row 5.
+        let selected_row = terminal.backend().buffer().content.chunks(80).nth(5).unwrap()
             .iter().map(|cell| cell.symbol()).collect::<String>();
         assert!(selected_row.contains(">"), "{selected_row:?}");
         assert!(content.contains("n new group"));
         assert!(content.contains("a add session"));
-        let dot = terminal.backend().buffer().content.chunks(80).nth(4).unwrap()
+        let dot = terminal.backend().buffer().content.chunks(80).nth(5).unwrap()
             .iter().find(|cell| cell.symbol() == "●").unwrap();
         assert_eq!(dot.fg, crate::ui::group_palette(2));
-        assert!(dialog.click(area.x + 4, area.y + 4, area, &ctx));
+        // The forge header moved down one row with the padding.
+        assert!(dialog.click(area.x + 4, area.y + 5, area, &ctx));
         assert_eq!(dialog.selected_name(), "forge");
     }
 
@@ -1063,20 +1103,22 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, area, &ctx)).unwrap();
         let buf = terminal.backend().buffer();
-        // Inner rows start at (9, 3): header above, cursor on the member.
-        let mark = buf.get(9, 4);
+        // Padded content starts at (11, 4): header above, cursor member
+        // one row down from the unpadded layout.
+        let mark = buf.get(11, 5);
         assert_eq!(mark.symbol(), ">");
         assert_eq!(mark.fg, Color::Cyan, "focus is cyan, not yellow");
         assert!(mark.modifier.contains(Modifier::REVERSED));
-        let name = buf.get(17, 4);
+        // Member row: marker, 4-space indent, dot, name.
+        let name = buf.get(19, 5);
         assert_eq!(name.symbol(), "a");
         assert!(name.modifier.contains(Modifier::REVERSED), "cursor row reverses");
         // The group dot keeps its identity color under focus.
-        assert_eq!(buf.get(15, 4).symbol(), "●");
-        assert_eq!(buf.get(15, 4).fg, crate::ui::group_palette(0));
+        assert_eq!(buf.get(17, 5).symbol(), "●");
+        assert_eq!(buf.get(17, 5).fg, crate::ui::group_palette(0));
         // The header row above stays plain white text.
-        assert_eq!(buf.get(9, 3).symbol(), " ");
-        assert_eq!(buf.get(11, 3).fg, Color::White);
+        assert_eq!(buf.get(11, 4).symbol(), " ");
+        assert_eq!(buf.get(13, 4).fg, Color::White);
     }
 
     #[test]
@@ -1094,12 +1136,33 @@ mod tests {
         let text = terminal.backend().buffer().content.iter()
             .map(|cell| cell.symbol()).collect::<String>();
         assert!(text.contains("Group name: [ab▌]"), "boxed input: {text:?}");
-        let mark = buf.get(9, 3);
+        // Padded input row one down and two in.
+        let mark = buf.get(11, 4);
         assert_eq!(mark.symbol(), ">");
         assert_eq!(mark.fg, Color::Cyan);
-        let open = buf.get(9 + 2 + 12, 3);
+        let open = buf.get(11 + 2 + 12, 4);
         assert_eq!(open.symbol(), "[");
         assert!(open.modifier.contains(Modifier::REVERSED), "field reverses");
+    }
+
+    #[test]
+    fn error_slot_sits_above_the_pinned_footer() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let ctx = empty_ctx();
+        let mut d = GroupDialog::new();
+        assert!(matches!(d.key(&ch('r'), &ctx), GroupOutcome::Pending));
+        assert!(d.error().is_some());
+        let area = Rect::new(8, 2, 64, 20);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, area, &ctx)).unwrap();
+        let row = |y: usize| {
+            terminal.backend().buffer().content.chunks(80).nth(y).unwrap()
+                .iter().map(|cell| cell.symbol()).collect::<String>()
+        };
+        // Fixed slot on the second-to-last row; the footer never moves
+        // off the last one, error or not.
+        assert!(row(19).contains("n creates one"), "{:?}", row(19));
+        assert!(row(20).contains("new group"), "{:?}", row(20));
     }
 
     #[test]
