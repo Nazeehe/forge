@@ -162,7 +162,7 @@ pub fn shell_join(argv: &[String]) -> String {
 pub struct CreateDialog {
     directory: Input,
     name: Input,
-    tool: Radio,
+    tool: Select,
     group: Select,
     actions: Radio,
     focus: usize,
@@ -187,9 +187,11 @@ impl CreateDialog {
         let name = Input::default().title("Name").value(suggested_name);
         // Agent CLIs only: forge never creates a bare shell session.
         // Choices follow registry order, so file order is display order.
+        // A one-row Select cycler (like Comm Group): an inline radio of
+        // every agent would not scale with user-added agents.
         let tools: Vec<String> =
             Harness::all().iter().map(|h| h.as_str().to_string()).collect();
-        let tool = Radio::default().choices(tools).value(0).rewind(true);
+        let tool = Select::default().choices(tools).value(0).rewind(true);
         let mut group_choices = vec!["None".to_string()];
         group_choices.extend(groups.iter().cloned());
         let group = Select::default()
@@ -223,7 +225,7 @@ impl CreateDialog {
     }
 
     pub fn tool_choice(&self) -> SessionKind {
-        SessionKind::Agent(Harness::from_index(self.tool.states.choice))
+        SessionKind::Agent(Harness::from_index(self.tool.states.selected))
     }
 
     /// Comm group choice: the leading `None` entry keeps the session
@@ -325,18 +327,24 @@ impl CreateDialog {
             }
             _ => {}
         }
+        // Both selects keep their popups closed (one-row cycler look),
+        // so cycle the public selection index directly.
         match self.focus {
-            FOCUS_TOOL => {
-                option_key(&mut self.tool, key);
-            }
-            // The select's popup stays closed (one-row cycler look), so
-            // cycle its public selection index directly.
-            FOCUS_GROUP => match key.code {
+            FOCUS_TOOL => match key.code {
                 KeyCode::Left => {
-                    cycle_group(&mut self.group, -1);
+                    cycle_select(&mut self.tool, -1);
                 }
                 KeyCode::Right => {
-                    cycle_group(&mut self.group, 1);
+                    cycle_select(&mut self.tool, 1);
+                }
+                _ => {}
+            },
+            FOCUS_GROUP => match key.code {
+                KeyCode::Left => {
+                    cycle_select(&mut self.group, -1);
+                }
+                KeyCode::Right => {
+                    cycle_select(&mut self.group, 1);
                 }
                 _ => {}
             },
@@ -389,8 +397,8 @@ impl CreateDialog {
     }
 }
 
-/// Cycle the group select with wraparound; empty choice lists are a no-op.
-fn cycle_group(select: &mut Select, dir: i32) {
+/// Cycle a closed select with wraparound; empty choice lists are a no-op.
+fn cycle_select(select: &mut Select, dir: i32) {
     let len = select.states.choices.len() as i32;
     if len == 0 {
         return;
@@ -493,11 +501,11 @@ fn fit(text: &str, width: usize) -> String {
 
 impl CreateDialog {
     /// Render the New Session form per the UI guidance: an opaque modal,
-    /// `>` plus reverse video on the focused row, `(o)`/`( )` radios with
-    /// the selection in accent yellow, `[Create*]` default action, and a
-    /// muted one-line key hint. The tui-realm components own state and
-    /// keys; rows are drawn by hand so no component default style leaks
-    /// session text or yellow through.
+    /// `>` plus reverse video on the focused row, `< value >` cyclers
+    /// with muted chevrons for CLI Tool and Comm Group, `[Create*]`
+    /// default action, and a muted one-line key hint. The tui-realm
+    /// components own state and keys; rows are drawn by hand so no
+    /// component default style leaks session text or yellow through.
     pub fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::style::Modifier;
         use ratatui::text::{Line, Span};
@@ -560,30 +568,6 @@ impl CreateDialog {
                 vec![Span::styled(format!("[{cut}{}]", " ".repeat(pad)), text)]
             }
         };
-        // `(o) choice   ( ) choice`: the mark carries selection in accent
-        // yellow, the words stay plain text.
-        let radio = |choices: &[String], selected: usize, focused: bool| -> Vec<Span> {
-            let mut spans = Vec::new();
-            for (i, choice) in choices.iter().enumerate() {
-                if i > 0 {
-                    spans.push(Span::styled("   ", if focused { focus_row() } else { text }));
-                }
-                let mark = if i == selected { "(o) " } else { "( ) " };
-                let mark_style = if focused {
-                    focus_row()
-                } else if i == selected {
-                    style(Role::Brand)
-                } else {
-                    style(Role::Muted)
-                };
-                spans.push(Span::styled(mark, mark_style));
-                spans.push(Span::styled(
-                    choice.clone(),
-                    if focused { focus_row() } else { text },
-                ));
-            }
-            spans
-        };
         // `< value >` cycler with muted chevrons.
         let select = |value: &str, focused: bool| -> Vec<Span> {
             let cut = fit(value, content_w.saturating_sub(4));
@@ -611,11 +595,16 @@ impl CreateDialog {
                     focused,
                     field(&self.name_text(), focused, "", false),
                 ),
-                FOCUS_TOOL => line_at(
-                    labels[index],
-                    focused,
-                    radio(&self.tool.states.choices, self.tool.states.choice, focused),
-                ),
+                FOCUS_TOOL => {
+                    let value = self
+                        .tool
+                        .states
+                        .choices
+                        .get(self.tool.states.selected)
+                        .map(String::as_str)
+                        .unwrap_or("?");
+                    line_at(labels[index], focused, select(value, focused))
+                }
                 FOCUS_GROUP => {
                     let value = self
                         .group
@@ -812,10 +801,14 @@ mod tests {
         // no yellow except selection marks and the default action. (Row 0
         // is focused, so its label reverses with the row.)
         assert_eq!(buf.get(4, 8).fg, Color::White, "label");
-        // CLI Tool row (y 10): `(o)` selection mark in accent yellow.
-        assert_eq!(buf.get(15, 10).symbol(), "(");
-        assert_eq!(buf.get(15, 10).fg, Color::Yellow, "selected mark");
-        assert_eq!(buf.get(16, 10).fg, Color::Yellow, "selected mark");
+        // CLI Tool row (y 10): `< claude >` cycler like Comm Group.
+        // Dialog inner starts at x2; marker (2) + label (11) put the
+        // control at x15.
+        assert_eq!(buf.get(15, 10).symbol(), "<", "left chevron");
+        assert_eq!(buf.get(24, 10).symbol(), ">", "right chevron");
+        let tool: String = (17..23).map(|x| buf.get(x, 10).symbol()).collect();
+        assert_eq!(tool, "claude", "current agent shown");
+        assert_eq!(buf.get(17, 10).fg, Color::White, "value in text style");
         // Actions row (y 13): `[Create*]` default in yellow bold.
         let star = buf.get(22, 13);
         assert_eq!(star.symbol(), "*", "default mark");
@@ -938,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn left_right_drives_tool_radio_and_rewinds() {
+    fn left_right_drives_tool_cycler_and_rewinds() {
         let (mut d, names) = fresh();
         step(&mut d, &names, 2);
         assert_eq!(d.focus(), 2);
