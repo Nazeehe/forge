@@ -3239,6 +3239,50 @@ mod tests {
         assert!(!text.contains('▀'), "image paints over the pane");
     }
 
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_tool_round_trip_renders_stores_and_shows() {
+        // Acceptance: tool call → background worker → sticky slot →
+        // fallback view → one terminal show claim. Bounded wait, same
+        // drain the main loop performs.
+        let mut state = AppState::new();
+        let (id, live_run) = spawn_visual_agent(&mut state, "agent");
+        let out = comms_reply(
+            &mut state,
+            &live_run,
+            "visual_show",
+            r#"{"content":"flowchart LR\n    A-->B","format":"mermaid","title":"flow","alt":"a to b"}"#,
+        );
+        assert!(out.contains(r#""accepted":true"#), "queued: {out}");
+        let mut stored = None;
+        for _ in 0..100 {
+            state.drain_visual();
+            if let Some(slot) = state.visual_slots.get(&id) {
+                stored = Some((slot.generation, slot.width, slot.height));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let (generation, width, height) =
+            stored.expect("worker stored the frame");
+        assert_eq!(generation, 1);
+        // Content-scaled, font-measured: bounds stay loose on purpose.
+        assert!(width > 50 && height > 20, "real raster: {width}x{height}");
+        let view = state.visual_view(id, false);
+        let text: String = view
+            .lines
+            .iter()
+            .flat_map(|row| row.iter().map(|s| s.text.as_str()))
+            .collect();
+        assert!(text.contains("flow"), "title: {text:?}");
+        assert!(text.contains("a to b"), "alt: {text:?}");
+        assert!(text.contains('▀'), "art: {text:?}");
+        show_visual_overlay(&mut state, id);
+        let spec = state.visual_take_show(true).expect("show");
+        assert_eq!(spec.generation, 1);
+        assert!(state.visual_shown_png().is_some(), "bytes behind the claim");
+    }
+
     #[test]
     fn walkthrough_tools_drive_tour_lifecycle() {
         let mut state = AppState::new();
