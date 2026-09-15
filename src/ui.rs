@@ -278,39 +278,84 @@ pub fn group_palette(index: usize) -> Color {
     PALETTE[index % PALETTE.len()]
 }
 
+/// Nerd Font half circles framing a pill tab: `label`. Single-cell
+/// each; a Nerd Font is required, otherwise they show as gaps (see the
+/// `pills` config flag).
+pub const PILL_LEFT: char = '\u{e0b6}';
+pub const PILL_RIGHT: char = '\u{e0b4}';
+
 /// One rendered chunk of the sessions bar: literal text, its style, and the
 /// tab it selects when clicked (`None` for group headers, which never
-/// switch sessions).
+/// switch sessions). `cap` paints rounded pill ends in the container
+/// color around tab buttons (`None` keeps the flat legacy look).
 pub struct BarSegment {
     pub text: String,
     pub style: Style,
     pub index: Option<usize>,
     pub accent: Option<Color>,
+    pub cap: Option<Color>,
+}
+
+/// Pill container color for a tab: the group color when grouped (matching
+/// the label background), accent yellow for the focused loner, dim gray
+/// for the rest.
+/// Pill container color: the group color for grouped tabs, the default
+/// selected yellow for the focused tab (group ignored), dim gray rest.
+fn pill_cap(tab: &SessionTab) -> Color {
+    if tab.focused {
+        Color::Yellow
+    } else if let Some(color) = tab.group_color {
+        group_palette(color)
+    } else {
+        Color::DarkGray
+    }
+}
+
+/// Label style for a pill tab: the selected tab always takes the default
+/// selected container; grouped tabs fill with their group color and dark
+/// text; the rest stay dim and unfilled.
+fn pill_style(tab: &SessionTab) -> Style {
+    if tab.focused {
+        theme::style(theme::Role::TabActive)
+    } else if let Some(color) = tab.group_color {
+        Style::default()
+            .fg(Color::Black)
+            .bg(group_palette(color))
+    } else {
+        theme::style(theme::Role::TabInactive)
+    }
 }
 
 /// Build bar segments in manager order so `N` numbering (and `Ctrl-b N`)
 /// never shifts: consecutive tabs sharing a group get one colored
 /// `group:` header; a group split by outsiders repeats its header rather
-/// than reordering anyone.
-pub fn session_bar_segments(tabs: &[SessionTab]) -> Vec<BarSegment> {
+/// than reordering anyone. With `pills`, tab buttons gain rounded ends
+/// and grouped/focused styling moves onto the container.
+pub fn session_bar_segments(tabs: &[SessionTab], pills: bool) -> Vec<BarSegment> {
     let mut segments = Vec::new();
     let mut prev_group: Option<&str> = None;
     for (n, tab) in tabs.iter().enumerate() {
-        if let Some(group) = tab.group.as_deref() {
-            if prev_group != Some(group) {
-                segments.push(BarSegment {
-                    text: format!("{}:", safe_text::encode_for_display(group)),
-                    style: Style::default()
-                        .fg(group_palette(tab.group_color.unwrap_or(0)))
-                        .add_modifier(Modifier::BOLD),
-                    index: None,
-                    accent: tab.group_color.map(group_palette),
-                });
+        // Pills carry the group color themselves, so the header is gone.
+        if !pills {
+            if let Some(group) = tab.group.as_deref() {
+                if prev_group != Some(group) {
+                    segments.push(BarSegment {
+                        text: format!("{}:", safe_text::encode_for_display(group)),
+                        style: Style::default()
+                            .fg(group_palette(tab.group_color.unwrap_or(0)))
+                            .add_modifier(Modifier::BOLD),
+                        index: None,
+                        accent: tab.group_color.map(group_palette),
+                        cap: None,
+                    });
+                }
             }
         }
         segments.push(BarSegment {
             text: format!("{} {}", n + 1, safe_text::encode_for_display(&tab.title)),
-            style: if tab.focused {
+            style: if pills {
+                pill_style(tab)
+            } else if tab.focused {
                 let mut style = theme::style(theme::Role::Focus);
                 if let Some(color) = tab.group_color {
                     style = style.bg(group_palette(color));
@@ -323,6 +368,7 @@ pub fn session_bar_segments(tabs: &[SessionTab]) -> Vec<BarSegment> {
             },
             index: Some(n),
             accent: tab.group_color.map(group_palette),
+            cap: pills.then(|| pill_cap(tab)),
         });
         prev_group = tab.group.as_deref();
     }
@@ -331,23 +377,32 @@ pub fn session_bar_segments(tabs: &[SessionTab]) -> Vec<BarSegment> {
 
 /// The reference strip gives every session its own status dot, group
 /// swatch, and numbered click target. Keep the compact strip on small
-/// terminals so labels remain usable there.
-pub fn session_bar_segments_for_area(tabs: &[SessionTab], bar: Rect) -> Vec<BarSegment> {
+/// terminals so labels remain usable there. Pills drop the bracket and
+/// divider furniture — the container replaces it.
+pub fn session_bar_segments_for_area(tabs: &[SessionTab], bar: Rect, pills: bool) -> Vec<BarSegment> {
     if bar.width < 160 {
-        return session_bar_segments(tabs);
+        return session_bar_segments(tabs, pills);
     }
     tabs.iter().enumerate().map(|(index, tab)| {
         let status = if tab.live { "●" } else { "○" };
+        let title = safe_text::encode_for_display(&tab.title);
+        let text = if pills {
+            format!("{status} ■ {} {title}", index + 1)
+        } else {
+            format!("{status} ■ [{}] {}  │", index + 1, title)
+        };
         BarSegment {
-            text: format!("{status} ■ [{}] {}  │", index + 1,
-                safe_text::encode_for_display(&tab.title)),
-            style: if tab.focused {
+            text,
+            style: if pills {
+                pill_style(tab)
+            } else if tab.focused {
                 theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
             } else {
                 theme::style(theme::Role::Text)
             },
             index: Some(index),
             accent: tab.group_color.map(group_palette),
+            cap: pills.then(|| pill_cap(tab)),
         }
     }).collect()
 }
@@ -364,15 +419,17 @@ pub struct SessionButton {
 
 /// Lay session segments left to right, clipping at the bar edge instead
 /// of wrapping. Buttons keep two-space gaps; a group header takes one
-/// trailing space so the run reads `group: 1 a 2 b`.
+/// trailing space so the run reads `group: 1 a 2 b`. Pill buttons reserve
+/// two cells per side (cap plus centering pad), so clicks anywhere on the
+/// container still land.
 pub fn layout_session_bar(bar: Rect, segments: &[BarSegment]) -> Vec<SessionButton> {
     let mut buttons = Vec::new();
     let mut col = bar.x;
     let edge = bar.x + bar.width;
     for segment in segments {
-        let width = Line::from(segment.text.as_str())
-            .width()
-            .min(u16::MAX as usize) as u16;
+        let width = (Line::from(segment.text.as_str()).width()
+            + if segment.cap.is_some() { 4 } else { 0 })
+        .min(u16::MAX as usize) as u16;
         let end = col.saturating_add(width);
         if col >= edge || end > edge {
             break;
@@ -713,6 +770,8 @@ pub struct Chrome {
     /// Grid mode: the main area shows every session in framed cells and
     /// the sidebar hides for full-width tiles.
     pub grid: bool,
+    /// Pill session tabs: rounded Nerd Font ends around each tab button.
+    pub pills: bool,
 }
 
 /// Grid tiling for grid mode: the blueprint's 1x1, 2x1, 2x2, 3x2, 3x3
@@ -1071,7 +1130,7 @@ mod tests {
     #[test]
     fn session_bar_buttons_number_left_to_right() {
         let bar = Rect::new(0, 22, 80, 1);
-        let segments = session_bar_segments(&[tab("shell-1", true), tab("shell-2", false)]);
+        let segments = session_bar_segments(&[tab("shell-1", true), tab("shell-2", false)], false);
         let buttons = layout_session_bar(bar, &segments);
         assert_eq!(buttons.len(), 2);
         assert_eq!(buttons[0].label, "1 shell-1");
@@ -1087,7 +1146,7 @@ mod tests {
         // Overflow clips instead of wrapping.
         let narrow = layout_session_bar(
             Rect::new(0, 0, 10, 1),
-            &session_bar_segments(&[tab("shell-1", true), tab("shell-2", false)]),
+            &session_bar_segments(&[tab("shell-1", true), tab("shell-2", false)], false),
         );
         assert_eq!(narrow.len(), 1);
     }
@@ -1100,7 +1159,7 @@ mod tests {
             tab("solo", false),
             grouped("b1", false, "other", 1),
         ];
-        let segments = session_bar_segments(&tabs);
+        let segments = session_bar_segments(&tabs, false);
         let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(
             texts,
@@ -1133,7 +1192,7 @@ mod tests {
         let segments = session_bar_segments(&[
             grouped("a", true, "team", 2),
             grouped("b", false, "team", 2),
-        ]);
+        ], false);
         assert_eq!(segments[1].style.fg, Some(Color::Yellow));
         assert_eq!(segments[1].style.bg, Some(group_palette(2)));
         assert_eq!(segments[2].style.fg, Some(group_palette(2)));
@@ -1225,7 +1284,7 @@ mod tests {
     fn wide_session_strip_uses_status_group_chips_and_clickable_numbers() {
         let tabs = [grouped("jarvis_dev", false, "aura", 0), grouped("web_client", true, "aura", 0),
             grouped("gl_rev", false, "gl", 1)];
-        let segments = session_bar_segments_for_area(&tabs, Rect::new(0, 38, 180, 1));
+        let segments = session_bar_segments_for_area(&tabs, Rect::new(0, 38, 180, 1), false);
         assert_eq!(segments.len(), 3);
         assert!(segments[0].text.contains("● ■ [1] jarvis_dev"));
         assert!(segments[1].text.contains("[2] web_client"));
@@ -1447,6 +1506,7 @@ mod tests {
             pending: 0,
             mode: "off",
             grid: false,
+            pills: false,
         }
     }
 

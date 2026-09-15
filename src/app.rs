@@ -55,6 +55,8 @@ pub struct AppState {
     /// Grid mode (`Ctrl-b w`): the main area tiles every session in
     /// framed cells instead of showing only the focused one.
     pub grid_mode: bool,
+    /// Rounded pill buttons everywhere; mirrors the config flag at startup.
+    pub pill_tabs: bool,
 }
 
 /// Overlay slot past the PTY tabs: Events, Tasks, Visual, Walkthrough.
@@ -82,6 +84,7 @@ impl AppState {
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
             grid_mode: false,
+            pill_tabs: true,
         }
     }
 

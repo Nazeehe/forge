@@ -79,6 +79,8 @@ pub struct Config {
     pub claudling_enabled: bool,
     pub telemetry_enabled: bool,
     pub clikan_enabled: bool,
+    /// Rounded pill session tabs (needs a Nerd Font); plain labels off.
+    pub pills_enabled: bool,
     pub messaging_idle_minutes: u64,
     pub bots: Vec<BotRegistration>,
 }
@@ -104,6 +106,7 @@ impl Default for Config {
             claudling_enabled: false,
             telemetry_enabled: true,
             clikan_enabled: false,
+            pills_enabled: true,
             messaging_idle_minutes: 10,
             bots: Vec::new(),
         }
@@ -267,6 +270,7 @@ fn extract(raw: &toml::Table) -> Result<Config, ConfigError> {
     let claudling = subtable(raw, "claudling");
     let telemetry = subtable(raw, "telemetry");
     let clikan = subtable(raw, "clikan");
+    let pills = subtable(raw, "pills");
     let messaging = subtable(raw, "messaging");
     Ok(Config {
         theme: str_val(raw, "theme", "default"),
@@ -288,6 +292,7 @@ fn extract(raw: &toml::Table) -> Result<Config, ConfigError> {
         claudling_enabled: claudling.map(|t| bool_val(t, "enabled", false)).unwrap_or(false),
         telemetry_enabled: telemetry.map(|t| bool_val(t, "enabled", true)).unwrap_or(true),
         clikan_enabled: clikan.map(|t| bool_val(t, "enabled", false)).unwrap_or(false),
+        pills_enabled: pills.map(|t| bool_val(t, "enabled", true)).unwrap_or(true),
         messaging_idle_minutes: messaging
             .map(|t| u64_val(t, "idle_timeout_minutes", 10))
             .transpose()
@@ -372,6 +377,7 @@ fn merge(raw: &mut toml::Table, config: &Config) {
         ("claudling", config.claudling_enabled),
         ("telemetry", config.telemetry_enabled),
         ("clikan", config.clikan_enabled),
+        ("pills", config.pills_enabled),
     ] {
         let mut t = toml::Table::new();
         t.insert("enabled".to_string(), toml::Value::Boolean(enabled));
@@ -418,7 +424,21 @@ mod tests {
         assert!(!c.claudling_enabled);
         assert!(c.telemetry_enabled);
         assert!(!c.clikan_enabled);
+        assert!(c.pills_enabled, "pill tabs default on");
         assert_eq!(c.messaging_idle_minutes, 10);
+    }
+
+    #[test]
+    fn pills_flag_parses_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("forge-pills-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[pills]\nenabled = false\n").unwrap();
+        let loaded = LoadedConfig::load(&path).unwrap();
+        assert!(!loaded.config.pills_enabled);
+        let back = extract(&loaded.raw).unwrap();
+        assert!(!back.pills_enabled);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

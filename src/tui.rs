@@ -105,6 +105,7 @@ pub fn run(
     };
     install_panic_hook();
     state.permission_mode = loaded.config.permission.mode.clone();
+    state.pill_tabs = loaded.config.pills_enabled;
     let mut policy = match crate::policy::Policy::new(
         loaded.config.permission.mode.clone(),
         &loaded.config.permission.allow,
@@ -294,6 +295,7 @@ fn loop_until_quit(
                 pending: state.pending_hooks.len(),
                 mode: policy.mode().as_str(),
                 grid: state.grid_mode,
+                pills: state.pill_tabs,
             };
             let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
             terminal.draw(|f| {
@@ -642,7 +644,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row < areas.session_bar.y + areas.session_bar.height
         && areas.session_bar.height > 0
     {
-        let segments = ui::session_bar_segments_for_area(&state.tabs(), areas.session_bar);
+        let segments = ui::session_bar_segments_for_area(&state.tabs(), areas.session_bar, state.pill_tabs);
         let buttons = ui::layout_session_bar(areas.session_bar, &segments);
         // Click-to-activate only: hover (Moved) and drags must never steal
         // the session; pane mouse protocols still get every event below.
@@ -831,10 +833,12 @@ mod tests {
         state.apply(AppEvent::Resize(24, 80));
         spawn_shell_cmd(&mut state, "exec sleep 30");
         spawn_shell_cmd(&mut state, "exec sleep 30");
-        // Session bar owns the last row; second button starts at column 11.
+        // Session bar owns the last row; caps plus centering pads push
+        // the second button to column 15, so this click lands on its
+        // left cap.
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 12,
+            column: 15,
             row: 23,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
