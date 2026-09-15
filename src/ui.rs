@@ -535,10 +535,10 @@ pub fn format_countdown(remaining: std::time::Duration) -> String {
 /// Sidebar lines. Never blank: with no sessions it still guides. The
 /// active mode button renders highlighted.
 pub fn sidebar_lines(info: &SidebarInfo) -> Vec<Line<'static>> {
-    sidebar_lines_at(info, SETTINGS_ROW.saturating_sub(1) as usize)
+    sidebar_lines_at(info, SETTINGS_ROW.saturating_sub(1) as usize, false)
 }
 
-fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize) -> Vec<Line<'static>> {
+fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize, pills: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     match &info.session {
         None => {
@@ -596,12 +596,43 @@ fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize) -> Vec<Line<'static>> {
     } else {
         (Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED), Style::default())
     };
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("[Off]", off_style),
-        Span::raw(" "),
-        Span::styled("[Yolo]", yolo_style),
-    ]));
+    lines.push(if pills {
+        // Pill mode buttons: rounded ends, centered labels, the active
+        // mode filled. The overlay widgets below paint the same cells.
+        let (off_style, yolo_style) = if info.mode == "yolo" {
+            (
+                theme::style(theme::Role::TabInactive),
+                theme::style(theme::Role::TabActive),
+            )
+        } else {
+            (
+                theme::style(theme::Role::TabActive),
+                theme::style(theme::Role::TabInactive),
+            )
+        };
+        let (off_cap, yolo_cap) = if info.mode == "yolo" {
+            (Color::DarkGray, Color::Yellow)
+        } else {
+            (Color::Yellow, Color::DarkGray)
+        };
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(PILL_LEFT.to_string(), Style::default().fg(off_cap)),
+            Span::styled(" Off ", off_style),
+            Span::styled(PILL_RIGHT.to_string(), Style::default().fg(off_cap)),
+            Span::raw(" "),
+            Span::styled(PILL_LEFT.to_string(), Style::default().fg(yolo_cap)),
+            Span::styled(" Yolo ", yolo_style),
+            Span::styled(PILL_RIGHT.to_string(), Style::default().fg(yolo_cap)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("[Off]", off_style),
+            Span::raw(" "),
+            Span::styled("[Yolo]", yolo_style),
+        ])
+    });
     lines.push(Line::from(""));
     lines.push(Line::from(format!("Pending: {}", info.pending)));
     lines
@@ -687,19 +718,24 @@ pub struct ModeButtons {
 /// so both always agree on which row cancels which timer. The header
 /// matches exactly plus a timer-row lookahead, so a session literally
 /// named "Scheduled" can never hijack it; clipped rows get no button.
-pub(crate) fn timer_cancel_rects(sidebar: Rect, info: &SidebarInfo) -> Vec<(String, Rect)> {
+pub(crate) fn timer_cancel_rects(
+    sidebar: Rect,
+    info: &SidebarInfo,
+    pills: bool,
+) -> Vec<(String, Rect)> {
     let Some(detail) = info.session.as_ref() else {
         return Vec::new();
     };
     if detail.timers.is_empty() {
         return Vec::new();
     }
-    let mode_areas = mode_button_areas(sidebar);
+    // Row math only needs the y, which pills never move.
+    let mode_areas = mode_button_areas(sidebar, false);
     let mode_row = mode_areas.off.y.saturating_sub(sidebar.y + 1) as usize;
     let lines = if sidebar.width >= 40 && sidebar.height >= 30 {
         rich_sidebar_lines(info, mode_row, sidebar.width)
     } else {
-        sidebar_lines_at(info, mode_row)
+        sidebar_lines_at(info, mode_row, false)
     };
     let mut header = None;
     for (idx, line) in lines.iter().enumerate() {
@@ -716,16 +752,17 @@ pub(crate) fn timer_cancel_rects(sidebar: Rect, info: &SidebarInfo) -> Vec<(Stri
     let Some(header) = header else {
         return Vec::new();
     };
-    // "[Cancel]" is 8 cells. Rich sidebars right-align it to the
-    // divider edge (4 shy of the rect); compact ones have no rules,
-    // so the button hugs the border instead.
+    // "[Cancel]" is 8 cells, the pill 10. Rich sidebars right-align it
+    // to the divider edge (4 shy of the rect); compact ones have no
+    // rules, so the button hugs the border instead.
     let edge = if sidebar.width >= 40 && sidebar.height >= 30 {
         sidebar.right().saturating_sub(3)
     } else {
         sidebar.right().saturating_sub(1)
     };
-    let x = edge.saturating_sub(8).max(sidebar.x + 1);
-    if edge.saturating_sub(x) < 8 {
+    let wide = if pills { 10 } else { 8 };
+    let x = edge.saturating_sub(wide).max(sidebar.x + 1);
+    if edge.saturating_sub(x) < wide {
         return Vec::new();
     }
     detail
@@ -741,21 +778,28 @@ pub(crate) fn timer_cancel_rects(sidebar: Rect, info: &SidebarInfo) -> Vec<(Stri
             if y + 1 >= sidebar.bottom() {
                 return None;
             }
-            Some((timer.id.clone(), Rect::new(x, y, 8, 1)))
+            Some((timer.id.clone(), Rect::new(x, y, wide, 1)))
         })
         .collect()
 }
 
-pub fn mode_button_areas(sidebar: Rect) -> ModeButtons {
+/// Mode-button hit areas: `[Off]`/`[Yolo]` legacy, pill containers
+/// (` Off ` 7 wide, ` Yolo ` 8 wide) when `pills`. Rows never move.
+pub fn mode_button_areas(sidebar: Rect, pills: bool) -> ModeButtons {
     let y = if sidebar.height >= 30 {
         sidebar.bottom().saturating_sub(4)
     } else {
         sidebar.y + SETTINGS_ROW
     };
     let visible = sidebar.height >= SETTINGS_ROW + 2 && sidebar.width >= 16;
+    let (off_w, yolo_x, yolo_w) = if pills {
+        (7, sidebar.x + 10, 8)
+    } else {
+        (5, sidebar.x + 8, 6)
+    };
     ModeButtons {
-        off: Rect::new(sidebar.x + 2, y, if visible { 5 } else { 0 }, 1),
-        yolo: Rect::new(sidebar.x + 8, y, if visible { 6 } else { 0 }, 1),
+        off: Rect::new(sidebar.x + 2, y, if visible { off_w } else { 0 }, 1),
+        yolo: Rect::new(yolo_x, y, if visible { yolo_w } else { 0 }, 1),
     }
 }
 
@@ -1016,12 +1060,12 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
             pending: chrome.pending,
             mode: chrome.mode,
         };
-        let mode_areas = mode_button_areas(areas.sidebar);
+        let mode_areas = mode_button_areas(areas.sidebar, chrome.pills);
         let mode_row = mode_areas.off.y.saturating_sub(areas.sidebar.y + 1) as usize;
         let mut lines = if areas.sidebar.width >= 40 && areas.sidebar.height >= 30 {
             rich_sidebar_lines(&info, mode_row, areas.sidebar.width)
         } else {
-            sidebar_lines_at(&info, mode_row)
+            sidebar_lines_at(&info, mode_row, chrome.pills)
         };
         if let Some(line) = lines.get_mut(mode_row) {
             *line = Line::from(""); // the controls below own this row
@@ -1034,42 +1078,93 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
         );
         frame.render_widget(side, areas.sidebar);
         for (label, area, active) in [
-            ("[Off]", mode_areas.off, info.mode == "off"),
-            ("[Yolo]", mode_areas.yolo, info.mode == "yolo"),
+            ("Off", mode_areas.off, info.mode == "off"),
+            ("Yolo", mode_areas.yolo, info.mode == "yolo"),
         ] {
             if area.width > 0 && area.right() <= areas.sidebar.right().saturating_sub(1) {
-                let style = if active {
-                    theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+                if chrome.pills {
+                    let (style, cap) = if active {
+                        (
+                            theme::style(theme::Role::TabActive),
+                            Color::Yellow,
+                        )
+                    } else {
+                        (
+                            theme::style(theme::Role::TabInactive),
+                            Color::DarkGray,
+                        )
+                    };
+                    render_pill(frame, area, label, style, cap);
                 } else {
-                    theme::style(theme::Role::Text)
-                };
-                ChromeButton::new(label, style).view(frame, area);
+                    let style = if active {
+                        theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+                    } else {
+                        theme::style(theme::Role::Text)
+                    };
+                    ChromeButton::new(&format!("[{label}]"), style).view(frame, area);
+                }
             }
         }
         // One red Cancel per armed timer, over its own countdown row.
-        for (_, area) in timer_cancel_rects(areas.sidebar, &info) {
-            ChromeButton::new(
-                "[Cancel]",
-                theme::style(theme::Role::Danger).add_modifier(Modifier::REVERSED),
-            )
-            .view(frame, area);
+        // The pill is the destructive variant: red ends, red label.
+        for (_, area) in timer_cancel_rects(areas.sidebar, &info, chrome.pills) {
+            if chrome.pills {
+                render_pill(
+                    frame,
+                    area,
+                    "Cancel",
+                    theme::style(theme::Role::Danger),
+                    Color::Red,
+                );
+            } else {
+                ChromeButton::new(
+                    "[Cancel]",
+                    theme::style(theme::Role::Danger).add_modifier(Modifier::REVERSED),
+                )
+                .view(frame, area);
+            }
         }
     }
 }
 
 /// Numbered session bar, kept in grid mode: digits exit grid and focus.
+/// One pill button: container-colored half circles around the label, with
+/// symmetric inner padding so the text sits centered in the container.
+/// The padding inherits the label style, keeping filled pills solid.
+fn render_pill(frame: &mut Frame, area: Rect, text: &str, style: Style, cap: Color) {
+    let cap_style = Style::default().fg(cap);
+    let line = Line::from(vec![
+        Span::styled(PILL_LEFT.to_string(), cap_style),
+        Span::styled(" ".to_string(), style),
+        Span::styled(text.to_string(), style),
+        Span::styled(" ".to_string(), style),
+        Span::styled(PILL_RIGHT.to_string(), cap_style),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 fn render_session_bar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
     if areas.session_bar.height > 0 {
-        let segments = session_bar_segments_for_area(&chrome.tabs, areas.session_bar);
+        let segments = session_bar_segments_for_area(&chrome.tabs, areas.session_bar, chrome.pills);
         let buttons = layout_session_bar(areas.session_bar, &segments);
         for (button, segment) in buttons.iter().zip(segments.iter()) {
             let area = Rect::new(button.start, areas.session_bar.y, button.end - button.start, 1);
             if button.index.is_some() {
-                ChromeButton::new(&button.label, segment.style).view(frame, area);
-                if areas.session_bar.width >= 160 && area.width >= 3 {
+                if let Some(cap) = segment.cap {
+                    render_pill(frame, area, &segment.text, segment.style, cap);
+                } else {
+                    ChromeButton::new(&button.label, segment.style).view(frame, area);
+                }
+                // Pills carry their color in the container: no swatch.
+                if segment.cap.is_none()
+                    && areas.session_bar.width >= 160
+                    && area.width >= 3
+                {
+                    // The swatch overwrites the text ■ with the accent color.
+                    let at = area.x + 2;
                     let accent = segment.accent.unwrap_or(theme::style(theme::Role::Muted).fg.unwrap_or(Color::Reset));
                     Label::default().text("■").style(Style::default().fg(accent))
-                        .view(frame, Rect::new(area.x + 2, area.y, 1, 1));
+                        .view(frame, Rect::new(at, area.y, 1, 1));
                 }
             } else {
                 Label::default()
@@ -1220,9 +1315,54 @@ mod tests {
     #[test]
     fn tall_sidebar_keeps_mode_buttons_near_bottom() {
         let sidebar = chrome_areas(Rect::new(0, 0, 120, 40)).sidebar;
-        let buttons = mode_button_areas(sidebar);
+        let buttons = mode_button_areas(sidebar, false);
         assert_eq!(buttons.off.y, sidebar.bottom() - 4);
         assert_eq!(mode_at(&buttons, buttons.yolo.x, buttons.yolo.y), Some("yolo"));
+    }
+
+    #[test]
+    fn pill_mode_buttons_widen_hit_areas() {
+        let sidebar = chrome_areas(Rect::new(0, 0, 80, 24)).sidebar;
+        let buttons = mode_button_areas(sidebar, true);
+        assert_eq!(buttons.off.width, 7, "off pill");
+        assert_eq!(buttons.yolo.x, buttons.off.x + 8, "one gap cell");
+        assert_eq!(buttons.yolo.width, 8, "yolo pill");
+        assert_eq!(buttons.off.y, buttons.yolo.y, "same row as legacy");
+        assert_eq!(mode_at(&buttons, buttons.off.x, buttons.off.y), Some("off"));
+        assert_eq!(mode_at(&buttons, buttons.yolo.x + 7, buttons.yolo.y), Some("yolo"), "right cap hits");
+        assert_eq!(mode_at(&buttons, buttons.off.x + 7, buttons.off.y), None, "gap misses");
+    }
+
+    #[test]
+    fn pill_cancel_rects_widen_and_keep_edge() {
+        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off" };
+        let areas = chrome_areas(Rect::new(0, 0, 180, 40));
+        let rects = timer_cancel_rects(areas.sidebar, &info, true);
+        assert_eq!(rects.len(), 2);
+        for (_, area) in &rects {
+            assert_eq!(area.width, 10, "pill Cancel width");
+            assert_eq!(area.right(), areas.sidebar.right() - 3, "keeps divider edge");
+        }
+    }
+
+    #[test]
+    fn render_pill_mode_buttons_and_cancel() {
+        let mut c = chrome();
+        c.pills = true;
+        c.detail = Some(timed_detail());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render(f, area(), &[], &c)).unwrap();
+        let rows = buffer_rows(&terminal);
+        // Mode row keeps its legacy row; pills replace the brackets.
+        assert!(rows[11].contains("Off"), "off pill: {:?}", rows[11]);
+        assert!(!rows[11].contains("[Off]"), "no legacy brackets");
+        let cancel_y = rows.iter().position(|r| r.contains("Cancel")).expect("cancel pill");
+        assert!(rows[cancel_y].contains("\u{e0b6}"));
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(66, 11)].fg, Color::Yellow, "active off cap");
+        assert_eq!(buf[(67, 11)].bg, Color::Yellow, "active off fill");
+        let cap_x = rows[cancel_y].find("\u{e0b6}").expect("left cap");
+        assert_eq!(buf[(cap_x as u16, cancel_y as u16)].fg, Color::Red, "destructive caps");
     }
 
     #[test]
@@ -1448,7 +1588,7 @@ mod tests {
     fn timer_cancel_rects_match_painted_rows() {
         let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off" };
         let areas = chrome_areas(Rect::new(0, 0, 180, 40));
-        let rects = timer_cancel_rects(areas.sidebar, &info);
+        let rects = timer_cancel_rects(areas.sidebar, &info, false);
         assert_eq!(rects.len(), 2);
         assert_eq!((rects[0].0.as_str(), rects[1].0.as_str()), ("t1", "t2"), "soonest first");
         assert_eq!(rects[1].1.y, rects[0].1.y + 1, "stacked rows");
@@ -1474,7 +1614,7 @@ mod tests {
         impostor.name = "Scheduled".to_string();
         impostor.timers.clear();
         let bare = SidebarInfo { session: Some(impostor), pending: 0, mode: "off" };
-        assert!(timer_cancel_rects(areas.sidebar, &bare).is_empty());
+        assert!(timer_cancel_rects(areas.sidebar, &bare, false).is_empty());
     }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {

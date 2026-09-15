@@ -610,7 +610,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         // recomputed live, so a repaint can never desync them.
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let info = state.sidebar_info();
-            for (timer_id, area) in ui::timer_cancel_rects(areas.sidebar, &info) {
+            for (timer_id, area) in ui::timer_cancel_rects(areas.sidebar, &info, state.pill_tabs) {
                 if ui::ChromeButton::new("[Cancel]", ratatui::style::Style::default())
                     .click(mev.column, mev.row, area)
                 {
@@ -621,7 +621,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
             }
         }
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
-            let buttons = ui::mode_button_areas(areas.sidebar);
+            let buttons = ui::mode_button_areas(areas.sidebar, state.pill_tabs);
             match ui::mode_at(&buttons, mev.column, mev.row) {
                 Some("yolo") => {
                     if ui::ChromeButton::new("[Yolo]", ratatui::style::Style::default())
@@ -1027,7 +1027,7 @@ mod tests {
         state.broker.call(&state.manager, &run, "schedule_prompt",
             r#"{"prompt":"later","delay_seconds":600}"#, now).expect("arms");
         let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let rects = ui::timer_cancel_rects(areas.sidebar, &state.sidebar_info());
+        let rects = ui::timer_cancel_rects(areas.sidebar, &state.sidebar_info(), state.pill_tabs);
         assert_eq!(rects.len(), 1, "one armed timer, one button");
         let (_, area) = &rects[0];
         forward_mouse(&mut state, MouseEvent {
@@ -1243,12 +1243,12 @@ mod tests {
         );
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
         assert!(!state.dirty, "hover leaves no work");
-        // Click Yolo to return.
+        // Click Yolo to return (pill starts at x=74).
         forward_mouse(
             &mut state,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: 73,
+                column: 75,
                 row: 11,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
