@@ -120,14 +120,37 @@ impl SessionsFile {
 /// Quit-time persist: appends one snapshot when sessions are live,
 /// leaves the file alone when none are. An empty quit must never
 /// destroy older entries: dismissing the picker (Esc) then quitting
-/// fresh would otherwise eat the very offer it skipped.
+/// fresh would otherwise eat the very offer it skipped. A re-quit with
+/// the same topology refreshes the newest entry in place instead of
+/// stacking a duplicate picker row; the fresh harness ids still land.
 pub fn save_quit_snapshot(path: &Path, sessions: Vec<SavedSession>) -> std::io::Result<()> {
     if sessions.is_empty() {
         return Ok(());
     }
     let mut file = SessionsFile::load(path);
-    file.push(make_entry(sessions, now_unix()));
+    let entry = make_entry(sessions, now_unix());
+    if let Some(last) = file.entries.last_mut() {
+        if same_topology(&last.sessions, &entry.sessions) {
+            *last = entry;
+            return file.save(path);
+        }
+    }
+    file.push(entry);
     file.save(path)
+}
+
+/// Resume-relevant identity, pairwise in manager order: name, tool,
+/// cwd, groups. The harness session id is excluded on purpose — it
+/// churns across restore cycles for the same logical session, and
+/// letting it force a new row is what stacked the duplicates.
+fn same_topology(a: &[SavedSession], b: &[SavedSession]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| {
+            x.name == y.name
+                && x.cli_tool == y.cli_tool
+                && x.cwd == y.cwd
+                && x.groups == y.groups
+        })
 }
 
 fn parse(text: &str) -> Option<SessionsFile> {
@@ -363,6 +386,36 @@ mod tests {
         assert!(SessionsFile::load(&path).entries.is_empty());
         std::fs::write(&path, r#"{"entries":[{"label":"x"}]}"#).unwrap();
         assert!(SessionsFile::load(&path).entries.is_empty(), "shape-checked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn steady_quits_refresh_newest_instead_of_stacking() {
+        let dir = std::env::temp_dir().join(format!("forge-ckpt-dedupe-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("sessions");
+        save_quit_snapshot(&path, vec![saved("a")]).unwrap();
+        // Same topology, churned harness id: refresh in place, no new row.
+        let mut again = saved("a");
+        again.harness_session_id = Some("harness-2".to_string());
+        save_quit_snapshot(&path, vec![again]).unwrap();
+        let back = SessionsFile::load(&path);
+        assert_eq!(back.entries.len(), 1, "no duplicate row");
+        assert_eq!(
+            back.entries[0].sessions[0].harness_session_id.as_deref(),
+            Some("harness-2"),
+            "ids stay fresh"
+        );
+        // Same names, different groups: a real change, appends.
+        let mut regrouped = saved("a");
+        regrouped.groups = vec!["other".to_string()];
+        save_quit_snapshot(&path, vec![regrouped]).unwrap();
+        assert_eq!(SessionsFile::load(&path).entries.len(), 2);
+        // ...and re-quitting that topology is stable again.
+        let mut regrouped2 = saved("a");
+        regrouped2.groups = vec!["other".to_string()];
+        save_quit_snapshot(&path, vec![regrouped2]).unwrap();
+        assert_eq!(SessionsFile::load(&path).entries.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
