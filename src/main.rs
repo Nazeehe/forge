@@ -32,6 +32,9 @@ mod walkthrough;
 
 const VERSION: &str = "1.0.0";
 
+/// Packaged `AGENTS.md`, dropped into `~/.forge` when missing.
+const DEFAULT_AGENTS_MD: &str = include_str!("../AGENTS.md");
+
 fn print_help() {
     println!("Usage: {} [--version|--help|hook-relay [endpoint]|mcp-serve [--endpoint PATH]|install-*|uninstall-*]", branding::binary_name());
     println!(
@@ -134,6 +137,15 @@ fn startup() -> i32 {
     if let Err(e) = crate::agents::load_registry(&agents_path) {
         eprintln!("error: {e}");
         return 1;
+    }
+    // Configuration guide for AI agents: docs only, so a failed drop
+    // warns instead of blocking startup — and an existing file is never
+    // overwritten, since local edits must survive upgrades.
+    let guide_path = branding::guide_file(&home);
+    if !guide_path.exists() {
+        if let Err(e) = std::fs::write(&guide_path, DEFAULT_AGENTS_MD) {
+            eprintln!("warning: cannot write configuration guide: {e}");
+        }
     }
     let run = ids::RunId::generate();
     if let Ok(mut log) =
@@ -248,6 +260,41 @@ fn main() {
         }
         None => {
             std::process::exit(startup());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packaged_guide_tracks_the_live_schema() {
+        // Doc rot guard: if a registry key is renamed, the guide must
+        // follow. File names, schema keys, enum values, and rules.
+        for needle in [
+            "config.toml",
+            "agents.json",
+            "sessions",
+            "extra_args",
+            "env_override",
+            "model_flag",
+            "default_model",
+            "subcommand",
+            "with_id",
+            "without_id",
+            "supports_hooks",
+            "session_attribution",
+            "hook_env",
+            "cwd_window",
+            "positional",
+            "safe-only",
+            "ai-assisted",
+        ] {
+            assert!(
+                DEFAULT_AGENTS_MD.contains(needle),
+                "guide lost {needle:?}"
+            );
         }
     }
 }

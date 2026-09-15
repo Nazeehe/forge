@@ -51,6 +51,13 @@ pub fn agents_file(home: &Path) -> PathBuf {
     config_dir(home).join("agents.json")
 }
 
+/// `~/.forge/AGENTS.md`: agent configuration guide, dropped from the
+/// packaged copy on first launch when missing. Never overwritten: local
+/// edits survive upgrades.
+pub fn guide_file(home: &Path) -> PathBuf {
+    config_dir(home).join("AGENTS.md")
+}
+
 /// `~/.forge/sessions`: saved session snapshots, newest last.
 pub fn sessions_file(home: &Path) -> PathBuf {
     config_dir(home).join("sessions")
@@ -70,6 +77,19 @@ mod tests {
     fn config_dir_names() {
         assert_eq!(config_dir_name(), ".forge");
         assert_eq!(legacy_config_dir_name(), ".ccpp");
+    }
+
+    #[test]
+    fn packaged_files_join_home() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            agents_file(home),
+            PathBuf::from("/home/tester/.forge/agents.json")
+        );
+        assert_eq!(
+            guide_file(home),
+            PathBuf::from("/home/tester/.forge/AGENTS.md")
+        );
     }
 
     #[test]
