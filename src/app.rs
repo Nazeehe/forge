@@ -58,6 +58,11 @@ pub struct AppState {
     /// Grid mode (`Ctrl-b w`): the main area tiles every session in
     /// framed cells instead of showing only the focused one.
     pub grid_mode: bool,
+    /// Monotonic visual generation: every accepted `visual_show` takes
+    /// the next number so stale renders never win. U3 scopes this per
+    /// session with the raster state; the global counter stays as the
+    /// tiebreak source.
+    pub visual_seq: u64,
     /// Rounded pill buttons everywhere; mirrors the config flag at startup.
     pub pill_tabs: bool,
 }
@@ -88,6 +93,7 @@ impl AppState {
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
             grid_mode: false,
+            visual_seq: 0,
             pill_tabs: true,
         }
     }
@@ -500,6 +506,8 @@ impl AppState {
     ) -> Option<Result<String, String>> {
         match tool {
             "start_session" | "set_session_status" | "clear_session_status" => {}
+            #[cfg(feature = "visual")]
+            "visual_show" => {}
             _ => return None,
         }
         let id = match self.resolve_tool_caller(run_id) {
@@ -509,8 +517,39 @@ impl AppState {
         match tool {
             "start_session" => Some(self.start_session_tool(id, args)),
             "set_session_status" => Some(self.set_session_status(id, args)),
+            #[cfg(feature = "visual")]
+            "visual_show" => Some(self.visual_show_tool(id, args)),
             _ => Some(self.clear_session_status(id)),
         }
+    }
+
+    /// Render the caller's diagram synchronously and report dimensions:
+    /// U2 plumbing with no stored state yet (U3 adds the worker, the
+    /// per-session slot, and the budget). Caps run before allocation;
+    /// failures stay single-line errors.
+    #[cfg(feature = "visual")]
+    fn visual_show_tool(
+        &mut self,
+        _caller: crate::session::SessionId,
+        args: &str,
+    ) -> Result<String, String> {
+        let content = Self::tool_arg(args, "content")
+            .ok_or_else(|| "visual_show needs content".to_string())?;
+        let format = Self::tool_arg(args, "format").unwrap_or_else(|| "mermaid".to_string());
+        crate::visual::check_request(&content, &format)?;
+        let png = crate::visual::render_png_bytes(&content)
+            .map_err(|e| format!("render failed: {e}"))?;
+        let (width, height) = crate::visual::png_dimensions(&png)?;
+        self.visual_seq += 1;
+        let title = Self::tool_arg(args, "title").unwrap_or_default();
+        let alt = Self::tool_arg(args, "alt").unwrap_or_default();
+        self.dirty = true;
+        Ok(format!(
+            r#"{{"format":"mermaid","width":{width},"height":{height},"generation":{},"title":{},"alt":{}}}"#,
+            self.visual_seq,
+            crate::mcp::escape_json(&title),
+            crate::mcp::escape_json(&alt),
+        ))
     }
 
     /// Create a local agent session: validated name/cwd/harness, an
@@ -2636,6 +2675,65 @@ mod tests {
         assert!(bad.contains(r#""ok":false"#), "bad: {bad}");
         assert!(bad.contains(r#""code":"unauthorized""#), "bad: {bad}");
         assert!(state.manager.remove(state.manager.order()[0]));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_show_accepts_mermaid_and_reports_dimensions() {
+        let mut state = AppState::new();
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let out = comms_reply(
+            &mut state,
+            &live_run,
+            "visual_show",
+            r#"{"content":"flowchart LR\n    A-->B","format":"mermaid","title":"flow"}"#,
+        );
+        assert!(out.contains(r#""ok":true"#), "accepted: {out}");
+        assert!(out.contains("\"width\""), "dimensions: {out}");
+        assert!(out.contains("\"generation\":1"), "stamped: {out}");
+        assert!(out.contains("flow"), "title echoed: {out}");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_show_rejects_bad_format_empty_and_stale_caller() {
+        let mut state = AppState::new();
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        // Unknown formats name the supported set.
+        let out = comms_reply(
+            &mut state,
+            &live_run,
+            "visual_show",
+            r#"{"content":"<b>x</b>","format":"html"}"#,
+        );
+        assert!(out.contains(r#""ok":false"#), "rejected: {out}");
+        assert!(out.contains("mermaid"), "names supported: {out}");
+        // Missing format defaults to mermaid.
+        let out = comms_reply(
+            &mut state,
+            &live_run,
+            "visual_show",
+            r#"{"content":"flowchart LR\n    A-->B"}"#,
+        );
+        assert!(out.contains(r#""ok":true"#), "default format: {out}");
+        // Empty content and stale callers fail closed.
+        let out = comms_reply(&mut state, &live_run, "visual_show", r#"{"content":""}"#);
+        assert!(out.contains(r#""ok":false"#), "empty: {out}");
+        let out = comms_reply(
+            &mut state,
+            "run-dead",
+            "visual_show",
+            r#"{"content":"flowchart LR\n    A-->B"}"#,
+        );
+        assert!(out.contains("stale run ID"), "stale: {out}");
     }
 
     #[test]

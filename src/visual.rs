@@ -23,6 +23,28 @@ pub fn render_png_bytes(source: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Largest diagram source accepted: enforced before any allocation.
+pub const MAX_SOURCE_CHARS: usize = 65_536;
+
+/// Validate a show request without rendering: format allowlist first
+/// (the error names the supported set), then non-empty bounded content.
+pub fn check_request(content: &str, format: &str) -> Result<(), String> {
+    if format != "mermaid" {
+        return Err(format!(
+            "unsupported format {format:?}: supported formats: mermaid"
+        ));
+    }
+    if content.is_empty() {
+        return Err("visual_show needs content".to_string());
+    }
+    if content.chars().count() > MAX_SOURCE_CHARS {
+        return Err(format!(
+            "content exceeds {MAX_SOURCE_CHARS} characters"
+        ));
+    }
+    Ok(())
+}
+
 /// Width/height from the PNG IHDR chunk: bytes 16..24, big-endian u32s.
 pub fn png_dimensions(png: &[u8]) -> Result<(u32, u32), String> {
     if png.len() < 24 || !png.starts_with(&[0x89, b'P', b'N', b'G']) {

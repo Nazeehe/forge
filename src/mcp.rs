@@ -476,6 +476,12 @@ fn tool_defs() -> Vec<ToolDef> {
             description: "Update one step of the open tour: step_index is 1-based like the displayed counter; absent fields keep their values.",
             schema: r#"{"type":"object","properties":{"step_index":{"type":"integer"},"start_line":{"type":"integer"},"end_line":{"type":"integer"},"explanation":{"type":"string"}},"required":["step_index"]}"#,
         },
+        #[cfg(feature = "visual")]
+        ToolDef {
+            name: "visual_show",
+            description: "Render a diagram into your Visual tab: content is the diagram source, format is mermaid (only), title and alt label it for the operator.",
+            schema: r#"{"type":"object","properties":{"content":{"type":"string"},"format":{"type":"string"},"title":{"type":"string"},"alt":{"type":"string"}},"required":["content"]}"#,
+        },
     ]
 }
 
@@ -717,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_names_all_sixteen_tools() {
+    fn tools_list_advertises_every_tool() {
         let res = handle_line(
             r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
             &ctx(),
@@ -742,6 +748,8 @@ mod tests {
             "clear_session_status",
             "walkthrough_add_step",
             "walkthrough_update",
+            #[cfg(feature = "visual")]
+            "visual_show",
         ] {
             assert!(res.contains(&format!(r#""name":"{tool}""#)), "res: {res}");
         }
