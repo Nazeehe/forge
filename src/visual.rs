@@ -3,9 +3,33 @@
 
 static SPIKE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Largest raster accepted into a slot: enforced on the decoded PNG
+/// before storing, so a hostile diagram cannot eat the image budget
+/// in one frame. Transient worker memory is bounded by the input cap.
+pub const MAX_RASTER_PIXELS: u64 = 2048 * 2048;
+
+/// One rasterized diagram, measured and pixel-capped.
+pub struct RasterFrame {
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Render plus measure plus pixel cap. In-memory raster would need a
+/// direct resvg dep; the scratch file stands until that earns its keep.
+pub fn render_frame(source: &str) -> Result<RasterFrame, String> {
+    let png = render_png_bytes(source)?;
+    let (width, height) = png_dimensions(&png)?;
+    if width as u64 * height as u64 > MAX_RASTER_PIXELS {
+        return Err(format!(
+            "raster {width}x{height} exceeds {MAX_RASTER_PIXELS} pixels"
+        ));
+    }
+    Ok(RasterFrame { png, width, height })
+}
+
 /// Render one Mermaid diagram to PNG bytes. The crate's PNG writer is
-/// file-based, so the spike round-trips a scratch file; U3 decides
-/// whether in-memory raster earns a direct resvg dep.
+/// file-based, so rendering round-trips a scratch file.
 pub fn render_png_bytes(source: &str) -> Result<Vec<u8>, String> {
     let svg = mermaid_rs_renderer::render(source).map_err(|e| e.to_string())?;
     let n = SPIKE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

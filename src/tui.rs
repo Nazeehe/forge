@@ -285,6 +285,7 @@ fn loop_until_quit(
         }
         state.settle_hooks(policy, audit_path);
         state.settle_comms();
+        state.drain_visual();
         if state.dirty {
             if state.grid_mode {
                 fit_grid_panes(state);

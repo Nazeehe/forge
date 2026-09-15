@@ -65,7 +65,56 @@ pub struct AppState {
     pub visual_seq: u64,
     /// Rounded pill buttons everywhere; mirrors the config flag at startup.
     pub pill_tabs: bool,
+    /// Sticky per-session visuals: the newest completed generation per
+    /// session. Raster failures drop the frame; the accepted verdict
+    /// stands and the previous frame (if any) stays put.
+    #[cfg(feature = "visual")]
+    pub visual_slots: std::collections::HashMap<crate::session::SessionId, VisualSlot>,
+    /// Oldest-first recency for eviction; touched on every store.
+    #[cfg(feature = "visual")]
+    pub visual_lru: std::collections::VecDeque<crate::session::SessionId>,
+    /// Image budget, tunable in tests; production defaults below.
+    #[cfg(feature = "visual")]
+    pub visual_budget_bytes: usize,
+    /// Slot count cap, tunable in tests; production defaults below.
+    #[cfg(feature = "visual")]
+    pub visual_budget_count: usize,
+    /// Background raster completions; drained once per main-loop pass.
+    #[cfg(feature = "visual")]
+    visual_tx: std::sync::mpsc::Sender<VisualDone>,
+    /// Drain end of the raster channel; see `drain_visual`.
+    #[cfg(feature = "visual")]
+    visual_rx: std::sync::mpsc::Receiver<VisualDone>,
 }
+
+/// One finished background raster, headed for a session slot.
+#[cfg(feature = "visual")]
+pub struct VisualDone {
+    pub session: crate::session::SessionId,
+    pub generation: u64,
+    pub title: String,
+    pub alt: String,
+    pub result: Result<crate::visual::RasterFrame, String>,
+}
+
+/// The newest completed visual for one session.
+#[cfg(feature = "visual")]
+pub struct VisualSlot {
+    pub generation: u64,
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub title: String,
+    pub alt: String,
+}
+
+/// Production image budget: decoded bytes across all slots.
+#[cfg(feature = "visual")]
+pub const DEFAULT_VISUAL_BUDGET_BYTES: usize = 48 * 1024 * 1024;
+
+/// Production slot cap: sticky visuals per session count.
+#[cfg(feature = "visual")]
+pub const DEFAULT_VISUAL_BUDGET_COUNT: usize = 8;
 
 /// Overlay slot past the PTY tabs: Events, Tasks, Visual, Walkthrough.
 /// Agent sessions always carry exactly three PTY tabs, so absolute
@@ -75,6 +124,8 @@ pub const OVERLAY_TABS: [&str; 4] = ["Events", "Tasks", "Visual", "Walkthrough"]
 
 impl AppState {
     pub fn new() -> Self {
+        #[cfg(feature = "visual")]
+        let (visual_tx, visual_rx) = std::sync::mpsc::channel();
         AppState {
             manager: SessionManager::new(),
             dirty: true,
@@ -95,6 +146,18 @@ impl AppState {
             grid_mode: false,
             visual_seq: 0,
             pill_tabs: true,
+            #[cfg(feature = "visual")]
+            visual_slots: std::collections::HashMap::new(),
+            #[cfg(feature = "visual")]
+            visual_lru: std::collections::VecDeque::new(),
+            #[cfg(feature = "visual")]
+            visual_budget_bytes: DEFAULT_VISUAL_BUDGET_BYTES,
+            #[cfg(feature = "visual")]
+            visual_budget_count: DEFAULT_VISUAL_BUDGET_COUNT,
+            #[cfg(feature = "visual")]
+            visual_tx,
+            #[cfg(feature = "visual")]
+            visual_rx,
         }
     }
 
@@ -523,33 +586,117 @@ impl AppState {
         }
     }
 
-    /// Render the caller's diagram synchronously and report dimensions:
-    /// U2 plumbing with no stored state yet (U3 adds the worker, the
-    /// per-session slot, and the budget). Caps run before allocation;
-    /// failures stay single-line errors.
+    /// Accept the caller's diagram for background raster: caps run
+    /// before anything spawns, the worker renders off the main loop,
+    /// and the verdict carries the generation the completion will
+    /// bear. Dimensions arrive with the frame (U4 paints it).
     #[cfg(feature = "visual")]
     fn visual_show_tool(
         &mut self,
-        _caller: crate::session::SessionId,
+        caller: crate::session::SessionId,
         args: &str,
     ) -> Result<String, String> {
         let content = Self::tool_arg(args, "content")
             .ok_or_else(|| "visual_show needs content".to_string())?;
         let format = Self::tool_arg(args, "format").unwrap_or_else(|| "mermaid".to_string());
         crate::visual::check_request(&content, &format)?;
-        let png = crate::visual::render_png_bytes(&content)
-            .map_err(|e| format!("render failed: {e}"))?;
-        let (width, height) = crate::visual::png_dimensions(&png)?;
         self.visual_seq += 1;
+        let generation = self.visual_seq;
         let title = Self::tool_arg(args, "title").unwrap_or_default();
         let alt = Self::tool_arg(args, "alt").unwrap_or_default();
+        let tx = self.visual_tx.clone();
+        std::thread::Builder::new()
+            .name("visual-raster".to_string())
+            .spawn(move || {
+                let result = crate::visual::render_frame(&content);
+                let _ = tx.send(VisualDone {
+                    session: caller,
+                    generation,
+                    title,
+                    alt,
+                    result,
+                });
+            })
+            .map_err(|e| format!("cannot spawn raster worker: {e}"))?;
         self.dirty = true;
         Ok(format!(
-            r#"{{"format":"mermaid","width":{width},"height":{height},"generation":{},"title":{},"alt":{}}}"#,
-            self.visual_seq,
-            crate::mcp::escape_json(&title),
-            crate::mcp::escape_json(&alt),
+            r#"{{"accepted":true,"format":"mermaid","generation":{generation}}}"#
         ))
+    }
+
+    /// Collect finished background rasters into sticky per-session
+    /// slots. Called once per main-loop pass; never blocks.
+    #[cfg(feature = "visual")]
+    pub fn drain_visual(&mut self) {
+        let done: Vec<VisualDone> = self.visual_rx.try_iter().collect();
+        for d in done {
+            self.visual_complete(d);
+        }
+    }
+
+    /// No-op drain when the feature is off, so the main loop needs no
+    /// feature gate at the call site.
+    #[cfg(not(feature = "visual"))]
+    pub fn drain_visual(&mut self) {}
+
+    /// Store a finished raster unless it is stale (an older generation
+    /// than the slot holds) or its session is gone. Raster failures
+    /// drop the frame and keep any previous one.
+    #[cfg(feature = "visual")]
+    fn visual_complete(&mut self, done: VisualDone) {
+        if self.manager.get(done.session).is_none() {
+            return;
+        }
+        if let Some(slot) = self.visual_slots.get(&done.session) {
+            if done.generation <= slot.generation {
+                return;
+            }
+        }
+        let Ok(frame) = done.result else {
+            return;
+        };
+        self.visual_lru.retain(|id| *id != done.session);
+        self.visual_lru.push_back(done.session);
+        self.visual_slots.insert(
+            done.session,
+            VisualSlot {
+                generation: done.generation,
+                png: frame.png,
+                width: frame.width,
+                height: frame.height,
+                title: done.title,
+                alt: done.alt,
+            },
+        );
+        self.visual_evict();
+        self.dirty = true;
+    }
+
+    /// Decoded bytes held across all slots.
+    #[cfg(feature = "visual")]
+    fn visual_bytes(&self) -> usize {
+        self.visual_slots.values().map(|slot| slot.png.len()).sum()
+    }
+
+    /// Enforce the budget: oldest sessions first, but never the
+    /// focused one until nothing else can go.
+    #[cfg(feature = "visual")]
+    fn visual_evict(&mut self) {
+        let active = self.manager.active();
+        while self.visual_slots.len() > self.visual_budget_count
+            || self.visual_bytes() > self.visual_budget_bytes
+        {
+            let victim = self
+                .visual_lru
+                .iter()
+                .position(|id| Some(*id) != active)
+                .or_else(|| (!self.visual_lru.is_empty()).then_some(0));
+            let Some(index) = victim else {
+                break;
+            };
+            let id = self.visual_lru.remove(index).expect("eviction index live");
+            self.visual_slots.remove(&id);
+        }
     }
 
     /// Create a local agent session: validated name/cwd/harness, an
@@ -2678,14 +2825,47 @@ mod tests {
     }
 
     #[cfg(feature = "visual")]
-    #[test]
-    fn visual_show_accepts_mermaid_and_reports_dimensions() {
-        let mut state = AppState::new();
+    fn spawn_visual_agent(state: &mut AppState, name: &str) -> (crate::session::SessionId, String) {
         let id = state.manager.spawn_agent(
-            "agent", &std::env::temp_dir(), "exec cat",
+            name, &std::env::temp_dir(), "exec cat",
             crate::ids::RunId::generate(), "codex",
         ).unwrap();
-        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        (id, run)
+    }
+
+    #[cfg(feature = "visual")]
+    fn fake_png(len: usize, w: u32, h: u32) -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A,
+            0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.resize(len.max(24), 0);
+        v
+    }
+
+    #[cfg(feature = "visual")]
+    fn complete(
+        state: &mut AppState,
+        session: crate::session::SessionId,
+        generation: u64,
+        png: Vec<u8>,
+    ) {
+        let (width, height) = crate::visual::png_dimensions(&png).unwrap();
+        state.visual_complete(crate::app::VisualDone {
+            session,
+            generation,
+            title: String::new(),
+            alt: String::new(),
+            result: Ok(crate::visual::RasterFrame { png, width, height }),
+        });
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_show_accepts_mermaid_for_background_render() {
+        let mut state = AppState::new();
+        let (_id, live_run) = spawn_visual_agent(&mut state, "agent");
         let out = comms_reply(
             &mut state,
             &live_run,
@@ -2693,9 +2873,85 @@ mod tests {
             r#"{"content":"flowchart LR\n    A-->B","format":"mermaid","title":"flow"}"#,
         );
         assert!(out.contains(r#""ok":true"#), "accepted: {out}");
-        assert!(out.contains("\"width\""), "dimensions: {out}");
+        assert!(out.contains("\"accepted\":true"), "queued: {out}");
         assert!(out.contains("\"generation\":1"), "stamped: {out}");
-        assert!(out.contains("flow"), "title echoed: {out}");
+        assert!(!out.contains("\"width\""), "no sync dimensions: {out}");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_complete_stores_newest_and_drops_stale() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 2, fake_png(64, 10, 10));
+        assert_eq!(state.visual_slots.get(&id).unwrap().generation, 2);
+        complete(&mut state, id, 1, fake_png(64, 20, 20));
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert_eq!(slot.generation, 2, "stale render dropped");
+        assert_eq!((slot.width, slot.height), (10, 10));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_complete_drops_missing_session() {
+        let mut state = AppState::new();
+        let ghost = crate::session::SessionId::fresh();
+        complete(&mut state, ghost, 1, fake_png(64, 10, 10));
+        assert!(state.visual_slots.is_empty(), "no slot for dead session");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_lru_evicts_oldest_inactive_first() {
+        let mut state = AppState::new();
+        state.visual_budget_count = 2;
+        let (a, _) = spawn_visual_agent(&mut state, "a");
+        let (b, _) = spawn_visual_agent(&mut state, "b");
+        let (c, _) = spawn_visual_agent(&mut state, "c");
+        assert!(state.select_session(0), "focus oldest");
+        assert_eq!(state.manager.active(), Some(a));
+        complete(&mut state, a, 1, fake_png(64, 10, 10));
+        complete(&mut state, b, 2, fake_png(64, 10, 10));
+        complete(&mut state, c, 3, fake_png(64, 10, 10));
+        assert_eq!(state.visual_slots.len(), 2);
+        assert!(state.visual_slots.contains_key(&a), "active survives");
+        assert!(state.visual_slots.contains_key(&c), "newest survives");
+        assert!(!state.visual_slots.contains_key(&b), "oldest inactive evicted");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_budget_counts_decoded_bytes() {
+        let mut state = AppState::new();
+        state.visual_budget_bytes = 100;
+        let (a, _) = spawn_visual_agent(&mut state, "a");
+        let (b, _) = spawn_visual_agent(&mut state, "b");
+        assert!(state.select_session(1), "focus newest");
+        complete(&mut state, a, 1, fake_png(60, 10, 10));
+        complete(&mut state, b, 2, fake_png(60, 10, 10));
+        assert_eq!(state.visual_slots.len(), 1);
+        assert!(state.visual_slots.contains_key(&b), "newest survives bytes");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_drain_collects_worker_results() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_tx.clone().send(crate::app::VisualDone {
+            session: id,
+            generation: 7,
+            title: "t".to_string(),
+            alt: String::new(),
+            result: Ok(crate::visual::RasterFrame {
+                png: fake_png(64, 10, 10),
+                width: 10,
+                height: 10,
+            }),
+        }).unwrap();
+        state.drain_visual();
+        assert_eq!(state.visual_slots.get(&id).unwrap().generation, 7);
+        assert_eq!(state.visual_slots.get(&id).unwrap().title, "t");
     }
 
     #[cfg(feature = "visual")]
