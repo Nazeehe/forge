@@ -744,7 +744,7 @@ impl AppState {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let name = self.suggested_session_name();
         let groups = self.broker.group_names();
-        self.create_dialog = Some(crate::create::CreateDialog::new(&name, &cwd, &groups));
+        self.create_dialog = Some(crate::create::CreateDialog::new(&name, &cwd, &groups, self.pill_tabs));
         self.dirty = true;
     }
 

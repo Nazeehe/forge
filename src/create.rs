@@ -172,12 +172,15 @@ pub struct CreateDialog {
     /// typed or deleted char replaces it wholesale, while cursor keys
     /// just deselect and keep the text.
     name_pristine: bool,
+    /// Rounded pill action buttons (needs a Nerd Font); set from the
+    /// global pills flag at construction.
+    pills: bool,
 }
 
 impl CreateDialog {
     /// `groups` are the live broker group names; the select offers them
     /// after a leading `None` (groupless).
-    pub fn new(suggested_name: &str, cwd: &Path, groups: &[String]) -> Self {
+    pub fn new(suggested_name: &str, cwd: &Path, groups: &[String], pills: bool) -> Self {
         let directory = Input::default()
             .title("Directory")
             .value(cwd.to_string_lossy().into_owned());
@@ -207,6 +210,7 @@ impl CreateDialog {
             base_cwd: cwd.to_path_buf(),
             error: None,
             name_pristine: true,
+            pills,
         }
     }
 
@@ -412,6 +416,61 @@ fn option_key(radio: &mut Radio, key: &KeyEvent) {
     }
 }
 
+/// Pill action buttons for the actions row: centered labels in rounded
+/// containers, the `>` chosen-marker and `*` default-marker kept. The
+/// Create pill always carries the accent (it is the default action);
+/// Cancel fills only when chosen.
+fn pill_actions(
+    focused: bool,
+    choice: usize,
+    text: ratatui::style::Style,
+) -> Vec<ratatui::text::Span<'static>> {
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::Span;
+    use crate::theme::{Role, focus_row, style};
+    let frame = |glyph: char, color: Color| {
+        Span::styled(glyph.to_string(), Style::default().fg(color))
+    };
+    let pad = |s: Style| Span::styled(" ".to_string(), s);
+    let create_chosen = focused && choice == 0;
+    let create_style = if create_chosen {
+        style(Role::TabActive)
+    } else {
+        style(Role::Brand).add_modifier(Modifier::BOLD)
+    };
+    let cancel_chosen = focused && choice == 1;
+    let cancel_plain = text;
+    let cancel_style = if cancel_chosen {
+        style(Role::TabActive)
+    } else {
+        cancel_plain
+    };
+    let cancel_cap = if cancel_chosen {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+    let mut spans = Vec::new();
+    if create_chosen {
+        spans.push(Span::styled(">", focus_row()));
+    }
+    spans.push(frame(crate::ui::PILL_LEFT, Color::Yellow));
+    spans.push(pad(create_style));
+    spans.push(Span::styled("Create*".to_string(), create_style));
+    spans.push(pad(create_style));
+    spans.push(frame(crate::ui::PILL_RIGHT, Color::Yellow));
+    spans.push(Span::styled("  ".to_string(), text));
+    if cancel_chosen {
+        spans.push(Span::styled(">", focus_row()));
+    }
+    spans.push(frame(crate::ui::PILL_LEFT, cancel_cap));
+    spans.push(pad(cancel_style));
+    spans.push(Span::styled("Cancel".to_string(), cancel_style));
+    spans.push(pad(cancel_style));
+    spans.push(frame(crate::ui::PILL_RIGHT, cancel_cap));
+    spans
+}
+
 /// Truncate to a cell width, marking cuts at the front with an
 /// ellipsis and keeping the tail intact — for paths, where the end
 /// carries the meaning.
@@ -581,24 +640,32 @@ impl CreateDialog {
                     // reverse marks the chosen button — the Enter target.
                     // `[Create*]` keeps accent yellow as the default action.
                     let choice = self.actions.states.choice;
-                    let create = if focused && choice == 0 {
-                        Span::styled(">[Create*]", focus_row())
-                    } else {
-                        Span::styled(
-                            "[Create*]",
-                            style(Role::Brand).add_modifier(Modifier::BOLD),
+                    if self.pills {
+                        line_at(
+                            labels[index],
+                            false,
+                            pill_actions(focused, choice, text),
                         )
-                    };
-                    let cancel = if focused && choice == 1 {
-                        Span::styled(">[Cancel]", focus_row())
                     } else {
-                        Span::styled("[Cancel]", text)
-                    };
-                    line_at(
-                        labels[index],
-                        false,
-                        vec![create, Span::styled("  ", text), cancel],
-                    )
+                        let create = if focused && choice == 0 {
+                            Span::styled(">[Create*]", focus_row())
+                        } else {
+                            Span::styled(
+                                "[Create*]",
+                                style(Role::Brand).add_modifier(Modifier::BOLD),
+                            )
+                        };
+                        let cancel = if focused && choice == 1 {
+                            Span::styled(">[Cancel]", focus_row())
+                        } else {
+                            Span::styled("[Cancel]", text)
+                        };
+                        line_at(
+                            labels[index],
+                            false,
+                            vec![create, Span::styled("  ", text), cancel],
+                        )
+                    }
                 }
             };
             // The actions row carries its own `>`; its marker stays blank
@@ -730,7 +797,7 @@ mod tests {
     fn fresh() -> (CreateDialog, Vec<String>) {
         let cwd = std::env::temp_dir();
         let groups = vec!["team".to_string(), "other".to_string()];
-        (CreateDialog::new("claude-1", &cwd, &groups), Vec::new())
+        (CreateDialog::new("claude-1", &cwd, &groups, false), Vec::new())
     }
 
     #[test]
@@ -782,6 +849,33 @@ mod tests {
         assert!(mark.modifier.contains(Modifier::REVERSED));
         // Create keeps its default `*` even while Cancel is chosen.
         assert_eq!(buf.get(22, 13).symbol(), "*");
+    }
+
+    #[test]
+    fn pill_actions_center_labels_and_keep_markers() {
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::style::{Color, Modifier};
+        let (mut d, names) = fresh();
+        d.pills = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        let buf = terminal.backend().buffer();
+        // Unfocused: Create pill carries the accent, Cancel stays dim.
+        assert_eq!(buf[(15, 13)].symbol(), "\u{e0b6}");
+        assert_eq!(buf[(15, 13)].fg, Color::Yellow);
+        assert_eq!(buf[(23, 13)].symbol(), "*", "default mark kept");
+        assert_eq!(buf[(23, 13)].fg, Color::Yellow);
+        assert_eq!(buf[(28, 13)].fg, Color::DarkGray, "dim cancel cap");
+        // Chosen Cancel: `>` marker plus filled container.
+        step(&mut d, &names, 4);
+        assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
+        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(28, 13)].symbol(), ">", "chosen marked");
+        assert_eq!(buf[(29, 13)].fg, Color::Yellow, "cancel cap lights");
+        assert_eq!(buf[(31, 13)].bg, Color::Yellow, "cancel fills");
+        assert!(buf[(31, 13)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(23, 13)].symbol(), "*", "default mark kept");
     }
 
     #[test]
@@ -1024,7 +1118,7 @@ mod tests {
         let root = sandbox(&["alpha-service", "alpha-worker"], &["top.txt"]);
         let r = root.to_string_lossy().into_owned();
         let groups: Vec<String> = vec![];
-        let mut d = CreateDialog::new("x", &root, &groups);
+        let mut d = CreateDialog::new("x", &root, &groups, false);
         let names: Vec<String> = vec![];
         assert_eq!(d.focus(), 0);
         // Several matches extend to their longest common prefix; a shared
@@ -1063,7 +1157,7 @@ mod tests {
         let long = "/home/user/projects/some/deeply/nested/directory/structure/that/goes/on/forever";
         // Room is 61 cells on an 80-wide terminal; the fixture overflows it.
         assert!(long.chars().count() > 61);
-        let mut d = CreateDialog::new("x", std::path::Path::new(long), &[]);
+        let mut d = CreateDialog::new("x", std::path::Path::new(long), &[], false);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
