@@ -193,30 +193,68 @@ pub fn run(
 /// replacement emits both sides), then position the cursor at the
 /// overlay origin and transmit `c` cell columns wide. Best effort —
 /// a dead terminal means we are quitting anyway.
+/// Focused Visual tab viewport: session, tab image region, and
+/// text-cell size. The region is the same chrome the fallback art
+/// and the button hit test use, so all three backends agree. The
+/// cell size comes from the terminal pixel report, falling back to
+/// the 8x16 the half-block art draws with exactly.
+#[cfg(feature = "visual")]
+fn visual_viewport(
+    state: &AppState,
+) -> Option<(crate::session::SessionId, crate::ui::VisualChrome, (f64, f64))> {
+    let (id, _) = state.visual_focused_frame()?;
+    let (rows, cols) = state.term_size;
+    let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let chrome = ui::visual_chrome(ui::pane_content_area(&areas));
+    let cell = match crossterm::terminal::window_size() {
+        Ok(ws) => crate::visual::cell_px(cols, rows, ws.width as u32, ws.height as u32),
+        Err(_) => crate::visual::FALLBACK_CELL_PX,
+    };
+    Some((id, chrome, cell))
+}
+
 #[cfg(feature = "visual")]
 fn sync_visual_terminal(
     state: &mut AppState,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> io::Result<()> {
     use std::io::Write as _;
     if let Some(image_id) = state.visual_take_hide() {
         write!(io::stdout(), "{}", crate::visual::kitty_delete(image_id))?;
     }
-    if let Some(spec) = state.visual_take_show(crate::visual::kitty_supported_env()) {
-        if let Some(png) = state.visual_shown_png() {
-            let size = terminal.size()?;
-            let area = crate::walkthrough::walk_area(ratatui::layout::Rect::new(
-                0,
-                0,
-                size.width,
-                size.height,
-            ));
-            crossterm::execute!(io::stdout(), crossterm::cursor::MoveTo(area.x, area.y))?;
-            write!(
-                io::stdout(),
-                "{}",
-                crate::visual::kitty_transmit(png, spec.image_id, area.width)
-            )?;
+    if !crate::visual::kitty_supported_env() {
+        return Ok(());
+    }
+    // Bytes first, claim second: the gate only records paints the
+    // terminal actually receives, so a failed encode retries instead
+    // of going dark.
+    if let Some((id, chrome, (cell_w, cell_h))) = visual_viewport(state) {
+        let (_, generation) = state.visual_focused_frame().expect("viewport implies frame");
+        if let Some(paint) = state.visual_paint(id, chrome.image, cell_w, cell_h) {
+            if let Some(png) = state.visual_frame_png(id, generation, paint) {
+                if let Some(spec) = state.visual_take_show(true, paint) {
+                    if spec.replace {
+                        write!(io::stdout(), "{}", crate::visual::kitty_delete(spec.image_id))?;
+                    }
+                    let placed = spec.paint;
+                    if placed.out_cols > 0 && placed.out_rows > 0 {
+                        crossterm::execute!(
+                            io::stdout(),
+                            crossterm::cursor::MoveTo(placed.cursor_x, placed.cursor_y)
+                        )?;
+                        write!(
+                            io::stdout(),
+                            "{}",
+                            crate::visual::kitty_transmit(
+                                &png,
+                                spec.image_id,
+                                placed.out_cols,
+                                placed.out_rows
+                            )
+                        )?;
+                    }
+                }
+            }
         }
     }
     io::stdout().flush()?;
@@ -385,11 +423,59 @@ fn loop_until_quit(
     Ok(())
 }
 
+/// Visual tab viewport keys: arrows pan, `+`/`-` zoom, Esc leaves
+/// the tab. Returns true when the key belonged to the viewport.
+/// Plain keys only: chords with Ctrl/Alt still reach the router, so
+/// prefixes keep working with a diagram open.
+#[cfg(feature = "visual")]
+fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let Some((id, chrome, (cell_w, cell_h))) = visual_viewport(state) else {
+        return true;
+    };
+    let (area_cols, area_rows) = (chrome.image.width, chrome.image.height);
+    if key.modifiers != KeyModifiers::NONE {
+        return false;
+    }
+    match key.code {
+        KeyCode::Left => {
+            state.visual_scroll(id, -1, 0, area_cols, area_rows, cell_w, cell_h);
+        }
+        KeyCode::Right => {
+            state.visual_scroll(id, 1, 0, area_cols, area_rows, cell_w, cell_h);
+        }
+        KeyCode::Up => {
+            state.visual_scroll(id, 0, -1, area_cols, area_rows, cell_w, cell_h);
+        }
+        KeyCode::Down => {
+            state.visual_scroll(id, 0, 1, area_cols, area_rows, cell_w, cell_h);
+        }
+        KeyCode::Char('+') | KeyCode::Char('=') => {
+            state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, area_cols, area_rows, cell_w, cell_h);
+        }
+        KeyCode::Char('-') | KeyCode::Char('_') => {
+            state.visual_zoom(id, crate::ui::VisualButton::ZoomOut, area_cols, area_rows, cell_w, cell_h);
+        }
+        KeyCode::Esc => {
+            state.overlay_view = None;
+            state.dirty = true;
+        }
+        _ => {}
+    }
+    true
+}
+
 fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEvent) {
     // An open tour captures every key, including prefix chords: the
     // overlay owns input while open and Esc leaves it.
     if state.walkthrough_overlay_active() {
         handle_walkthrough_key(state, key);
+        return;
+    }
+    // A focused Visual tab owns its viewport keys the same way, so
+    // arrows pan the diagram instead of reaching the agent pane.
+    #[cfg(feature = "visual")]
+    if state.visual_tab_focused() && handle_visual_key(state, key) {
         return;
     }
     match router.feed(key) {
@@ -800,6 +886,30 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     let Some(active) = state.manager.active() else {
         return;
     };
+    // A focused Visual tab owns the wheel (vertical pan) and its
+    // zoom buttons; every other main-area event dies here so clicks
+    // never reach the agent pane behind the diagram.
+    #[cfg(feature = "visual")]
+    if state.visual_tab_focused() {
+        if let Some((id, chrome, (cell_w, cell_h))) = visual_viewport(state) {
+            let (area_cols, area_rows) = (chrome.image.width, chrome.image.height);
+            match mev.kind {
+                event::MouseEventKind::ScrollUp => {
+                    state.visual_scroll(id, 0, -3, area_cols, area_rows, cell_w, cell_h);
+                }
+                event::MouseEventKind::ScrollDown => {
+                    state.visual_scroll(id, 0, 3, area_cols, area_rows, cell_w, cell_h);
+                }
+                event::MouseEventKind::Down(event::MouseButton::Left) => {
+                    if let Some(button) = ui::visual_button_at(&chrome, mev.column, mev.row) {
+                        state.visual_zoom(id, button, area_cols, area_rows, cell_w, cell_h);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
     if state.overlay_active() { return; }
     let mode = state.manager.mouse_mode(active);
     if mode == vt100::MouseProtocolMode::None {
@@ -965,6 +1075,101 @@ mod tests {
         );
         assert!(state.topbar().tabs[1].active);
         assert!(!state.dirty);
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    fn open_visual_overlay(state: &mut AppState) -> crate::session::SessionId {
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            RunId::generate(), "codex",
+        ).unwrap();
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: vec![1, 2, 3],
+            rgba: Vec::new(),
+            width: 1000,
+            height: 1000,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+        });
+        // Agent tabs: CLI, terminal, SCM, then Events/Tasks/Visual.
+        assert!(state.select_top_tab(5));
+        assert!(state.visual_tab_focused());
+        id
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_arrows_pan_plus_minus_zoom_esc_leaves() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = open_visual_overlay(&mut state);
+        let mut router = InputRouter::new();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        // Contained at zoom 1, nothing to pan: keys are swallowed and
+        // the viewport does not move.
+        handle_key(&mut state, &mut router, key(KeyCode::Right));
+        handle_key(&mut state, &mut router, key(KeyCode::Down));
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert_eq!((slot.scroll_x, slot.scroll_y), (0, 0));
+        assert!(state.visual_tab_focused(), "arrows stay in the tab");
+        // Zoom in, then pan down and back up.
+        handle_key(&mut state, &mut router, key(KeyCode::Char('+')));
+        assert!(state.visual_slots.get(&id).unwrap().zoom > 1.0);
+        handle_key(&mut state, &mut router, key(KeyCode::Down));
+        assert_eq!(state.visual_slots.get(&id).unwrap().scroll_y, 1);
+        handle_key(&mut state, &mut router, key(KeyCode::Up));
+        assert_eq!(state.visual_slots.get(&id).unwrap().scroll_y, 0);
+        handle_key(&mut state, &mut router, key(KeyCode::Char('-')));
+        assert_eq!(state.visual_slots.get(&id).unwrap().zoom, 1.0);
+        // Esc leaves the tab; other keys never reach the pane.
+        handle_key(&mut state, &mut router, key(KeyCode::Char('x')));
+        assert!(state.visual_tab_focused(), "plain keys are swallowed");
+        handle_key(&mut state, &mut router, key(KeyCode::Esc));
+        assert!(!state.visual_tab_focused());
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_wheel_pans_and_button_clicks_zoom() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = open_visual_overlay(&mut state);
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let chrome = ui::visual_chrome(ui::pane_content_area(&areas));
+        let (area_cols, area_rows) = (chrome.image.width, chrome.image.height);
+        for _ in 0..3 {
+            assert!(state.visual_zoom(id, ui::VisualButton::ZoomIn, area_cols, area_rows, 8.0, 16.0));
+        }
+        let zoomed = state.visual_slots.get(&id).unwrap().zoom;
+        let wheel = |kind| MouseEvent {
+            kind, column: chrome.image.x + 2, row: chrome.image.y + 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        forward_mouse(&mut state, wheel(MouseEventKind::ScrollDown));
+        assert_eq!(state.visual_slots.get(&id).unwrap().scroll_y, 3);
+        forward_mouse(&mut state, wheel(MouseEventKind::ScrollUp));
+        assert_eq!(state.visual_slots.get(&id).unwrap().scroll_y, 0);
+        // Zoom-in button click; a click on the image itself is dead.
+        let click = |column, row| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left), column, row,
+            modifiers: KeyModifiers::NONE,
+        };
+        forward_mouse(&mut state, click(chrome.zoom_in.x, chrome.zoom_in.y));
+        assert!(state.visual_slots.get(&id).unwrap().zoom > zoomed);
+        let zoomed = state.visual_slots.get(&id).unwrap().zoom;
+        forward_mouse(&mut state, click(chrome.image.x + 2, chrome.image.y + 2));
+        assert_eq!(state.visual_slots.get(&id).unwrap().zoom, zoomed);
+        forward_mouse(&mut state, click(chrome.zoom_out.x, chrome.zoom_out.y));
+        assert!(state.visual_slots.get(&id).unwrap().zoom < zoomed);
+        assert!(state.visual_tab_focused(), "clicks stay in the tab");
         assert!(state.manager.remove(id));
     }
 

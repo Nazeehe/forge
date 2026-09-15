@@ -101,6 +101,7 @@ pub struct VisualShown {
     pub session: crate::session::SessionId,
     pub generation: u64,
     pub image_id: u32,
+    pub paint: crate::visual::VisualPaint,
 }
 
 /// Claim for one transmit: the TUI positions the cursor and writes it.
@@ -109,6 +110,10 @@ pub struct VisualShowSpec {
     pub image_id: u32,
     pub session: crate::session::SessionId,
     pub generation: u64,
+    pub paint: crate::visual::VisualPaint,
+    /// Same placement id, new pixels: the TUI deletes before
+    /// re-transmitting instead of claiming a fresh id.
+    pub replace: bool,
 }
 
 /// One finished background raster, headed for a session slot.
@@ -131,6 +136,12 @@ pub struct VisualSlot {
     pub height: u32,
     pub title: String,
     pub alt: String,
+    /// Zoom factor for the Visual tab viewport: 1.0 shows the whole
+    /// frame contained in the tab, higher zooms scrollable overflow.
+    pub zoom: f32,
+    /// Viewport origin in displayed cells into the zoomed frame.
+    pub scroll_x: u16,
+    pub scroll_y: u16,
 }
 
 /// Production image budget: decoded bytes across all slots.
@@ -359,30 +370,205 @@ impl AppState {
     }
 
     /// Claim the next terminal transmit, if the overlay wants an image
-    /// the screen does not already show. The TUI positions the cursor
+    /// the screen does not already show. The paint fingerprint covers
+    /// zoom, scroll, crop, and cursor, so scrolling or zooming
+    /// re-transmits under the same placement id (`replace`) while an
+    /// untouched frame claims nothing. The TUI positions the cursor
     /// and writes the escape; `None` means nothing to do.
     #[cfg(feature = "visual")]
-    pub fn visual_take_show(&mut self, kitty: bool) -> Option<VisualShowSpec> {
+    pub fn visual_take_show(
+        &mut self,
+        kitty: bool,
+        paint: crate::visual::VisualPaint,
+    ) -> Option<VisualShowSpec> {
         if !kitty {
             return None;
         }
         let (session, generation) = self.visual_overlay_active()?;
-        if matches!(&self.visual_shown, Some(s) if s.session == session && s.generation == generation)
-        {
+        let same_slot = matches!(&self.visual_shown, Some(s) if s.session == session && s.generation == generation);
+        if same_slot && matches!(&self.visual_shown, Some(s) if s.paint == paint) {
             return None;
         }
-        self.visual_image_seq += 1;
-        let spec = VisualShowSpec {
-            image_id: self.visual_image_seq,
-            session,
-            generation,
+        let (image_id, replace) = match &self.visual_shown {
+            Some(shown) if shown.session == session && shown.generation == generation => {
+                (shown.image_id, true)
+            }
+            _ => {
+                self.visual_image_seq += 1;
+                (self.visual_image_seq, false)
+            }
         };
-        self.visual_shown = Some(VisualShown {
-            session,
-            generation,
-            image_id: spec.image_id,
-        });
-        Some(spec)
+        self.visual_shown = Some(VisualShown { session, generation, image_id, paint });
+        Some(VisualShowSpec { image_id, session, generation, paint, replace })
+    }
+
+    /// Whether the focused tab is a session Visual tab: arrows,
+    /// `+`/`-`, wheel, and zoom clicks route to its viewport.
+    #[cfg(feature = "visual")]
+    pub fn visual_tab_focused(&self) -> bool {
+        self.visual_overlay_active().is_some()
+    }
+
+    /// Layout for one session's visual inside its tab image region:
+    /// contained display size from zoom, clamped scroll, source crop,
+    /// and the centered cursor. `cell_w`/`cell_h` come from the
+    /// terminal's pixel report (Kitty path) or the exact 8x16 the
+    /// half-block fallback draws with.
+    #[cfg(feature = "visual")]
+    pub fn visual_paint(
+        &self,
+        id: crate::session::SessionId,
+        image: ratatui::layout::Rect,
+        cell_w: f64,
+        cell_h: f64,
+    ) -> Option<crate::visual::VisualPaint> {
+        use crate::visual::{clamp_scroll, crop_for_view, fit_display};
+        let slot = self.visual_slots.get(&id)?;
+        let (disp_cols, disp_rows) = fit_display(
+            slot.width,
+            slot.height,
+            slot.zoom,
+            image.width,
+            image.height,
+            cell_w,
+            cell_h,
+        );
+        let (ox, oy) = clamp_scroll(
+            slot.scroll_x,
+            slot.scroll_y,
+            disp_cols,
+            disp_rows,
+            image.width,
+            image.height,
+        );
+        let crop =
+            crop_for_view(slot.width, slot.height, disp_cols, disp_rows, image.width, image.height, ox, oy);
+        Some(crate::visual::VisualPaint {
+            zoom_bits: slot.zoom.to_bits(),
+            ox,
+            oy,
+            out_cols: crop.out_cols,
+            out_rows: crop.out_rows,
+            cursor_x: image.x.saturating_add(image.width.saturating_sub(crop.out_cols) / 2),
+            cursor_y: image.y.saturating_add(image.height.saturating_sub(crop.out_rows) / 2),
+            sx: crop.sx,
+            sy: crop.sy,
+            sw: crop.sw,
+            sh: crop.sh,
+        })
+    }
+
+    /// Step one session's visual zoom, re-clamping the scroll offset
+    /// to the new overflow. Geometry is the tab image region plus the
+    /// cell size the paint uses. Returns whether anything changed.
+    #[cfg(feature = "visual")]
+    pub fn visual_zoom(
+        &mut self,
+        id: crate::session::SessionId,
+        dir: crate::ui::VisualButton,
+        area_cols: u16,
+        area_rows: u16,
+        cell_w: f64,
+        cell_h: f64,
+    ) -> bool {
+        use crate::visual::{ZoomDir, clamp_scroll, fit_display, zoom_step};
+        let Some(slot) = self.visual_slots.get_mut(&id) else {
+            return false;
+        };
+        let dir = match dir {
+            crate::ui::VisualButton::ZoomIn => ZoomDir::In,
+            crate::ui::VisualButton::ZoomOut => ZoomDir::Out,
+        };
+        let next = zoom_step(slot.zoom, dir);
+        if next == slot.zoom {
+            return false;
+        }
+        slot.zoom = next;
+        let (disp_cols, disp_rows) =
+            fit_display(slot.width, slot.height, slot.zoom, area_cols, area_rows, cell_w, cell_h);
+        (slot.scroll_x, slot.scroll_y) = clamp_scroll(
+            slot.scroll_x,
+            slot.scroll_y,
+            disp_cols,
+            disp_rows,
+            area_cols,
+            area_rows,
+        );
+        self.dirty = true;
+        true
+    }
+
+    /// Pan one session's visual viewport by (`dx`, `dy`) displayed
+    /// cells, positive right and down, clamped to the zoom overflow.
+    /// Returns whether anything changed.
+    #[cfg(feature = "visual")]
+    pub fn visual_scroll(
+        &mut self,
+        id: crate::session::SessionId,
+        dx: i16,
+        dy: i16,
+        area_cols: u16,
+        area_rows: u16,
+        cell_w: f64,
+        cell_h: f64,
+    ) -> bool {
+        use crate::visual::{clamp_scroll, fit_display};
+        let Some(slot) = self.visual_slots.get_mut(&id) else {
+            return false;
+        };
+        let (disp_cols, disp_rows) =
+            fit_display(slot.width, slot.height, slot.zoom, area_cols, area_rows, cell_w, cell_h);
+        let max_x = disp_cols.saturating_sub(area_cols);
+        let max_y = disp_rows.saturating_sub(area_rows);
+        let (nx, ny) = (
+            slot.scroll_x.saturating_add_signed(dx).min(max_x),
+            slot.scroll_y.saturating_add_signed(dy).min(max_y),
+        );
+        let (nx, ny) = clamp_scroll(nx, ny, disp_cols, disp_rows, area_cols, area_rows);
+        if (nx, ny) == (slot.scroll_x, slot.scroll_y) {
+            return false;
+        }
+        slot.scroll_x = nx;
+        slot.scroll_y = ny;
+        self.dirty = true;
+        true
+    }
+
+    /// The focused Visual tab's (session, generation), if the overlay
+    /// sits on a visual slot with a stored frame.
+    #[cfg(feature = "visual")]
+    pub fn visual_focused_frame(&self) -> Option<(crate::session::SessionId, u64)> {
+        self.visual_overlay_active()
+    }
+
+    /// PNG bytes for one paint of a stored frame: the frame itself
+    /// when the viewport shows it whole (no re-encode), else the
+    /// cropped region re-encoded for transmit. Independent of the
+    /// show gate, so the TUI only claims a transmit it can render.
+    #[cfg(feature = "visual")]
+    pub fn visual_frame_png(
+        &self,
+        id: crate::session::SessionId,
+        generation: u64,
+        paint: crate::visual::VisualPaint,
+    ) -> Option<Vec<u8>> {
+        let slot = self.visual_slots.get(&id)?;
+        if slot.generation != generation {
+            return None;
+        }
+        if paint.sx == 0 && paint.sy == 0 && paint.sw == slot.width && paint.sh == slot.height {
+            return Some(slot.png.clone());
+        }
+        let crop = crate::visual::ViewCrop {
+            sx: paint.sx,
+            sy: paint.sy,
+            sw: paint.sw,
+            sh: paint.sh,
+            out_cols: paint.out_cols,
+            out_rows: paint.out_rows,
+        };
+        let cut = crate::visual::crop_rgba(&slot.rgba, slot.width, slot.height, crop);
+        crate::visual::encode_png(&cut, paint.sw, paint.sh).ok()
     }
 
     /// Release the terminal image when the overlay no longer wants it:
@@ -401,11 +587,6 @@ impl AppState {
 
     /// PNG bytes of the image the terminal currently shows, if any.
     #[cfg(feature = "visual")]
-    pub fn visual_shown_png(&self) -> Option<&[u8]> {
-        let shown = self.visual_shown.as_ref()?;
-        self.visual_slots.get(&shown.session).map(|s| s.png.as_slice())
-    }
-
     /// Unconditional take of the shown image id, for shutdown cleanup
     /// while the overlay still wants it.
     #[cfg(feature = "visual")]
@@ -413,9 +594,10 @@ impl AppState {
         self.visual_shown.take().map(|s| s.image_id)
     }
 
-    /// Visual pane content: title and alt text always; half-block art
-    /// when the terminal cannot take a Kitty image (the image paints
-    /// over the pane in Kitty mode, so no art is emitted there).
+    /// Visual pane content: zoom strip first, then title and alt
+    /// text; half-block art when the terminal cannot take a Kitty
+    /// image (the image paints over the image region in Kitty mode,
+    /// so no art is emitted there).
     #[cfg(feature = "visual")]
     pub fn visual_view(&self, id: crate::session::SessionId, kitty: bool) -> crate::ui::PaneView {
         use ratatui::style::{Color, Style};
@@ -443,22 +625,67 @@ impl AppState {
             };
         };
         let mut lines = Vec::new();
+        // Row zero is always the zoom strip, in both backends: the
+        // Kitty image paints only the region below it, and the mouse
+        // hit test assumes these exact columns.
+        lines.push(vec![
+            crate::ui::SpanView {
+                text: crate::ui::VISUAL_ZOOM_IN_LABEL.to_string(),
+                style: crate::theme::style(crate::theme::Role::Focus),
+            },
+            crate::ui::SpanView {
+                text: "  ".to_string(),
+                style: Style::default(),
+            },
+            crate::ui::SpanView {
+                text: crate::ui::VISUAL_ZOOM_OUT_LABEL.to_string(),
+                style: crate::theme::style(crate::theme::Role::Focus),
+            },
+            crate::ui::SpanView {
+                text: "  ←→↑↓ scroll · wheel scrolls".to_string(),
+                style: muted,
+            },
+        ]);
         if !slot.title.is_empty() {
             lines.push(line(&slot.title, text));
         }
         if !kitty {
-            let cols = self.term_size.1.max(1) as usize;
-            for row in crate::visual::halfblock_rows(&slot.rgba, slot.width, slot.height, cols) {
-                lines.push(
-                    row.into_iter()
-                        .map(|cell| crate::ui::SpanView {
-                            text: cell.ch.to_string(),
-                            style: Style::default()
-                                .fg(Color::Rgb(cell.fg.0, cell.fg.1, cell.fg.2))
-                                .bg(Color::Rgb(cell.bg.0, cell.bg.1, cell.bg.2)),
-                        })
-                        .collect(),
-                );
+            // Half-block cells are exactly 1:2 by construction, so the
+            // fallback layout uses the fixed 8x16 cell, never the
+            // terminal pixel report. Art covers the visible crop only,
+            // capped at the tab image region like the Kitty paint.
+            let (rows, cols) = self.term_size;
+            let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+            let image = crate::ui::visual_chrome(crate::ui::pane_content_area(&areas)).image;
+            if let Some(paint) =
+                self.visual_paint(id, image, crate::visual::FALLBACK_CELL_PX.0, crate::visual::FALLBACK_CELL_PX.1)
+            {
+                let crop = crate::visual::ViewCrop {
+                    sx: paint.sx,
+                    sy: paint.sy,
+                    sw: paint.sw,
+                    sh: paint.sh,
+                    out_cols: paint.out_cols,
+                    out_rows: paint.out_rows,
+                };
+                let cut = crate::visual::crop_rgba(&slot.rgba, slot.width, slot.height, crop);
+                for row in crate::visual::halfblock_rows(
+                    &cut,
+                    paint.sw,
+                    paint.sh,
+                    paint.out_cols.max(1) as usize,
+                ) {
+                    lines.push(
+                        row.into_iter()
+                            .map(|cell| crate::ui::SpanView {
+                                text: cell.ch.to_string(),
+                                style: Style::default()
+                                    .fg(Color::Rgb(cell.fg.0, cell.fg.1, cell.fg.2))
+                                    .bg(Color::Rgb(cell.bg.0, cell.bg.1, cell.bg.2)),
+                            })
+                            .collect(),
+                    );
+                }
             }
         }
         if !slot.alt.is_empty() {
@@ -834,6 +1061,11 @@ impl AppState {
                 height: frame.height,
                 title: done.title,
                 alt: done.alt,
+                // A new frame resets the viewport: whole diagram
+                // contained in the tab, no scroll.
+                zoom: 1.0,
+                scroll_x: 0,
+                scroll_y: 0,
             },
         );
         self.visual_evict();
@@ -3182,26 +3414,160 @@ mod tests {
     }
 
     #[cfg(feature = "visual")]
+    fn paint_for(state: &AppState, id: crate::session::SessionId) -> crate::visual::VisualPaint {
+        state
+            .visual_paint(id, ratatui::layout::Rect::new(0, 0, 200, 50), 8.0, 16.0)
+            .expect("paint")
+    }
+
+    #[cfg(feature = "visual")]
     #[test]
     fn visual_take_show_hide_tracks_terminal_image() {
         let mut state = AppState::new();
         let (id, _) = spawn_visual_agent(&mut state, "agent");
         complete(&mut state, id, 1, fake_png(64, 10, 10));
         show_visual_overlay(&mut state, id);
-        let spec = state.visual_take_show(true).expect("show once");
+        let paint = paint_for(&state, id);
+        let spec = state.visual_take_show(true, paint).expect("show once");
         assert_eq!(spec.generation, 1);
-        assert!(state.visual_take_show(true).is_none(), "already shown");
-        assert!(state.visual_take_show(false).is_none(), "no kitty no show");
-        assert_eq!(state.visual_shown_png().unwrap().len(), 64);
+        assert!(!spec.replace, "first claim takes a fresh id");
+        assert!(state.visual_take_show(true, paint).is_none(), "already shown");
+        assert!(state.visual_take_show(false, paint).is_none(), "no kitty no show");
+        assert_eq!(state.visual_frame_png(id, 1, paint).unwrap().len(), 64);
         // New generation hides the old image, then shows the new one.
         complete(&mut state, id, 2, fake_png(64, 10, 10));
         assert_eq!(state.visual_take_hide(), Some(spec.image_id));
-        let spec2 = state.visual_take_show(true).expect("reshow");
+        let spec2 = state.visual_take_show(true, paint_for(&state, id)).expect("reshow");
         assert_ne!(spec2.image_id, spec.image_id, "fresh placement id");
         // Overlay away hides; double hide is silent.
         state.overlay_view = None;
         assert_eq!(state.visual_take_hide(), Some(spec2.image_id));
         assert_eq!(state.visual_take_hide(), None);
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_take_show_repaints_viewport_changes_under_the_same_id() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 100, 100));
+        show_visual_overlay(&mut state, id);
+        let paint = paint_for(&state, id);
+        let spec = state.visual_take_show(true, paint).expect("show");
+        // Zooming changes the fingerprint: same placement id, replace.
+        assert!(state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        let zoomed = paint_for(&state, id);
+        assert_ne!(zoomed, paint, "zoom moves the paint");
+        let reshow = state.visual_take_show(true, zoomed).expect("repaint");
+        assert_eq!(reshow.image_id, spec.image_id, "no fresh id for a viewport change");
+        assert!(reshow.replace, "TUI deletes before re-transmitting");
+        assert!(state.visual_take_show(true, zoomed).is_none(), "paint now current");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_zoom_and_scroll_clamp_to_the_overflow() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 1000, 1000));
+        // Zoomed out at minimum: further out changes nothing.
+        for _ in 0..20 {
+            state.visual_zoom(id, crate::ui::VisualButton::ZoomOut, 200, 50, 8.0, 16.0);
+        }
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert_eq!(slot.zoom, crate::visual::MIN_ZOOM);
+        state.dirty = false;
+        assert!(!state.visual_zoom(id, crate::ui::VisualButton::ZoomOut, 200, 50, 8.0, 16.0));
+        assert!(!state.dirty, "no-op zoom stays clean");
+        // Zoom to maximum: 1000x1000 at 8x overflows a 200x50 tab by
+        // (600, 350) cells.
+        for _ in 0..30 {
+            state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0);
+        }
+        assert_eq!(state.visual_slots.get(&id).unwrap().zoom, crate::visual::MAX_ZOOM);
+        assert!(!state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        state.dirty = false;
+        assert!(state.visual_scroll(id, 5, 7, 200, 50, 8.0, 16.0));
+        assert!(state.dirty, "scroll marks dirty");
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert_eq!((slot.scroll_x, slot.scroll_y), (5, 7));
+        assert!(!state.visual_scroll(id, 0, 0, 200, 50, 8.0, 16.0), "no-op scroll");
+        assert!(state.visual_scroll(id, 10_000, 10_000, 200, 50, 8.0, 16.0));
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert_eq!((slot.scroll_x, slot.scroll_y), (600, 350), "pinned to overflow");
+        assert!(state.visual_scroll(id, -1, -1, 200, 50, 8.0, 16.0));
+        // Unknown sessions never dirty.
+        state.dirty = false;
+        let ghost = crate::session::SessionId::fresh();
+        assert!(!state.visual_scroll(ghost, 1, 1, 200, 50, 8.0, 16.0));
+        assert!(!state.visual_zoom(ghost, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        assert!(!state.dirty);
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_paint_contains_and_centers_a_small_diagram() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 400, 200));
+        // 400x200 at 8x16 cells is natively 50x13: contained, not
+        // stretched to the 200-column region.
+        let paint = state
+            .visual_paint(id, ratatui::layout::Rect::new(1, 2, 200, 50), 8.0, 16.0)
+            .expect("paint");
+        assert_eq!((paint.out_cols, paint.out_rows), (50, 13));
+        assert_eq!((paint.cursor_x, paint.cursor_y), (76, 20), "centered");
+        assert_eq!((paint.sx, paint.sy, paint.sw, paint.sh), (0, 0, 400, 200));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_paint_png_skips_reencode_for_full_frames() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        let mut rgba = Vec::new();
+        for p in [[255u8, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]] {
+            rgba.extend_from_slice(&p);
+        }
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: fake_png(30, 2, 2),
+            rgba,
+            width: 2,
+            height: 2,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+        });
+        let full = crate::visual::VisualPaint {
+            zoom_bits: 1f32.to_bits(),
+            ox: 0, oy: 0, out_cols: 1, out_rows: 1,
+            cursor_x: 0, cursor_y: 0,
+            sx: 0, sy: 0, sw: 2, sh: 2,
+        };
+        assert_eq!(state.visual_frame_png(id, 1, full).unwrap(), fake_png(30, 2, 2));
+        // A cropped viewport re-encodes just its region: top-left red.
+        let cut = crate::visual::VisualPaint { sw: 1, sh: 1, ..full };
+        let png = state.visual_frame_png(id, 1, cut).expect("cropped bytes");
+        let (back, w, h) = crate::visual::decode_rgba(&png).expect("decodes");
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(&back[..4], &[255, 0, 0, 255]);
+        assert!(state.visual_frame_png(id, 2, full).is_none(), "stale generation");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_kitty_view_carries_the_zoom_strip_without_art() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        let view = state.visual_view(id, true);
+        let strip: String = view.lines[0].iter().map(|s| s.text.as_str()).collect();
+        assert!(strip.contains("zoom in") && strip.contains("zoom out"), "buttons: {strip:?}");
+        let text: String = view.lines.iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
+        assert!(!text.contains('▀'), "image paints over the pane");
     }
 
     #[cfg(feature = "visual")]
@@ -3222,6 +3588,9 @@ mod tests {
             height: 2,
             title: "flow".to_string(),
             alt: "a diagram".to_string(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
         });
         let view = state.visual_view(id, false);
         assert!(view.title.contains("Visual"), "pane title: {}", view.title);
@@ -3229,7 +3598,11 @@ mod tests {
         assert!(text.contains("flow"), "title line: {text:?}");
         assert!(text.contains("a diagram"), "alt line: {text:?}");
         assert!(text.contains('▀'), "half-block art: {text:?}");
-        let cell = &view.lines[1][0];
+        // Row zero is the zoom strip; title, then art.
+        let strip: String = view.lines[0].iter().map(|s| s.text.as_str()).collect();
+        assert!(strip.contains("zoom in") && strip.contains("zoom out"), "buttons: {strip:?}");
+        assert!(view.lines[1].iter().any(|s| s.text == "flow"), "title row: {text:?}");
+        let cell = &view.lines[2][0];
         assert_eq!(cell.style.fg, Some(ratatui::style::Color::Rgb(255, 0, 0)));
         assert_eq!(cell.style.bg, Some(ratatui::style::Color::Rgb(0, 0, 255)));
         // Kitty mode carries title and alt for the record, no art.
@@ -3278,9 +3651,10 @@ mod tests {
         assert!(text.contains("a to b"), "alt: {text:?}");
         assert!(text.contains('▀'), "art: {text:?}");
         show_visual_overlay(&mut state, id);
-        let spec = state.visual_take_show(true).expect("show");
+        let paint = paint_for(&state, id);
+        let spec = state.visual_take_show(true, paint).expect("show");
         assert_eq!(spec.generation, 1);
-        assert!(state.visual_shown_png().is_some(), "bytes behind the claim");
+        assert!(state.visual_frame_png(id, 1, paint).is_some(), "bytes behind the claim");
     }
 
     #[test]

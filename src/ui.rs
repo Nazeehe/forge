@@ -161,6 +161,80 @@ pub fn pane_grid_area(areas: &ChromeAreas) -> Rect {
     }
 }
 
+/// Content cells inside a framed single-pane tab: the pane-grid rect
+/// minus the block border, where overlay tab lines actually paint.
+/// Matches `cursor_screen_pos`, whose inner origin is also area + 1.
+#[cfg(feature = "visual")]
+pub fn pane_content_area(areas: &ChromeAreas) -> Rect {
+    let grid = pane_grid_area(areas);
+    Rect::new(
+        grid.x.saturating_add(1),
+        grid.y.saturating_add(1),
+        grid.width.saturating_sub(2),
+        grid.height.saturating_sub(2),
+    )
+}
+
+/// Visual tab zoom buttons: fixed labels, so hit rects stay stable.
+#[cfg(feature = "visual")]
+pub const VISUAL_ZOOM_IN_LABEL: &str = "[+ zoom in]";
+#[cfg(feature = "visual")]
+pub const VISUAL_ZOOM_OUT_LABEL: &str = "[- zoom out]";
+
+/// Which Visual tab zoom button a click hit, if any.
+#[cfg(feature = "visual")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisualButton {
+    ZoomIn,
+    ZoomOut,
+}
+
+/// Visual tab chrome inside its content rect: a one-row button strip
+/// on top, the image region below it. Render and mouse handling both
+/// recompute these from the same content rect, so clicks never
+/// desync from what the tab paints.
+#[cfg(feature = "visual")]
+pub struct VisualChrome {
+    pub image: Rect,
+    pub zoom_in: Rect,
+    pub zoom_out: Rect,
+}
+
+#[cfg(feature = "visual")]
+pub fn visual_chrome(content: Rect) -> VisualChrome {
+    let row_h = if content.height > 0 { 1 } else { 0 };
+    let image = Rect::new(
+        content.x,
+        content.y.saturating_add(row_h),
+        content.width,
+        content.height.saturating_sub(row_h),
+    );
+    let zin_w = (VISUAL_ZOOM_IN_LABEL.len() as u16).min(content.width);
+    let zout_x = content.x.saturating_add(zin_w + 2);
+    let zout_w = (VISUAL_ZOOM_OUT_LABEL.len() as u16)
+        .min(content.width.saturating_sub(zin_w + 2));
+    VisualChrome {
+        image,
+        zoom_in: Rect::new(content.x, content.y, zin_w, row_h),
+        zoom_out: Rect::new(zout_x, content.y, zout_w, row_h),
+    }
+}
+
+/// Hit-test a click against the Visual tab zoom buttons.
+#[cfg(feature = "visual")]
+pub fn visual_button_at(chrome: &VisualChrome, col: u16, row: u16) -> Option<VisualButton> {
+    let hit = |r: Rect| {
+        r.height > 0 && r.width > 0 && row == r.y && col >= r.x && col < r.x.saturating_add(r.width)
+    };
+    if hit(chrome.zoom_in) {
+        Some(VisualButton::ZoomIn)
+    } else if hit(chrome.zoom_out) {
+        Some(VisualButton::ZoomOut)
+    } else {
+        None
+    }
+}
+
 /// One per-session tab: the agent CLI tab plus the human terminal tab.
 #[derive(Clone, Debug, Default)]
 pub struct TopTab {
@@ -1497,6 +1571,51 @@ mod tests {
         assert!(rows[1].contains("[Codex]"));
         assert!(rows[2].contains("PTY first line"));
         assert_eq!(translate_mouse(pane_grid_area(&areas), 1, 2), Some((1, 1)));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn pane_content_area_sits_inside_the_pane_border() {
+        let areas = chrome_areas(Rect::new(0, 0, 180, 40));
+        let grid = pane_grid_area(&areas);
+        let content = pane_content_area(&areas);
+        assert_eq!(content.x, grid.x + 1);
+        assert_eq!(content.y, grid.y + 1);
+        assert_eq!(content.width, grid.width - 2);
+        assert_eq!(content.height, grid.height - 2);
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chrome_splits_buttons_row_and_image_region() {
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20));
+        assert_eq!(
+            (chrome.zoom_in.x, chrome.zoom_in.y),
+            (10, 5),
+            "buttons paint on the first content row"
+        );
+        assert_eq!(
+            (chrome.image.x, chrome.image.y, chrome.image.width, chrome.image.height),
+            (10, 6, 60, 19),
+            "image region fills the rest"
+        );
+        assert_eq!((chrome.zoom_in.x, chrome.zoom_in.width), (10, 11));
+        assert_eq!((chrome.zoom_out.x, chrome.zoom_out.width), (23, 12));
+        assert_eq!(visual_button_at(&chrome, 10, 5), Some(VisualButton::ZoomIn));
+        assert_eq!(visual_button_at(&chrome, 20, 5), Some(VisualButton::ZoomIn));
+        assert_eq!(visual_button_at(&chrome, 21, 5), None, "gap is dead");
+        assert_eq!(visual_button_at(&chrome, 23, 5), Some(VisualButton::ZoomOut));
+        assert_eq!(visual_button_at(&chrome, 34, 5), Some(VisualButton::ZoomOut));
+        assert_eq!(visual_button_at(&chrome, 35, 5), None, "past the label");
+        assert_eq!(visual_button_at(&chrome, 10, 6), None, "image rows are not buttons");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chrome_degrades_on_tiny_content() {
+        let chrome = visual_chrome(Rect::new(0, 0, 0, 0));
+        assert_eq!(chrome.image.height, 0);
+        assert_eq!(visual_button_at(&chrome, 0, 0), None);
     }
 
     fn text_of(line: &Line) -> String {
