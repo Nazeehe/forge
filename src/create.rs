@@ -502,10 +502,13 @@ fn fit(text: &str, width: usize) -> String {
 impl CreateDialog {
     /// Render the New Session form per the UI guidance: an opaque modal,
     /// `>` plus reverse video on the focused row, `< value >` cyclers
-    /// with muted chevrons for CLI Tool and Comm Group, `[Create*]`
-    /// default action, and a muted one-line key hint. The tui-realm
-    /// components own state and keys; rows are drawn by hand so no
-    /// component default style leaks session text or yellow through.
+    /// with muted chevrons for CLI Tool and Comm Group, a centered
+    /// `[Create*]` default action row, and a muted one-line key hint.
+    /// Content keeps two cells of border padding; roomy dialogs pin
+    /// the hint to the bottom with a fixed error slot so validation
+    /// never shifts the layout. The tui-realm components own state
+    /// and keys; rows are drawn by hand so no component default style
+    /// leaks session text or yellow through.
     pub fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::style::Modifier;
         use ratatui::text::{Line, Span};
@@ -525,10 +528,20 @@ impl CreateDialog {
         }
         let text = style(Role::Text);
         let end = inner.y + inner.height;
-        let mut row = inner.y;
+        // Breathing room: content never touches the border. Roomy
+        // dialogs additionally start one row down and pin the hint to
+        // the bottom with a fixed error slot; cramped ones stack like
+        // before so tiny terminals lose nothing.
+        let comfortable = inner.height >= 10;
+        let cx = inner.x + 2;
+        let cw = inner.width.saturating_sub(4);
+        let hint_row = end.saturating_sub(1);
+        let error_row = end.saturating_sub(2);
+        let form_limit = if comfortable { error_row } else { end };
+        let mut row = inner.y + if comfortable { 1 } else { 0 };
         // Marker column plus label column; controls start after both.
         let label_w = 11u16;
-        let content_w = inner.width.saturating_sub(2 + label_w) as usize;
+        let content_w = cw.saturating_sub(2 + label_w) as usize;
         // One full row: `>` marker, padded label, then the control spans.
         // The focused row renders entirely in reverse video; elsewhere
         // each span carries its semantic style.
@@ -578,12 +591,48 @@ impl CreateDialog {
                 Span::styled(" >", if focused { focus_row() } else { chev }),
             ]
         };
-        let labels = ["Directory", "Name", "CLI Tool", "Comm Group", ""];
+        let labels = ["Directory", "Name", "CLI Tool", "Comm Group"];
         for index in 0..FIELD_COUNT {
-            if row >= end {
+            if row >= form_limit {
                 return;
             }
             let focused = index == self.focus;
+            if index == FOCUS_ACTIONS {
+                // Centered action row: the marker tracks the chosen
+                // button while `>` plus reverse marks it — the Enter
+                // target. `[Create*]` keeps accent yellow by default.
+                let choice = self.actions.states.choice;
+                let spans = if self.pills {
+                    pill_actions(focused, choice, text)
+                } else {
+                    let create = if focused && choice == 0 {
+                        Span::styled(">[Create*]", focus_row())
+                    } else {
+                        Span::styled(
+                            "[Create*]",
+                            style(Role::Brand).add_modifier(Modifier::BOLD),
+                        )
+                    };
+                    let cancel = if focused && choice == 1 {
+                        Span::styled(">[Cancel]", focus_row())
+                    } else {
+                        Span::styled("[Cancel]", text)
+                    };
+                    vec![create, Span::styled("  ", text), cancel]
+                };
+                let width: u16 = spans
+                    .iter()
+                    .map(|s| s.width() as u16)
+                    .sum::<u16>()
+                    .min(cw);
+                let ax = cx + cw.saturating_sub(width) / 2;
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(ax, row, width, 1),
+                );
+                row += 1;
+                continue;
+            }
             let line = match index {
                 FOCUS_DIRECTORY => line_at(
                     labels[index],
@@ -605,7 +654,7 @@ impl CreateDialog {
                         .unwrap_or("?");
                     line_at(labels[index], focused, select(value, focused))
                 }
-                FOCUS_GROUP => {
+                _ => {
                     let value = self
                         .group
                         .states
@@ -615,81 +664,60 @@ impl CreateDialog {
                         .unwrap_or("None");
                     line_at(labels[index], focused, select(value, focused))
                 }
-                _ => {
-                    // Action row: the marker tracks the row, while `>` plus
-                    // reverse marks the chosen button — the Enter target.
-                    // `[Create*]` keeps accent yellow as the default action.
-                    let choice = self.actions.states.choice;
-                    if self.pills {
-                        line_at(
-                            labels[index],
-                            false,
-                            pill_actions(focused, choice, text),
-                        )
-                    } else {
-                        let create = if focused && choice == 0 {
-                            Span::styled(">[Create*]", focus_row())
-                        } else {
-                            Span::styled(
-                                "[Create*]",
-                                style(Role::Brand).add_modifier(Modifier::BOLD),
-                            )
-                        };
-                        let cancel = if focused && choice == 1 {
-                            Span::styled(">[Cancel]", focus_row())
-                        } else {
-                            Span::styled("[Cancel]", text)
-                        };
-                        line_at(
-                            labels[index],
-                            false,
-                            vec![create, Span::styled("  ", text), cancel],
-                        )
-                    }
-                }
             };
-            // The actions row carries its own `>`; its marker stays blank
-            // so focus never reads twice.
-            let line = if index == FOCUS_ACTIONS {
-                let mut spans = line.spans;
-                spans[0] = Span::raw("  ");
-                Line::from(spans)
-            } else {
-                line
-            };
-            frame.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner.x, row, inner.width, 1),
-            );
+            frame.render_widget(Paragraph::new(line), Rect::new(cx, row, cw, 1));
             row += 1;
             // Breathing room: after the text block and after the options.
             if index == FOCUS_NAME || index == FOCUS_GROUP {
                 row += 1;
             }
         }
+        // Fixed error slot, so a validation failure never shoves the
+        // hint (or anything else) around.
+        let error_at = if comfortable { error_row } else { row };
         if let Some(err) = self.error.clone() {
-            if row < end {
+            if error_at < end {
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![Span::styled(
                         format!("! {err}"),
                         style(Role::Danger),
                     )])),
-                    Rect::new(inner.x, row, inner.width, 1),
+                    Rect::new(cx, error_at, cw, 1),
                 );
-                row += 1;
             }
+        }
+        if comfortable {
+            row = hint_row;
         }
         if row < end {
             // Shorter hint on narrow dialogs so it never wraps.
-            let keys: &[(&str, &str)] = if inner.width >= 60 {
-                &[
-                    ("Tab", " complete/move • "),
-                    ("Left/Right", " change • "),
-                    ("Enter", " create • "),
-                    ("Esc", " cancel"),
-                ]
+            let full: &[(&str, &str)] = &[
+                ("Tab", " complete/move • "),
+                ("Left/Right", " change • "),
+                ("Enter", " create • "),
+                ("Esc", " cancel"),
+            ];
+            let short: &[(&str, &str)] = &[
+                ("Tab", " complete/move • "),
+                ("Enter", " create • "),
+                ("Esc", " cancel"),
+            ];
+            let keys = if Line::from(
+                full.iter()
+                    .flat_map(|(k, d)| {
+                        [
+                            Span::styled(*k, style(Role::KeyHint)),
+                            Span::styled(*d, style(Role::KeyDesc)),
+                        ]
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .width()
+                <= cw as usize
+            {
+                full
             } else {
-                &[("Tab", " complete/move • "), ("Enter", " create • "), ("Esc", " cancel")]
+                short
             };
             let hint = Line::from(
                 keys.iter()
@@ -701,10 +729,7 @@ impl CreateDialog {
                     })
                     .collect::<Vec<_>>(),
             );
-            frame.render_widget(
-                Paragraph::new(hint),
-                Rect::new(inner.x, row, inner.width, 1),
-            );
+            frame.render_widget(Paragraph::new(hint), Rect::new(cx, row, cw, 1));
         }
     }
 }
@@ -792,32 +817,33 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        // create_area centers 78x12: inner text starts at (2, 7).
-        let mark = buf.get(2, 7);
+        // create_area centers 78x12; padded content starts at (4, 8).
+        let mark = buf.get(4, 8);
         assert_eq!(mark.symbol(), ">", "focus marker");
         assert_eq!(mark.fg, Color::Cyan, "focus is cyan, not yellow");
         assert!(mark.modifier.contains(Modifier::REVERSED), "focus reverses");
         // Unfocused body labels stay full-contrast white; the dialog owns
         // no yellow except selection marks and the default action. (Row 0
         // is focused, so its label reverses with the row.)
-        assert_eq!(buf.get(4, 8).fg, Color::White, "label");
-        // CLI Tool row (y 10): `< claude >` cycler like Comm Group.
-        // Dialog inner starts at x2; marker (2) + label (11) put the
-        // control at x15.
-        assert_eq!(buf.get(15, 10).symbol(), "<", "left chevron");
-        assert_eq!(buf.get(24, 10).symbol(), ">", "right chevron");
-        let tool: String = (17..23).map(|x| buf.get(x, 10).symbol()).collect();
+        assert_eq!(buf.get(6, 9).fg, Color::White, "label");
+        // CLI Tool row (y 11): `< claude >` cycler like Comm Group.
+        // Content starts at x4; marker (2) + label (11) put the control
+        // at x17.
+        assert_eq!(buf.get(17, 11).symbol(), "<", "left chevron");
+        assert_eq!(buf.get(26, 11).symbol(), ">", "right chevron");
+        let tool: String = (19..25).map(|x| buf.get(x, 11).symbol()).collect();
         assert_eq!(tool, "claude", "current agent shown");
-        assert_eq!(buf.get(17, 10).fg, Color::White, "value in text style");
-        // Actions row (y 13): `[Create*]` default in yellow bold.
-        let star = buf.get(22, 13);
+        assert_eq!(buf.get(19, 11).fg, Color::White, "value in text style");
+        // Actions row (y 14) centers `[Create*]`: 19 wide in 72 content
+        // columns starting at x4, so the `*` lands at x37.
+        let star = buf.get(37, 14);
         assert_eq!(star.symbol(), "*", "default mark");
         assert_eq!(star.fg, Color::Yellow);
         assert!(star.modifier.contains(Modifier::BOLD));
-        // Hint row (y 14): keys cyan.
-        assert_eq!(buf.get(2, 14).fg, Color::Cyan, "hint key");
+        // Hint row pins to the bottom inner row (y 16): keys cyan.
+        assert_eq!(buf.get(4, 16).fg, Color::Cyan, "hint key");
         // Builtin stays transparent: no modal fill behind the rows.
-        assert_eq!(buf.get(3, 8).bg, Color::Reset, "transparent on builtin");
+        assert_eq!(buf.get(5, 9).bg, Color::Reset, "transparent on builtin");
     }
 
     #[test]
@@ -830,13 +856,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        // `>[Cancel]` sits after `[Create*]` plus two spaces: x 15+11.
-        let mark = buf.get(26, 13);
+        // Centered 20-wide row at x30: `[Create*]` plus two spaces,
+        // then `>[Cancel]` whose marker lands at x41.
+        let mark = buf.get(41, 14);
         assert_eq!(mark.symbol(), ">", "chosen button marked");
         assert_eq!(mark.fg, Color::Cyan);
         assert!(mark.modifier.contains(Modifier::REVERSED));
         // Create keeps its default `*` even while Cancel is chosen.
-        assert_eq!(buf.get(22, 13).symbol(), "*");
+        assert_eq!(buf.get(37, 14).symbol(), "*");
     }
 
     #[test]
@@ -848,25 +875,67 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        // Unfocused: Create pill carries the accent, Cancel stays dim.
-        assert_eq!(buf[(15, 13)].symbol(), "\u{e0b6}");
-        assert_eq!(buf[(15, 13)].fg, Color::Yellow);
-        assert_eq!(buf[(23, 13)].symbol(), "*", "default mark kept");
-        assert_eq!(buf[(17, 13)].bg, Color::Yellow, "create solid");
-        assert_eq!(buf[(23, 13)].fg, Color::Black, "create dark label");
-        assert_eq!(buf[(28, 13)].fg, Color::DarkGray, "dim cancel cap");
-        assert_eq!(buf[(30, 13)].bg, Color::DarkGray, "cancel dim fill");
-        assert_eq!(buf[(30, 13)].fg, Color::Black, "cancel dark label");
+        // Unfocused: the 23-wide pill row centers at x28, Create pill
+        // carries the accent, Cancel stays dim.
+        assert_eq!(buf[(28, 14)].symbol(), "\u{e0b6}");
+        assert_eq!(buf[(28, 14)].fg, Color::Yellow);
+        assert_eq!(buf[(36, 14)].symbol(), "*", "default mark kept");
+        assert_eq!(buf[(30, 14)].bg, Color::Yellow, "create solid");
+        assert_eq!(buf[(36, 14)].fg, Color::Black, "create dark label");
+        assert_eq!(buf[(41, 14)].fg, Color::DarkGray, "dim cancel cap");
+        assert_eq!(buf[(43, 14)].bg, Color::DarkGray, "cancel dim fill");
+        assert_eq!(buf[(43, 14)].fg, Color::Black, "cancel dark label");
         // Chosen Cancel: `>` marker plus filled container.
         step(&mut d, &names, 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(28, 13)].symbol(), ">", "chosen marked");
-        assert_eq!(buf[(29, 13)].fg, Color::Yellow, "cancel cap lights");
-        assert_eq!(buf[(31, 13)].bg, Color::Yellow, "cancel fills");
-        assert!(buf[(31, 13)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buf[(23, 13)].symbol(), "*", "default mark kept");
+        assert_eq!(buf[(41, 14)].symbol(), ">", "chosen marked");
+        assert_eq!(buf[(42, 14)].fg, Color::Yellow, "cancel cap lights");
+        assert_eq!(buf[(44, 14)].bg, Color::Yellow, "cancel fills");
+        assert!(buf[(44, 14)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(36, 14)].symbol(), "*", "default mark kept");
+    }
+
+    #[test]
+    fn error_slot_keeps_hint_pinned() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut d, _) = fresh();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        // Content columns only: the modal border frames the row.
+        let blank: String = (4..76)
+            .map(|x| terminal.backend().buffer().get(x, 15).symbol())
+            .collect();
+        assert!(blank.trim().is_empty(), "error slot rests blank");
+        // Submit the prefilled name as taken: error appears in its
+        // fixed slot, the hint never moves off the bottom row.
+        assert!(matches!(
+            d.key(&key(KeyCode::Enter), &["claude-1".to_string()]),
+            DialogOutcome::Pending
+        ));
+        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        let buf = terminal.backend().buffer();
+        let err: String = (0..80).map(|x| buf.get(x, 15).symbol()).collect();
+        assert!(err.contains("already taken"), "fixed slot: {err:?}");
+        assert_eq!(buf.get(4, 15).symbol(), "!", "inset to content");
+        assert_eq!(buf.get(4, 16).symbol(), "T", "hint stays pinned");
+        assert_eq!(buf.get(4, 16).fg, ratatui::style::Color::Cyan);
+    }
+
+    #[test]
+    fn cramped_terminal_stacks_without_top_pad() {
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::style::Color;
+        let (mut d, _) = fresh();
+        // 80x11 squeezes the area to 11 rows: 9 inner rows means
+        // compact stacking, no top pad, hint right after the form.
+        let mut terminal = Terminal::new(TestBackend::new(80, 11)).unwrap();
+        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf.get(4, 1).symbol(), ">", "content still padded");
+        assert_eq!(buf.get(4, 8).symbol(), "T", "hint follows the form");
+        assert_eq!(buf.get(4, 8).fg, Color::Cyan);
     }
 
     #[test]
@@ -880,10 +949,10 @@ mod tests {
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         // Unfocused Name label goes black for light terminals.
-        assert_eq!(buf.get(4, 8).fg, Color::Black);
+        assert_eq!(buf.get(6, 9).fg, Color::Black);
         // The block interior carries the opaque light fill.
-        assert_eq!(buf.get(3, 8).bg, Color::White, "modal fill");
-        assert_eq!(buf.get(30, 8).bg, Color::White, "modal fill");
+        assert_eq!(buf.get(5, 9).bg, Color::White, "modal fill");
+        assert_eq!(buf.get(40, 9).bg, Color::White, "modal fill");
     }
 
     #[test]
@@ -1149,17 +1218,18 @@ mod tests {
     fn long_directory_renders_ellipsis_front() {
         use ratatui::{backend::TestBackend, Terminal};
         let long = "/home/user/projects/some/deeply/nested/directory/structure/that/goes/on/forever";
-        // Room is 61 cells on an 80-wide terminal; the fixture overflows it.
-        assert!(long.chars().count() > 61);
+        // Room is 57 cells on an 80-wide terminal after border padding;
+        // the fixture overflows it.
+        assert!(long.chars().count() > 57);
         let mut d = CreateDialog::new("x", std::path::Path::new(long), &[], false);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        // Directory row (y 7): `[` at x 15, then the `…tail` box.
-        let row: String = (15..15 + 63)
-            .map(|x| buf.get(x, 7).symbol().to_string())
+        // Directory row (y 8): `[` at x 17, then the `…tail` box.
+        let row: String = (17..17 + 59)
+            .map(|x| buf.get(x, 8).symbol().to_string())
             .collect();
-        assert_eq!(row, format!("[{}]", fit_start(long, 61)));
+        assert_eq!(row, format!("[{}]", fit_start(long, 57)));
         assert!(row.starts_with("[…"));
         assert!(row.ends_with("forever]"));
     }
