@@ -575,7 +575,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row < areas.topbar.y + areas.topbar.height
     {
         let topbar = state.topbar();
-        let buttons = ui::layout_topbar(areas.topbar, &topbar.tabs);
+        let buttons = ui::layout_topbar(areas.topbar, &topbar.tabs, state.pill_tabs);
         if let Some(index) = ui::topbar_at(&buttons, mev.column) {
             let button = &buttons[index];
             let area = ratatui::layout::Rect::new(button.start, areas.topbar.y, button.end - button.start, 1);
@@ -906,7 +906,7 @@ mod tests {
             RunId::generate(), "codex",
         ).unwrap();
         let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs);
+        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
         let click = |column| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left), column, row: areas.topbar.y,
             modifiers: KeyModifiers::NONE,
@@ -1001,7 +1001,7 @@ mod tests {
         // Clicks in the tour pane never reach the agent, but the tab
         // strip above it still switches back to the CLI tab.
         let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs);
+        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
         forward_mouse(&mut state, MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: buttons[0].start, row: areas.topbar.y, modifiers: KeyModifiers::NONE,
@@ -1048,7 +1048,7 @@ mod tests {
             RunId::generate(), "codex",
         ).unwrap();
         let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs);
+        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
         // Click the SCM tab: the pane is born 24x80 and must take the
         // main area at once (180x40 less top strip, session bar, and
         // main-pane borders), not render cornered.

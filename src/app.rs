@@ -2938,7 +2938,7 @@ mod tests {
         ).unwrap();
         assert_eq!(state.topbar().tabs.len(), 7);
         let bar = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
-        assert_eq!(crate::ui::layout_topbar(bar, &state.topbar().tabs).len(), 7);
+        assert_eq!(crate::ui::layout_topbar(bar, &state.topbar().tabs, false).len(), 7);
         assert!(state.manager.remove(id));
     }
 

@@ -226,13 +226,17 @@ impl Component for ChromeButton {
 }
 
 /// Lay tab buttons left to right with two-space gaps, clipping at the edge.
-pub fn layout_topbar(bar: Rect, tabs: &[TopTab]) -> Vec<TopButton> {
+/// Topbar tab layout: `[label]` buttons legacy, pill buttons (caps plus
+/// centering pads) when `pills`. Tab 0 always starts one cell in.
+pub fn layout_topbar(bar: Rect, tabs: &[TopTab], pills: bool) -> Vec<TopButton> {
     let mut buttons = Vec::new();
     let mut col = bar.x.saturating_add(1);
     let edge = bar.x + bar.width;
     for (index, tab) in tabs.iter().enumerate() {
-        let label = format!("[{}]", safe_text::encode_for_display(&tab.label));
-        let width = Line::from(label).width().min(u16::MAX as usize) as u16;
+        let shown = safe_text::encode_for_display(&tab.label);
+        let label = if pills { shown } else { format!("[{shown}]") };
+        let width = (Line::from(label.as_str()).width() + if pills { 4 } else { 0 })
+            .min(u16::MAX as usize) as u16;
         let end = col.saturating_add(width);
         if col >= edge || end > edge {
             break;
@@ -241,6 +245,15 @@ pub fn layout_topbar(bar: Rect, tabs: &[TopTab]) -> Vec<TopButton> {
         col = end.saturating_add(2);
     }
     buttons
+}
+
+/// Pill container for a topbar tab: selected yellow, the rest dim gray.
+fn topbar_pill(tab: &TopTab) -> (Style, Color) {
+    if tab.active {
+        (theme::style(theme::Role::TabActive), Color::Yellow)
+    } else {
+        (theme::style(theme::Role::TabInactive), Color::DarkGray)
+    }
 }
 
 /// Button index under an area-relative column, if any.
@@ -836,18 +849,23 @@ pub fn grid_cell_at(cells: &[Rect], col: u16, row: u16) -> Option<usize> {
 /// through display encoding: raw escape sequences must never reach the
 /// outer terminal.
 /// One tab-strip row: `[label]` buttons, the active tab reversed.
-fn render_topbar(frame: &mut Frame, bar: Rect, tabs: &[TopTab]) {
-    let buttons = layout_topbar(bar, tabs);
+fn render_topbar(frame: &mut Frame, bar: Rect, tabs: &[TopTab], pills: bool) {
+    let buttons = layout_topbar(bar, tabs, pills);
     for button in &buttons {
         let tab = &tabs[button.index];
-        let style = if tab.active {
-            theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+        let area = Rect::new(button.start, bar.y, button.end - button.start, 1);
+        if pills {
+            let (style, cap) = topbar_pill(tab);
+            render_pill(frame, area, &safe_text::encode_for_display(&tab.label), style, cap);
         } else {
-            theme::style(theme::Role::Text)
-        };
-        let mut control = ChromeButton::new(&format!("[{}]", tab.label), style);
-        control.view(frame, Rect::new(button.start, bar.y,
-            button.end - button.start, 1));
+            let style = if tab.active {
+                theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+            } else {
+                theme::style(theme::Role::Text)
+            };
+            let mut control = ChromeButton::new(&format!("[{}]", tab.label), style);
+            control.view(frame, area);
+        }
     }
 }
 
@@ -945,7 +963,7 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
     } else {
         render_focused(frame, &areas, panes);
         if areas.topbar.height > 0 {
-            render_topbar(frame, areas.topbar, &chrome.topbar.tabs);
+            render_topbar(frame, areas.topbar, &chrome.topbar.tabs, chrome.pills);
         }
         render_sidebar(frame, &areas, chrome);
     }
@@ -1221,10 +1239,10 @@ mod tests {
         let top = layout_topbar(Rect::new(0, 0, 40, 1), &[
             TopTab { label: "A\n界".into(), active: true },
             TopTab { label: "Terminal".into(), active: false },
-        ]);
+        ], false);
         assert_eq!((top[0].start, top[0].end), (1, 7));
         assert_eq!(top[1].start, 9);
-        let segments = session_bar_segments(&[tab("a\nb", true), tab("界", false)]);
+        let segments = session_bar_segments(&[tab("a\nb", true), tab("界", false)], false);
         assert_eq!(segments[0].text, "1 a⏎b");
         let buttons = layout_session_bar(Rect::new(0, 0, 40, 1), &segments);
         assert_eq!((buttons[0].start, buttons[0].end), (0, 5));
@@ -1517,7 +1535,7 @@ mod tests {
             TopTab { label: "Codex".to_string(), active: true },
             TopTab { label: "Terminal".to_string(), active: false },
         ];
-        let buttons = layout_topbar(bar, &tabs);
+        let buttons = layout_topbar(bar, &tabs, false);
         assert_eq!(buttons.len(), 2);
         // "[Codex]" spans 1..8, gap, "[Terminal]" spans 10..20.
         assert_eq!(topbar_at(&buttons, 1), Some(0));
@@ -1526,7 +1544,7 @@ mod tests {
         assert_eq!(topbar_at(&buttons, 10), Some(1));
         assert_eq!(topbar_at(&buttons, 0), None, "margin is dead");
         // Narrow bar clips the second tab instead of wrapping.
-        let narrow = layout_topbar(Rect::new(0, 0, 12, 1), &tabs);
+        let narrow = layout_topbar(Rect::new(0, 0, 12, 1), &tabs, false);
         assert_eq!(narrow.len(), 1);
     }
 
@@ -1538,7 +1556,7 @@ mod tests {
             TopTab { label: "🤖 Codex".to_string(), active: true },
             TopTab { label: "💻 Terminal".to_string(), active: false },
         ];
-        let buttons = layout_topbar(Rect::new(0, 0, 40, 1), &tabs);
+        let buttons = layout_topbar(Rect::new(0, 0, 40, 1), &tabs, false);
         assert_eq!(buttons.len(), 2);
         // "[🤖 Codex]" spans 10 cells: brackets + icon + space + name.
         assert_eq!((buttons[0].start, buttons[0].end), (1, 11));
@@ -1633,6 +1651,94 @@ mod tests {
         assert!(!buf.get(41, 0).modifier.contains(Modifier::REVERSED), "plain name");
         // Full-width tiles: the second frame opens mid-screen.
         assert_eq!(buf.get(40, 0).symbol(), "┌");
+    }
+
+    #[test]
+    fn pill_segments_fill_group_and_select_overrides() {
+        let segs = session_bar_segments(
+            &[
+                grouped("a", true, "team", 2),
+                grouped("b", false, "team", 2),
+                tab("c", false),
+            ],
+            true,
+        );
+        assert_eq!(segs.len(), 3, "no headers in pills mode");
+        assert!(segs.iter().all(|s| s.index.is_some()));
+        let order: Vec<_> = segs.iter().map(|s| s.index).collect();
+        assert_eq!(order, vec![Some(0), Some(1), Some(2)]);
+        // Selected ignores group: default yellow container, dark text.
+        assert_eq!(segs[0].cap, Some(Color::Yellow));
+        assert_eq!(segs[0].style.bg, Some(Color::Yellow));
+        assert_eq!(segs[0].style.fg, Some(Color::Black));
+        // Grouped rest fills the group color with dark text.
+        let g = group_palette(2);
+        assert_eq!(segs[1].cap, Some(g));
+        assert_eq!(segs[1].style.bg, Some(g));
+        assert_eq!(segs[1].style.fg, Some(Color::Black));
+        // Ungrouped rest stays dim and unfilled.
+        assert_eq!(segs[2].cap, Some(Color::DarkGray));
+        assert_eq!(segs[2].style.bg, None);
+    }
+
+    #[test]
+    fn pill_layout_reserves_caps_and_centering_pads() {
+        let bar = Rect::new(0, 0, 80, 1);
+        let segs = session_bar_segments(&[tab("a", true)], true);
+        let buttons = layout_session_bar(bar, &segs);
+        // "1 a" (3) + 2 caps + 2 pads.
+        assert_eq!(buttons[0].end - buttons[0].start, 7);
+        assert_eq!(session_at(&buttons, 0), Some(0), "left cap hits");
+        assert_eq!(session_at(&buttons, 1), Some(0), "left pad hits");
+        assert_eq!(session_at(&buttons, 6), Some(0), "right cap hits");
+        assert_eq!(session_at(&buttons, 7), None, "gap misses");
+    }
+
+    #[test]
+    fn topbar_pills_widen_and_highlight_selected() {
+        let tabs = vec![
+            TopTab { label: "Codex".into(), active: true },
+            TopTab { label: "Terminal".into(), active: false },
+        ];
+        let bar = Rect::new(0, 0, 40, 1);
+        let buttons = layout_topbar(bar, &tabs, true);
+        // "Codex" (5) + caps/pads spans 1..10; "Terminal" (8) + 4 spans 12..24.
+        assert_eq!((buttons[0].start, buttons[0].end), (1, 10));
+        assert_eq!((buttons[1].start, buttons[1].end), (12, 24));
+        assert_eq!(topbar_at(&buttons, 1), Some(0), "left cap hits");
+        assert_eq!(topbar_at(&buttons, 9), Some(0), "right cap hits");
+        assert_eq!(topbar_at(&buttons, 10), None, "gap is dead");
+    }
+
+    #[test]
+    fn render_topbar_pills_fill_selected() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut c = chrome();
+        c.pills = true;
+        terminal.draw(|f| render(f, area(), &[pane("sh", "body", true)], &c)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Helper topbar leads with active "Shell" at x1.
+        let row: String = (1..10).map(|x| buf[(x, 0)].symbol()).collect();
+        assert_eq!(row, "\u{e0b6} Shell \u{e0b4}");
+        assert_eq!(buf[(1, 0)].fg, Color::Yellow, "selected cap");
+        assert_eq!(buf[(2, 0)].bg, Color::Yellow, "selected fill");
+    }
+
+    #[test]
+    fn render_pill_centers_label_in_container() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut c = chrome();
+        c.pills = true;
+        terminal.draw(|f| render(f, area(), &[pane("sh", "body", true)], &c)).unwrap();
+        let buf = terminal.backend().buffer();
+        // chrome() tab "sh" focused: `cap sp 1 sp sh sp cap` on row 23.
+        assert_eq!(buf[(0, 23)].symbol(), "");
+        assert_eq!(buf[(0, 23)].fg, Color::Yellow);
+        assert_eq!(buf[(1, 23)].symbol(), " ");
+        assert_eq!(buf[(1, 23)].bg, Color::Yellow, "pad fills container");
+        assert_eq!(buf[(7, 23)].symbol(), "");
+        let row: String = (0..8).map(|x| buf[(x, 23)].symbol()).collect();
+        assert_eq!(row, " 1 sh ");
     }
 
     #[test]
