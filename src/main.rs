@@ -19,6 +19,7 @@ mod mcp;
 mod paths;
 mod policy;
 mod pty;
+mod quit;
 mod relay;
 mod safe_text;
 mod session;

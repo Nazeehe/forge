@@ -30,6 +30,9 @@ pub struct AppState {
     /// Startup restore picker, if a sessions file offered entries. First
     /// input goes here until it resolves to a pick or a fresh start.
     pub restore_picker: Option<crate::checkpoint::RestorePicker>,
+    /// Quit-confirmation modal, if the quit chord is pending an answer.
+    /// Captures all input while present; No is the default.
+    pub quit_confirm: Option<crate::quit::QuitConfirm>,
     /// Live permission mode. The TUI loop rebuilds policy and persists the
     /// config whenever this diverges from the loaded one.
     pub permission_mode: crate::config::PermissionMode,
@@ -76,6 +79,7 @@ impl AppState {
             create_dialog: None,
             group_dialog: None,
             restore_picker: None,
+            quit_confirm: None,
             permission_mode: crate::config::PermissionMode::Yolo,
             broker: crate::comms::Broker::new(),
             last_human_input: None,
@@ -751,6 +755,11 @@ impl AppState {
     /// Open the group management dialog.
     pub fn open_group_dialog(&mut self) {
         self.group_dialog = Some(crate::groups::GroupDialog::new());
+        self.dirty = true;
+    }
+
+    pub fn open_quit_confirm(&mut self) {
+        self.quit_confirm = Some(crate::quit::QuitConfirm::new(self.pill_tabs));
         self.dirty = true;
     }
 

@@ -238,6 +238,8 @@ fn loop_until_quit(
                         handle_dialog_key(state, key);
                     } else if state.group_dialog.is_some() {
                         handle_group_key(state, key);
+                    } else if state.quit_confirm.is_some() {
+                        handle_quit_key(state, key);
                     } else {
                         handle_key(state, &mut router, key);
                     }
@@ -247,6 +249,7 @@ fn loop_until_quit(
                     if state.restore_picker.is_none()
                         && state.create_dialog.is_none()
                         && state.group_dialog.is_none()
+                        && state.quit_confirm.is_none()
                     {
                         // A tour draft takes the paste single-line, like
                         // typed input; the pane path below stays untouched.
@@ -311,6 +314,9 @@ fn loop_until_quit(
                         dialog.view(f, garea, &ctx);
                     }
                 }
+                if let Some(dialog) = state.quit_confirm.as_ref() {
+                    dialog.view(f, crate::quit::quit_area(area));
+                }
                 if let Some(picker) = state.restore_picker.as_ref() {
                     picker.view(f, crate::checkpoint::RestorePicker::picker_area(area));
                 }
@@ -354,7 +360,7 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             }
         }
         RoutedKey::Command(cmd) => match cmd {
-            UserCommand::Quit => state.should_quit = true,
+            UserCommand::Quit => state.open_quit_confirm(),
             UserCommand::NextSession => {
                 state.step_session(1);
                 fit_active_pane(state);
@@ -494,6 +500,24 @@ fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
     }
 }
 
+/// One quit-confirm key: Yes quits, anything else keeps running.
+fn handle_quit_key(state: &mut AppState, key: event::KeyEvent) {
+    let outcome = state.quit_confirm.as_mut().map(|d| d.key(&key));
+    match outcome {
+        Some(crate::quit::QuitOutcome::Confirmed) => {
+            state.quit_confirm = None;
+            state.should_quit = true;
+        }
+        Some(crate::quit::QuitOutcome::Dismissed) => {
+            state.quit_confirm = None;
+            state.dirty = true;
+        }
+        _ => {
+            state.dirty = true;
+        }
+    }
+}
+
 /// One dialog key: submit spawns and fits, cancel closes, edits redraw.
 fn handle_dialog_key(state: &mut AppState, key: event::KeyEvent) {
     let names = state.live_names();
@@ -563,6 +587,9 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         return;
     }
     if state.create_dialog.is_some() {
+        return;
+    }
+    if state.quit_confirm.is_some() {
         return;
     }
     let (rows, cols) = state.term_size;
@@ -1254,6 +1281,35 @@ mod tests {
             },
         );
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+    }
+
+    #[test]
+    fn prefix_q_asks_first_and_no_stays() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key(&mut state, &mut router, prefix);
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(state.quit_confirm.is_some(), "quit asks first");
+        assert!(!state.should_quit, "nothing quits yet");
+        // No is default: Enter stays.
+        handle_quit_key(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.quit_confirm.is_none(), "confirm closed");
+        assert!(!state.should_quit, "No keeps running");
+    }
+
+    #[test]
+    fn prefix_q_then_y_quits() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key(&mut state, &mut router, prefix);
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        handle_quit_key(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(state.quit_confirm.is_none(), "confirm closed");
+        assert!(state.should_quit, "Yes quits");
     }
 
     #[test]
