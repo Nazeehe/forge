@@ -186,10 +186,10 @@ impl CreateDialog {
             .value(cwd.to_string_lossy().into_owned());
         let name = Input::default().title("Name").value(suggested_name);
         // Agent CLIs only: forge never creates a bare shell session.
-        let tool = Radio::default()
-            .choices(["claude", "codex", "muse"])
-            .value(0)
-            .rewind(true);
+        // Choices follow registry order, so file order is display order.
+        let tools: Vec<String> =
+            Harness::all().iter().map(|h| h.as_str().to_string()).collect();
+        let tool = Radio::default().choices(tools).value(0).rewind(true);
         let mut group_choices = vec!["None".to_string()];
         group_choices.extend(groups.iter().cloned());
         let group = Select::default()
@@ -223,11 +223,7 @@ impl CreateDialog {
     }
 
     pub fn tool_choice(&self) -> SessionKind {
-        match self.tool.states.choice {
-            1 => SessionKind::Agent(Harness::Codex),
-            2 => SessionKind::Agent(Harness::Muse),
-            _ => SessionKind::Agent(Harness::Claude),
-        }
+        SessionKind::Agent(Harness::from_index(self.tool.states.choice))
     }
 
     /// Comm group choice: the leading `None` entry keeps the session
@@ -752,6 +748,10 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn agent(name: &str) -> SessionKind {
+        SessionKind::Agent(crate::harness::Harness::from_name(name).unwrap())
+    }
+
     fn typed(dialog: &mut CreateDialog, text: &str, names: &[String]) {
         for ch in text.chars() {
             let outcome = dialog.key(&key(KeyCode::Char(ch)), names);
@@ -896,7 +896,10 @@ mod tests {
     #[test]
     fn defaults_prefill_claude_and_none_group() {
         let (d, _) = fresh();
-        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Claude));
+        assert_eq!(
+            d.tool_choice(),
+            SessionKind::Agent(crate::harness::Harness::from_name("claude").unwrap())
+        );
         assert_eq!(d.spec().name, "claude-1");
         assert_eq!(d.spec().cwd, std::env::temp_dir());
         assert_eq!(d.spec().model, "");
@@ -940,14 +943,14 @@ mod tests {
         step(&mut d, &names, 2);
         assert_eq!(d.focus(), 2);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
-        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Codex));
+        assert_eq!(d.tool_choice(), agent("codex"));
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
-        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Muse));
+        assert_eq!(d.tool_choice(), agent("muse"));
         // Rewind wraps back to claude.
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
-        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Claude));
+        assert_eq!(d.tool_choice(), agent("claude"));
         assert!(matches!(d.key(&key(KeyCode::Left), &names), DialogOutcome::Pending));
-        assert_eq!(d.tool_choice(), SessionKind::Agent(crate::harness::Harness::Muse));
+        assert_eq!(d.tool_choice(), agent("muse"));
     }
 
     #[test]

@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "name": "claude",
+      "binary": "claude",
+      "env_override": "CLAUDE_BIN",
+      "model_flag": "--model",
+      "default_model": "",
+      "extra_args": [],
+      "resume": {
+        "subcommand": null,
+        "with_id": { "flag": "--resume" },
+        "without_id": ["--continue"]
+      },
+      "supports_hooks": true,
+      "session_attribution": "hook_env"
+    },
+    {
+      "name": "codex",
+      "binary": "codex",
+      "env_override": "CODEX_BIN",
+      "model_flag": "--model",
+      "default_model": "",
+      "extra_args": [],
+      "resume": {
+        "subcommand": "resume",
+        "with_id": { "positional": true },
+        "without_id": ["--last"]
+      },
+      "supports_hooks": true,
+      "session_attribution": "hook_env"
+    },
+    {
+      "name": "muse",
+      "binary": "muse",
+      "env_override": "METAMATE_BIN",
+      "model_flag": "--model",
+      "default_model": "",
+      "extra_args": [],
+      "resume": {
+        "subcommand": "resume",
+        "with_id": { "positional": true },
+        "without_id": ["--last"]
+      },
+      "supports_hooks": true,
+      "session_attribution": "cwd_window"
+    }
+  ]
+}

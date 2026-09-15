@@ -1,3 +1,4 @@
+mod agents;
 mod app;
 mod audit;
 mod bot;
@@ -119,6 +120,20 @@ fn startup() -> i32 {
             eprintln!("error: cannot init audit log: {e}");
             return 1;
         }
+    }
+    // Agent CLI definitions: materialize the packaged default on first
+    // launch, then load. A bad file is a hard error — launching an agent
+    // with the wrong argv is worse than not launching.
+    let agents_path = branding::agents_file(&home);
+    if !agents_path.exists() {
+        if let Err(e) = std::fs::write(&agents_path, crate::agents::DEFAULT_AGENTS_JSON) {
+            eprintln!("error: cannot write agents file: {e}");
+            return 1;
+        }
+    }
+    if let Err(e) = crate::agents::load_registry(&agents_path) {
+        eprintln!("error: {e}");
+        return 1;
     }
     let run = ids::RunId::generate();
     if let Ok(mut log) =

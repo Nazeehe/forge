@@ -509,7 +509,8 @@ impl SessionManager {
         }
         let mut candidates = self.sessions.iter().filter(|(_, rec)| {
             rec.state.is_live()
-                && rec.cli_tool == "muse"
+                && crate::harness::Harness::from_name(&rec.cli_tool)
+                    .is_some_and(|h| h.cwd_window_attribution())
                 && rec.harness_session_id.is_none()
                 && rec.cwd.to_string_lossy() == cwd
                 && rec.spawned_at.elapsed() < BOOTSTRAP_WINDOW

@@ -2256,7 +2256,9 @@ mod tests {
         std::env::set_var("CODEX_BIN", "/bin/true");
         let mut s = AppState::new();
         let spec = crate::create::SessionSpec {
-            kind: crate::create::SessionKind::Agent(crate::harness::Harness::Codex),
+            kind: crate::create::SessionKind::Agent(
+                crate::harness::Harness::from_name("codex").unwrap(),
+            ),
             name: "coder".to_string(),
             cwd: std::env::temp_dir(),
             model: "gpt-5".to_string(),
@@ -2525,7 +2527,9 @@ mod tests {
         let mut s = AppState::new();
         let agent = s
             .create_session(&crate::create::SessionSpec {
-                kind: crate::create::SessionKind::Agent(crate::harness::Harness::Codex),
+                kind: crate::create::SessionKind::Agent(
+                    crate::harness::Harness::from_name("codex").unwrap(),
+                ),
                 name: "codex-1".to_string(),
                 cwd: std::env::temp_dir(),
                 model: String::new(),

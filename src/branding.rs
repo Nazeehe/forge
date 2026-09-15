@@ -45,6 +45,12 @@ pub fn app_log(home: &Path) -> PathBuf {
     config_dir(home).join("forge.log")
 }
 
+/// `~/.forge/agents.json`: agent CLI definitions, materialized from the
+/// packaged default on first launch when missing.
+pub fn agents_file(home: &Path) -> PathBuf {
+    config_dir(home).join("agents.json")
+}
+
 /// `~/.forge/sessions`: saved session snapshots, newest last.
 pub fn sessions_file(home: &Path) -> PathBuf {
     config_dir(home).join("sessions")
