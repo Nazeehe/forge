@@ -791,7 +791,13 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
             }
         }
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
-            let buttons = ui::mode_button_areas(areas.sidebar, state.pill_tabs);
+            // Same rich/compact split the render uses: compact buttons
+            // follow the content-built row.
+            let buttons = if areas.sidebar.width >= 40 && areas.sidebar.height >= 30 {
+                ui::mode_button_areas(areas.sidebar, state.pill_tabs)
+            } else {
+                ui::compact_mode_buttons(areas.sidebar, &state.sidebar_info(), state.pill_tabs)
+            };
             match ui::mode_at(&buttons, mev.column, mev.row) {
                 Some("yolo") => {
                     if ui::ChromeButton::new("[Yolo]", ratatui::style::Style::default())
@@ -1793,10 +1799,12 @@ mod tests {
         state.open_group_dialog();
         handle_group_key(&mut state, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         let area = crate::groups::group_area(ratatui::layout::Rect::new(0, 0, 80, 24));
+        // Padded content: header sits one row down, first session on
+        // the row after it.
         forward_mouse(&mut state, MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: area.x + 3,
-            row: area.y + 2,
+            row: area.y + 3,
             modifiers: KeyModifiers::NONE,
         });
         handle_group_key(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

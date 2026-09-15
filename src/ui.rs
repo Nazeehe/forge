@@ -664,19 +664,23 @@ pub fn format_countdown(remaining: std::time::Duration) -> String {
 /// Sidebar lines. Never blank: with no sessions it still guides. The
 /// active mode button renders highlighted.
 pub fn sidebar_lines(info: &SidebarInfo) -> Vec<Line<'static>> {
-    sidebar_lines_at(info, SETTINGS_ROW.saturating_sub(1) as usize, false)
+    sidebar_lines_at(info, SETTINGS_ROW.saturating_sub(1) as usize, false).0
 }
 
-fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize, pills: bool) -> Vec<Line<'static>> {
+fn sidebar_lines_at(
+    info: &SidebarInfo,
+    mode_row: usize,
+    pills: bool,
+) -> (Vec<Line<'static>>, usize) {
     let mut lines = Vec::new();
     match &info.session {
         None => {
-            lines.push(Line::from("Sessions"));
+            lines.push(Line::from(" Sessions"));
             lines.push(Line::from("  none yet"));
             lines.push(Line::from("  Ctrl-b c creates one"));
         }
         Some(detail) => {
-            lines.push(Line::from("Session"));
+            lines.push(Line::from(" Session"));
             lines.push(Line::from(format!(
                 "  {}",
                 safe_text::encode_for_display(&detail.name)
@@ -697,7 +701,7 @@ fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize, pills: bool) -> Vec<Lin
                 )));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from("Stats"));
+            lines.push(Line::from(" Stats"));
             lines.push(Line::from(format!(
                 "  Uptime {}",
                 format_uptime(detail.uptime_secs)
@@ -709,17 +713,21 @@ fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize, pills: bool) -> Vec<Lin
             )));
             if !detail.timers.is_empty() {
                 lines.push(Line::from(""));
-                lines.push(Line::from("Scheduled"));
+                lines.push(Line::from(" Scheduled"));
                 for timer in &detail.timers {
                     lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
                 }
             }
         }
     }
+    // Short content pads up to the familiar fixed zone; long content
+    // flows past it. The button row follows the flow (returned below)
+    // instead of doubling against a fixed overlay row.
     while lines.len() < mode_row.saturating_sub(1) {
         lines.push(Line::from(""));
     }
-    lines.push(Line::from("Settings"));
+    lines.push(Line::from(" Settings"));
+    let btn = lines.len();
     let (off_style, yolo_style) = if info.mode == "yolo" {
         (Style::default(), Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED))
     } else {
@@ -763,41 +771,57 @@ fn sidebar_lines_at(info: &SidebarInfo, mode_row: usize, pills: bool) -> Vec<Lin
         ])
     });
     lines.push(Line::from(""));
-    lines.push(Line::from(format!("Pending: {}", info.pending)));
-    lines
+    lines.push(Line::from(format!(" Pending: {}", info.pending)));
+    (lines, btn)
+}
+
+/// Compact mode-button hit areas, following the content-built button
+/// row: status and timers push it down, and the render blanks and
+/// paints that same row. One builder serves both sides, so clicks
+/// never desync from what is on screen.
+pub fn compact_mode_buttons(sidebar: Rect, info: &SidebarInfo, pills: bool) -> ModeButtons {
+    let min_row = mode_button_areas(sidebar, pills)
+        .off
+        .y
+        .saturating_sub(sidebar.y + 1) as usize;
+    let (_, btn) = sidebar_lines_at(info, min_row, pills);
+    mode_button_areas_at(sidebar, pills, sidebar.y.saturating_add(1).saturating_add(btn as u16))
 }
 
 fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Line<'static>> {
+    // Text keeps one indent cell off the border; rules and stat values
+    // share the narrower measure so the right edge stays aligned.
     let mut lines = vec![
-        Line::from(Span::styled("Forge", theme::style(theme::Role::Brand))),
-        Line::from(Span::styled("Session Control Plane", theme::style(theme::Role::Muted))),
+        Line::from(Span::styled(" Forge", theme::style(theme::Role::Brand))),
+        Line::from(Span::styled(" Session Control Plane", theme::style(theme::Role::Muted))),
         Line::from(""),
-        Line::from(Span::styled("Session", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(" Session", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))),
     ];
     match &info.session {
         Some(detail) => {
             lines.push(Line::from(Span::styled(
-                safe_text::encode_for_display(&detail.name), theme::style(theme::Role::Focus))));
-            lines.push(Line::from(safe_text::encode_for_display(&detail.cli_tool)));
-            lines.push(Line::from(safe_text::encode_for_display(&detail.cwd)));
+                format!(" {}", safe_text::encode_for_display(&detail.name)), theme::style(theme::Role::Focus))));
+            lines.push(Line::from(format!(" {}", safe_text::encode_for_display(&detail.cli_tool))));
+            lines.push(Line::from(format!(" {}", safe_text::encode_for_display(&detail.cwd))));
             if let Some(status) = detail.status.as_deref() {
-                lines.push(Line::from(safe_text::encode_for_display(status)));
+                lines.push(Line::from(format!(" {}", safe_text::encode_for_display(status))));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
-                Span::raw("Status  "),
+                Span::raw(" Status  "),
                 Span::styled(format!("● {}", safe_text::encode_for_display(&detail.state)),
                     theme::style(theme::Role::Running)),
             ]));
-            lines.push(Line::from(format!("Pending hooks: {}", info.pending)));
+            lines.push(Line::from(format!(" Pending hooks: {}", info.pending)));
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("Stats", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))));
+            lines.push(Line::from(Span::styled(" Stats", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))));
             lines.push(stat_line("◷ Uptime", &format_uptime(detail.uptime_secs), width));
-            lines.push(Line::from("─".repeat(width.saturating_sub(4) as usize)));
+            lines.push(rule_line(width));
             lines.push(stat_line("Tool calls", &detail.tool_calls.to_string(), width));
-            lines.push(Line::from("─".repeat(width.saturating_sub(4) as usize)));
-            lines.push(Line::from("Tool Approvals"));
+            lines.push(rule_line(width));
+            lines.push(Line::from(" Tool Approvals"));
             lines.push(Line::from(vec![
+                Span::raw(" "),
                 Span::styled(format!("✓ {}", detail.approvals), theme::style(theme::Role::Success)),
                 Span::raw("   "),
                 Span::styled(format!("× {}", detail.denials), theme::style(theme::Role::Danger)),
@@ -805,34 +829,40 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
             if !detail.timers.is_empty() {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "Scheduled",
+                    " Scheduled",
                     theme::style(theme::Role::Text).add_modifier(Modifier::BOLD),
                 )));
                 for timer in &detail.timers {
-                    lines.push(Line::from(format!("◷ in {}", timer.remaining)));
+                    lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
                 }
             }
-            lines.push(Line::from("─".repeat(width.saturating_sub(4) as usize)));
+            lines.push(rule_line(width));
         }
         None => {
-            lines.push(Line::from("No session selected"));
-            lines.push(Line::from("Ctrl-b c creates one"));
+            lines.push(Line::from(" No session selected"));
+            lines.push(Line::from(" Ctrl-b c creates one"));
         }
     }
     while lines.len() < mode_row.saturating_sub(2) { lines.push(Line::from("")); }
-    lines.push(Line::from(Span::styled("Global Settings", theme::style(theme::Role::Brand))));
-    lines.push(Line::from("Autopilot"));
+    lines.push(Line::from(Span::styled(" Global Settings", theme::style(theme::Role::Brand))));
+    lines.push(Line::from(" Autopilot"));
     lines.push(Line::from("")); // button widgets own this row
-    lines.push(Line::from(Span::styled("Ctrl-b shortcuts", theme::style(theme::Role::KeyHint))));
+    lines.push(Line::from(Span::styled(" Ctrl-b shortcuts", theme::style(theme::Role::KeyHint))));
     lines
 }
 
+/// Divider rule sharing the stat-value measure: one indent cell, then
+/// dashes to the common right edge.
+fn rule_line(width: u16) -> Line<'static> {
+    Line::from(format!(" {}", "─".repeat(width.saturating_sub(6) as usize)))
+}
+
 fn stat_line(label: &str, value: &str, width: u16) -> Line<'static> {
-    // Values end exactly at the divider edge below them: both span
-    // width-4, so nothing overshoots the rules.
-    let available = width.saturating_sub(4) as usize;
+    // Values end exactly at the divider edge below them: one indent
+    // cell plus a width-6 span, so nothing overshoots the rules.
+    let available = width.saturating_sub(6) as usize;
     let spaces = available.saturating_sub(label.chars().count() + value.chars().count());
-    Line::from(format!("{label}{}{value}", " ".repeat(spaces.max(1))))
+    Line::from(format!(" {label}{}{value}", " ".repeat(spaces.max(1))))
 }
 
 /// Click areas for the mode buttons, relative to the sidebar rect. Row is
@@ -864,11 +894,14 @@ pub(crate) fn timer_cancel_rects(
     let lines = if sidebar.width >= 40 && sidebar.height >= 30 {
         rich_sidebar_lines(info, mode_row, sidebar.width)
     } else {
-        sidebar_lines_at(info, mode_row, false)
+        sidebar_lines_at(info, mode_row, false).0
     };
     let mut header = None;
     for (idx, line) in lines.iter().enumerate() {
-        let exact = line.spans.len() == 1 && line.spans[0].content == "Scheduled";
+        // Headers carry one indent cell now; the timer-row lookahead
+        // below still keeps a session literally named Scheduled from
+        // matching.
+        let exact = line.spans.len() == 1 && line.spans[0].content.trim() == "Scheduled";
         let next_row = lines.get(idx + 1).is_some_and(|next| {
             let text: String = next.spans.iter().map(|s| s.content.as_ref()).collect();
             text.starts_with("  ◷ in ") || text.starts_with("◷ in ")
@@ -920,6 +953,13 @@ pub fn mode_button_areas(sidebar: Rect, pills: bool) -> ModeButtons {
     } else {
         sidebar.y + SETTINGS_ROW
     };
+    mode_button_areas_at(sidebar, pills, y)
+}
+
+/// Mode-button hit areas on an explicit row: the compact render and
+/// mouse paths pass the content-built row so the buttons follow long
+/// content instead of doubling against a fixed overlay.
+pub fn mode_button_areas_at(sidebar: Rect, pills: bool, y: u16) -> ModeButtons {
     let visible = sidebar.height >= SETTINGS_ROW + 2 && sidebar.width >= 16;
     let (off_w, yolo_x, yolo_w) = if pills {
         (7, sidebar.x + 10, 8)
@@ -1189,14 +1229,27 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
             pending: chrome.pending,
             mode: chrome.mode,
         };
+        let rich =
+            areas.sidebar.width >= 40 && areas.sidebar.height >= 30;
         let mode_areas = mode_button_areas(areas.sidebar, chrome.pills);
         let mode_row = mode_areas.off.y.saturating_sub(areas.sidebar.y + 1) as usize;
-        let mut lines = if areas.sidebar.width >= 40 && areas.sidebar.height >= 30 {
-            rich_sidebar_lines(&info, mode_row, areas.sidebar.width)
+        let mut lines;
+        // Compact buttons follow the content-built row (same builder
+        // the mouse path uses); rich ones stay pinned near the bottom.
+        let btn_areas = if rich {
+            lines = rich_sidebar_lines(&info, mode_row, areas.sidebar.width);
+            mode_areas
         } else {
-            sidebar_lines_at(&info, mode_row, chrome.pills)
+            let (content, btn) = sidebar_lines_at(&info, mode_row, chrome.pills);
+            lines = content;
+            mode_button_areas_at(
+                areas.sidebar,
+                chrome.pills,
+                areas.sidebar.y.saturating_add(1).saturating_add(btn as u16),
+            )
         };
-        if let Some(line) = lines.get_mut(mode_row) {
+        let btn_row = btn_areas.off.y.saturating_sub(areas.sidebar.y + 1) as usize;
+        if let Some(line) = lines.get_mut(btn_row) {
             *line = Line::from(""); // the controls below own this row
         }
         let side = Paragraph::new(Text::from(lines)).block(
@@ -1207,8 +1260,8 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
         );
         frame.render_widget(side, areas.sidebar);
         for (label, area, active) in [
-            ("Off", mode_areas.off, info.mode == "off"),
-            ("Yolo", mode_areas.yolo, info.mode == "yolo"),
+            ("Off", btn_areas.off, info.mode == "off"),
+            ("Yolo", btn_areas.yolo, info.mode == "yolo"),
         ] {
             if area.width > 0 && area.right() <= areas.sidebar.right().saturating_sub(1) {
                 if chrome.pills {
@@ -1482,14 +1535,16 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &c)).unwrap();
         let rows = buffer_rows(&terminal);
-        // Mode row keeps its legacy row; pills replace the brackets.
-        assert!(rows[11].contains("Off"), "off pill: {:?}", rows[11]);
-        assert!(!rows[11].contains("[Off]"), "no legacy brackets");
+        // Timed content pushes the button row down to 15; pills still
+        // replace the brackets there, and the fixed row stays blank.
+        assert!(!rows[11].contains("Off"), "no ghost row: {:?}", rows[11]);
+        assert!(rows[15].contains("Off"), "off pill: {:?}", rows[15]);
+        assert!(!rows[15].contains("[Off]"), "no legacy brackets");
         let cancel_y = rows.iter().position(|r| r.contains("Cancel")).expect("cancel pill");
         assert!(rows[cancel_y].contains("\u{e0b6}"));
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(66, 11)].fg, Color::Yellow, "active off cap");
-        assert_eq!(buf[(67, 11)].bg, Color::Yellow, "active off fill");
+        assert_eq!(buf[(66, 15)].fg, Color::Yellow, "active off cap");
+        assert_eq!(buf[(67, 15)].bg, Color::Yellow, "active off fill");
         let cap_byte = rows[cancel_y].find("\u{e0b6}").expect("left cap");
         let cap_x = rows[cancel_y][..cap_byte].chars().count() as u16;
         assert_eq!(buf[(cap_x, cancel_y as u16)].fg, Color::Red, "destructive caps");
@@ -1719,6 +1774,84 @@ mod tests {
         lines.iter().any(|l| text_of(l).contains(needle))
     }
 
+    #[cfg(test)]
+    fn sidebar_chrome() -> Chrome {
+        Chrome {
+            tabs: vec![],
+            topbar: TopBar { tabs: vec![] },
+            detail: Some(SessionDetail {
+                name: "shell-1".to_string(),
+                cli_tool: "shell".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                state: "running".to_string(),
+                status: Some("blocked: waiting on review".to_string()),
+                timers: vec![TimerView { id: "t1".to_string(), remaining: "9:55".to_string() }],
+                uptime_secs: 65,
+                tool_calls: 4,
+                approvals: 3,
+                denials: 1,
+            }),
+            pending: 3,
+            mode: "off",
+            grid: false,
+            pills: true,
+        }
+    }
+
+    #[test]
+    fn compact_status_and_timers_show_a_single_button_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+        // Narrow terminal: 24-wide compact sidebar with status and a
+        // timer armed, the combination that used to push the content
+        // buttons past the fixed overlay row and paint both.
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(f, f.area(), &[], &sidebar_chrome())).unwrap();
+        let buf = terminal.backend().buffer();
+        let areas = chrome_areas(Rect::new(0, 0, 120, 30));
+        let row_text = |y: u16| {
+            (areas.sidebar.x..areas.sidebar.right())
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        // The old fixed overlay row stays blank content; the buttons
+        // follow the flow instead of doubling.
+        assert!(!row_text(11).contains(PILL_LEFT), "no ghost row: {:?}", row_text(11));
+        assert!(row_text(14).contains("Settings"), "header visible: {:?}", row_text(14));
+        let pill_rows: Vec<u16> = (0..30)
+            .filter(|y| row_text(*y).contains(PILL_LEFT))
+            .collect();
+        // Mode pills plus the timer Cancel: exactly two pill rows.
+        assert_eq!(pill_rows.len(), 2, "one button row, one cancel: {pill_rows:?}");
+        assert!(mode_at(
+            &compact_mode_buttons(areas.sidebar, &sidebar_chrome_info(), true),
+            areas.sidebar.x + 3,
+            pill_rows[1],
+        ).is_some(), "mouse follows the visible buttons");
+    }
+
+    #[cfg(test)]
+    fn sidebar_chrome_info() -> SidebarInfo {
+        let c = sidebar_chrome();
+        SidebarInfo { session: c.detail.clone(), pending: c.pending, mode: c.mode }
+    }
+
+    #[test]
+    fn sidebar_content_keeps_border_padding() {
+        use ratatui::{backend::TestBackend, Terminal};
+        // Compact headers sit one cell inside the border...
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(f, f.area(), &[], &sidebar_chrome())).unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(97, 1)].symbol(), " ", "border gap");
+        assert_eq!(buf[(98, 1)].symbol(), "S", "Session header");
+        // ...and so do rich ones.
+        let mut wide = Terminal::new(TestBackend::new(180, 40)).unwrap();
+        wide.draw(|f| render(f, f.area(), &[], &sidebar_chrome())).unwrap();
+        let buf = wide.backend().buffer();
+        assert_eq!(buf[(136, 1)].symbol(), " ");
+        assert_eq!(buf[(137, 1)].symbol(), "F", "Forge header");
+    }
+
     #[test]
     fn sidebar_shows_focused_session_detail_and_mode() {
         let info = SidebarInfo {
@@ -1770,13 +1903,18 @@ mod tests {
 
     #[test]
     fn stat_values_end_at_divider_edge() {
-        // Dividers span width-4; values must end on the same column,
-        // never overshoot the rules the way the screenshot showed.
+        // One indent cell plus a width-6 span: values must end on the
+        // same column as the rules, never overshoot them the way the
+        // screenshot showed.
         for width in [30u16, 45, 60] {
             let line = stat_line("◷ Uptime", "41s", width);
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(text.chars().count(), (width - 4) as usize, "width {width}");
+            assert_eq!(text.chars().count(), (width - 5) as usize, "width {width}");
+            assert!(text.starts_with(' '), "indent");
             assert!(text.ends_with("41s"));
+            let rule = rule_line(width);
+            let rule_text: String = rule.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(rule_text.chars().count(), (width - 5) as usize, "rule {width}");
         }
     }
 
@@ -1808,7 +1946,7 @@ mod tests {
         let lines = rich_sidebar_lines(&info, 30, 45);
         let header = lines
             .iter()
-            .position(|l| l.spans.len() == 1 && l.spans[0].content == "Scheduled")
+            .position(|l| l.spans.len() == 1 && l.spans[0].content.trim() == "Scheduled")
             .expect("section renders");
         let blank = lines[header - 1].spans.iter().all(|s| s.content.is_empty());
         assert!(blank, "breathing room above Scheduled");
