@@ -28,6 +28,8 @@ mod session_status;
 mod theme;
 mod tui;
 mod ui;
+#[cfg(feature = "visual")]
+mod visual;
 mod walkthrough;
 
 const VERSION: &str = "1.0.0";
