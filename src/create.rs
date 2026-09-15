@@ -416,16 +416,16 @@ fn option_key(radio: &mut Radio, key: &KeyEvent) {
     }
 }
 
-/// Pill action buttons for the actions row: centered labels in rounded
-/// containers, the `>` chosen-marker and `*` default-marker kept. The
-/// Create pill always carries the accent (it is the default action);
-/// Cancel fills only when chosen.
+/// Pill action buttons for the actions row: centered labels in solid
+/// rounded containers, the `>` chosen-marker and `*` default-marker kept.
+/// Create always carries the accent (it is the default action); Cancel
+/// rests in the dim container and both fill with the accent when chosen.
 fn pill_actions(
     focused: bool,
     choice: usize,
     text: ratatui::style::Style,
 ) -> Vec<ratatui::text::Span<'static>> {
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::{Color, Style};
     use ratatui::text::Span;
     use crate::theme::{Role, focus_row, style};
     let frame = |glyph: char, color: Color| {
@@ -433,17 +433,12 @@ fn pill_actions(
     };
     let pad = |s: Style| Span::styled(" ".to_string(), s);
     let create_chosen = focused && choice == 0;
-    let create_style = if create_chosen {
-        style(Role::TabActive)
-    } else {
-        style(Role::Brand).add_modifier(Modifier::BOLD)
-    };
+    let create_style = style(Role::TabActive);
     let cancel_chosen = focused && choice == 1;
-    let cancel_plain = text;
     let cancel_style = if cancel_chosen {
         style(Role::TabActive)
     } else {
-        cancel_plain
+        style(Role::TabInactive)
     };
     let cancel_cap = if cancel_chosen {
         Color::Yellow
@@ -864,8 +859,11 @@ mod tests {
         assert_eq!(buf[(15, 13)].symbol(), "\u{e0b6}");
         assert_eq!(buf[(15, 13)].fg, Color::Yellow);
         assert_eq!(buf[(23, 13)].symbol(), "*", "default mark kept");
-        assert_eq!(buf[(23, 13)].fg, Color::Yellow);
+        assert_eq!(buf[(17, 13)].bg, Color::Yellow, "create solid");
+        assert_eq!(buf[(23, 13)].fg, Color::Black, "create dark label");
         assert_eq!(buf[(28, 13)].fg, Color::DarkGray, "dim cancel cap");
+        assert_eq!(buf[(30, 13)].bg, Color::DarkGray, "cancel dim fill");
+        assert_eq!(buf[(30, 13)].fg, Color::Black, "cancel dark label");
         // Chosen Cancel: `>` marker plus filled container.
         step(&mut d, &names, 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));

@@ -34,7 +34,7 @@ pub enum Role {
     Focus,
     /// Pill session tab: bright container, dark label.
     TabActive,
-    /// Pill session tab at rest: dim label, no container fill.
+    /// Pill tab at rest: dim solid container, dark label.
     TabInactive,
     BorderFocused,
     BorderUnfocused,
@@ -150,7 +150,9 @@ fn builtin_style(role: Role) -> Style {
             .fg(Color::Black)
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
-        Role::TabInactive => Style::default().fg(Color::DarkGray),
+        Role::TabInactive => Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray),
         Role::BorderFocused => Style::default().fg(Color::Yellow),
         Role::BorderUnfocused => Style::default().fg(Color::DarkGray),
         Role::BorderModal => Style::default().fg(Color::Cyan),

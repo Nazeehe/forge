@@ -326,7 +326,7 @@ fn pill_cap(tab: &SessionTab) -> Color {
 
 /// Label style for a pill tab: the selected tab always takes the default
 /// selected container; grouped tabs fill with their group color and dark
-/// text; the rest stay dim and unfilled.
+/// text; ungrouped rest sits in a dim container.
 fn pill_style(tab: &SessionTab) -> Style {
     if tab.focused {
         theme::style(theme::Role::TabActive)
@@ -390,8 +390,9 @@ pub fn session_bar_segments(tabs: &[SessionTab], pills: bool) -> Vec<BarSegment>
 
 /// The reference strip gives every session its own status dot, group
 /// swatch, and numbered click target. Keep the compact strip on small
-/// terminals so labels remain usable there. Pills drop the bracket and
-/// divider furniture — the container replaces it.
+/// terminals so labels remain usable there. Pills drop the status dot,
+/// swatch, brackets, and dividers — the container carries the group and
+/// the number stays in the centered label.
 pub fn session_bar_segments_for_area(tabs: &[SessionTab], bar: Rect, pills: bool) -> Vec<BarSegment> {
     if bar.width < 160 {
         return session_bar_segments(tabs, pills);
@@ -400,7 +401,7 @@ pub fn session_bar_segments_for_area(tabs: &[SessionTab], bar: Rect, pills: bool
         let status = if tab.live { "●" } else { "○" };
         let title = safe_text::encode_for_display(&tab.title);
         let text = if pills {
-            format!("{status} ■ {} {title}", index + 1)
+            format!("{} {title}", index + 1)
         } else {
             format!("{status} ■ [{}] {}  │", index + 1, title)
         };
@@ -1106,14 +1107,14 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
             }
         }
         // One red Cancel per armed timer, over its own countdown row.
-        // The pill is the destructive variant: red ends, red label.
+        // The pill is the destructive variant: red container, dark label.
         for (_, area) in timer_cancel_rects(areas.sidebar, &info, chrome.pills) {
             if chrome.pills {
                 render_pill(
                     frame,
                     area,
                     "Cancel",
-                    theme::style(theme::Role::Danger),
+                    Style::default().fg(Color::Black).bg(Color::Red),
                     Color::Red,
                 );
             } else {
@@ -1361,8 +1362,27 @@ mod tests {
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(66, 11)].fg, Color::Yellow, "active off cap");
         assert_eq!(buf[(67, 11)].bg, Color::Yellow, "active off fill");
-        let cap_x = rows[cancel_y].find("\u{e0b6}").expect("left cap");
-        assert_eq!(buf[(cap_x as u16, cancel_y as u16)].fg, Color::Red, "destructive caps");
+        let cap_byte = rows[cancel_y].find("\u{e0b6}").expect("left cap");
+        let cap_x = rows[cancel_y][..cap_byte].chars().count() as u16;
+        assert_eq!(buf[(cap_x, cancel_y as u16)].fg, Color::Red, "destructive caps");
+        assert_eq!(buf[(cap_x + 1, cancel_y as u16)].bg, Color::Red, "destructive fill");
+    }
+
+    #[test]
+    fn render_pill_mode_buttons_fill_inactive_container() {
+        // The 80-col sidebar drops the Yolo overlay pill, so render wide
+        // enough for both mode pills and check the resting container.
+        let mut c = chrome();
+        c.pills = true;
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|f| render(f, Rect::new(0, 0, 160, 40), &[], &c)).unwrap();
+        let rows = buffer_rows(&terminal);
+        let y = rows.iter().position(|r| r.contains("Yolo")).expect("yolo pill paints");
+        let byte_x = rows[y].find("Yolo").expect("yolo label");
+        let cell_x = rows[y][..byte_x].chars().count() as u16;
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(cell_x - 1, y as u16)].bg, Color::DarkGray, "inactive yolo fill");
+        assert_eq!(buf[(cell_x, y as u16)].fg, Color::Black, "inactive yolo label");
     }
 
     #[test]
@@ -1450,6 +1470,16 @@ mod tests {
         assert_eq!(segments[2].accent, Some(group_palette(1)));
         let buttons = layout_session_bar(Rect::new(0, 38, 180, 1), &segments);
         assert_eq!(session_at(&buttons, buttons[1].start + 5), Some(1));
+    }
+
+    #[test]
+    fn wide_session_pills_drop_status_markers_and_keep_number() {
+        let tabs = [tab("a", true), grouped("b", false, "team", 2)];
+        let segments = session_bar_segments_for_area(&tabs, Rect::new(0, 0, 180, 1), true);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "1 a");
+        assert_eq!(segments[1].text, "2 b");
+        assert!(segments.iter().all(|s| !s.text.contains('●') && !s.text.contains('■')));
     }
 
     #[test]
@@ -1816,9 +1846,10 @@ mod tests {
         assert_eq!(segs[1].cap, Some(g));
         assert_eq!(segs[1].style.bg, Some(g));
         assert_eq!(segs[1].style.fg, Some(Color::Black));
-        // Ungrouped rest stays dim and unfilled.
+        // Ungrouped rest sits in the dim container with dark text.
         assert_eq!(segs[2].cap, Some(Color::DarkGray));
-        assert_eq!(segs[2].style.bg, None);
+        assert_eq!(segs[2].style.bg, Some(Color::DarkGray));
+        assert_eq!(segs[2].style.fg, Some(Color::Black));
     }
 
     #[test]
@@ -1862,6 +1893,9 @@ mod tests {
         assert_eq!(row, "\u{e0b6} Shell \u{e0b4}");
         assert_eq!(buf[(1, 0)].fg, Color::Yellow, "selected cap");
         assert_eq!(buf[(2, 0)].bg, Color::Yellow, "selected fill");
+        // Next pill starts at x12 (2-cell gap): cap, pad, text.
+        assert_eq!(buf[(13, 0)].bg, Color::DarkGray, "inactive fill");
+        assert_eq!(buf[(14, 0)].fg, Color::Black, "inactive dark label");
     }
 
     #[test]

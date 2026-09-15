@@ -34,11 +34,11 @@ Render every clickable button in the forge TUI as a rounded pill tab (`label` wi
 ## Key Decisions
 
 - One shared pill language: `render_pill(frame, area, segment, cap)` in `ui.rs` serves all surfaces; caps always 1 cell each, layout reserves +2.
-- Session pills: container = group color for grouped tabs; the selected tab always uses the default selected container (`TabActive` yellow) ignoring group color; idle ungrouped = `TabInactive` dim. Text is Black on filled containers. Timer Cancel = destructive variant (red caps + `Danger` label, no fill) so it never reads as "selected".
+- Session pills: container = group color for grouped tabs; the selected tab always uses the default selected container (`TabActive` yellow) ignoring group color; idle ungrouped = `TabInactive` dim solid container. Text is Black on filled containers. Every pill middle is filled with its cap color — no hollow pills. Timer Cancel = destructive variant (solid red container, dark label) so it never reads as "selected".
 - Pill text is centered via symmetric 1-space inner padding (`render_pill` adds it; layout reserves +4: 2 caps + 2 pads).
 - Pills mode drops the now-redundant group-color furniture: no `group:` headers and no wide-bar `■` swatch overlay (the pill itself carries the color).
 - Create dialog keeps its `>` chosen-marker and `*` default-marker inside the pill label; the row's reverse-video focus stays.
-- Wide (≥160) pills drop `[...]`/`│` furniture and the accent `■` overlay shifts +1 past the left cap.
+- Wide (≥160) pills drop `[...]`/`│` furniture, the `●`/`○` status dot, and the `■` swatch: label is just `N title` centered in the container.
 - PUA halves are assumed width-1 (matches `unicode-width` and Nerd Fonts); the config flag is the fallback if a terminal disagrees.
 - Glyph orientation (`E0B6` left, `E0B4` right) cannot be verified by `TestBackend`; final proof is eyeballing a nerd-font terminal (manual check below).
 
