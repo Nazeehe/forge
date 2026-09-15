@@ -715,7 +715,7 @@ fn safe_name(raw: &str) -> String {
 
 /// Truncate a row to a cell width, marking cuts with an ellipsis so
 /// long names can never wrap the one-row-per-entry layout.
-fn fit_row(text: &str, width: usize) -> String {
+pub(crate) fn fit_row(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         return text.to_string();
     }

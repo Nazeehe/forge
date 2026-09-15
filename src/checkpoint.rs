@@ -267,6 +267,10 @@ impl RestorePicker {
     }
 
     /// Render the box: title, one row per snapshot, footer hints.
+    /// Content keeps border padding; roomy boxes pin the hint to the
+    /// bottom row, and long labels truncate with an ellipsis so rows
+    /// never spill past the frame. The cursor marker is `>`, the same
+    /// language the other pickers speak.
     pub fn view(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         use ratatui::widgets::{Block, Borders, Paragraph};
         let block = Block::default()
@@ -278,25 +282,30 @@ impl RestorePicker {
         if inner.height < 4 || inner.width < 20 {
             return;
         }
+        let roomy = inner.height >= 6;
+        let cx = inner.x + 2;
+        let cw = inner.width.saturating_sub(4);
         let end = inner.y + inner.height;
-        let mut row = inner.y;
+        let mut row = inner.y + if roomy { 1 } else { 0 };
         let now = now_unix();
         for (index, entry) in self.entries.iter().enumerate() {
             if row + 1 >= end {
                 break;
             }
-            let mark = if index == self.selected { "▸" } else { " " };
+            let mark = if index == self.selected { ">" } else { " " };
             let noun = if entry.sessions.len() == 1 {
                 "session"
             } else {
                 "sessions"
             };
-            let line = format!(
-                "{mark} {} ({} {noun} · {})",
-                entry.label,
+            let meta = format!(
+                "({} {noun} · {})",
                 entry.sessions.len(),
                 age_string(entry.saved_at_unix, now)
             );
+            // Metadata is the load-bearing part; the label yields.
+            let room = (cw as usize).saturating_sub(3 + meta.chars().count());
+            let line = format!("{mark} {} {meta}", crate::groups::fit_row(&entry.label, room));
             let style = if index == self.selected {
                 crate::theme::style(crate::theme::Role::Focus)
             } else {
@@ -304,14 +313,17 @@ impl RestorePicker {
             };
             frame.render_widget(
                 Paragraph::new(line).style(style),
-                ratatui::layout::Rect::new(inner.x, row, inner.width, 1),
+                ratatui::layout::Rect::new(cx, row, cw, 1),
             );
             row += 1;
+        }
+        if roomy {
+            row = end.saturating_sub(1);
         }
         if row < end {
             frame.render_widget(
                 Paragraph::new("Enter load • Esc fresh start"),
-                ratatui::layout::Rect::new(inner.x, row, inner.width, 1),
+                ratatui::layout::Rect::new(cx, row, cw, 1),
             );
         }
     }
@@ -445,6 +457,46 @@ mod tests {
         assert_eq!(picker.key(&key(KeyCode::Enter)), RestoreOutcome::Pick(0));
         assert_eq!(picker.key(&key(KeyCode::Esc)), RestoreOutcome::Fresh);
         assert!(RestorePicker::new(&SessionsFile::default()).is_none(), "empty offers nothing");
+    }
+
+    #[test]
+    fn picker_pads_content_and_pins_hint() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved("a")], 100));
+        file.push(make_entry(vec![saved("b")], 200));
+        let picker = RestorePicker::new(&file).unwrap();
+        // 80x24 centers the 64x20 box at (8, 2): padded content at
+        // x11, first entry one row down, hint on the bottom row.
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| {
+            picker.view(f, RestorePicker::picker_area(f.area()));
+        }).unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf.get(9, 4).symbol(), " ", "border padding");
+        assert_eq!(buf.get(11, 4).symbol(), " ", "older entry unmarked");
+        assert_eq!(buf.get(11, 5).symbol(), ">", "newest preselected");
+        let hint: String = (11..70).map(|x| buf.get(x, 20).symbol()).collect();
+        assert!(hint.contains("Enter load"), "pinned hint: {hint:?}");
+    }
+
+    #[test]
+    fn picker_truncates_long_labels_inside_the_box() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved(&"x".repeat(100))], 100));
+        let picker = RestorePicker::new(&file).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| {
+            picker.view(f, RestorePicker::picker_area(f.area()));
+        }).unwrap();
+        let buf = terminal.backend().buffer();
+        // Padded content width is 58: the row fits exactly, ellipsis
+        // marking the cut.
+        let row: String = (11..11 + 58).map(|x| buf.get(x, 4).symbol()).collect();
+        assert_eq!(row.chars().count(), 58);
+        assert!(row.contains("…"), "truncated: {row:?}");
+        assert!(!row.contains("xxxxxxxxxx "), "no overflow past the box");
     }
 
     #[test]
