@@ -541,6 +541,17 @@ impl AppState {
         self.visual_overlay_active()
     }
 
+    /// Paint the terminal already shows, if the overlay still wants
+    /// exactly it. Lets the TUI skip all byte work for an unchanged
+    /// frame: byte building (clone or crop+encode) happens only when
+    /// this differs from the fresh paint.
+    #[cfg(feature = "visual")]
+    pub fn visual_current_paint(&self) -> Option<crate::visual::VisualPaint> {
+        let shown = self.visual_shown.as_ref()?;
+        let (session, generation) = self.visual_overlay_active()?;
+        (shown.session == session && shown.generation == generation).then_some(shown.paint)
+    }
+
     /// PNG bytes for one paint of a stored frame: the frame itself
     /// when the viewport shows it whole (no re-encode), else the
     /// cropped region re-encoded for transmit. Independent of the
@@ -3462,6 +3473,29 @@ mod tests {
         assert_eq!(reshow.image_id, spec.image_id, "no fresh id for a viewport change");
         assert!(reshow.replace, "TUI deletes before re-transmitting");
         assert!(state.visual_take_show(true, zoomed).is_none(), "paint now current");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_current_paint_tracks_what_the_terminal_shows() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 100, 100));
+        show_visual_overlay(&mut state, id);
+        assert_eq!(state.visual_current_paint(), None, "nothing shown yet");
+        let paint = paint_for(&state, id);
+        state.visual_take_show(true, paint).expect("show");
+        assert_eq!(state.visual_current_paint(), Some(paint));
+        // Viewport moved without a reshow: the terminal is stale, so
+        // the TUI must build bytes again.
+        assert!(state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        let zoomed = paint_for(&state, id);
+        assert_ne!(state.visual_current_paint(), Some(zoomed), "stale paint");
+        state.visual_take_show(true, zoomed).expect("reshow");
+        assert_eq!(state.visual_current_paint(), Some(zoomed));
+        // Leaving the tab clears it: nothing current anymore.
+        state.overlay_view = None;
+        assert_eq!(state.visual_current_paint(), None);
     }
 
     #[cfg(feature = "visual")]

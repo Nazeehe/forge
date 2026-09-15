@@ -225,33 +225,36 @@ fn sync_visual_terminal(
     if !crate::visual::kitty_supported_env() {
         return Ok(());
     }
-    // Bytes first, claim second: the gate only records paints the
-    // terminal actually receives, so a failed encode retries instead
-    // of going dark.
+    // Peek before bytes: an unchanged frame costs comparisons, not
+    // a clone or crop+encode the gate would drop. Bytes still come
+    // before the claim, so the gate records only paints the terminal
+    // actually receives and a failed encode retries next frame.
     if let Some((id, chrome, (cell_w, cell_h))) = visual_viewport(state) {
         let (_, generation) = state.visual_focused_frame().expect("viewport implies frame");
         if let Some(paint) = state.visual_paint(id, chrome.image, cell_w, cell_h) {
-            if let Some(png) = state.visual_frame_png(id, generation, paint) {
-                if let Some(spec) = state.visual_take_show(true, paint) {
-                    if spec.replace {
-                        write!(io::stdout(), "{}", crate::visual::kitty_delete(spec.image_id))?;
-                    }
-                    let placed = spec.paint;
-                    if placed.out_cols > 0 && placed.out_rows > 0 {
-                        crossterm::execute!(
-                            io::stdout(),
-                            crossterm::cursor::MoveTo(placed.cursor_x, placed.cursor_y)
-                        )?;
-                        write!(
-                            io::stdout(),
-                            "{}",
-                            crate::visual::kitty_transmit(
-                                &png,
-                                spec.image_id,
-                                placed.out_cols,
-                                placed.out_rows
-                            )
-                        )?;
+            if state.visual_current_paint() != Some(paint) {
+                if let Some(png) = state.visual_frame_png(id, generation, paint) {
+                    if let Some(spec) = state.visual_take_show(true, paint) {
+                        if spec.replace {
+                            write!(io::stdout(), "{}", crate::visual::kitty_delete(spec.image_id))?;
+                        }
+                        let placed = spec.paint;
+                        if placed.out_cols > 0 && placed.out_rows > 0 {
+                            crossterm::execute!(
+                                io::stdout(),
+                                crossterm::cursor::MoveTo(placed.cursor_x, placed.cursor_y)
+                            )?;
+                            write!(
+                                io::stdout(),
+                                "{}",
+                                crate::visual::kitty_transmit(
+                                    &png,
+                                    spec.image_id,
+                                    placed.out_cols,
+                                    placed.out_rows
+                                )
+                            )?;
+                        }
                     }
                 }
             }
