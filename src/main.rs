@@ -33,7 +33,7 @@ mod walkthrough;
 const VERSION: &str = "1.0.0";
 
 /// Packaged `AGENTS.md`, dropped into `~/.forge` when missing.
-const DEFAULT_AGENTS_MD: &str = include_str!("../AGENTS.md");
+const DEFAULT_AGENTS_MD: &str = include_str!("../assets/AGENTS.md");
 
 fn print_help() {
     println!("Usage: {} [--version|--help|hook-relay [endpoint]|mcp-serve [--endpoint PATH]|install-*|uninstall-*]", branding::binary_name());

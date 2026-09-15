@@ -10,7 +10,7 @@
 use std::path::Path;
 
 /// Packaged default, placed in `~/.forge` when no agents file exists.
-pub const DEFAULT_AGENTS_JSON: &str = include_str!("../agents.json");
+pub const DEFAULT_AGENTS_JSON: &str = include_str!("../assets/agents.json");
 
 /// The only schema version this forge understands.
 pub const EXPECTED_VERSION: u64 = 1;

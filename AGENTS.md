@@ -1,133 +1,89 @@
-# Forge agent configuration guide
+# AGENTS.md — Forge Rebuild
 
-You are configuring **forge**, a terminal multiplexer that runs AI coding
-CLIs ("agents") in session panes. All settings live in `~/.forge/`.
-Edit them with targeted changes, then restart forge to apply. Never
-invent settings: every key below is load-bearing, and both structured
-files fail startup on invalid content rather than guessing.
+Read this before touching any code. It binds every agent and every session.
 
-## Files in `~/.forge/`
+Always answer questions the user asked first. 
 
-| File | Purpose | If invalid |
-|---|---|---|
-| `config.toml` | General settings (below) | Startup error |
-| `agents.json` | Agent CLI definitions (below) | Startup error |
-| `AGENTS.md` | This guide | Ignored (docs only) |
-| `sessions` | Auto-managed restore snapshots | Leave alone; forge dedupes and prunes these itself |
-| `audit.log`, `forge.log` | Logs | Never edit |
-| `endpoint.json` | Live IPC endpoint (hook relays reach the TUI through it) | Never touch; removed at shutdown |
+## 1. TDD IS MANDATORY — NO EXCEPTIONS
 
-`config.toml` preserves unknown sections across saves; `agents.json`
-rejects unknown fields. A missing `config.toml` or `agents.json` is
-recreated from packaged defaults; a missing `AGENTS.md` is re-dropped
-unchanged. Your edits to any of them are never overwritten.
+This project is rebuilt **strict test-driven development, red → green → refactor**:
 
-## `config.toml` reference
+1. **Write the failing test FIRST.** New behavior, bug fix, or change: start with a
+   colocated Rust test (or native Go/TS test where applicable) that fails.
+2. **Observe red.** Run it. Watch it fail for the right reason. A test you never
+   saw fail proves nothing.
+3. **Implement minimally.** Just enough production code to turn the test green.
+4. **Refactor while green.** Keep the suite passing.
+5. **Never weaken correct code to satisfy a self-authored test.** If your new test
+   disagrees with real behavior, your assumption is the bug — fix the test.
 
-```toml
-theme = "default"          # theme name; "default" follows the OS theme
-prefix = "ctrl-b"          # command prefix chord
+Rules:
 
-[permission]
-mode = "yolo"              # off | safe-only | ai-assisted | yolo
-allow = []                 # extra allowed tool patterns
-block = []                 # blocked tool patterns (win over allow)
+- No production code without a failing test first. No "quick" untested edits.
+- Every phase gate in `.agents/plans/2026-09-12-forge-bringup.md` lists required
+  tests. The phase is NOT done until `cargo test` (whole suite, unmodified — never
+  `-k 'not …'`, `--deselect`, `#[ignore]` to dodge red) is green.
+- A test that fails on code you changed is the requirement. Fix the code, never
+  delete or skip the test. Rewriting an existing assertion to fit your change is
+  the same violation.
+- Keep tests colocated (`#[cfg(test)]` in the module) so behavior and proof live
+  together. Throwaway probes go in `/tmp`, never in the repo.
+- `error_logs.md` is the read-only blueprint reference. Do not delete or
+  overwrite it. It is context; the code is the source of truth.
 
-[ai]
-provider = "openai"
-model = "gpt-4.1-mini"
-threshold = 0.6
-timeout_seconds = 10
-auto_refresh = true
-key_env = "APE_API_KEY"    # env var holding the credential, not the key
+## 2. Toolchain
 
-[claudling]                # optional integrations, all default off except noted
-enabled = false
-[telemetry]
-enabled = true
-[clikan]
-enabled = false
-[pills]                    # rounded Nerd Font pill buttons; plain labels when off
-enabled = true
+- Rust 2021 edition, `forge` 1.0.0. Stable toolchain (1.98.1 verified 2026-09-12).
+- `cargo` lives in `~/.cargo/bin` and is **only on PATH in login shells**.
+  Prefix every cargo invocation: `bash -lc 'cargo …'` or use the full path.
+- No Go / Node work in this bring-up (clikan + whiteboard frontend excluded).
 
-[messaging]
-idle_timeout_minutes = 10
+## 3. Architecture invariants (from blueprint, non-negotiable)
 
-[[bots]]                   # operator-registered external bot clients
-name = "relay-bot"
-token_file = "/run/secrets/relay-bot.token"  # secret lives here, never in this file
-groups = ["peers"]
-grants = []
-```
+- Single-owner state: workers never mutate `AppState` directly; they emit typed
+  `AppEvent` through MPSC. Bounded queues, bounded drain per tick.
+- Current **run ID** (not session name) authorizes requests.
+- No shared communication group → no cross-session control or data transfer.
+- No injection while the target is busy or the user is typing.
+- All connections, queues, frames, files, pixels, output, retries, timers bounded.
+- Important files: atomic writes (temp → fsync → rename → dir fsync), `0600`
+  where private. Relative-path jail: reject absolute/traversal/symlink/special/overwrite.
+- Hostile text is escaped for display; raw input stays the policy input.
+- Absent/slow Forge never blocks a harness hook (fail-open relay, bounded waits).
+- Terminal state (raw mode, alt screen, images, cursor) restores on panic/exit.
 
-`mode` must be exactly one of `off`, `safe-only`, `ai-assisted`,
-`yolo`. `[[bots]]` entries need a non-empty `name` and `token_file`;
-a missing token file fails that client closed at boot, not the boot.
+## 4. UI stack decision (locked)
 
-## `agents.json` reference
+- `tuirealm 4` + `ratatui 0.30` + `crossterm 0.29`. Pinned in `Cargo.lock`.
+- `tui-realm` owns chrome: dialogs, switcher, settings — keyboard-first,
+  mouse-clickable. No permission modal: yolo auto-approves, other modes
+  reply ask-for-the-harness so the CLI handles it natively.
+- The PTY grid and visual pane stay a **raw custom `ratatui` view** fed by
+  portable-pty readers. Never force PTY painting through components.
+- Semantic theme APIs only (`src/theme.rs`). No inline RGB. Rounded borders,
+  never blank panels.
 
-Top level: `{"version": 1, "agents": [...]}`. Names must be unique,
-non-empty, with no whitespace or `/`. The name is the session
-`cli_tool` string, the create-dialog choice, and the installer key.
+## 5. Scope (locked for this bring-up)
 
-```jsonc
-{
-  "version": 1,
-  "agents": [
-    {
-      "name": "claude",
-      "binary": "claude",          // resolved through PATH at spawn
-      "env_override": "CLAUDE_BIN", // explicit path wins when set and non-empty
-      "model_flag": "--model",     // fresh launch: <binary> [--model <model>] [extra_args...]
-      "default_model": "",         // empty = the CLI's own default
-      "extra_args": [],            // always appended: launch after the model, restore after the resume tail
-      "resume": {
-        "subcommand": null,        // or "resume": prepended after the binary
-        "with_id": { "flag": "--resume" },  // or { "positional": true }: resume <id>
-        "without_id": ["--continue"]        // literal fallback argv, must not be empty
-      },
-      "supports_hooks": true,
-      "session_attribution": "hook_env"     // or "cwd_window", see below
-    }
-  ]
-}
-```
+- **BUILD:** Rust `forge` only — TUI, sessions/PTY, hooks/permissions (Off,
+  Safe-Only, YOLO first; AI-Assisted later), MCP broker + local tool surface,
+  projects, checklists/tasks, walkthrough, timers, persistence/recovery,
+  supervised terminal-exec, whiteboard backend stubs, team builder, VCS, Claudling.
+- **SKIP entirely:** memory feature (no `memory.db`, no memory MCP tools, no
+  memory config section, no embeddings). Do not scaffold it "for later".
+- **EXCLUDE:** Go `clikan` tree, React whiteboard frontend, release upload path.
+  Keep degrading stubs: `clikan/mod.rs` shim, whiteboard SHA-asset serve,
+  macOS raster/screenshot (Linux-first, degrade off-macOS).
+- **Harnesses:** ship `claude`, `codex`, `muse` first via an extensible
+  `cli_tool` registry (name, binary, env override, flags, hook capabilities).
+  Adding a harness MUST be a data record + hook mapping, never a refactor.
 
-Rules the parser enforces (violations are startup errors):
+## 6. Verification before "done"
 
-- `version` must be `1`; `agents` must be a non-empty array.
-- `with_id` takes exactly one of `flag` / `positional`.
-- `session_attribution` is `hook_env` or `cwd_window`. Use
-  `cwd_window` only when the CLI scrubs the hook environment so forge
-  cannot attribute hook events directly (today: muse); it falls back
-  to matching a recently spawned, still-unbound session in the same
-  cwd. Everything else uses `hook_env`.
-- No approval bypasses, ever: any arg containing `yolo` or
-  `dangerously` in `extra_args` or `without_id` is rejected. Forge
-  gates through hooks where the CLI supports them instead.
-- Only `name`, `binary`, and `resume` are required; the rest have
-  safe defaults (`--model`, empty model/args, no hooks).
-
-### Adding a new agent CLI
-
-1. Confirm the CLI's resume form with `--help`: flag style
-   (`--resume <id>`, fallback flag) or subcommand style
-   (`resume [<id>]`, fallback `resume --last`).
-2. Append one entry following the template above.
-3. Restart forge. The create dialog lists agents in file order.
-4. Verify: create a session with the new agent, quit, relaunch, and
-   confirm the restore picker offers it and resume reconnects.
-
-Renaming an agent orphans its saved snapshots (restore skips unknown
-names with a reason instead of failing). Removing one is safe under
-the same rule. Hook/MCP/skills installers are still keyed by name in
-code, so a brand-new agent gets launching and resume but not
-`install-*` support yet.
-
-## Applying changes
-
-Restart forge after editing either structured file. To verify a
-change: relaunch, open the create dialog (`Ctrl-b c` by default) for
-`agents.json` edits, or check the sidebar mode row for permission
-edits. If forge refuses to start, read the startup error first — it
-names the file, entry, and field.
+- `bash -lc 'cargo build'` and `bash -lc 'cargo test'` green in-session.
+  Multi-filter runs need `--`: `cargo test -- session:: event::` (bare extra
+  args are rejected by the test harness).
+- Phase gate tests from the execution plan all pass, including negative cases
+  (forged run ID, missing group, full queue, corrupt save, hostile text).
+- Manual smoke from Phase 2 on: launch, 2 sessions, prefix commands, kill one,
+  `kill -9` recovery.
