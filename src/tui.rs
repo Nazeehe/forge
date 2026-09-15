@@ -635,11 +635,11 @@ fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
             }
             state.dirty = true;
         }
-        Some(_) => {
+        Some(crate::checkpoint::RestoreOutcome::Fresh) => {
             state.restore_picker = None;
             state.dirty = true;
         }
-        None => {}
+        Some(crate::checkpoint::RestoreOutcome::Pending) | None => {}
     }
 }
 
@@ -1859,5 +1859,33 @@ mod tests {
         restore_terminal();
         restore_terminal();
         drop(TerminalGuard { active: false });
+    }
+
+    #[test]
+    fn restore_picker_ignores_arrows_esc_dismisses() {
+        use crate::checkpoint::{make_entry, RestorePicker, SavedSession, SessionsFile};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        let mut file = SessionsFile::default();
+        file.push(make_entry(
+            vec![SavedSession {
+                name: "a".to_string(),
+                cli_tool: "claude".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                groups: Vec::new(),
+                harness_session_id: None,
+            }],
+            1_700_000_000,
+        ));
+        state.restore_picker = RestorePicker::new(&file);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        // Arrows and navigation keys must not dismiss the modal.
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Up, KeyCode::Down] {
+            handle_restore_key(&mut state, key(code));
+            assert!(state.restore_picker.is_some(), "{code:?} dismissed the picker");
+        }
+        // Esc dismisses; the tested keys above left no selection damage.
+        handle_restore_key(&mut state, key(KeyCode::Esc));
+        assert!(state.restore_picker.is_none());
     }
 }
