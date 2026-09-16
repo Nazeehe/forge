@@ -2993,7 +2993,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn dropped_response_on_source_exit_notifies_responder() {
         // B answers, gets success, and A's queue still holds the
         // response when A exits: deleting it silently would leave B

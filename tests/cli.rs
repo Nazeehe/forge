@@ -13,6 +13,9 @@ fn forge() -> (Command, std::path::PathBuf) {
         HOME_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     c.env("HOME", &home);
+    // Never inherit the parent session's live listener: a relay test
+    // must find no endpoint, not the developer's running Forge.
+    c.env_remove("FORGE_IPC_ENDPOINT");
     (c, home)
 }
 
