@@ -30,3 +30,9 @@ png = { version = "0.17", optional = true }
 [features]
 default = ["visual"]
 visual = ["mermaid-rs-renderer/png", "png"]
+
+# Profiling: full optimization with debuginfo, so `perf` and
+# `samply` can unwind stacks and attribute samples to source lines.
+# Binary grows; runtime speed is unaffected.
+[profile.release]
+debug = true
