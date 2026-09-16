@@ -41,6 +41,11 @@ pub struct AppState {
     /// Last human key/paste forwarded to a pane. Injections wait out a short
     /// debounce after typing so they never interleave with user input.
     pub last_human_input: Option<std::time::Instant>,
+    /// Last courtesy/timer sweep. `Broker::tick` scans every conversation
+    /// and timer, so `settle_comms` runs it at most once per
+    /// [`crate::comms::BROKER_TICK_INTERVAL`]; queue delivery below stays
+    /// per-tick. `None` forces the next sweep (boot, tests).
+    pub last_broker_tick: Option<std::time::Instant>,
     /// Last hook verdict or queued hook request. Injections wait out
     /// [`crate::comms::INJECT_HOOK_DEBOUNCE`] after hook activity so a
     /// body never races a mid-tool-use verdict into the same pane.
@@ -172,6 +177,7 @@ impl AppState {
             permission_mode: crate::config::PermissionMode::Yolo,
             broker: crate::comms::Broker::new(),
             last_human_input: None,
+            last_broker_tick: None,
             last_hook_activity: None,
             pending_enter: std::collections::HashMap::new(),
             overlay_view: None,
@@ -1562,10 +1568,25 @@ impl AppState {
         hands_off && hooks_quiet
     }
 
+    /// Whether the courtesy/timer sweep is due: always on a fresh
+    /// window (`None`), otherwise once the interval lapses. Pure so
+    /// the throttle itself is unit-testable; the sweep stays live.
+    fn tick_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+        last.is_none_or(|t| {
+            now.duration_since(t) >= crate::comms::BROKER_TICK_INTERVAL
+        })
+    }
+
     pub fn settle_comms(&mut self) {
         use crate::session::Activity;
         let now = std::time::Instant::now();
-        self.broker.tick(now);
+        // Second-scale sweep on a 16ms loop: skip inside the window.
+        // Everything below (debounce gates, queue delivery, staged
+        // Enters) stays per-tick, so injections never wait on this.
+        if Self::tick_due(self.last_broker_tick, now) {
+            self.broker.tick(now);
+            self.last_broker_tick = Some(now);
+        }
         if !self.injection_settled(now) {
             return;
         }
@@ -2266,6 +2287,68 @@ mod tests {
         assert!(s.dirty, "a settled hook must repaint");
         let _ = reply_rx.recv_timeout(std::time::Duration::from_secs(2));
         let _ = std::fs::remove_file(&audit);
+    }
+
+    #[test]
+    fn broker_tick_throttles_but_delivery_stays_per_tick() {
+        // The courtesy/timer sweep is second-scale work on a 16ms loop:
+        // rapid settles must skip it, while queue delivery below stays
+        // per-tick. A delay-0 timer scheduled inside the window proves
+        // the skip (still pending), and one after a lapsed window
+        // proves the sweep resumes.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        assert!(s.manager.set_activity(a, crate::session::Activity::Idle));
+        let schedule = |s: &mut AppState, prompt: &str| {
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+                run_id: run_a.to_string(),
+                tool: "schedule_prompt".to_string(),
+                args: format!("{{\"prompt\":{prompt:?},\"delay_seconds\":0}}"),
+                reply: reply_tx,
+            }));
+            let line = reply_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("schedule answers at once");
+            assert!(line.contains("\"ok\":true"), "schedule accepted: {line}");
+        };
+        // First settle sweeps: the due timer fires.
+        schedule(&mut s, "tick-one");
+        s.settle_comms();
+        assert!(s.broker.timers_for(a).is_empty(), "first settle sweeps");
+        // A timer scheduled inside the throttle window waits out the
+        // next sweep instead of firing on the very next settle.
+        schedule(&mut s, "tick-two");
+        s.settle_comms();
+        assert_eq!(
+            s.broker.timers_for(a).len(),
+            1,
+            "rapid settle skips the sweep"
+        );
+        // A lapsed window sweeps again: delivery never waited, only
+        // the sweep did.
+        s.last_broker_tick = None;
+        s.settle_comms();
+        assert!(s.broker.timers_for(a).is_empty(), "lapsed window sweeps");
+        assert!(s.manager.remove(a));
+    }
+
+    #[test]
+    fn broker_tick_window_opens_once_per_interval() {
+        use std::time::{Duration, Instant};
+        let window = crate::comms::BROKER_TICK_INTERVAL;
+        let start = Instant::now();
+        // Fresh windows (boot, tests) always sweep at once.
+        assert!(AppState::tick_due(None, start));
+        // Inside the window the sweep waits...
+        assert!(!AppState::tick_due(Some(start), start));
+        assert!(!AppState::tick_due(Some(start), start + window - Duration::from_millis(1)));
+        // ...then opens again once it lapses.
+        assert!(AppState::tick_due(Some(start), start + window));
     }
 
     #[test]

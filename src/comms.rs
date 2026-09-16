@@ -21,6 +21,11 @@ pub const PRESSURE_CAP: usize = 5;
 pub const MAX_SCHEDULE_DELAY_SECS: f64 = 86_400.0;
 /// Silence after an ack before the one courtesy reminder goes out.
 pub const COURTESY_GRACE: Duration = Duration::from_secs(30);
+/// Fastest courtesy/timer sweep: `Broker::tick` walks every conversation
+/// and timer, but grace is 30s and timers are second-scale, so the 16ms
+/// loop skips sweeps inside this window. Queue delivery is unaffected
+/// and stays per-tick; worst case a reminder or timer fires this late.
+pub const BROKER_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// Human typing holds injections for this long after the last key/paste.
 pub const INJECT_DEBOUNCE: Duration = Duration::from_secs(2);
 /// Beat between an injection body and its Enter: one input event at a
