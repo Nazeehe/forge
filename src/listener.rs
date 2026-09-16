@@ -11,6 +11,14 @@
 
 /// Connections accepted per transport before newcomers are turned away.
 pub const MAX_CONNS: usize = 32;
+/// Bound for the listener-to-owner event queue. Worst legit burst is
+/// both transports times the connection cap times one event each
+/// (64); the owner drains [`crate::tui::MAX_DRAIN`] per loop, so this
+/// is 4x headroom. Overflow never blocks a handler thread: `try_send`
+/// drops to the existing delivery-failure paths (the caller times out
+/// and retries an idempotent send; hooks fail open upstream), so a
+/// stalled owner cannot grow the queue without limit.
+pub const IPC_QUEUE_CAP: usize = 256;
 
 /// Longest accepted header line; longer means a broken or hostile client.
 pub const MAX_LINE: usize = 65536;
@@ -197,7 +205,7 @@ impl Drop for ListenerGuard {
 /// arrives on the loop as `AppEvent::HookRequest`.
 pub fn spawn_unix(
     path: &std::path::Path,
-    tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::event::AppEvent>,
     cap: usize,
 ) -> std::io::Result<ListenerGuard> {
     let listener = bind_unix(path)?;
@@ -210,7 +218,7 @@ pub fn spawn_unix(
 /// Spawn the loopback-TCP accept loop on a dynamic port (for reverse
 /// forwarding): same protocol and cap as the Unix socket.
 pub fn spawn_tcp(
-    tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::event::AppEvent>,
     cap: usize,
 ) -> std::io::Result<(ListenerGuard, u16)> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -222,7 +230,7 @@ pub fn spawn_tcp(
 /// Spawn both transports with the production cap and a pid-namespaced
 /// socket path. Never fatal to the TUI: hooks fail open without it.
 pub fn spawn_all(
-    tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::event::AppEvent>,
 ) -> std::io::Result<Spawned> {
     let path = std::env::temp_dir().join(format!("forge.{}.sock", std::process::id()));
     let guard = spawn_unix(&path, tx.clone(), MAX_CONNS)?;
@@ -268,7 +276,7 @@ impl Acceptor for std::net::TcpListener {
 
 fn accept_loop<A: Acceptor>(
     listener: A,
-    tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::event::AppEvent>,
     cap: usize,
 ) {
     let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -294,7 +302,7 @@ fn accept_loop<A: Acceptor>(
 
 fn handle_conn<S: std::io::Read + std::io::Write>(
     mut conn: S,
-    tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::event::AppEvent>,
 ) {
     let line = match read_record_line(&mut conn, MAX_LINE) {
         Ok(line) => line,
@@ -311,7 +319,7 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
     mut conn: S,
     line: &[u8],
     hook: String,
-    tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::event::AppEvent>,
 ) {
     let body = String::from_utf8_lossy(line).into_owned();
     let run_id = crate::mcp::top_str(&body, "run_id").unwrap_or_default();
@@ -329,7 +337,7 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if tx
-        .send(crate::event::AppEvent::HookRequest(HookRequest {
+        .try_send(crate::event::AppEvent::HookRequest(HookRequest {
             hook,
             body,
             run_id,
@@ -374,7 +382,7 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
 fn handle_comms<S: std::io::Read + std::io::Write>(
     mut conn: S,
     line: &[u8],
-    tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::event::AppEvent>,
 ) {
     let text = String::from_utf8_lossy(line).into_owned();
     if crate::mcp::top_raw(&text, "bot").is_some() {
@@ -390,7 +398,7 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if tx
-        .send(crate::event::AppEvent::CommsRequest(CommsRequest {
+        .try_send(crate::event::AppEvent::CommsRequest(CommsRequest {
             run_id,
             tool,
             args,
@@ -434,7 +442,7 @@ fn refuse_bot<S: std::io::Write>(
 fn handle_bot<S: std::io::Read + std::io::Write>(
     mut conn: S,
     text: &str,
-    tx: &std::sync::mpsc::Sender<crate::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::event::AppEvent>,
 ) {
     let Some(parts) = bot_parts(text) else {
         refuse_bot(
@@ -469,7 +477,7 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
     }
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     if tx
-        .send(crate::event::AppEvent::BotRequest(BotRequest {
+        .try_send(crate::event::AppEvent::BotRequest(BotRequest {
             name: parts.name,
             token: parts.token,
             tool: parts.tool,
@@ -495,6 +503,26 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn saturated_queue_drops_to_caller_timeout() {
+        // A rendezvous channel is permanently full: the handler must
+        // drop the request (the caller times out and retries; hooks
+        // fail open upstream), never block its thread while a stalled
+        // owner falls behind. A blocking send here would hang this
+        // test exactly as it would hang the handler.
+        let (tx, _rx) = std::sync::mpsc::sync_channel(0);
+        let mut conn = std::io::Cursor::new(Vec::new());
+        handle_comms(
+            &mut conn,
+            br#"{"run_id":"r","tool":"list_sessions","args":{}}"#,
+            &tx,
+        );
+        assert!(
+            conn.get_ref().is_empty(),
+            "no verdict is written; the caller owns the timeout"
+        );
+    }
 
     #[test]
     fn first_line_leaves_trailer_unread() {
@@ -561,7 +589,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let _guard = spawn_unix(&path, tx, 8).unwrap();
         let mut conn = UnixStream::connect(&path).unwrap();
         conn.write_all(b"{\"v\":1,\"hook\":\"PreToolUse\",\"run_id\":\"run-9\",\"body\":{\"tool\":\"Bash\"}}\n")
@@ -605,7 +633,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let _guard = spawn_unix(&path, tx, 8).unwrap();
         // Another instance's relay: dropped before an event exists.
         let mut conn = UnixStream::connect(&path).unwrap();
@@ -651,7 +679,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let _guard = spawn_unix(&path, tx, 8).unwrap();
         let mut conn = UnixStream::connect(&path).unwrap();
         conn.write_all(b"{\"v\":1,\"hook\":\"PreToolUse\",\"body\":{\"tool\":\"Bash\"}}\n")
@@ -700,7 +728,7 @@ mod tests {
     fn tcp_hook_record_reaches_the_loop() {
         use std::io::Write;
         use std::net::TcpStream;
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let (_guard, port) = spawn_tcp(tx, 8).unwrap();
         let mut conn = TcpStream::connect(("127.0.0.1", port)).unwrap();
         conn.write_all(b"{\"v\":1,\"hook\":\"Stop\",\"body\":{}}\n").unwrap();
@@ -723,7 +751,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let _guard = spawn_unix(&path, tx, 8).unwrap();
         let mut conn = UnixStream::connect(&path).unwrap();
         conn.write_all(b"{\"v\":1,\"hook\":\"Stop\",\"body\":{}}\n").unwrap();
@@ -765,7 +793,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let _guard = spawn_unix(&path, tx, 8).unwrap();
         let mut conn = UnixStream::connect(&path).unwrap();
         conn.write_all(b"{\"v\":1,\"kind\":\"comms\",\"run_id\":\"abc\",\"tool\":\"list_sessions\",\"args\":{}}\n")
@@ -877,7 +905,7 @@ mod tests {
     fn bot_record_reaches_the_loop_with_a_reply_path() {
         let conn = MemConn::default();
         let reader = conn.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let own = std::process::id();
         let line = format!(
             "{{\"v\":1,\"kind\":\"comms\",\"run_id\":\"\",\"forge_pid\":{own},\"tool\":\"bot_poll\",\"args\":{{\"cursor\":1}},\"bot\":{{\"name\":\"skippy\",\"token\":\"tok-1\"}}}}"
@@ -905,7 +933,7 @@ mod tests {
         // thread needed, fully deterministic.
         let conn = MemConn::default();
         let reader = conn.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let line = "{\"v\":1,\"kind\":\"comms\",\"forge_pid\":424242,\"tool\":\"bot_poll\",\"args\":{},\"bot\":{\"name\":\"skippy\",\"token\":\"tok-1\"}}";
         handle_bot(conn, line, &tx);
         assert!(
@@ -924,7 +952,7 @@ mod tests {
         ] {
             let conn = MemConn::default();
             let reader = conn.clone();
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
             handle_bot(conn, line, &tx);
             assert!(
                 rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
@@ -946,7 +974,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
         let _guard = spawn_unix(&path, tx, 2).unwrap();
         let held: Vec<UnixStream> = (0..2).map(|_| UnixStream::connect(&path).unwrap()).collect();
         // Give the accept loop a beat to count both holders.
