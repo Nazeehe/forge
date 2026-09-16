@@ -380,6 +380,10 @@ pub struct BotConv {
     pub delivered: bool,
     pub last_update: Instant,
     pub reminded: bool,
+    /// The owing party sent an update after the ack (a follow-up, not
+    /// mere receipt). The courtesy obligation is satisfied for good:
+    /// sweeps skip reminded-or-updated conversations alike.
+    pub target_updated: bool,
 }
 
 /// One operator-registered bot peer: credential, group grants, cursor

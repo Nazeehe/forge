@@ -176,6 +176,10 @@ struct Conv {
     acked: bool,
     last_update: Instant,
     reminded: bool,
+    /// The owing party (always the target for courtesy) sent an update
+    /// after the ack. Satisfies the obligation outright: sweeps never
+    /// remind a conversation its target already updated.
+    target_updated: bool,
     /// An ask counts toward pressure once while queued, then once while
     /// delivered-awaiting-response — never both at once.
     delivered: bool,
@@ -935,6 +939,7 @@ impl Broker {
                 delivered: false,
                 last_update: now,
                 reminded: false,
+                target_updated: false,
             },
         );
         let result = format!(r#"{{"conversation":"{conv}","epoch":{}}}"#, self.epoch);
@@ -1044,6 +1049,7 @@ impl Broker {
                 delivered: false,
                 last_update: now,
                 reminded: false,
+                target_updated: false,
             },
         );
         let result = format!(r#"{{"conversation":"{conv}","epoch":{}}}"#, self.epoch);
@@ -1129,6 +1135,12 @@ impl Broker {
             },
         );
         if let Some(conv) = self.bot_convs.get_mut(id) {
+            // The client owes the update exactly when the session told
+            // it (session-originated tell): then this follow-up
+            // satisfies courtesy for good.
+            if !conv.from_client {
+                conv.target_updated = true;
+            }
             conv.last_update = now;
         }
         Ok(format!(
@@ -1405,6 +1417,7 @@ impl Broker {
                 acked: false,
                 last_update: now,
                 reminded: false,
+                target_updated: false,
                 delivered: false,
             },
         );
@@ -1473,6 +1486,7 @@ impl Broker {
                 delivered: false,
                 last_update: now,
                 reminded: false,
+                target_updated: false,
             },
         );
         Ok(format!(r#"{{"conversation":"{conv}"}}"#))
@@ -1724,6 +1738,12 @@ impl Broker {
                 },
             );
             if let Some(conv) = self.convs.get_mut(&id) {
+                // Only the owing party's update satisfies courtesy: a
+                // target follow-up suppresses the reminder for good,
+                // while the source's own follow-up merely restarts grace.
+                if caller == conv.target {
+                    conv.target_updated = true;
+                }
                 conv.last_update = now;
             }
             return Ok(format!(r#"{{"conversation":"{id}","followup":true}}"#));
@@ -1770,6 +1790,7 @@ impl Broker {
                 acked: false,
                 last_update: now,
                 reminded: false,
+                target_updated: false,
                 delivered: false,
             },
         );
@@ -1837,6 +1858,12 @@ impl Broker {
             return Some(Err(format!("pressure cap reached for {target_name:?}")));
         }
         if let Some(conv) = self.bot_convs.get_mut(id) {
+            // The session owes the update exactly when the client told
+            // it (client-originated tell): then this follow-up satisfies
+            // courtesy for good.
+            if conv.from_client {
+                conv.target_updated = true;
+            }
             conv.last_update = now;
         }
         Some(Ok(format!(r#"{{"conversation":"{id}","followup":true}}"#)))
@@ -2174,6 +2201,7 @@ impl Broker {
                 || conv.state != ConvState::Open
                 || !conv.acked
                 || conv.reminded
+                || conv.target_updated
             {
                 continue;
             }
@@ -2223,6 +2251,7 @@ impl Broker {
                 || conv.state != BotConvState::Open
                 || !conv.acked
                 || conv.reminded
+                || conv.target_updated
             {
                 continue;
             }
@@ -3452,6 +3481,75 @@ mod tests {
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll: {poll}");
         assert_eq!(poll.matches(r#""kind":"failed""#).count(), 1, "poll: {poll}");
+    }
+
+    #[test]
+    fn target_followup_suppresses_the_courtesy_reminder() {
+        // The courtesy obligation ends when the owing party updates:
+        // b acked and then sent the update itself, so no reminder may
+        // fire — not now, not after more silence. The source's own
+        // follow-ups merely restart grace (see the back-to-source test).
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
+            .unwrap();
+        let conv = json_field(&res, "conversation").unwrap();
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .unwrap();
+        p.call(
+            &p.run_b.clone(),
+            "tell_session",
+            &format!(r#"{{"target":"a","message":"on it","conversation_id":"{conv}"}}"#),
+        )
+        .expect("target follows up");
+        p.state.broker.take_due(p.a, 10);
+        p.state.broker.take_due(p.b, 10);
+        // Past grace and far past it: silence, forever.
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(31));
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+    }
+
+    #[test]
+    fn client_followup_suppresses_the_courtesy_reminder() {
+        // Same rule client-ward: the session told the client, the
+        // client acked and followed up, so the inbox stays quiet.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_b.clone(),
+                "tell_session",
+                r#"{"target":"skippy","text":"fyi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall(
+            "skippy",
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("client acks");
+        p.bcall(
+            "skippy",
+            "tell_session",
+            &format!(r#"{{"target":"b","text":"on it","conversation_id":"{conv}"}}"#),
+        )
+        .expect("client follows up");
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(!poll.contains(r#""kind":"reminder""#), "poll: {poll}");
     }
 
     #[test]
