@@ -51,8 +51,9 @@ pub struct AppState {
     /// body never races a mid-tool-use verdict into the same pane.
     pub last_hook_activity: Option<std::time::Instant>,
     /// Sessions owed a staged Enter: an injection body went out and its CR
-    /// follows after [`crate::comms::INJECT_ENTER_DELAY`], staged per
-    /// session and re-armed by newer bodies.
+    /// follows after [`crate::comms::INJECT_ENTER_DELAY`], one entry per
+    /// session. Later bodies stay queued until the staged CR lands, so
+    /// each body submits as its own input event.
     pub pending_enter: std::collections::HashMap<crate::session::SessionId, std::time::Instant>,
     /// One read-only chrome view, scoped to the currently focused session.
     pub overlay_view: Option<(crate::session::SessionId, usize)>,
@@ -1601,7 +1602,14 @@ impl AppState {
             if !idle {
                 continue;
             }
-            let due = self.broker.take_due(id, usize::MAX);
+            // One body per Enter: a staged CR means the previous body
+            // is still awaiting submission, so later bodies stay queued
+            // instead of merging into the same burst. Each body gets
+            // its own staged Enter below.
+            if self.pending_enter.contains_key(&id) {
+                continue;
+            }
+            let due = self.broker.take_due(id, 1);
             let mut wrote = false;
             // Panes that opted into paste mode (DECSET 2004) take the
             // whole payload as one bracketed-paste transaction; the rest
@@ -1614,8 +1622,8 @@ impl AppState {
                 }
             }
             if wrote {
-                // Arm (or re-arm) the staged Enter: the CR goes out on a
-                // later tick, never in the same burst as the text.
+                // Arm the staged Enter: the CR goes out on a later tick,
+                // never in the same burst as the text.
                 self.pending_enter.insert(id, now);
             }
         }
@@ -2800,6 +2808,112 @@ mod tests {
         assert!(
             raw[pos + body.len()..].contains(&b'\r'),
             "enter trails the body: {raw:?}"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn settle_comms_delivers_one_body_per_enter() {
+        // Two queued tells must not merge into one submission: the first
+        // settle writes only the head body and stages its Enter; the
+        // second body waits for its own Enter after the first CR lands.
+        use crate::pty::PtyEvent;
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn(
+                "b",
+                &std::env::temp_dir(),
+                "stty raw -echo && printf READY || printf STTYFAIL; exec cat",
+                run_b.clone(),
+                "shell",
+            )
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let mut raw = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                if ev.0 == b {
+                    if let PtyEvent::Output(bytes) = &ev.2 {
+                        raw.extend_from_slice(bytes);
+                    }
+                }
+            }
+            if raw.windows(5).any(|w| w == b"READY") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "probe session never went raw, got: {raw:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        raw.clear();
+        let tell = |s: &mut AppState, text: &str| {
+            let (reply_tx, _) = std::sync::mpsc::channel();
+            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+                run_id: run_a.to_string(),
+                tool: "tell_session".to_string(),
+                args: format!("{{\"target\":\"b\",\"text\":{text:?}}}"),
+                reply: reply_tx,
+            }));
+        };
+        tell(&mut s, "first-one");
+        tell(&mut s, "second-two");
+        // Only the head body goes out; the second waits in queue.
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "second body waits for its own enter");
+        assert!(s.pending_enter.contains_key(&b), "enter staged, not sent");
+        // Past the beat the first CR lands while the second body is
+        // still queued — never in the same burst.
+        std::thread::sleep(
+            crate::comms::INJECT_ENTER_DELAY + std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert!(!s.pending_enter.contains_key(&b), "first enter sent");
+        assert_eq!(s.broker.queued(b), 1, "second body still queued");
+        // The next settle writes the second body and stages its Enter.
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "second body delivered");
+        assert!(s.pending_enter.contains_key(&b), "second enter staged");
+        // Byte order on the wire: body1, CR, body2, CR — the second
+        // body never appears before the first Enter.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                if ev.0 == b {
+                    if let PtyEvent::Output(bytes) = &ev.2 {
+                        raw.extend_from_slice(bytes);
+                    }
+                }
+            }
+            if raw.windows(b"second-two".len()).any(|w| w == b"second-two") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "second body never arrived, got: {raw:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let first_cr = raw.iter().position(|&byte| byte == b'\r').expect("CR sent");
+        let second_at = raw
+            .windows(b"second-two".len())
+            .position(|w| w == b"second-two")
+            .expect("second body present");
+        assert!(
+            second_at > first_cr,
+            "second body follows the first enter: {raw:?}"
         );
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
