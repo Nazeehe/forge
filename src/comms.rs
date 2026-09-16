@@ -22,6 +22,12 @@ pub const PRESSURE_CAP: usize = 5;
 pub const MAX_SCHEDULE_DELAY_SECS: f64 = 86_400.0;
 /// Silence after an ack before the one courtesy reminder goes out.
 pub const COURTESY_GRACE: Duration = Duration::from_secs(30);
+/// Terminal (Done/Failed) conversation records live this long past
+/// their last update before the sweep evicts them. Past the
+/// idempotency replay window (600s) with margin, so a replayed
+/// conversation ID still resolves while retries can replay it; open
+/// conversations never evict, whatever their age.
+pub const CONV_TTL: Duration = Duration::from_secs(1800);
 /// Fastest courtesy/timer sweep: `Broker::tick` walks every conversation
 /// and timer, but grace is 30s and timers are second-scale, so the 16ms
 /// loop skips sweeps inside this window. Queue delivery is unaffected
@@ -2422,6 +2428,32 @@ impl Broker {
                 self.dead_sessions.remove(&id);
             }
         }
+        // Evict terminal records past their TTL so the maps stay
+        // bounded by live work, not history. A record survives while
+        // a queued response or ack still names it: evicting under one
+        // would strand the exit path's loud-failure lookup (None
+        // reads as "no party to tell"). Other kinds never look the
+        // record up after terminal state, so they pin nothing.
+        let mut pinned = std::collections::HashSet::new();
+        for q in self.queue.values() {
+            for inj in q {
+                if matches!(
+                    inj.kind,
+                    InjectKind::Response | InjectKind::Ack
+                ) {
+                    pinned.insert(inj.conv.clone());
+                }
+            }
+        }
+        self.convs.retain(|id, conv| {
+            conv.state == ConvState::Open
+                || now.duration_since(conv.last_update) < CONV_TTL
+                || pinned.contains(id)
+        });
+        self.bot_convs.retain(|_, conv| {
+            conv.state == BotConvState::Open
+                || now.duration_since(conv.last_update) < CONV_TTL
+        });
     }
 }
 
@@ -3653,6 +3685,110 @@ mod tests {
             .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(!poll.contains(r#""kind":"reminder""#), "poll: {poll}");
+    }
+
+    #[test]
+    fn terminal_conversations_evict_past_ttl() {
+        // Done and Failed records must not pile up forever: past the
+        // TTL the sweep evicts them and late arrivals read as unknown
+        // (still rejected, like a closed conversation).
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
+            .expect("ask validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        let answer = format!(r#"{{"conversation_id":"{conv}","message":"a"}}"#);
+        p.call(&p.run_b.clone(), "send_response", &answer)
+            .expect("target answers");
+        let err = p
+            .call(&p.run_b.clone(), "send_response", &answer)
+            .expect_err("closed rejects dups");
+        assert_eq!(err, "conversation is closed");
+        // The Done record survives while its response sits queued...
+        assert_eq!(p.state.broker.take_due(p.a, 10).len(), 1);
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let err = p
+            .call(&p.run_b.clone(), "send_response", &answer)
+            .expect_err("evicted reads unknown");
+        assert_eq!(err, "unknown conversation");
+        // ...and a Failed record evicts the same way.
+        let res = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q2"}"#)
+            .expect("ask validates");
+        let conv2 = json_field(&res, "conversation").expect("conversation id");
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let err = p
+            .call(
+                &p.run_b.clone(),
+                "send_response",
+                &format!(r#"{{"conversation_id":"{conv2}","message":"late"}}"#),
+            )
+            .expect_err("failed record evicted");
+        assert_eq!(err, "unknown conversation");
+    }
+
+    #[test]
+    fn queued_references_pin_terminal_conversations() {
+        // Eviction must not strand a queued response: while the
+        // injection still waits, the Done record stays so an exit
+        // still notifies the responder loudly (Major 5's guarantee).
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
+            .expect("ask validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        let answer = format!(r#"{{"conversation_id":"{conv}","message":"a"}}"#);
+        p.call(&p.run_b.clone(), "send_response", &answer)
+            .expect("target answers");
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let err = p
+            .call(&p.run_b.clone(), "send_response", &answer)
+            .expect_err("pinned record still names closed");
+        assert_eq!(err, "conversation is closed");
+        // Once the queue drains the pin releases and it evicts.
+        assert_eq!(p.state.broker.take_due(p.a, 10).len(), 1);
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let err = p
+            .call(&p.run_b.clone(), "send_response", &answer)
+            .expect_err("unpinned record evicts");
+        assert_eq!(err, "unknown conversation");
+    }
+
+    #[test]
+    fn terminal_bot_conversations_evict_past_ttl() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"ready?"}"#)
+            .expect("ask validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("target answers");
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let err = p
+            .bcall(
+                "skippy",
+                "send_response",
+                &format!(r#"{{"conversation_id":"{conv}","message":"again"}}"#),
+            )
+            .expect_err("evicted bot conv reads unknown");
+        assert_eq!(err.code, ErrorCode::NotFound);
     }
 
     #[test]
