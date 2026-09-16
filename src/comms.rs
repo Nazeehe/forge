@@ -235,12 +235,14 @@ pub struct Broker {
     /// Open left; without this, a lost deposit would close the conv
     /// while the notice never arrives.
     dead_sessions: HashSet<SessionId>,
-    /// Session-path idempotency records, keyed `"{caller}/{key}"` so
-    /// two sessions may mint the same key without colliding. Retries
-    /// after an IPC or bridge timeout replay the stored verdict
-    /// instead of minting a duplicate send. Keyless calls bypass it
-    /// and execute every time, exactly as before.
-    session_idem: IdemCache,
+    /// Session-path idempotency records, one cache per caller so two
+    /// sessions may mint the same key without colliding and a noisy
+    /// session's flood evicts only its own records, never another
+    /// caller's live retry. Retries after an IPC or bridge timeout
+    /// replay the stored verdict instead of minting a duplicate send.
+    /// Keyless calls bypass it and execute every time, exactly as
+    /// before. Entries die with their caller on exit.
+    session_idem: HashMap<String, IdemCache>,
 }
 
 impl Broker {
@@ -256,7 +258,7 @@ impl Broker {
             clients: HashMap::new(),
             bot_convs: HashMap::new(),
             dead_sessions: HashSet::new(),
-            session_idem: IdemCache::new(),
+            session_idem: HashMap::new(),
         }
     }
 
@@ -630,13 +632,17 @@ impl Broker {
         // of silently duplicating or, worse, returning a wrong
         // conversation. Broker rejections are never stored.
         let caller_s = caller.to_string();
-        let scoped = match Self::arg(args, "idempotency_key").filter(|s| !s.is_empty()) {
+        let keyed = match Self::arg(args, "idempotency_key").filter(|s| !s.is_empty()) {
             None => None,
             Some(key) => {
                 crate::bot::validate_key(&key).map_err(|e| e.message)?;
                 let fp = crate::bot::fingerprint(tool, &[&caller_s, args]);
-                let scoped = format!("{caller_s}/{key}");
-                match self.session_idem.check(&scoped, fp, now) {
+                let cached = self
+                    .session_idem
+                    .entry(caller_s.clone())
+                    .or_insert_with(IdemCache::new)
+                    .check(&key, fp, now);
+                match cached {
                     IdemCheck::Hit(result) => return Ok(result),
                     IdemCheck::Miss => {}
                     IdemCheck::Conflict => {
@@ -645,7 +651,7 @@ impl Broker {
                         );
                     }
                 }
-                Some((scoped, fp))
+                Some((key, fp))
             }
         };
         let result = match tool {
@@ -658,8 +664,10 @@ impl Broker {
             "cancel_scheduled_prompt" => self.cancel_scheduled(caller, args),
             _ => Err("unknown tool".to_string()),
         };
-        if let (Some((scoped, fp)), Ok(line)) = (scoped, &result) {
-            self.session_idem.store(&scoped, fp, line, now);
+        if let (Some((key, fp)), Ok(line)) = (keyed, &result) {
+            if let Some(cache) = self.session_idem.get_mut(&caller_s) {
+                cache.store(&key, fp, line, now);
+            }
         }
         result
     }
@@ -2181,6 +2189,10 @@ impl Broker {
     /// Fail every open conversation touching an exited session. Targets fail
     /// loudly (their sources are told); sources fail silently.
     pub fn target_exited(&mut self, _sessions: &SessionManager, id: SessionId) {
+        // A dead caller can never retry (its run is unbound and a
+        // restart mints a fresh session), so its idempotency records
+        // go with it instead of occupying another caller's capacity.
+        self.session_idem.remove(&id.to_string());
         // A dying queue can strand answers: a queued response or ack
         // means its sender already got success, so the other party must
         // hear the loss loudly instead of assuming it was read.
@@ -3905,6 +3917,46 @@ mod tests {
             .bcall("skippy", "bot_ack", r#"{"cursor":1}"#)
             .expect("exact retry replays");
         assert!(retry.contains(r#""acknowledged":1"#), "retry: {retry}");
+    }
+
+    #[test]
+    fn idempotency_capacity_is_per_caller() {
+        // One noisy session flooding past the cache cap must not
+        // evict another caller's still-live retry record.
+        use crate::bot::IDEM_MAX_KEYS;
+        let mut p = live_pair().grouped();
+        let args = r#"{"target":"a","message":"q","idempotency_key":"bk"}"#;
+        let first = p
+            .call(&p.run_b.clone(), "ask_session", args)
+            .expect("ask validates");
+        let now = std::time::Instant::now();
+        for i in 0..(IDEM_MAX_KEYS + 10) {
+            p.state
+                .broker
+                .session_idem
+                .entry(p.a.to_string())
+                .or_insert_with(crate::bot::IdemCache::new)
+                .store(&format!("k-{i}"), i as u64, "x", now);
+        }
+        let replay = p
+            .call(&p.run_b.clone(), "ask_session", args)
+            .expect("retry validates");
+        assert_eq!(replay, first, "B's record survives A's flood");
+    }
+
+    #[test]
+    fn idempotency_records_die_with_their_caller() {
+        let mut p = live_pair().grouped();
+        let args = r#"{"target":"a","message":"q","idempotency_key":"bk"}"#;
+        p.call(&p.run_b.clone(), "ask_session", args)
+            .expect("ask validates");
+        assert!(p.state.broker.session_idem.len() >= 1, "record exists");
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        assert_eq!(
+            p.state.broker.session_idem.len(),
+            0,
+            "dead callers keep no retry records"
+        );
     }
 
     #[test]
