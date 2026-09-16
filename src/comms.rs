@@ -1157,6 +1157,18 @@ impl Broker {
                 "only the target answers",
             ));
         }
+        // Group grants are live: a session or client removed from the
+        // shared group since the ask loses the answer channel too.
+        let granted = self
+            .clients
+            .get(client)
+            .is_some_and(|c| self.shares_with_client(session, &c.groups));
+        if !granted {
+            return Err(BotError::new(
+                ErrorCode::NoSharedGroup,
+                "no shared group with target",
+            ));
+        }
         self.push(
             session,
             Injection {
@@ -1214,6 +1226,18 @@ impl Broker {
             return Err(BotError::new(
                 ErrorCode::ConversationClosed,
                 "only the target acknowledges",
+            ));
+        }
+        // Group grants are live: leaving the shared group since the
+        // tell revokes the ack channel too.
+        let granted = self
+            .clients
+            .get(client)
+            .is_some_and(|c| self.shares_with_client(session, &c.groups));
+        if !granted {
+            return Err(BotError::new(
+                ErrorCode::NoSharedGroup,
+                "no shared group with target",
             ));
         }
         self.push(
@@ -1594,6 +1618,9 @@ impl Broker {
             if caller != conv.target {
                 return Err("only the target answers".to_string());
             }
+            if !self.shared_group(caller, conv.source) {
+                return Err("no shared group with target".to_string());
+            }
             conv.source
         };
         let from = self.names(sessions, caller);
@@ -1813,6 +1840,15 @@ impl Broker {
         if caller != session {
             return Some(Err("only the target answers".to_string()));
         }
+        // The client grant behind this ask is live: leaving the shared
+        // group since revokes the session's answer channel.
+        let granted = self
+            .clients
+            .get(&client)
+            .is_some_and(|c| self.shares_with_client(caller, &c.groups));
+        if !granted {
+            return Some(Err("no shared group with target".to_string()));
+        }
         let from_name = self.names(sessions, caller);
         let from_id = caller.to_string();
         let deposit = self
@@ -1858,6 +1894,15 @@ impl Broker {
         }
         if caller != session {
             return Some(Err("only the target acknowledges".to_string()));
+        }
+        // The client grant behind this tell is live: leaving the shared
+        // group since revokes the session's ack channel.
+        let granted = self
+            .clients
+            .get(&client)
+            .is_some_and(|c| self.shares_with_client(caller, &c.groups));
+        if !granted {
+            return Some(Err("no shared group with target".to_string()));
         }
         let from_name = self.names(sessions, caller);
         let from_id = caller.to_string();
@@ -1908,6 +1953,9 @@ impl Broker {
             }
             if caller != conv.target {
                 return Err("only the target acknowledges".to_string());
+            }
+            if !self.shared_group(caller, conv.source) {
+                return Err("no shared group with target".to_string());
             }
             conv.source
         };
@@ -2297,6 +2345,130 @@ mod tests {
         assert!(list.contains(r#""name":"a""#), "list: {list}");
         assert!(!list.contains(r#""name":"b""#), "list: {list}");
         assert!(list.contains(r#""id":"s"#), "list: {list}");
+    }
+
+    #[test]
+    fn response_after_group_leave_is_refused() {
+        // Leaving the shared group revokes the answer channel: the
+        // response must fail closed, not ride the old conversation ID.
+        let mut p = live_pair().grouped();
+        let ask = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"ready?"}"#)
+            .expect("ask validates");
+        let conv = json_field(&ask, "conversation").expect("conversation id");
+        assert!(p.state.broker.leave(p.b, "peers"));
+        let err = p
+            .call(
+                &p.run_b.clone(),
+                "send_response",
+                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+            )
+            .expect_err("leave revokes answers");
+        assert!(err.contains("no shared group"), "err: {err}");
+    }
+
+    #[test]
+    fn ack_after_group_leave_is_refused() {
+        let mut p = live_pair().grouped();
+        let tell = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"hi"}"#)
+            .expect("tell validates");
+        let conv = json_field(&tell, "conversation").expect("conversation id");
+        assert!(p.state.broker.leave(p.b, "peers"));
+        let err = p
+            .call(
+                &p.run_b.clone(),
+                "ack_message",
+                &format!(r#"{{"conversation_id":"{conv}"}}"#),
+            )
+            .expect_err("leave revokes acks");
+        assert!(err.contains("no shared group"), "err: {err}");
+    }
+
+    #[test]
+    fn client_response_after_session_leaves_group_is_refused() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_a.clone(),
+                "ask_session",
+                r#"{"target":"skippy","message":"are you there?"}"#,
+            )
+            .expect("session asks client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        assert!(p.state.broker.leave(p.a, "peers"));
+        let err = p
+            .bcall(
+                "skippy",
+                "send_response",
+                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+            )
+            .expect_err("leave revokes client answers");
+        assert_eq!(err.code, ErrorCode::NoSharedGroup);
+    }
+
+    #[test]
+    fn session_response_to_client_ask_after_leave_is_refused() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"ready?"}"#)
+            .expect("client asks");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        assert!(p.state.broker.leave(p.b, "peers"));
+        let err = p
+            .call(
+                &p.run_b.clone(),
+                "send_response",
+                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+            )
+            .expect_err("leave revokes session answers to clients");
+        assert!(err.contains("no shared group"), "err: {err}");
+    }
+
+    #[test]
+    fn session_ack_to_client_tell_after_leave_is_refused() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "tell_session", r#"{"target":"b","text":"hi"}"#)
+            .expect("client tells");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        assert!(p.state.broker.leave(p.b, "peers"));
+        let err = p
+            .call(
+                &p.run_b.clone(),
+                "ack_message",
+                &format!(r#"{{"conversation_id":"{conv}"}}"#),
+            )
+            .expect_err("leave revokes session acks to clients");
+        assert!(err.contains("no shared group"), "err: {err}");
+    }
+
+    #[test]
+    fn client_ack_after_session_leaves_group_is_refused() {
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_a.clone(),
+                "tell_session",
+                r#"{"target":"skippy","text":"hi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        assert!(p.state.broker.leave(p.a, "peers"));
+        let err = p
+            .bcall(
+                "skippy",
+                "ack_message",
+                &format!(r#"{{"conversation_id":"{conv}"}}"#),
+            )
+            .expect_err("leave revokes client acks");
+        assert_eq!(err.code, ErrorCode::NoSharedGroup);
     }
 
     #[test]
