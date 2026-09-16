@@ -1669,8 +1669,12 @@ impl AppState {
                 self.dirty = true;
             }
         }
-        self.pending_enter
-            .retain(|id, _| self.manager.get(*id).is_some());
+        // Records outlive their sessions (a natural exit marks the
+        // record, it does not remove it), so mere presence prunes
+        // nothing: only live sessions keep a staged Enter.
+        self.pending_enter.retain(|id, _| {
+            self.manager.get(*id).is_some_and(|rec| rec.state.is_live())
+        });
     }
 
     /// Cycle the active session; wraps around. No-op when empty.
@@ -1715,6 +1719,10 @@ impl AppState {
         if !self.manager.remove(id) {
             return false;
         }
+        // Same cleanup as a natural exit: debounce entries die with
+        // the session, or the maps grow with every termination.
+        self.last_human_input.remove(&id);
+        self.last_hook_activity.remove(&id);
         self.overlay_view = None;
         self.dirty = true;
         true
@@ -1809,14 +1817,24 @@ impl AppState {
             let (decision, reason) = policy.decide(&req.hook, &req.body);
             let line = crate::policy::decision_line(&req.hook, decision, reason);
             let _ = req.reply.send(line);
+            // Same attribution as enqueue: run ID first, harness
+            // fallback second. A verdict for a fallback-attributed
+            // hook protects its pane too, not just run-bound ones.
+            let fallback_id = if self.manager.lookup_run(&req.run_id).is_none() {
+                crate::session::session_id_from_hook_body(&req.body)
+                    .and_then(|h| self.manager.lookup_harness_session(&h))
+            } else {
+                None
+            };
+            let attributed = self.manager.lookup_run(&req.run_id).or(fallback_id);
             // The verdict races bodies only in its own pane: stamp the
             // attributed session, never the whole app.
-            if let Some(id) = self.manager.lookup_run(&req.run_id) {
+            if let Some(id) = attributed {
                 self.last_hook_activity
                     .insert(id, std::time::Instant::now());
             }
             // Attribute the verdict to the sender's sidebar counters.
-            if let Some(id) = self.manager.lookup_run(&req.run_id) {
+            if let Some(id) = attributed {
                 self.manager.note_verdict(id, decision);
             }
             self.audit_hook(audit_path, &req.hook, &req.body, decision, reason);
@@ -3124,6 +3142,101 @@ mod tests {
         assert!(!s.pending_enter.contains_key(&b), "human owns the prompt");
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn terminate_session_prunes_debounce_entries() {
+        // Manual termination must clean the per-target debounce maps
+        // like a natural exit does, or they grow with every session.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        s.note_human_input(a);
+        s.last_hook_activity.insert(a, std::time::Instant::now());
+        assert!(s.terminate_session(a));
+        assert!(!s.last_human_input.contains_key(&a), "typing entry pruned");
+        assert!(!s.last_hook_activity.contains_key(&a), "hook entry pruned");
+    }
+
+    #[test]
+    fn verdict_stamp_uses_harness_fallback_attribution() {
+        // Enqueue attributes by run or harness fallback; the verdict
+        // stamp must use the same attribution, or a slow batch ages
+        // the enqueue stamp past the beat and the verdict protects
+        // nobody.
+        use crate::config::PermissionMode;
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        s.manager.set_harness_session(a, "h-1".to_string());
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: r#"{"body":{"session_id":"h-1"}}"#.to_string(),
+            run_id: "unknown-run".to_string(),
+            sync: false,
+            reply: reply_tx,
+            timed_out: Default::default(),
+        }));
+        assert!(s.last_hook_activity.contains_key(&a), "enqueue attributes");
+        // Age the enqueue stamp out, so only a verdict stamp can renew.
+        s.last_hook_activity.insert(
+            a,
+            std::time::Instant::now() - std::time::Duration::from_secs(3600),
+        );
+        let audit = std::env::temp_dir().join(format!(
+            "forge-hook-fallback-test-{}",
+            std::process::id()
+        ));
+        let mut yolo =
+            crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+        s.settle_hooks(&mut yolo, &audit);
+        let age = std::time::Instant::now()
+            .duration_since(*s.last_hook_activity.get(&a).expect("verdict stamps"));
+        assert!(age < std::time::Duration::from_secs(5), "verdict stamps: {age:?}");
+        let _ = std::fs::remove_file(&audit);
+        assert!(s.manager.remove(a));
+    }
+
+    #[test]
+    fn staged_enter_prunes_exited_records() {
+        // A naturally exited session keeps its record (marked not
+        // live); its staged Enter must still go, or the map — and
+        // futile pane retries — survive forever.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        assert!(s.manager.kill(a));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                s.apply(AppEvent::from_pty(ev.0, ev.2));
+            }
+            let exited = s.manager.get(a).is_none_or(|rec| !rec.state.is_live());
+            if exited || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(s.manager.get(a).is_some(), "record retained");
+        assert!(!s.manager.get(a).unwrap().state.is_live(), "marked exited");
+        s.pending_enter.insert(
+            a,
+            std::time::Instant::now()
+                - crate::comms::INJECT_ENTER_DELAY
+                - std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert!(!s.pending_enter.contains_key(&a), "exited entry pruned");
     }
 
     #[test]
