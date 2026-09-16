@@ -17,6 +17,13 @@ use crate::session::{SessionId, SessionManager};
 /// Per-target message pressure cap: undelivered injections plus delivered
 /// asks awaiting response. Delivered tells no longer count.
 pub const PRESSURE_CAP: usize = 5;
+/// Per-session injection queue cap. Completions (responses, acks,
+/// failures, reminders) always queue — they finish already-admitted
+/// work — so the bound comes from the other end: a session with this
+/// many undelivered entries cannot start new sends until it drains.
+/// Sized past one loop drain (100) with headroom; hitting it reads as
+/// backpressure ("drain first"), never as lost work.
+pub const QUEUE_CAP: usize = 128;
 /// Longest self-injection delay in seconds: a day. Beyond that the TUI
 /// the timer belongs to is long gone, and `Instant` math would overflow.
 pub const MAX_SCHEDULE_DELAY_SECS: f64 = 86_400.0;
@@ -660,6 +667,15 @@ impl Broker {
                 Some((key, fp))
             }
         };
+        // New work gates on the caller's own backlog: completions
+        // bypass deliberately, so without this a session that never
+        // drains could pile responses behind itself without limit.
+        // Retries replay above, so only genuinely new sends wait.
+        if (tool == "ask_session" || tool == "tell_session")
+            && self.queued(caller) >= QUEUE_CAP
+        {
+            return Err("caller queue full; drain it before sending".to_string());
+        }
         let result = match tool {
             "ask_session" => self.ask(sessions, caller, args, now),
             "send_response" => self.send_response(sessions, caller, args, now),
@@ -4007,6 +4023,42 @@ mod tests {
             .expect("poll validates");
         assert!(poll.contains(&conv), "poll names the conv: {poll}");
         assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
+    }
+
+    #[test]
+    fn caller_backlog_gates_new_sends() {
+        // A answers nothing while asking on: each answer piles a
+        // response behind busy A. Past the queue cap A's new sends
+        // refuse with backpressure instead of growing the queue
+        // without limit; draining unblocks. Completions themselves
+        // still bypass (B keeps answering throughout).
+        let mut p = live_pair().grouped();
+        for _ in 0..crate::comms::QUEUE_CAP {
+            let res = p
+                .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
+                .expect("ask admitted");
+            let conv = json_field(&res, "conversation").expect("conversation id");
+            assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
+            p.call(
+                &p.run_b.clone(),
+                "send_response",
+                &format!(r#"{{"conversation_id":"{conv}","message":"a"}}"#),
+            )
+            .expect("B answers");
+        }
+        assert_eq!(p.state.broker.queued(p.a), crate::comms::QUEUE_CAP);
+        let err = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"one more"}"#)
+            .expect_err("backlogged caller waits");
+        assert!(err.contains("caller queue full"), "err: {err}");
+        let err = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"one more"}"#)
+            .expect_err("tells gate the same way");
+        assert!(err.contains("caller queue full"), "err: {err}");
+        // Draining unblocks: backpressure, not deadlock.
+        assert_eq!(p.state.broker.take_due(p.a, 200).len(), crate::comms::QUEUE_CAP);
+        p.call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"again"}"#)
+            .expect("drained caller sends");
     }
 
     #[test]
