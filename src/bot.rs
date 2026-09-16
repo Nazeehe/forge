@@ -574,7 +574,13 @@ impl BotClient {
 
     /// Advance the acknowledged cursor through a contiguous received
     /// prefix only. Anything else is a conflict, never a silent skip.
+    /// Retrying the exact committed cursor replays success (the
+    /// response to a commit can be lost on the wire); anything older
+    /// still conflicts.
     pub fn ack(&mut self, cursor: u64) -> Result<u64, BotError> {
+        if cursor == self.acked && cursor != 0 {
+            return Ok(cursor);
+        }
         if cursor <= self.acked || cursor > self.received_upto {
             return Err(BotError::new(
                 ErrorCode::Conflict,
@@ -762,7 +768,10 @@ mod tests {
         // Receive in order, then advance.
         assert!(c.poll(0, 20).len() == 2);
         c.ack(2).unwrap();
-        assert!(c.ack(2).is_err(), "no double advance");
+        // An exact retry replays the commit (a lost verdict must not
+        // read as a conflict); anything older still conflicts.
+        assert_eq!(c.ack(2).unwrap(), 2, "exact retry replays");
+        assert!(c.ack(1).is_err(), "older cursors still conflict");
     }
 
     #[test]

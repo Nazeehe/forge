@@ -1281,8 +1281,10 @@ impl Broker {
             .ok_or_else(|| {
                 BotError::new(ErrorCode::InvalidArguments, "a conversation ID is required")
             })?;
-        let (kind, state, session, from_client) = match self.bot_convs.get(&id) {
-            Some(c) if c.client == client => (c.kind, c.state, c.session, c.from_client),
+        let (kind, state, session, from_client, acked) = match self.bot_convs.get(&id) {
+            Some(c) if c.client == client => {
+                (c.kind, c.state, c.session, c.from_client, c.acked)
+            }
             _ => {
                 return Err(BotError::new(
                     ErrorCode::NotFound,
@@ -1318,6 +1320,14 @@ impl Broker {
             return Err(BotError::new(
                 ErrorCode::NoSharedGroup,
                 "no shared group with target",
+            ));
+        }
+        if acked {
+            // Idempotent replay, same shape as the session path: no
+            // duplicate Ack, no courtesy-clock nudge.
+            return Ok(format!(
+                r#"{{"conversation":"{id}","acknowledged":true,"epoch":{}}}"#,
+                self.epoch
             ));
         }
         self.push(
@@ -2062,7 +2072,7 @@ impl Broker {
         if let Some(r) = self.ack_bot(sessions, caller, &id, now) {
             return r;
         }
-        let source = {
+        let (source, acked) = {
             let conv = self
                 .convs
                 .get(&id)
@@ -2079,8 +2089,14 @@ impl Broker {
             if !self.shared_group(caller, conv.source) {
                 return Err("no shared group with target".to_string());
             }
-            conv.source
+            (conv.source, conv.acked)
         };
+        if acked {
+            // Idempotent replay: the Ack already went out, so a
+            // retried acknowledgement succeeds without queueing a
+            // duplicate or nudging the courtesy clock.
+            return Ok(format!(r#"{{"conversation":"{id}","acknowledged":true}}"#));
+        }
         let from = self.names(sessions, caller);
         self.push(
             source,
@@ -2291,14 +2307,17 @@ impl Broker {
                 },
             );
         }
-        // Fire due self-injection timers into their queues; the idle
-        // path delivers them like any other injection.
+        // Fire due self-injection timers into their queues, earliest
+        // due first: hash order is not an ordering, and a stalled
+        // loop can owe several deadlines at once.
         let mut fired = Vec::new();
         for (timer_id, timer) in self.timers.iter() {
             if now >= timer.due {
-                fired.push(timer_id.clone());
+                fired.push((timer.due, timer_id.clone()));
             }
         }
+        fired.sort();
+        let fired: Vec<String> = fired.into_iter().map(|(_, id)| id).collect();
         for timer_id in fired {
             if let Some(timer) = self.timers.remove(&timer_id) {
                 self.push(
@@ -3789,6 +3808,104 @@ mod tests {
             )
             .expect_err("evicted bot conv reads unknown");
         assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn repeat_ack_replays_without_dup() {
+        // A retried acknowledgement (lost verdict, impatient
+        // harness) returns success again but queues no second Ack
+        // and stops touching the courtesy clock.
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"hi"}"#)
+            .expect("tell validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        let ack = format!(r#"{{"conversation_id":"{conv}"}}"#);
+        p.call(&p.run_b.clone(), "ack_message", &ack)
+            .expect("ack validates");
+        assert_eq!(p.state.broker.take_due(p.a, 10).len(), 1);
+        let again = p
+            .call(&p.run_b.clone(), "ack_message", &ack)
+            .expect("retry still acknowledges");
+        assert!(again.contains(r#""acknowledged":true"#), "again: {again}");
+        assert_eq!(
+            p.state.broker.take_due(p.a, 10).len(),
+            0,
+            "no duplicate Ack queued"
+        );
+    }
+
+    #[test]
+    fn bot_repeat_ack_replays_without_dup() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_a.clone(),
+                "tell_session",
+                r#"{"target":"skippy","message":"hi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        let ack = format!(r#"{{"conversation_id":"{conv}"}}"#);
+        p.bcall("skippy", "ack_message", &ack)
+            .expect("ack validates");
+        assert_eq!(p.state.broker.take_due(p.a, 10).len(), 1);
+        p.bcall("skippy", "ack_message", &ack)
+            .expect("retry still acknowledges");
+        assert_eq!(
+            p.state.broker.take_due(p.a, 10).len(),
+            0,
+            "no duplicate Ack queued"
+        );
+    }
+
+    #[test]
+    fn overdue_timers_fire_earliest_first() {
+        // Five armed out of order must still inject earliest-due
+        // first: hash order is not an ordering.
+        let mut p = live_pair().grouped();
+        for (prompt, delay) in [("p1", 5), ("p2", 4), ("p3", 3), ("p4", 2), ("p5", 1)] {
+            p.call(
+                &p.run_a.clone(),
+                "schedule_prompt",
+                &format!(r#"{{"prompt":"{prompt}","delay_seconds":{delay}}}"#),
+            )
+            .expect("schedule validates");
+        }
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        let due = p.state.broker.take_due(p.a, 10);
+        let texts: Vec<&str> = due.iter().map(|inj| inj.text.as_str()).collect();
+        assert_eq!(texts, vec!["p5", "p4", "p3", "p2", "p1"]);
+    }
+
+    #[test]
+    fn bot_ack_cursor_retry_replays() {
+        // The server committed the ack; a lost verdict retried with
+        // the exact cursor replays instead of conflicting.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"ready?"}"#)
+            .expect("ask validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("target answers");
+        p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        let first = p
+            .bcall("skippy", "bot_ack", r#"{"cursor":1}"#)
+            .expect("ack validates");
+        assert!(first.contains(r#""acknowledged":1"#), "first: {first}");
+        let retry = p
+            .bcall("skippy", "bot_ack", r#"{"cursor":1}"#)
+            .expect("exact retry replays");
+        assert!(retry.contains(r#""acknowledged":1"#), "retry: {retry}");
     }
 
     #[test]
