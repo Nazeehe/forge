@@ -1773,8 +1773,11 @@ impl AppState {
                 self.manager.note_verdict(id, decision);
             }
             self.audit_hook(audit_path, &req.hook, &req.body, decision, reason);
+            // A verdict changes sidebar counters and audit state, so only
+            // a fired hook repaints; an empty queue leaves the frame clean
+            // and the idle loop skips the 60Hz full redraw.
+            self.dirty = true;
         }
-        self.dirty = true;
     }
 
     fn audit_hook(
@@ -2230,6 +2233,38 @@ mod tests {
         let logged = std::fs::read_to_string(&audit).unwrap();
         assert_eq!(logged.lines().count(), 2, "audit: {logged:?}");
         assert!(logged.contains(r#""decision":"ask""#), "audit: {logged:?}");
+        let _ = std::fs::remove_file(&audit);
+    }
+
+    #[test]
+    fn settle_hooks_dirties_only_when_a_hook_fires() {
+        use crate::config::PermissionMode;
+        let audit = std::env::temp_dir().join(format!(
+            "forge-settle-idle-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut policy = crate::policy::Policy::new(PermissionMode::Yolo, &[], &[])
+            .unwrap();
+        let mut s = AppState::new();
+        // Empty queue: the 60Hz loop must not repaint from this.
+        s.dirty = false;
+        s.settle_hooks(&mut policy, &audit);
+        assert!(!s.dirty, "idle settle must leave the frame clean");
+        // A real verdict still repaints (counters/audit change).
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
+            run_id: String::new(),
+            sync: true,
+            reply: reply_tx,
+            timed_out: Default::default(),
+        }));
+        s.dirty = false;
+        s.settle_hooks(&mut policy, &audit);
+        assert!(s.dirty, "a settled hook must repaint");
+        let _ = reply_rx.recv_timeout(std::time::Duration::from_secs(2));
         let _ = std::fs::remove_file(&audit);
     }
 
