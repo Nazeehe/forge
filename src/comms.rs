@@ -2062,7 +2062,31 @@ impl Broker {
     /// Fail every open conversation touching an exited session. Targets fail
     /// loudly (their sources are told); sources fail silently.
     pub fn target_exited(&mut self, _sessions: &SessionManager, id: SessionId) {
-        self.queue.remove(&id);
+        // A dying queue can strand answers: a queued response or ack
+        // means its sender already got success, so the other party must
+        // hear the loss loudly instead of assuming it was read.
+        let dropped = self.queue.remove(&id).unwrap_or_default();
+        for inj in &dropped {
+            let (other, from) = match inj.kind {
+                InjectKind::Response | InjectKind::Ack => match self.convs.get(&inj.conv) {
+                    Some(conv) => (conv.target, conv.source_name.clone()),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if other == id {
+                continue;
+            }
+            self.push(
+                other,
+                Injection {
+                    conv: inj.conv.clone(),
+                    kind: InjectKind::Failed,
+                    from,
+                    text: "source exited before delivery".to_string(),
+                },
+            );
+        }
         self.timers.retain(|_, timer| timer.target != id);
         let mut notify = Vec::new();
         for (conv_id, conv) in self.convs.iter_mut() {
@@ -2696,6 +2720,57 @@ mod tests {
                 .code,
             ErrorCode::PressureLimit
         );
+    }
+
+    #[test]
+    #[test]
+    fn dropped_response_on_source_exit_notifies_responder() {
+        // B answers, gets success, and A's queue still holds the
+        // response when A exits: deleting it silently would leave B
+        // believing it was read. B must hear the loss loudly.
+        let mut p = live_pair().grouped();
+        let ask = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
+            .expect("ask validates");
+        let conv = json_field(&ask, "conversation").expect("conversation id");
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the ask");
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("target answers");
+        assert_eq!(p.state.broker.queued(p.a), 1);
+        p.state.broker.target_exited(&p.state.manager, p.a);
+        assert_eq!(p.state.broker.queued(p.a), 0, "exited queue is gone");
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1, "responder hears the loss");
+        assert!(matches!(due[0].kind, InjectKind::Failed));
+        assert_eq!(due[0].conv, conv);
+    }
+
+    #[test]
+    fn dropped_ack_on_source_exit_notifies_acker() {
+        // Same window for acks: the teller exits before reading the
+        // ack, so the acker must hear it instead of assuming receipt.
+        let mut p = live_pair().grouped();
+        let tell = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"hi"}"#)
+            .expect("tell validates");
+        let conv = json_field(&tell, "conversation").expect("conversation id");
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the tell");
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("target acks");
+        assert_eq!(p.state.broker.queued(p.a), 1);
+        p.state.broker.target_exited(&p.state.manager, p.a);
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1, "acker hears the loss");
+        assert!(matches!(due[0].kind, InjectKind::Failed));
+        assert_eq!(due[0].conv, conv);
     }
 
     #[test]
