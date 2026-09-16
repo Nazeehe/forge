@@ -33,8 +33,19 @@ pub const COURTESY_GRACE: Duration = Duration::from_secs(30);
 /// their last update before the sweep evicts them. Past the
 /// idempotency replay window (600s) with margin, so a replayed
 /// conversation ID still resolves while retries can replay it; open
-/// conversations never evict, whatever their age.
+/// asks never evict, whatever their age (quiet tells quiesce below).
 pub const CONV_TTL: Duration = Duration::from_secs(1800);
+/// Hard cap on terminal records per conversation map: past this the
+/// sweep evicts oldest-first even within their TTL, so a burst half
+/// hour cannot grow the maps (or the per-second scans) without limit.
+/// Open work never counts toward the cap.
+pub const CONV_CAP: usize = 4096;
+/// An Open tell quiet this long is a dead thread: no delivery, ack,
+/// reminder, or follow-up in a full day means nobody is coming back,
+/// so the sweep evicts it (resume with a fresh tell). Open asks never
+/// quiesce — an awaited answer can land at any time — and queued work
+/// pins its record either way.
+pub const QUIESCE_TTL: Duration = Duration::from_secs(86400);
 /// Fastest courtesy/timer sweep: `Broker::tick` walks every conversation
 /// and timer, but grace is 30s and timers are second-scale, so the 16ms
 /// loop skips sweeps inside this window. Queue delivery is unaffected
@@ -2582,9 +2593,13 @@ impl Broker {
         // would strand the exit path's loud-failure lookup (None
         // reads as "no party to tell"). Other kinds never look the
         // record up after terminal state, so they pin nothing.
+        // Quiescence pins harder: any queued work keeps an Open tell,
+        // since its body may still deliver.
         let mut pinned = std::collections::HashSet::new();
+        let mut referenced = std::collections::HashSet::new();
         for q in self.queue.values() {
             for inj in q {
+                referenced.insert(inj.conv.clone());
                 if matches!(
                     inj.kind,
                     InjectKind::Response | InjectKind::Ack
@@ -2594,14 +2609,70 @@ impl Broker {
             }
         }
         self.convs.retain(|id, conv| {
-            conv.state == ConvState::Open
-                || now.duration_since(conv.last_update) < CONV_TTL
-                || pinned.contains(id)
+            if conv.state == ConvState::Open {
+                // Only tells go quiet: an ask awaits its answer,
+                // which can land at any time. A tell silent for a day
+                // is a dead thread (resume with a fresh tell).
+                if conv.kind == ConvKind::Tell
+                    && now.duration_since(conv.last_update) >= QUIESCE_TTL
+                    && !referenced.contains(id)
+                {
+                    return false;
+                }
+                return true;
+            }
+            now.duration_since(conv.last_update) < CONV_TTL || pinned.contains(id)
         });
-        self.bot_convs.retain(|_, conv| {
-            conv.state == BotConvState::Open
-                || now.duration_since(conv.last_update) < CONV_TTL
+        // Terminal count cap, oldest first, even within TTL. Open
+        // work never counts.
+        let over = self
+            .convs
+            .values()
+            .filter(|c| c.state != ConvState::Open)
+            .count()
+            .saturating_sub(CONV_CAP);
+        if over > 0 {
+            let mut oldest: Vec<(String, Instant)> = self
+                .convs
+                .iter()
+                .filter(|(_, c)| c.state != ConvState::Open)
+                .map(|(id, c)| (id.clone(), c.last_update))
+                .collect();
+            oldest.sort_by_key(|(_, at)| *at);
+            for (id, _) in oldest.into_iter().take(over) {
+                self.convs.remove(&id);
+            }
+        }
+        self.bot_convs.retain(|id, conv| {
+            if conv.state == BotConvState::Open {
+                if conv.kind == BotConvKind::Tell
+                    && now.duration_since(conv.last_update) >= QUIESCE_TTL
+                    && !referenced.contains(id)
+                {
+                    return false;
+                }
+                return true;
+            }
+            now.duration_since(conv.last_update) < CONV_TTL
         });
+        let bot_over = self
+            .bot_convs
+            .values()
+            .filter(|c| c.state != BotConvState::Open)
+            .count()
+            .saturating_sub(CONV_CAP);
+        if bot_over > 0 {
+            let mut oldest: Vec<(String, Instant)> = self
+                .bot_convs
+                .iter()
+                .filter(|(_, c)| c.state != BotConvState::Open)
+                .map(|(id, c)| (id.clone(), c.last_update))
+                .collect();
+            oldest.sort_by_key(|(_, at)| *at);
+            for (id, _) in oldest.into_iter().take(bot_over) {
+                self.bot_convs.remove(&id);
+            }
+        }
     }
 }
 
@@ -4023,6 +4094,138 @@ mod tests {
             .expect("poll validates");
         assert!(poll.contains(&conv), "poll names the conv: {poll}");
         assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
+    }
+
+    #[test]
+    fn terminal_records_cap_oldest_first() {
+        // Past CONV_CAP the sweep evicts the oldest terminal
+        // records even within their TTL; Open work never counts.
+        let mut p = live_pair().grouped();
+        let now = std::time::Instant::now();
+        let mut oldest = String::new();
+        for i in 0..(crate::comms::CONV_CAP + 1) {
+            let id = format!("cap-{i}");
+            if i == 0 {
+                oldest = id.clone();
+            }
+            p.state.broker.convs.insert(
+                id,
+                Conv {
+                    kind: ConvKind::Ask,
+                    source: p.a,
+                    target: p.b,
+                    source_name: "a".to_string(),
+                    target_name: "b".to_string(),
+                    state: ConvState::Done,
+                    acked: false,
+                    last_update: now - std::time::Duration::from_secs(1000 - (i as u64).min(999)),
+                    reminded: false,
+                    target_updated: false,
+                    delivered: false,
+                },
+            );
+        }
+        p.state.broker.convs.insert(
+            "live-open".to_string(),
+            Conv {
+                kind: ConvKind::Ask,
+                source: p.a,
+                target: p.b,
+                source_name: "a".to_string(),
+                target_name: "b".to_string(),
+                state: ConvState::Open,
+                acked: false,
+                last_update: now - std::time::Duration::from_secs(5000),
+                reminded: false,
+                target_updated: false,
+                delivered: false,
+            },
+        );
+        p.state.broker.tick(now);
+        let terminal = p
+            .state
+            .broker
+            .convs
+            .values()
+            .filter(|c| c.state != ConvState::Open)
+            .count();
+        assert_eq!(terminal, crate::comms::CONV_CAP, "cap enforced");
+        assert!(!p.state.broker.convs.contains_key(&oldest), "oldest evicted");
+        assert!(p.state.broker.convs.contains_key("live-open"), "open spared");
+    }
+
+    #[test]
+    fn quiet_tells_quiesce_past_ttl() {
+        // An Open tell quiet for a day is a dead thread: evict it
+        // (resume with a fresh tell). Open asks await answers and
+        // never quiesce; queued work pins its record.
+        let mut p = live_pair().grouped();
+        let now = std::time::Instant::now();
+        let old = now - crate::comms::QUIESCE_TTL - std::time::Duration::from_secs(60);
+        let (a, b) = (p.a, p.b);
+        let mk = move |kind: ConvKind| Conv {
+            kind,
+            source: a,
+            target: b,
+            source_name: "a".to_string(),
+            target_name: "b".to_string(),
+            state: ConvState::Open,
+            acked: true,
+            last_update: old,
+            reminded: true,
+            target_updated: false,
+            delivered: false,
+        };
+        p.state.broker.convs.insert("quiet-tell".to_string(), mk(ConvKind::Tell));
+        p.state.broker.convs.insert("quiet-ask".to_string(), mk(ConvKind::Ask));
+        let mut fresh = mk(ConvKind::Tell);
+        fresh.last_update = now;
+        p.state.broker.convs.insert("fresh-tell".to_string(), fresh);
+        p.state.broker.convs.insert("pinned-tell".to_string(), mk(ConvKind::Tell));
+        p.state.broker.push(
+            b,
+            Injection {
+                conv: "pinned-tell".to_string(),
+                kind: InjectKind::Tell,
+                from: "a".to_string(),
+                text: "waiting".to_string(),
+            },
+        );
+        p.state.broker.tick(now);
+        assert!(!p.state.broker.convs.contains_key("quiet-tell"), "quiet tell evicted");
+        assert!(p.state.broker.convs.contains_key("quiet-ask"), "open ask spared");
+        assert!(p.state.broker.convs.contains_key("fresh-tell"), "fresh tell spared");
+        assert!(p.state.broker.convs.contains_key("pinned-tell"), "queued tell pinned");
+    }
+
+    #[test]
+    fn quiet_bot_tells_quiesce_past_ttl() {
+        // Same quiescence rule, bot table: a day-quiet Open tell
+        // evicts, an Open ask never does.
+        use crate::bot::{BotConv, BotConvKind, BotConvState};
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let now = std::time::Instant::now();
+        let old = now - crate::comms::QUIESCE_TTL - std::time::Duration::from_secs(60);
+        let b = p.b;
+        let mk = move |kind: BotConvKind| BotConv {
+            kind,
+            session: b,
+            session_name: "b".to_string(),
+            client: "skippy".to_string(),
+            from_client: true,
+            state: BotConvState::Open,
+            acked: true,
+            delivered: false,
+            last_update: old,
+            reminded: true,
+            target_updated: false,
+        };
+        p.state.broker.bot_convs.insert("quiet-tell".to_string(), mk(BotConvKind::Tell));
+        p.state.broker.bot_convs.insert("quiet-ask".to_string(), mk(BotConvKind::Ask));
+        p.state.broker.tick(now);
+        assert!(!p.state.broker.bot_convs.contains_key("quiet-tell"), "quiet tell evicted");
+        assert!(p.state.broker.bot_convs.contains_key("quiet-ask"), "open ask spared");
     }
 
     #[test]
