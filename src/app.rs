@@ -1609,22 +1609,24 @@ impl AppState {
             if self.pending_enter.contains_key(&id) {
                 continue;
             }
-            let due = self.broker.take_due(id, 1);
-            let mut wrote = false;
+            // Peek before pop: the message leaves the queue only after
+            // its bytes reach the pane, so a failed write retries next
+            // settle with pressure untouched. Single owner, so the head
+            // cannot change between peek and pop.
+            let Some(head) = self.broker.peek_due(id) else {
+                continue;
+            };
             // Panes that opted into paste mode (DECSET 2004) take the
             // whole payload as one bracketed-paste transaction; the rest
             // take it raw, exactly as before.
             let bracketed = self.manager.bracketed_paste(id);
-            for inj in due {
-                if self.manager.inject_write(id, &inj.render_framed(bracketed)).is_ok() {
-                    wrote = true;
-                    self.dirty = true;
-                }
-            }
-            if wrote {
+            if self.manager.inject_write(id, &head.render_framed(bracketed)).is_ok() {
+                let taken = self.broker.take_due(id, 1);
+                debug_assert!(taken.first().map(|t| &t.conv) == Some(&head.conv));
                 // Arm the staged Enter: the CR goes out on a later tick,
                 // never in the same burst as the text.
                 self.pending_enter.insert(id, now);
+                self.dirty = true;
             }
         }
         self.settle_enters(now);
@@ -1650,11 +1652,13 @@ impl AppState {
             if !settled || !idle {
                 continue;
             }
-            // A dead pane drops the CR: the body stays visible as a draft
-            // for the human rather than vanishing silently.
-            let _ = self.manager.inject_write(id, &[crate::comms::INJECT_ENTER_CR]);
-            self.pending_enter.remove(&id);
-            self.dirty = true;
+            // A CR that never reaches the pane stays staged for retry:
+            // removing it would strand an unsubmitted body. Exited
+            // sessions are pruned below, so a dead pane stops here.
+            if self.manager.inject_write(id, &[crate::comms::INJECT_ENTER_CR]).is_ok() {
+                self.pending_enter.remove(&id);
+                self.dirty = true;
+            }
         }
         self.pending_enter
             .retain(|id, _| self.manager.get(*id).is_some());
@@ -2914,6 +2918,89 @@ mod tests {
         assert!(
             second_at > first_cr,
             "second body follows the first enter: {raw:?}"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn failed_body_write_keeps_message_queued() {
+        // Popping is not delivery: if the bytes never reach the pane,
+        // the message must stay queued for the next settle instead of
+        // vanishing with its pressure already moved.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","text":"held"}"#.to_string(),
+            reply: reply_tx,
+        }));
+        // Kill the writer while the record stays idle (exit undrained):
+        // every write now fails deterministically.
+        s.manager.active_pane_mut(b).expect("live pane").close();
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "failed write retries, never drops");
+        assert!(
+            !s.pending_enter.contains_key(&b),
+            "no enter staged without a body"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn failed_enter_write_stays_staged() {
+        // A CR that never reaches the pane must be retried, not
+        // forgotten: removing it strands an unsubmitted body.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","text":"held"}"#.to_string(),
+            reply: reply_tx,
+        }));
+        s.settle_comms();
+        assert!(s.pending_enter.contains_key(&b), "enter staged");
+        // Kill the writer with the CR still staged, then age past the beat.
+        s.manager.active_pane_mut(b).expect("live pane").close();
+        s.pending_enter.insert(
+            b,
+            std::time::Instant::now()
+                - crate::comms::INJECT_ENTER_DELAY
+                - std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert!(
+            s.pending_enter.contains_key(&b),
+            "failed enter stays staged for retry"
         );
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));

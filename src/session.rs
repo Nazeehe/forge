@@ -397,7 +397,10 @@ impl SessionManager {
         rec.tabs.get(rec.active_tab)?.pane.as_ref()
     }
 
-    fn active_pane_mut(&mut self, id: SessionId) -> Option<&mut crate::pty::PtyPane> {
+    /// Test seam (plus future pane surgery): kill or replace the live
+    /// pane while the record stays put, e.g. to prove a failed write
+    /// retries instead of dropping the message.
+    pub(crate) fn active_pane_mut(&mut self, id: SessionId) -> Option<&mut crate::pty::PtyPane> {
         let rec = self.sessions.get_mut(&id)?;
         let tab = rec.active_tab;
         rec.tabs.get_mut(tab)?.pane.as_mut()

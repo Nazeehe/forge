@@ -448,6 +448,13 @@ impl Broker {
         self.queued(id) + asks + bot_asks
     }
 
+    /// Oldest queued injection without popping: delivery peeks, writes,
+    /// and only then pops, so a failed write retries on the next settle
+    /// instead of losing the message with its pressure already moved.
+    pub fn peek_due(&self, id: SessionId) -> Option<Injection> {
+        self.queue.get(&id)?.front().cloned()
+    }
+
     /// Pop up to `limit` queued injections, oldest first. Popping an ask
     /// marks it delivered so pressure moves with it instead of doubling.
     pub fn take_due(&mut self, id: SessionId, limit: usize) -> Vec<Injection> {
