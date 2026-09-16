@@ -1336,6 +1336,18 @@ impl Broker {
 
     fn bot_poll(&mut self, client: &str, args: &str) -> Result<String, BotError> {
         self.check_epoch(args)?;
+        // Event IDs restart at 1 every epoch, so a resumed nonzero
+        // cursor that omits the epoch would echo itself as
+        // next_cursor forever while fresh events go unseen.
+        let cursor_arg = Self::arg_u64(args, "cursor");
+        if let Some(Ok(c)) = cursor_arg {
+            if c != 0 && Self::arg_u64(args, "epoch").is_none() {
+                return Err(BotError::new(
+                    ErrorCode::Conflict,
+                    "nonzero cursor requires the epoch",
+                ));
+            }
+        }
         let limit = match Self::arg_u64(args, "limit") {
             None => crate::bot::POLL_MAX_EVENTS,
             Some(Ok(n)) => usize::try_from(n)
@@ -1348,11 +1360,25 @@ impl Broker {
             .get(client)
             .expect("caller authenticated")
             .acked_cursor();
-        let start = match Self::arg_u64(args, "cursor") {
+        let start = match cursor_arg {
             None => acked,
             Some(Ok(c)) => c.max(acked),
             Some(Err(e)) => return Err(e),
         };
+        // A cursor past everything produced names no event in this
+        // epoch (stale pre-restart cursor, or client bug): echoing it
+        // back would skip the whole inbox, so conflict instead.
+        let produced = self
+            .clients
+            .get(client)
+            .expect("caller authenticated")
+            .produced_upto();
+        if start > produced {
+            return Err(BotError::new(
+                ErrorCode::Conflict,
+                "cursor is ahead of produced events; poll without a cursor to resume",
+            ));
+        }
         let events = self
             .clients
             .get_mut(client)
@@ -2749,6 +2775,45 @@ mod tests {
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll: {poll}");
         assert!(poll.contains(r#""kind":"ack""#), "poll: {poll}");
+    }
+
+    #[test]
+    fn stale_cursor_without_epoch_conflicts() {
+        // After a restart event IDs begin at 1 again, so a resumed
+        // nonzero cursor without the epoch would echo itself as
+        // next_cursor forever while new events 1..N go unseen.
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let err = p
+            .bcall("skippy", "bot_poll", r#"{"cursor":500}"#)
+            .expect_err("nonzero cursor needs the epoch");
+        assert_eq!(err.code, ErrorCode::Conflict);
+    }
+
+    #[test]
+    fn cursor_ahead_of_produced_events_conflicts() {
+        // A cursor past everything produced is a stale pre-restart
+        // cursor with a fresh epoch (or a client bug): echoing it
+        // back as next_cursor would skip the whole inbox.
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let first = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        let epoch = crate::mcp::top_raw(&first, "epoch").expect("epoch echoed");
+        let err = p
+            .bcall(
+                "skippy",
+                "bot_poll",
+                &format!(r#"{{"cursor":500,"epoch":{epoch}}}"#),
+            )
+            .expect_err("ahead cursor conflicts");
+        assert_eq!(err.code, ErrorCode::Conflict);
+        // An up-to-date cursor still polls fine.
+        assert!(p
+            .bcall("skippy", "bot_poll", &format!(r#"{{"epoch":{epoch}}}"#))
+            .expect("current poll validates")
+            .contains("\"events\":[]"));
     }
 
     #[test]

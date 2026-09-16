@@ -481,6 +481,12 @@ impl BotClient {
         self.acked
     }
 
+    /// Highest event ID produced this epoch (IDs restart at 1, so a
+    /// cursor past this never names a real event here).
+    pub fn produced_upto(&self) -> u64 {
+        self.next_id - 1
+    }
+
     /// Replay-or-reserve one idempotent send: a hit returns the stored
     /// result, a reused key with changed arguments conflicts, a miss
     /// reserves nothing (the caller stores after acceptance).
