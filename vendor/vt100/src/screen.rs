@@ -175,6 +175,13 @@ impl Screen {
         })
     }
 
+    /// Forge patch: sequential visible-row access so forge can convert
+    /// rows without paying the O(n) `visible_row(n)` walk per row that
+    /// `cell(r, c)` loops pay. Same window `cell()` reads through.
+    pub fn visible_rows(&self) -> impl Iterator<Item = &crate::row::Row> + '_ {
+        self.grid().visible_rows()
+    }
+
     /// Returns the text contents of the terminal logically between two cells.
     /// This will include the remainder of the starting row after `start_col`,
     /// followed by the entire contents of the rows between `start_row` and

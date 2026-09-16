@@ -35,6 +35,12 @@ delta lives here until one does.
   `scroll_region_active` helper is removed. Covered by
   `tests/scrollback_viewport.rs` (`top_anchored_region_scroll_feeds_
   scrollback`, `bottom_anchored_region_scroll_still_discards`).
+- `src/screen.rs`: added `visible_rows()` passthrough to the grid's
+  windowed iterator. Forge's row cache walks rows sequentially with
+  O(1) cells; the only public path before was `cell(r, c)`, which pays
+  an O(n) `visible_row(n)` walk per row per frame. Same window either
+  way. Covered by forge's `styled_rows_*` suite (positions, colors,
+  and the wheel-viewport test pin the mapping).
 
 ## Refreshing
 

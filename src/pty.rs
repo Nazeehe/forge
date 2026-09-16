@@ -337,18 +337,21 @@ impl PtyPane {
                 cache: (0..rows).map(|_| CachedRow::default()).collect(),
             };
         }
-        // Same cell(r, c) access as the old whole-grid pass, so the
-        // scrollback mapping is untouched; only the work is cached.
+        // Sequential rows with O(1) cells, through the same window
+        // `cell()` reads: the old cell(r, c) loop paid an O(n) walk per
+        // row on top of identical mapping.
         let mut out = Vec::with_capacity(rows as usize);
-        for r in 0..rows {
-            let slot = &mut cache.cache[r as usize];
-            if !row_matches(&slot.cells, |c| screen.cell(r, c).cloned(), cols) {
-                let (cells, line) = convert_row(|c| screen.cell(r, c).cloned(), cols);
+        for (r, vis) in screen.visible_rows().enumerate().take(rows as usize) {
+            let slot = &mut cache.cache[r];
+            if !row_matches(&slot.cells, |c| vis.get(c).cloned(), cols) {
+                let (cells, line) = convert_row(|c| vis.get(c).cloned(), cols);
                 slot.cells = cells;
                 slot.out = line;
             }
             out.push(slot.out.clone());
         }
+        // A short grid pads exactly like all-blank rows did before.
+        out.resize_with(rows as usize, Vec::new);
         while out.last().is_some_and(|line| line.is_empty()) {
             out.pop();
         }
