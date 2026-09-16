@@ -398,23 +398,23 @@ fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "ask_session",
-            description: "Ask a peer session a question; returns a conversation ID immediately and injects the question when the target is idle.",
-            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"}},"required":["target","message"]}"#,
+            description: "Ask a peer session a question; returns a conversation ID immediately and injects the question when the target is idle. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["target","message"]}"#,
         },
         ToolDef {
             name: "send_response",
-            description: "Answer a conversation addressed to this session.",
-            schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"message":{"type":"string"}},"required":["conversation_id","message"]}"#,
+            description: "Answer a conversation addressed to this session. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["conversation_id","message"]}"#,
         },
         ToolDef {
             name: "tell_session",
-            description: "Tell a peer session something; the peer acknowledges asynchronously.",
-            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"conversation_id":{"type":"string"}}}"#,
+            description: "Tell a peer session something; the peer acknowledges asynchronously. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"conversation_id":{"type":"string"},"idempotency_key":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "ack_message",
-            description: "Acknowledge a tell addressed to this session.",
-            schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"}},"required":["conversation_id"]}"#,
+            description: "Acknowledge a tell addressed to this session. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["conversation_id"]}"#,
         },
         ToolDef {
             name: "list_sessions",
@@ -438,18 +438,18 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "compact_session",
-            description: "Queue /compact for a session; omit target to compact yourself, name a peer in a shared group otherwise. Delivers when the target is idle.",
-            schema: r#"{"type":"object","properties":{"target":{"type":"string"}}}"#,
+            description: "Queue /compact for a session; omit target to compact yourself, name a peer in a shared group otherwise. Delivers when the target is idle. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            schema: r#"{"type":"object","properties":{"target":{"type":"string"},"idempotency_key":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "schedule_prompt",
-            description: "Arm a self-injection timer: the prompt lands in your own queue after delay_seconds (0 to 86400) and delivers when idle. clear_context starts it with /clear.",
-            schema: r#"{"type":"object","properties":{"prompt":{"type":"string"},"delay_seconds":{"type":"number"},"clear_context":{"type":"boolean"}},"required":["prompt"]}"#,
+            description: "Arm a self-injection timer: the prompt lands in your own queue after delay_seconds (0 to 86400) and delivers when idle. clear_context starts it with /clear. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            schema: r#"{"type":"object","properties":{"prompt":{"type":"string"},"delay_seconds":{"type":"number"},"clear_context":{"type":"boolean"},"idempotency_key":{"type":"string"}},"required":["prompt"]}"#,
         },
         ToolDef {
             name: "cancel_scheduled_prompt",
-            description: "Cancel an armed self-injection timer by timer_id.",
-            schema: r#"{"type":"object","properties":{"timer_id":{"type":"string"}},"required":["timer_id"]}"#,
+            description: "Cancel an armed self-injection timer by timer_id. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            schema: r#"{"type":"object","properties":{"timer_id":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["timer_id"]}"#,
         },
         ToolDef {
             name: "start_session",
@@ -752,6 +752,30 @@ mod tests {
             "visual_show",
         ] {
             assert!(res.contains(&format!(r#""name":"{tool}""#)), "res: {res}");
+        }
+        // Every send honors idempotency_key, so every send schema
+        // must advertise it: agents cannot retry safely with a key
+        // they were never told exists. Each tool owns the slice up
+        // to the next tool's name, so a neighbor's key cannot mask
+        // a missing one.
+        for tool in [
+            "ask_session",
+            "send_response",
+            "tell_session",
+            "ack_message",
+            "compact_session",
+            "schedule_prompt",
+            "cancel_scheduled_prompt",
+        ] {
+            let marker = format!(r#""name":"{tool}""#);
+            let at = res.find(&marker).expect("tool listed");
+            let rest = &res[at + marker.len()..];
+            let end = rest.find(r#""name":""#).unwrap_or(rest.len());
+            let window = &rest[..end];
+            assert!(
+                window.contains("idempotency_key"),
+                "{tool} advertises idempotency_key: {window}"
+            );
         }
     }
 

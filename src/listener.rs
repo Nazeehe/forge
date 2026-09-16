@@ -59,6 +59,44 @@ pub struct HookRequest {
     pub timed_out: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Commit-claim states for a queued request. Pending moves exactly
+/// once: the owner claims Executing and runs the mutation, or the
+/// timed-out handler claims TimedOut and the late owner skips it. A
+/// plain flag cannot do this: the owner could read `false`, stall on
+/// the scheduler past the deadline, then mutate after the caller gave
+/// up. The atomic claim closes that race; a mutation already running
+/// when the deadline passes still commits, and idempotent retry
+/// covers its caller.
+pub const CLAIM_PENDING: u8 = 0;
+pub const CLAIM_EXECUTING: u8 = 1;
+pub const CLAIM_TIMED_OUT: u8 = 2;
+
+/// Claim a queued request for execution (owner side). True means this
+/// caller won Pending-to-Executing and must run the mutation; false
+/// means the handler already timed it out and the request is skipped.
+pub fn claim_execute(flag: &std::sync::atomic::AtomicU8) -> bool {
+    flag.compare_exchange(
+        CLAIM_PENDING,
+        CLAIM_EXECUTING,
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+    )
+    .is_ok()
+}
+
+/// Mark a queued request timed out (handler side). True means the mark
+/// landed and a late owner will skip; false means the owner already
+/// claimed it — the mutation commits, and the caller's retry replays.
+pub fn claim_timeout(flag: &std::sync::atomic::AtomicU8) -> bool {
+    flag.compare_exchange(
+        CLAIM_PENDING,
+        CLAIM_TIMED_OUT,
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+    )
+    .is_ok()
+}
+
 /// One comms tool call for the broker (4c). Always synchronous: the loop
 /// answers at once and the handler relays the one-line verdict.
 #[derive(Debug)]
@@ -67,10 +105,9 @@ pub struct CommsRequest {
     pub tool: String,
     pub args: String,
     pub reply: std::sync::mpsc::Sender<String>,
-    /// Set by the connection handler when the caller stops waiting: the
-    /// caller already holds a timeout verdict, so `apply` must not run
-    /// the send for nobody. Shared (not copied) with the handler.
-    pub timed_out: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Commit claim shared (not copied) with the connection handler:
+    /// `apply` runs the send only after winning Pending-to-Executing.
+    pub claim: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 /// One external bot call for the broker. Identity travels as the
@@ -83,6 +120,9 @@ pub struct BotRequest {
     pub tool: String,
     pub args: String,
     pub reply: std::sync::mpsc::Sender<String>,
+    /// Same commit claim as [`CommsRequest`]: no mutation starts after
+    /// the caller stopped waiting.
+    pub claim: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 /// Parsed bot envelope parts: credential plus the tool call. Missing
@@ -396,14 +436,14 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
     };
     let args = crate::mcp::top_raw(&text, "args").unwrap_or("{}").to_string();
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let claim = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CLAIM_PENDING));
     if tx
         .try_send(crate::event::AppEvent::CommsRequest(CommsRequest {
             run_id,
             tool,
             args,
             reply: reply_tx,
-            timed_out: std::sync::Arc::clone(&timed_out),
+            claim: std::sync::Arc::clone(&claim),
         }))
         .is_err()
     {
@@ -417,10 +457,11 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
         }
         let _ = conn.write_all(&bytes);
     } else {
-        // The caller already holds its own timeout verdict; flag the
-        // queued request so a late `apply` skips the send instead of
-        // running it for nobody (same shape as hook timeout-deny).
-        timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+        // The caller already holds its own timeout verdict: claim
+        // TimedOut so a late `apply` (even one stalled past the
+        // deadline) skips the send. When the owner already claimed
+        // it, the mutation commits and the caller's retry replays.
+        claim_timeout(&claim);
     }
 }
 
@@ -476,6 +517,7 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
         return;
     }
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let claim = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CLAIM_PENDING));
     if tx
         .try_send(crate::event::AppEvent::BotRequest(BotRequest {
             name: parts.name,
@@ -483,6 +525,7 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
             tool: parts.tool,
             args: parts.args,
             reply: reply_tx,
+            claim: std::sync::Arc::clone(&claim),
         }))
         .is_err()
     {
@@ -495,6 +538,10 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
             bytes.push(b'\n');
         }
         let _ = conn.write_all(&bytes);
+    } else {
+        // Same commit claim as comms calls: a late `apply` skips
+        // instead of mutating for a caller that stopped waiting.
+        claim_timeout(&claim);
     }
 }
 
@@ -503,6 +550,29 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn commit_claim_has_exactly_one_winner() {
+        use std::sync::Arc;
+        // Owner first: the mutation runs, and the late timeout mark
+        // changes nothing.
+        let claimed = Arc::new(std::sync::atomic::AtomicU8::new(CLAIM_PENDING));
+        assert!(claim_execute(&claimed), "owner claims");
+        assert!(!claim_timeout(&claimed), "late timeout loses");
+        assert_eq!(
+            claimed.load(std::sync::atomic::Ordering::SeqCst),
+            CLAIM_EXECUTING
+        );
+        // Timeout first: the mark lands, and a stalled owner that
+        // wakes past the deadline still skips.
+        let late = Arc::new(std::sync::atomic::AtomicU8::new(CLAIM_PENDING));
+        assert!(claim_timeout(&late), "timeout marks");
+        assert!(!claim_execute(&late), "late owner skips");
+        assert_eq!(
+            late.load(std::sync::atomic::Ordering::SeqCst),
+            CLAIM_TIMED_OUT
+        );
+    }
 
     #[test]
     fn saturated_queue_drops_to_caller_timeout() {

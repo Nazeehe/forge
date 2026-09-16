@@ -1882,12 +1882,13 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::CommsRequest(req) => {
-                // A request the caller already timed out on is never
-                // applied: the send would run for nobody while the
-                // caller retries, minting exactly the duplicate the
-                // session idempotency cache exists to absorb. Say so
-                // on the reply so the verdict is never a stale ok.
-                if req.timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+                // The commit claim runs atomically for a reason: a
+                // plain flag could read false, stall on the scheduler
+                // past the deadline, then mutate after the caller gave
+                // up. Losing the claim means the handler already timed
+                // out, so the send is skipped and the retry guidance
+                // goes on the reply instead of a stale ok.
+                if !crate::listener::claim_execute(&req.claim) {
                     let _ = req.reply.send(
                         "{\"ok\":false,\"error\":\"caller timed out; retry with the same idempotency_key\"}\n"
                             .to_string(),
@@ -1919,6 +1920,22 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::BotRequest(req) => {
+                // Same commit claim as comms requests: no bot mutation
+                // starts after its caller stopped waiting.
+                if !crate::listener::claim_execute(&req.claim) {
+                    let mut line = String::from("{\"ok\":false,\"error\":");
+                    line.push_str(
+                        &crate::bot::BotError::new(
+                            crate::bot::ErrorCode::Timeout,
+                            "caller timed out; retry with the same idempotency_key",
+                        )
+                        .to_json(),
+                    );
+                    line.push_str("}\n");
+                    let _ = req.reply.send(line);
+                    self.dirty = true;
+                    return;
+                }
                 let now = std::time::Instant::now();
                 let line = match self.broker.bot_call(
                     &self.manager,
@@ -2374,7 +2391,7 @@ mod tests {
                 tool: "schedule_prompt".to_string(),
                 args: format!("{{\"prompt\":{prompt:?},\"delay_seconds\":0}}"),
                 reply: reply_tx,
-                timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
             }));
             let line = reply_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
@@ -2472,7 +2489,7 @@ mod tests {
             tool: "ask_session".to_string(),
             args: r#"{"target":"b","message":"ready?"}"#.to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2509,7 +2526,7 @@ mod tests {
             tool: "ask_session".to_string(),
             args: r#"{"target":"b","message":"ready?"}"#.to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_TIMED_OUT)),
         }));
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2530,7 +2547,7 @@ mod tests {
             tool: "ask_session".to_string(),
             args: "{}".to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2560,7 +2577,7 @@ mod tests {
             tool: "ask_session".to_string(),
             args: r#"{"target":"b","message":"q?"}"#.to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         assert!(s.manager.kill(b));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2607,7 +2624,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 1, "busy target waits");
@@ -2670,7 +2687,7 @@ mod tests {
                 tool: tool.to_string(),
                 args: args.to_string(),
                 reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
             }));
             reply_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
@@ -2777,7 +2794,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: "{\"target\":\"a\",\"text\":\"hold\"}".to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(a), 1, "generating target waits");
@@ -2854,7 +2871,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"message\":\"ping-body\"}".to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 0, "raw session is idle: body delivered");
@@ -2969,7 +2986,7 @@ mod tests {
                 tool: "tell_session".to_string(),
                 args: format!("{{\"target\":\"b\",\"text\":{text:?}}}"),
                 reply: reply_tx,
-                timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
             }));
         };
         tell(&mut s, "first-one");
@@ -3048,7 +3065,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","text":"held"}"#.to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         // Kill the writer while the record stays idle (exit undrained):
         // every write now fails deterministically.
@@ -3087,7 +3104,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","text":"held"}"#.to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         s.settle_comms();
         assert!(s.pending_enter.contains_key(&b), "enter staged");
@@ -3129,7 +3146,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","message":"wait"}"#.to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         // Typing debounces the typed-in pane only (never its neighbors).
         s.note_human_input(b);
@@ -3265,7 +3282,7 @@ mod tests {
                 tool: "tell_session".to_string(),
                 args: r#"{"target":"b","message":"wait"}"#.to_string(),
                 reply: reply_tx,
-                timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
             }));
         };
         // Human typing in A leaves B's delivery alone.
@@ -3322,7 +3339,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","message":"wait"}"#.to_string(),
             reply: reply_tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         // Fresh hook activity holds delivery even to an idle target.
         s.last_hook_activity.insert(b, std::time::Instant::now());
@@ -3769,7 +3786,7 @@ mod tests {
             tool: tool.to_string(),
             args: args.to_string(),
             reply: tx,
-            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
         }));
         rx.recv().expect("comms verdict arrives")
     }
@@ -3788,8 +3805,34 @@ mod tests {
             tool: tool.to_string(),
             args: args.to_string(),
             reply: tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                crate::listener::CLAIM_PENDING,
+            )),
         }));
         rx.recv().expect("bot verdict arrives")
+    }
+
+    #[test]
+    fn timed_out_bot_request_skips_and_says_so() {
+        // The claim lost means the handler already timed out: no bot
+        // mutation runs, and the reply guides the retry to its key.
+        let mut state = bot_state();
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.apply(AppEvent::BotRequest(crate::listener::BotRequest {
+            name: "skippy".to_string(),
+            token: BOT_TOKEN.to_string(),
+            tool: "list_sessions".to_string(),
+            args: "{}".to_string(),
+            reply: tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                crate::listener::CLAIM_TIMED_OUT,
+            )),
+        }));
+        let line = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("skip verdict arrives");
+        assert!(line.contains(r#""ok":false"#), "line: {line:?}");
+        assert!(line.contains("timed out"), "line: {line:?}");
     }
 
     const BOT_TOKEN: &str = "0123456789abcdef0123456789abcdef";
