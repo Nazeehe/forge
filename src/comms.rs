@@ -219,6 +219,11 @@ pub struct Broker {
     /// Conversations with a bot peer as one party. Parallel to `convs`
     /// so bot traffic never touches terminal queues.
     bot_convs: HashMap<String, BotConv>,
+    /// Exited sessions with bot failure notices still unsent (their
+    /// inbox was full). Sweeps retry them and drop ids with nothing
+    /// Open left; without this, a lost deposit would close the conv
+    /// while the notice never arrives.
+    dead_sessions: HashSet<SessionId>,
 }
 
 impl Broker {
@@ -233,6 +238,7 @@ impl Broker {
             epoch: crate::bot::generate_epoch(),
             clients: HashMap::new(),
             bot_convs: HashMap::new(),
+            dead_sessions: HashSet::new(),
         }
     }
 
@@ -2120,25 +2126,41 @@ impl Broker {
             if conv.state != BotConvState::Open || conv.session != id {
                 continue;
             }
-            conv.state = BotConvState::Failed;
             if conv.from_client {
                 bot_notify.push((
                     conv.client.clone(),
                     conv_id.clone(),
                     conv.session_name.clone(),
                 ));
+            } else {
+                conv.state = BotConvState::Failed;
             }
         }
         for (client, conv_id, session_name) in bot_notify {
-            if let Some(c) = self.clients.get_mut(&client) {
-                let _ = c.deposit(
-                    BotKind::Failed,
-                    &conv_id,
-                    &id.to_string(),
-                    &session_name,
-                    "target exited",
-                    crate::bot::now_unix_ms(),
-                );
+            // Deposit first: only a recorded failure closes the
+            // conversation. A full inbox leaves it Open and parks the
+            // session for retry on later sweeps (see tick).
+            let deposited = match self.clients.get_mut(&client) {
+                Some(c) => c
+                    .deposit(
+                        BotKind::Failed,
+                        &conv_id,
+                        &id.to_string(),
+                        &session_name,
+                        "target exited",
+                        crate::bot::now_unix_ms(),
+                    )
+                    .is_ok(),
+                // No inbox exists (revocation fails convs itself, so
+                // this is belt-and-braces): nothing to retry toward.
+                None => true,
+            };
+            if deposited {
+                if let Some(conv) = self.bot_convs.get_mut(&conv_id) {
+                    conv.state = BotConvState::Failed;
+                }
+            } else {
+                self.dead_sessions.insert(id);
             }
         }
     }
@@ -2205,7 +2227,6 @@ impl Broker {
                 continue;
             }
             if now.duration_since(conv.last_update) >= COURTESY_GRACE {
-                conv.reminded = true;
                 let source = if conv.from_client {
                     conv.client.clone()
                 } else {
@@ -2222,24 +2243,90 @@ impl Broker {
         }
         for (session, client, conv_id, source, to_session) in bot_due {
             if to_session {
+                // Session queues are unbounded: the push cannot fail.
                 self.push(
                     session,
                     Injection {
-                        conv: conv_id,
+                        conv: conv_id.clone(),
                         kind: InjectKind::Reminder,
                         from: source,
                         text: "no update since your ack; the source is still waiting".to_string(),
                     },
                 );
-            } else if let Some(c) = self.clients.get_mut(&client) {
-                let _ = c.deposit(
-                    BotKind::Reminder,
-                    &conv_id,
-                    &session.to_string(),
-                    &source,
-                    "no update since your ack; the source is still waiting",
-                    crate::bot::now_unix_ms(),
-                );
+                if let Some(conv) = self.bot_convs.get_mut(&conv_id) {
+                    conv.reminded = true;
+                }
+            } else {
+                // The inbox is capped: only a deposited reminder counts
+                // as sent. A full inbox leaves the conversation
+                // un-reminded and the next sweep retries.
+                let deposited = self
+                    .clients
+                    .get_mut(&client)
+                    .map(|c| {
+                        c.deposit(
+                            BotKind::Reminder,
+                            &conv_id,
+                            &session.to_string(),
+                            &source,
+                            "no update since your ack; the source is still waiting",
+                            crate::bot::now_unix_ms(),
+                        )
+                        .is_ok()
+                    })
+                    .unwrap_or(false);
+                if deposited {
+                    if let Some(conv) = self.bot_convs.get_mut(&conv_id) {
+                        conv.reminded = true;
+                    }
+                }
+            }
+        }
+        // Retry exit-failure notices whose inbox was full: each success
+        // closes its conversation, and ids with nothing Open drop out.
+        let dead: Vec<SessionId> = self.dead_sessions.iter().copied().collect();
+        for id in dead {
+            let mut pending = Vec::new();
+            for (conv_id, conv) in self.bot_convs.iter() {
+                if conv.state == BotConvState::Open
+                    && conv.session == id
+                    && conv.from_client
+                {
+                    pending.push((
+                        conv_id.clone(),
+                        conv.client.clone(),
+                        conv.session_name.clone(),
+                    ));
+                }
+            }
+            for (conv_id, client, session_name) in pending {
+                let deposited = self
+                    .clients
+                    .get_mut(&client)
+                    .map(|c| {
+                        c.deposit(
+                            BotKind::Failed,
+                            &conv_id,
+                            &id.to_string(),
+                            &session_name,
+                            "target exited",
+                            crate::bot::now_unix_ms(),
+                        )
+                        .is_ok()
+                    })
+                    .unwrap_or(false);
+                if deposited {
+                    if let Some(conv) = self.bot_convs.get_mut(&conv_id) {
+                        conv.state = BotConvState::Failed;
+                    }
+                }
+            }
+            let live = self
+                .bot_convs
+                .values()
+                .any(|c| c.state == BotConvState::Open && c.session == id);
+            if !live {
+                self.dead_sessions.remove(&id);
             }
         }
     }
@@ -3261,6 +3348,110 @@ mod tests {
             .broker
             .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
         assert!(p.state.broker.take_due(p.b, 10).is_empty());
+    }
+
+    /// Fill a client's inbox to the cap with padding events. Deposit
+    /// fails exactly when full, so the loop needs no inbox access.
+    fn fill_inbox(p: &mut Pair, client: &str) {
+        let c = p
+            .state
+            .broker
+            .clients
+            .get_mut(client)
+            .expect("client registered");
+        let mut n = 0;
+        while c
+            .deposit(crate::bot::BotKind::Tell, "pad", "pad", "pad", "pad", 0)
+            .is_ok()
+        {
+            n += 1;
+        }
+        assert!(n > 0, "inbox filled to the cap");
+    }
+
+    /// Poll-plus-ack the whole backlog: polls advance the received
+    /// cursor 20 at a time, acks drain what was received. Thirteen
+    /// steps reach exactly 256 (the cap).
+    fn drain_inbox(p: &mut Pair, client: &str) {
+        for step in 1..=13 {
+            let cursor = (step * 20).min(crate::bot::INBOX_CAP as u64);
+            p.bcall(client, "bot_poll", "{}").expect("poll validates");
+            p.bcall(client, "bot_ack", &format!(r#"{{"cursor":{cursor}}}"#))
+                .expect("ack validates");
+        }
+    }
+
+    #[test]
+    fn bot_courtesy_reminder_retries_a_full_inbox() {
+        // A reminder that cannot be deposited must not count as sent:
+        // the conversation stays un-reminded and the next sweep retries
+        // once the client makes room. Session-originated tell, so the
+        // reminder travels client-ward into the (possibly full) inbox.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_b.clone(),
+                "tell_session",
+                r#"{"target":"skippy","text":"hi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall(
+            "skippy",
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("client acks");
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the ack");
+        fill_inbox(&mut p, "skippy");
+        // Past grace with nowhere to put the reminder: still pending.
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(31));
+        assert!(
+            !p.state.broker.bot_convs.get(&conv).expect("conv").reminded,
+            "undelivered reminder stays un-reminded"
+        );
+        // Room opens: the next sweep delivers exactly one reminder.
+        drain_inbox(&mut p, "skippy");
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert!(p.state.broker.bot_convs.get(&conv).expect("conv").reminded);
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert_eq!(poll.matches(r#""kind":"reminder""#).count(), 1, "poll: {poll}");
+        assert!(poll.contains(&conv), "poll: {poll}");
+    }
+
+    #[test]
+    fn exit_failure_notice_retries_a_full_inbox() {
+        // Same ordering for exit notices: a full inbox must hold the
+        // conversation Open (retry on later sweeps), never mark Failed
+        // while the notice is lost.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "tell_session", r#"{"target":"b","text":"hi"}"#)
+            .expect("client tells");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        fill_inbox(&mut p, "skippy");
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        assert_eq!(
+            p.state.broker.bot_convs.get(&conv).expect("conv").state,
+            crate::bot::BotConvState::Open,
+            "unsent failure notice holds the conv open"
+        );
+        // Room opens: the next sweep delivers the failure and closes.
+        drain_inbox(&mut p, "skippy");
+        p.state.broker.tick(std::time::Instant::now());
+        assert_eq!(
+            p.state.broker.bot_convs.get(&conv).expect("conv").state,
+            crate::bot::BotConvState::Failed
+        );
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert_eq!(poll.matches(r#""kind":"failed""#).count(), 1, "poll: {poll}");
     }
 
     #[test]
