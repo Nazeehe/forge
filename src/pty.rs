@@ -107,7 +107,27 @@ pub struct PtyPane {
     master: Option<Box<dyn MasterPty + Send>>,
     child: ChildCell,
     screen: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
+    row_cache: std::sync::Mutex<RowCache>,
     _reader: Option<thread::JoinHandle<()>>,
+}
+
+/// Converted-row cache keyed by raw cell values. A row reconverts only
+/// when one of its cells differs — `Cell: PartialEq` covers contents,
+/// colors, every text-mode bit, and the wide flags, so a match proves
+/// the conversion would be byte-identical. Value-keyed, never
+/// dirty-bit keyed: a missed change would cost a redundant conversion,
+/// never a stale row.
+#[derive(Default)]
+struct RowCache {
+    rows: u16,
+    cols: u16,
+    cache: Vec<CachedRow>,
+}
+
+#[derive(Default)]
+struct CachedRow {
+    cells: Vec<Option<vt100::Cell>>,
+    out: Vec<FormattedCell>,
 }
 
 fn lock_child(cell: &ChildCell) -> MutexGuard<'_, Box<dyn portable_pty::Child + Send + Sync>> {
@@ -120,6 +140,63 @@ fn lock_writer(cell: &WriterCell) -> MutexGuard<'_, Option<Box<dyn Write + Send>
 
 fn lock_screen(cell: &std::sync::Arc<std::sync::Mutex<vt100::Parser>>) -> std::sync::MutexGuard<'_, vt100::Parser> {
     cell.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock_cache(cell: &std::sync::Mutex<RowCache>) -> std::sync::MutexGuard<'_, RowCache> {
+    cell.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// True when the row still holds exactly the cached cells. Allocation
+/// free on a hit: cells compare by value, in place.
+fn row_matches(
+    cells: &[Option<vt100::Cell>],
+    get: impl Fn(u16) -> Option<vt100::Cell>,
+    cols: u16,
+) -> bool {
+    cells.len() == cols as usize && (0..cols).all(|c| cells[c as usize] == get(c))
+}
+
+/// Convert one visible row, returning the raw cells it was built from
+/// alongside the conversion. Logic mirrors the old whole-grid pass
+/// cell for cell: every cell emitted (padding included), wide
+/// continuations skipped, trailing plain padding and blank rows
+/// trimmed by the caller.
+fn convert_row(
+    get: impl Fn(u16) -> Option<vt100::Cell>,
+    cols: u16,
+) -> (Vec<Option<vt100::Cell>>, Vec<FormattedCell>) {
+    let mut cells = Vec::with_capacity(cols as usize);
+    let mut line = Vec::new();
+    for c in 0..cols {
+        let cell = get(c);
+        if let Some(ref cell) = cell {
+            if cell.is_wide_continuation() {
+                cells.push(Some(cell.clone()));
+                continue;
+            }
+            let text = cell.contents();
+            let format = CellFormat {
+                fg: map_color(cell.fgcolor()),
+                bg: map_color(cell.bgcolor()),
+                bold: cell.bold(),
+                italic: cell.italic(),
+                underline: cell.underline(),
+                inverse: cell.inverse(),
+                dim: cell.dim(),
+            };
+            line.push(FormattedCell {
+                text: if text.is_empty() { " ".to_string() } else { text },
+                format,
+            });
+        }
+        cells.push(cell);
+    }
+    while line.last().is_some_and(|cell| {
+        cell.text == " " && cell.format == CellFormat::plain()
+    }) {
+        line.pop();
+    }
+    (cells, line)
 }
 
 impl PtyPane {
@@ -195,6 +272,7 @@ impl PtyPane {
             master: Some(pair.master),
             child,
             screen,
+            row_cache: std::sync::Mutex::new(RowCache::default()),
             _reader: Some(handle),
         })
     }
@@ -248,37 +326,28 @@ impl PtyPane {
         let parser = lock_screen(&self.screen);
         let screen = parser.screen();
         let (rows, cols) = screen.size();
-        let mut out = Vec::new();
+        let mut cache = lock_cache(&self.row_cache);
+        // A size change reflows every row: drop the cache wholesale.
+        // Scrollback moves, erase ops, and alt-screen swaps all change
+        // cell values, so the per-row comparison below catches them.
+        if cache.rows != rows || cache.cols != cols {
+            *cache = RowCache {
+                rows,
+                cols,
+                cache: (0..rows).map(|_| CachedRow::default()).collect(),
+            };
+        }
+        // Same cell(r, c) access as the old whole-grid pass, so the
+        // scrollback mapping is untouched; only the work is cached.
+        let mut out = Vec::with_capacity(rows as usize);
         for r in 0..rows {
-            let mut line = Vec::new();
-            for c in 0..cols {
-                let Some(cell) = screen.cell(r, c) else {
-                    continue;
-                };
-                if cell.is_wide_continuation() {
-                    continue;
-                }
-                let text = cell.contents();
-                let format = CellFormat {
-                    fg: map_color(cell.fgcolor()),
-                    bg: map_color(cell.bgcolor()),
-                    bold: cell.bold(),
-                    italic: cell.italic(),
-                    underline: cell.underline(),
-                    inverse: cell.inverse(),
-                    dim: cell.dim(),
-                };
-                line.push(FormattedCell {
-                    text: if text.is_empty() { " ".to_string() } else { text },
-                    format,
-                });
+            let slot = &mut cache.cache[r as usize];
+            if !row_matches(&slot.cells, |c| screen.cell(r, c).cloned(), cols) {
+                let (cells, line) = convert_row(|c| screen.cell(r, c).cloned(), cols);
+                slot.cells = cells;
+                slot.out = line;
             }
-            while line.last().is_some_and(|cell| {
-                cell.text == " " && cell.format == CellFormat::plain()
-            }) {
-                line.pop();
-            }
-            out.push(line);
+            out.push(slot.out.clone());
         }
         while out.last().is_some_and(|line| line.is_empty()) {
             out.pop();
@@ -820,6 +889,122 @@ mod tests {
             "SGR 2 marks faint: {rows:?}"
         );
         assert!(!rows[0][4].format.dim, "SGR 22 clears faint");
+        pane.close();
+    }
+
+    #[test]
+    fn styled_rows_refresh_italic_underline_inverse() {
+        // Single-attribute transitions must surface through the row
+        // cache: if cell comparison missed a mode bit, the stale row
+        // would keep the old format forever.
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "printf 'a\\033[3mI\\033[23mb\\033[4mU\\033[24mc\\033[7mV\\033[27md'; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        let rows = loop {
+            let rows = pane.styled_rows();
+            if row_text(rows.first().unwrap_or(&Vec::new())).starts_with("aIbUcVd") {
+                break rows;
+            }
+            if Instant::now() > deadline {
+                panic!("styled rows never arrived: {rows:?}");
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let row = &rows[0];
+        assert!(!row[0].format.italic, "plain stays plain");
+        assert!(row[1].format.italic, "SGR 3 marks italic");
+        assert!(!row[2].format.italic, "SGR 23 clears italic");
+        assert!(row[3].format.underline, "SGR 4 marks underline");
+        assert!(!row[4].format.underline, "SGR 24 clears underline");
+        assert!(row[5].format.inverse, "SGR 7 marks inverse");
+        assert!(!row[6].format.inverse, "SGR 27 clears inverse");
+        pane.close();
+    }
+
+    #[test]
+    fn styled_rows_refresh_wide_then_narrow() {
+        // Overwriting a wide glyph with a narrow one flips the lead
+        // and continuation width bits; the converted row must follow.
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "printf '\\u4e2d'; sleep 1; printf '\\rX'; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        let rows = loop {
+            let rows = pane.styled_rows();
+            let first = row_text(rows.first().unwrap_or(&Vec::new()));
+            if first.starts_with('X') {
+                break rows;
+            }
+            if Instant::now() > deadline {
+                panic!("overwrite never arrived: {rows:?}");
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(&row_text(&rows[0])[..1], "X");
+        pane.close();
+    }
+
+    #[test]
+    fn styled_rows_resize_drops_stale_rows() {
+        // A smaller grid must not keep serving rows converted at the
+        // old size.
+        let (tx, rx) = channel();
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "for i in $(seq 1 20); do echo line-$i; done; sleep 30",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let rows = pane.styled_rows();
+            if rows.len() >= 20
+                && row_text(rows.last().unwrap_or(&Vec::new())).contains("line-20")
+            {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("lines never arrived");
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        pane.resize(10, 80).unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let rows = pane.styled_rows();
+            if rows.len() <= 10 {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("stale rows after resize: {}", rows.len());
+            }
+            while rx.try_recv().is_ok() {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
         pane.close();
     }
 
