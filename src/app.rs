@@ -57,8 +57,17 @@ pub struct AppState {
     /// Sessions owed a staged Enter: an injection body went out and its CR
     /// follows after [`crate::comms::INJECT_ENTER_DELAY`], one entry per
     /// session. Later bodies stay queued until the staged CR lands, so
-    /// each body submits as its own input event.
-    pub pending_enter: std::collections::HashMap<crate::session::SessionId, std::time::Instant>,
+    /// each body submits as its own input event. The entry remembers
+    /// which conversation and kind went out, so human input that kills
+    /// the staged submit can tell the sender loudly; walkthrough
+    /// prompts stage with `None` (no sender to tell).
+    pub pending_enter: std::collections::HashMap<
+        crate::session::SessionId,
+        (
+            std::time::Instant,
+            Option<(String, crate::comms::InjectKind)>,
+        ),
+    >,
     /// One read-only chrome view, scoped to the currently focused session.
     pub overlay_view: Option<(crate::session::SessionId, usize)>,
     /// Live walkthroughs by session. Entered agent-side through the
@@ -762,7 +771,7 @@ impl AppState {
         if self.manager.inject_write(id, markup.as_bytes()).is_err() {
             return false;
         }
-        self.pending_enter.insert(id, std::time::Instant::now());
+        self.pending_enter.insert(id, (std::time::Instant::now(), None));
         let Some(wt) = self.walkthroughs.get_mut(&id) else {
             return false;
         };
@@ -1323,7 +1332,20 @@ impl AppState {
     pub fn note_human_input(&mut self, id: crate::session::SessionId) {
         self.last_human_input
             .insert(id, std::time::Instant::now());
-        self.pending_enter.remove(&id);
+        // Dropping the staged submit protects the human's draft, but
+        // the body is already in the prompt: it may mix or be
+        // discarded, so its sender is told loudly (walkthrough
+        // prompts have no sender and stay silent).
+        if let Some((_, staged)) = self.pending_enter.remove(&id) {
+            if let Some((conv, kind)) = staged {
+                let typer = self
+                    .manager
+                    .get(id)
+                    .map(|rec| rec.name.clone())
+                    .unwrap_or_else(|| id.to_string());
+                self.broker.clobber_notice(id, &typer, &conv, kind);
+            }
+        }
     }
 
     /// Live session names for dialog validation.
@@ -1634,8 +1656,13 @@ impl AppState {
                 let taken = self.broker.take_due(id, 1);
                 debug_assert!(taken.first().map(|t| &t.conv) == Some(&head.conv));
                 // Arm the staged Enter: the CR goes out on a later tick,
-                // never in the same burst as the text.
-                self.pending_enter.insert(id, now);
+                // never in the same burst as the text. Remember what
+                // went out, so human input that kills the submit can
+                // tell the sender.
+                self.pending_enter.insert(
+                    id,
+                    (now, Some((head.conv.clone(), head.kind))),
+                );
                 self.dirty = true;
             }
         }
@@ -1651,7 +1678,7 @@ impl AppState {
         let due: Vec<crate::session::SessionId> = self
             .pending_enter
             .iter()
-            .filter(|(_, &at)| now.duration_since(at) >= crate::comms::INJECT_ENTER_DELAY)
+            .filter(|(_, (at, _))| now.duration_since(*at) >= crate::comms::INJECT_ENTER_DELAY)
             .map(|(&id, _)| id)
             .collect();
         for id in due {
@@ -3112,9 +3139,10 @@ mod tests {
         s.manager.active_pane_mut(b).expect("live pane").close();
         s.pending_enter.insert(
             b,
-            std::time::Instant::now()
+            (std::time::Instant::now()
                 - crate::comms::INJECT_ENTER_DELAY
                 - std::time::Duration::from_millis(100),
+            None),
         );
         s.settle_comms();
         assert!(
@@ -3154,9 +3182,105 @@ mod tests {
         assert_eq!(s.broker.queued(b), 1, "fresh typing debounces delivery");
         // Human input also drops a staged Enter for that session: our CR
         // must never submit the human's draft.
-        s.pending_enter.insert(b, std::time::Instant::now());
+        s.pending_enter.insert(b, (std::time::Instant::now(), None));
         s.note_human_input(b);
         assert!(!s.pending_enter.contains_key(&b), "human owns the prompt");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn typed_over_tell_notifies_the_source() {
+        // The tell body reached B's prompt with its Enter staged;
+        // B types first, so the staged submit dies to protect the
+        // draft. The body may have mixed or been discarded, so A is
+        // told loudly instead of assuming it landed cleanly.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","message":"wait"}"#.to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                crate::listener::CLAIM_PENDING,
+            )),
+        }));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "body delivered");
+        assert!(s.pending_enter.contains_key(&b), "enter staged");
+        s.note_human_input(b);
+        let due = s.broker.take_due(a, 10);
+        assert_eq!(due.len(), 1, "source hears the clobber");
+        assert!(matches!(due[0].kind, crate::comms::InjectKind::Failed));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn typed_over_response_notifies_the_answerer() {
+        // B's answer sits in A's prompt awaiting its staged Enter;
+        // A types first. The answerer (not the asker) is told.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let mut converse = |run: &str, tool: &str, args: String| {
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+                run_id: run.to_string(),
+                tool: tool.to_string(),
+                args,
+                reply: reply_tx,
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                    crate::listener::CLAIM_PENDING,
+                )),
+            }));
+            reply_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("verdict arrives")
+        };
+        let ask_line = converse(
+            &run_a.to_string(),
+            "ask_session",
+            r#"{"target":"b","message":"q?"}"#.to_string(),
+        );
+        assert!(ask_line.contains(r#""ok":true"#), "ask accepted: {ask_line}");
+        let conv = crate::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
+            .expect("conversation id");
+        let resp_line = converse(
+            &run_b.to_string(),
+            "send_response",
+            format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        );
+        assert!(resp_line.contains(r#""ok":true"#), "answer accepted: {resp_line}");
+        s.settle_comms();
+        assert!(s.pending_enter.contains_key(&a), "enter staged");
+        s.note_human_input(a);
+        let due = s.broker.take_due(b, 10);
+        assert_eq!(due.len(), 1, "answerer hears the clobber");
+        assert!(matches!(due[0].kind, crate::comms::InjectKind::Failed));
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
     }
@@ -3248,9 +3372,10 @@ mod tests {
         assert!(!s.manager.get(a).unwrap().state.is_live(), "marked exited");
         s.pending_enter.insert(
             a,
-            std::time::Instant::now()
+            (std::time::Instant::now()
                 - crate::comms::INJECT_ENTER_DELAY
                 - std::time::Duration::from_millis(100),
+            None),
         );
         s.settle_comms();
         assert!(!s.pending_enter.contains_key(&a), "exited entry pruned");
@@ -3294,9 +3419,10 @@ mod tests {
         // gate, not one-body-per-Enter staging.
         s.pending_enter.insert(
             b,
-            std::time::Instant::now()
+            (std::time::Instant::now()
                 - crate::comms::INJECT_ENTER_DELAY
                 - std::time::Duration::from_millis(100),
+            None),
         );
         s.settle_comms();
         assert!(!s.pending_enter.contains_key(&b), "enter flushed");

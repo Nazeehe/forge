@@ -2231,6 +2231,83 @@ impl Broker {
         out
     }
 
+    /// A staged submit died to human input with its body already in
+    /// the pane: the message may have mixed with the draft or been
+    /// discarded. Tell the sender loudly (one notice, never chained).
+    /// Asks and tells notify their source, responses and acks their
+    /// target; every other kind stays best-effort as before (timer
+    /// commands name no conversation at all, and follow-ups ride
+    /// threads their sources already watch). Bot senders hear it
+    /// through their inbox, parking on a full one like any exit
+    /// notice. Nobody is told about their own typing.
+    pub fn clobber_notice(
+        &mut self,
+        typer: SessionId,
+        typer_name: &str,
+        conv_id: &str,
+        kind: InjectKind,
+    ) {
+        const TEXT: &str =
+            "typed over your message before it submitted; confirm they saw it";
+        if let Some(sender) = self.convs.get(conv_id).and_then(|conv| match kind {
+            InjectKind::Ask | InjectKind::Tell => Some(conv.source),
+            InjectKind::Response | InjectKind::Ack => Some(conv.target),
+            _ => None,
+        }) {
+            if sender == typer {
+                return;
+            }
+            self.push(
+                sender,
+                Injection {
+                    conv: conv_id.to_string(),
+                    kind: InjectKind::Failed,
+                    from: typer_name.to_string(),
+                    text: TEXT.to_string(),
+                },
+            );
+            return;
+        }
+        // Same four kinds: follow-up senders are ambiguous on both
+        // tables, so they stay best-effort.
+        let clobbered = matches!(
+            kind,
+            InjectKind::Ask | InjectKind::Tell | InjectKind::Response | InjectKind::Ack
+        );
+        if clobbered {
+            if let Some(client) = self
+                .bot_convs
+                .get(conv_id)
+                .map(|conv| conv.client.clone())
+            {
+                let deposited = match self.clients.get_mut(&client) {
+                    Some(c) => c
+                        .deposit(
+                            BotKind::Failed,
+                            conv_id,
+                            &typer.to_string(),
+                            typer_name,
+                            TEXT,
+                            crate::bot::now_unix_ms(),
+                        )
+                        .is_ok(),
+                    // No inbox exists: nothing to retry toward.
+                    None => true,
+                };
+                if !deposited {
+                    self.pending_failures.push((
+                        client,
+                        conv_id.to_string(),
+                        typer.to_string(),
+                        typer_name.to_string(),
+                    ));
+                }
+            }
+        }
+        // Non-clobbered kinds, timer commands, and unknown IDs have
+        // nobody to tell.
+    }
+
     /// Fail every open conversation touching an exited session. Targets fail
     /// loudly (their sources are told); sources fail silently.
     pub fn target_exited(&mut self, _sessions: &SessionManager, id: SessionId) {
@@ -3969,6 +4046,35 @@ mod tests {
         p.bcall("skippy", "ack_message", &format!(r#"{{"conversation_id":"{conv}"}}"#))
             .expect("client acks");
         p.state.broker.target_exited(&p.state.manager, p.a);
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll names the conv: {poll}");
+        assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
+    }
+
+    #[test]
+    fn typed_over_bot_ack_notifies_the_inbox() {
+        // The client's ack reached A's prompt with its Enter staged;
+        // A types first, so the submit dies and the client is told
+        // through its inbox instead of assuming clean delivery.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_a.clone(),
+                "tell_session",
+                r#"{"target":"skippy","message":"hi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall(
+            "skippy",
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("client acks");
+        p.state.settle_comms();
+        assert!(p.state.pending_enter.contains_key(&p.a), "enter staged");
+        p.state.note_human_input(p.a);
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll names the conv: {poll}");
         assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
