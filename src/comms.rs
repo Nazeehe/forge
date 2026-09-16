@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::bot::{
-    BotClient, BotConv, BotConvKind, BotConvState, BotError, BotKind, ErrorCode,
+    BotClient, BotConv, BotConvKind, BotConvState, BotError, BotKind, ErrorCode, IdemCache,
+    IdemCheck,
 };
 use crate::session::{SessionId, SessionManager};
 
@@ -228,6 +229,12 @@ pub struct Broker {
     /// Open left; without this, a lost deposit would close the conv
     /// while the notice never arrives.
     dead_sessions: HashSet<SessionId>,
+    /// Session-path idempotency records, keyed `"{caller}/{key}"` so
+    /// two sessions may mint the same key without colliding. Retries
+    /// after an IPC or bridge timeout replay the stored verdict
+    /// instead of minting a duplicate send. Keyless calls bypass it
+    /// and execute every time, exactly as before.
+    session_idem: IdemCache,
 }
 
 impl Broker {
@@ -243,6 +250,7 @@ impl Broker {
             clients: HashMap::new(),
             bot_convs: HashMap::new(),
             dead_sessions: HashSet::new(),
+            session_idem: IdemCache::new(),
         }
     }
 
@@ -607,17 +615,47 @@ impl Broker {
         now: Instant,
     ) -> Result<String, String> {
         let caller = self.resolve_caller(sessions, caller_run)?;
-        match tool {
+        if tool == "list_sessions" {
+            return Ok(self.list_sessions(sessions, caller));
+        }
+        // Keyed sends fingerprint the tool plus the caller's exact
+        // argument bytes, so a byte-identical retry replays while any
+        // changed send under the same key conflicts loudly instead
+        // of silently duplicating or, worse, returning a wrong
+        // conversation. Broker rejections are never stored.
+        let caller_s = caller.to_string();
+        let scoped = match Self::arg(args, "idempotency_key").filter(|s| !s.is_empty()) {
+            None => None,
+            Some(key) => {
+                crate::bot::validate_key(&key).map_err(|e| e.message)?;
+                let fp = crate::bot::fingerprint(tool, &[&caller_s, args]);
+                let scoped = format!("{caller_s}/{key}");
+                match self.session_idem.check(&scoped, fp, now) {
+                    IdemCheck::Hit(result) => return Ok(result),
+                    IdemCheck::Miss => {}
+                    IdemCheck::Conflict => {
+                        return Err(
+                            "idempotency key reused with different arguments".to_string()
+                        );
+                    }
+                }
+                Some((scoped, fp))
+            }
+        };
+        let result = match tool {
             "ask_session" => self.ask(sessions, caller, args, now),
             "send_response" => self.send_response(sessions, caller, args, now),
             "tell_session" => self.tell(sessions, caller, args, now),
             "ack_message" => self.ack(sessions, caller, args, now),
-            "list_sessions" => Ok(self.list_sessions(sessions, caller)),
             "compact_session" => self.compact(sessions, caller, args),
             "schedule_prompt" => self.schedule(sessions, caller, args, now),
             "cancel_scheduled_prompt" => self.cancel_scheduled(caller, args),
             _ => Err("unknown tool".to_string()),
+        };
+        if let (Some((scoped, fp)), Ok(line)) = (scoped, &result) {
+            self.session_idem.store(&scoped, fp, line, now);
         }
+        result
     }
 
     /// Operator registration of one bot peer: validated name, at least
@@ -3550,6 +3588,41 @@ mod tests {
             .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(!poll.contains(r#""kind":"reminder""#), "poll: {poll}");
+    }
+
+    #[test]
+    fn keyed_retry_replays_the_first_verdict() {
+        // A harness that times out and retries with the same key must
+        // get the original conversation back, not a duplicate. Keyless
+        // calls still execute every time.
+        let mut p = live_pair().grouped();
+        let args = r#"{"target":"b","message":"q","idempotency_key":"k-1"}"#;
+        let first = p.call(&p.run_a.clone(), "ask_session", args).expect("ask validates");
+        let replay = p.call(&p.run_a.clone(), "ask_session", args).expect("retry validates");
+        assert_eq!(replay, first, "retry replays instead of duplicating");
+        let third = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
+            .expect("keyless ask validates");
+        assert_ne!(third, first, "keyless calls still execute");
+    }
+
+    #[test]
+    fn keyed_retry_with_changed_args_conflicts() {
+        let mut p = live_pair().grouped();
+        p.call(
+            &p.run_a.clone(),
+            "ask_session",
+            r#"{"target":"b","message":"q","idempotency_key":"k-2"}"#,
+        )
+        .expect("ask validates");
+        let err = p
+            .call(
+                &p.run_a.clone(),
+                "ask_session",
+                r#"{"target":"b","message":"CHANGED","idempotency_key":"k-2"}"#,
+            )
+            .expect_err("same key, different send conflicts");
+        assert!(err.contains("different arguments"), "err: {err}");
     }
 
     #[test]

@@ -59,6 +59,10 @@ pub struct CommsRequest {
     pub tool: String,
     pub args: String,
     pub reply: std::sync::mpsc::Sender<String>,
+    /// Set by the connection handler when the caller stops waiting: the
+    /// caller already holds a timeout verdict, so `apply` must not run
+    /// the send for nobody. Shared (not copied) with the handler.
+    pub timed_out: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One external bot call for the broker. Identity travels as the
@@ -384,12 +388,14 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
     };
     let args = crate::mcp::top_raw(&text, "args").unwrap_or("{}").to_string();
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if tx
         .send(crate::event::AppEvent::CommsRequest(CommsRequest {
             run_id,
             tool,
             args,
             reply: reply_tx,
+            timed_out: std::sync::Arc::clone(&timed_out),
         }))
         .is_err()
     {
@@ -402,6 +408,11 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
             bytes.push(b'\n');
         }
         let _ = conn.write_all(&bytes);
+    } else {
+        // The caller already holds its own timeout verdict; flag the
+        // queued request so a late `apply` skips the send instead of
+        // running it for nobody (same shape as hook timeout-deny).
+        timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

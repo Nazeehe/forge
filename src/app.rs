@@ -1846,6 +1846,19 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::CommsRequest(req) => {
+                // A request the caller already timed out on is never
+                // applied: the send would run for nobody while the
+                // caller retries, minting exactly the duplicate the
+                // session idempotency cache exists to absorb. Say so
+                // on the reply so the verdict is never a stale ok.
+                if req.timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = req.reply.send(
+                        "{\"ok\":false,\"error\":\"caller timed out; retry with the same idempotency_key\"}\n"
+                            .to_string(),
+                    );
+                    self.dirty = true;
+                    return;
+                }
                 // Walkthrough and session tools answer here (they own
                 // overlay and manager state the broker cannot see);
                 // everything else goes to the broker at once. The
@@ -2322,6 +2335,7 @@ mod tests {
                 tool: "schedule_prompt".to_string(),
                 args: format!("{{\"prompt\":{prompt:?},\"delay_seconds\":0}}"),
                 reply: reply_tx,
+                timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }));
             let line = reply_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
@@ -2419,6 +2433,7 @@ mod tests {
             tool: "ask_session".to_string(),
             args: r#"{"target":"b","message":"ready?"}"#.to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2432,6 +2447,42 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_request_skips_apply_and_says_so() {
+        // The listener marks a request whose caller already timed
+        // out; applying it would run a send nobody waits for and
+        // report ok to nobody. Skip the send, say so on the reply.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "ask_session".to_string(),
+            args: r#"{"target":"b","message":"ready?"}"#.to_string(),
+            reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }));
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""ok":false"#), "line: {line:?}");
+        assert!(line.contains("timed out"), "line: {line:?}");
+        assert_eq!(s.broker.queued(b), 0, "cancelled send creates nothing");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
     fn comms_rejections_are_single_line_json() {
         let mut s = AppState::new();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
@@ -2440,6 +2491,7 @@ mod tests {
             tool: "ask_session".to_string(),
             args: "{}".to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2469,6 +2521,7 @@ mod tests {
             tool: "ask_session".to_string(),
             args: r#"{"target":"b","message":"q?"}"#.to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         assert!(s.manager.kill(b));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2515,6 +2568,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 1, "busy target waits");
@@ -2577,6 +2631,7 @@ mod tests {
                 tool: tool.to_string(),
                 args: args.to_string(),
                 reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }));
             reply_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
@@ -2681,6 +2736,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: "{\"target\":\"a\",\"text\":\"hold\"}".to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(a), 1, "generating target waits");
@@ -2756,6 +2812,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"message\":\"ping-body\"}".to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 0, "raw session is idle: body delivered");
@@ -2870,6 +2927,7 @@ mod tests {
                 tool: "tell_session".to_string(),
                 args: format!("{{\"target\":\"b\",\"text\":{text:?}}}"),
                 reply: reply_tx,
+                timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }));
         };
         tell(&mut s, "first-one");
@@ -2948,6 +3006,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","text":"held"}"#.to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         // Kill the writer while the record stays idle (exit undrained):
         // every write now fails deterministically.
@@ -2986,6 +3045,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","text":"held"}"#.to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         s.settle_comms();
         assert!(s.pending_enter.contains_key(&b), "enter staged");
@@ -3027,6 +3087,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","message":"wait"}"#.to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         s.note_human_input(a);
         s.settle_comms();
@@ -3062,6 +3123,7 @@ mod tests {
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","message":"wait"}"#.to_string(),
             reply: reply_tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         // Fresh hook activity holds delivery even to an idle target.
         s.last_hook_activity = Some(std::time::Instant::now());
@@ -3496,6 +3558,7 @@ mod tests {
             tool: tool.to_string(),
             args: args.to_string(),
             reply: tx,
+            timed_out: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }));
         rx.recv().expect("comms verdict arrives")
     }
