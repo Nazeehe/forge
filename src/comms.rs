@@ -1428,6 +1428,18 @@ impl Broker {
 
     fn bot_ack_cursor(&mut self, client: &str, args: &str) -> Result<String, BotError> {
         self.check_epoch(args)?;
+        // Same restart rule as polls: event IDs restart at 1 every
+        // epoch, so a resumed nonzero ack without the epoch could
+        // coincide with the fresh received prefix and delete new
+        // events. Zero (which advances nothing) needs no epoch.
+        if let Some(Ok(c)) = Self::arg_u64(args, "cursor") {
+            if c != 0 && Self::arg_u64(args, "epoch").is_none() {
+                return Err(BotError::new(
+                    ErrorCode::Conflict,
+                    "nonzero cursor requires the epoch",
+                ));
+            }
+        }
         let cursor = match Self::arg_u64(args, "cursor") {
             Some(Ok(c)) => c,
             _ => {
@@ -2866,7 +2878,13 @@ mod tests {
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll: {poll}");
         assert!(poll.contains(r#""kind":"response""#), "poll: {poll}");
-        p.bcall("skippy", "bot_ack", r#"{"cursor":1}"#).expect("ack validates");
+        let epoch = crate::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
+        p.bcall(
+            "skippy",
+            "bot_ack",
+            &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#),
+        )
+        .expect("ack validates");
         assert!(p
             .bcall("skippy", "bot_poll", "{}")
             .unwrap()
@@ -2887,7 +2905,13 @@ mod tests {
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll: {poll}");
         assert!(poll.contains(r#""kind":"ask""#), "poll: {poll}");
-        p.bcall("skippy", "bot_ack", r#"{"cursor":1}"#).unwrap();
+        let epoch = crate::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
+        p.bcall(
+            "skippy",
+            "bot_ack",
+            &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#),
+        )
+        .unwrap();
         p.bcall(
             "skippy",
             "send_response",
@@ -3648,11 +3672,17 @@ mod tests {
     /// cursor 20 at a time, acks drain what was received. Thirteen
     /// steps reach exactly 256 (the cap).
     fn drain_inbox(p: &mut Pair, client: &str) {
+        let first = p.bcall(client, "bot_poll", "{}").expect("poll validates");
+        let epoch = crate::mcp::top_raw(&first, "epoch").expect("epoch echoed");
         for step in 1..=13 {
             let cursor = (step * 20).min(crate::bot::INBOX_CAP as u64);
             p.bcall(client, "bot_poll", "{}").expect("poll validates");
-            p.bcall(client, "bot_ack", &format!(r#"{{"cursor":{cursor}}}"#))
-                .expect("ack validates");
+            p.bcall(
+                client,
+                "bot_ack",
+                &format!(r#"{{"cursor":{cursor},"epoch":{epoch}}}"#),
+            )
+            .expect("ack validates");
         }
     }
 
@@ -4102,6 +4132,32 @@ mod tests {
     }
 
     #[test]
+    fn epochless_nonzero_ack_conflicts() {
+        // Like polls, a nonzero ack without the epoch may be a stale
+        // pre-restart retry: accepting it would advance (and delete)
+        // a fresh epoch's received prefix.
+        use crate::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        for n in 0..3 {
+            p.call(
+                &p.run_a.clone(),
+                "tell_session",
+                &format!(r#"{{"target":"skippy","message":"m{n}"}}"#),
+            )
+            .expect("tell validates");
+        }
+        p.bcall("skippy", "bot_poll", "{}").expect("poll receives");
+        let err = p
+            .bcall("skippy", "bot_ack", r#"{"cursor":2}"#)
+            .expect_err("epochless nonzero ack conflicts");
+        assert_eq!(err.code, ErrorCode::Conflict);
+        // Nothing was deleted: the fresh prefix still polls.
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains("m0"), "fresh events intact: {poll}");
+    }
+
+    #[test]
     fn bot_ack_cursor_retry_replays() {
         // The server committed the ack; a lost verdict retried with
         // the exact cursor replays instead of conflicting.
@@ -4117,13 +4173,13 @@ mod tests {
             &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
         )
         .expect("target answers");
-        p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-        let first = p
-            .bcall("skippy", "bot_ack", r#"{"cursor":1}"#)
-            .expect("ack validates");
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        let epoch = crate::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
+        let ack = format!(r#"{{"cursor":1,"epoch":{epoch}}}"#);
+        let first = p.bcall("skippy", "bot_ack", &ack).expect("ack validates");
         assert!(first.contains(r#""acknowledged":1"#), "first: {first}");
         let retry = p
-            .bcall("skippy", "bot_ack", r#"{"cursor":1}"#)
+            .bcall("skippy", "bot_ack", &ack)
             .expect("exact retry replays");
         assert!(retry.contains(r#""acknowledged":1"#), "retry: {retry}");
     }
