@@ -421,8 +421,18 @@ impl Broker {
         self.queue.get(&id).map(VecDeque::len).unwrap_or(0)
     }
 
-    /// Pressure on a target: queued injections plus delivered asks still
-    /// awaiting a response. One ask occupies exactly one side at a time.
+    /// Pressure on a target: queued injections, delivered asks still
+    /// awaiting a response, and armed timers (future queue entries).
+    /// One ask occupies exactly one side at a time. Every admission
+    /// gate (sends and schedules) reads this one budget, so timers
+    /// plus sends can never stack past the cap.
+    ///
+    /// Completions bypass the gate by design and are not counted
+    /// against it: a response resolves its ask (net zero), a fired
+    /// timer converts to one queued entry (net zero), and acks,
+    /// reminders, and failure notices each answer already-admitted
+    /// work. Gating them would fail the very completion that drains
+    /// pressure; sequential delivery paces the pane instead.
     pub fn pressure(&self, _sessions: &SessionManager, id: SessionId) -> usize {
         let asks = self
             .convs
@@ -445,7 +455,8 @@ impl Broker {
                     && c.delivered
             })
             .count();
-        self.queued(id) + asks + bot_asks
+        let timers = self.timers.values().filter(|t| t.target == id).count();
+        self.queued(id) + asks + bot_asks + timers
     }
 
     /// Oldest queued injection without popping: delivery peeks, writes,
@@ -1541,8 +1552,9 @@ impl Broker {
             return Err("clear_context must be true or false".to_string());
         }
         let clear = Self::arg_bool(args, "clear_context").unwrap_or(false);
-        let own = self.timers.values().filter(|t| t.target == caller).count();
-        if own + self.queued(caller) >= PRESSURE_CAP {
+        // Same budget as sends: timers are future queue entries, so a
+        // loaded target refuses new ones instead of stacking past the cap.
+        if self.pressure(sessions, caller) >= PRESSURE_CAP {
             return Err("pressure cap reached".to_string());
         }
         let text = if clear {
@@ -2891,6 +2903,49 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert!(matches!(due[0].kind, InjectKind::Response));
         assert_eq!(p.state.broker.pressure(&p.state.manager, p.b), 0);
+    }
+
+    #[test]
+    fn armed_timers_count_against_send_pressure() {
+        // Five armed timers saturate the target: the sixth unit of work
+        // (a new ask) must wait, or timers plus sends stack past the cap.
+        let mut p = live_pair().grouped();
+        for i in 0..PRESSURE_CAP {
+            p.call(
+                &p.run_a.clone(),
+                "schedule_prompt",
+                &format!(r#"{{"prompt":"timer-{i}","delay_seconds":3600}}"#),
+            )
+            .expect("timers arm");
+        }
+        let err = p
+            .call(&p.run_b.clone(), "ask_session", r#"{"target":"a","message":"q"}"#)
+            .expect_err("timers hold the pressure budget");
+        assert!(err.contains("pressure cap"), "err: {err}");
+    }
+
+    #[test]
+    fn delivered_asks_count_against_scheduling() {
+        // Scheduling reads the same budget as sending: five delivered
+        // asks awaiting answers leave no room for a new timer.
+        let mut p = live_pair().grouped();
+        for i in 0..PRESSURE_CAP {
+            p.call(
+                &p.run_b.clone(),
+                "ask_session",
+                &format!(r#"{{"target":"a","message":"q{i}"}}"#),
+            )
+            .expect("asks queue");
+        }
+        assert_eq!(p.state.broker.take_due(p.a, 10).len(), PRESSURE_CAP);
+        let err = p
+            .call(
+                &p.run_a.clone(),
+                "schedule_prompt",
+                r#"{"prompt":"later","delay_seconds":3600}"#,
+            )
+            .expect_err("asks hold the pressure budget");
+        assert!(err.contains("pressure cap"), "err: {err}");
     }
 
     #[test]
