@@ -2414,6 +2414,10 @@ impl Broker {
                 || !conv.acked
                 || conv.reminded
                 || conv.target_updated
+                // A dead session's queue is gone: reminding it only
+                // recreates a queue nobody drains (its failure notice
+                // is already parked for retry).
+                || self.dead_sessions.contains(&conv.session)
             {
                 continue;
             }
@@ -2518,6 +2522,10 @@ impl Broker {
                 .any(|c| c.state == BotConvState::Open && c.session == id);
             if !live {
                 self.dead_sessions.remove(&id);
+                // Nothing legitimate queues to a dead session (sends
+                // resolve live targets only), so anything here is
+                // sweep debris for nobody: drop it with the entry.
+                self.queue.remove(&id);
             }
         }
         // Retry stranded-answer notices parked at exit time: each
@@ -3877,6 +3885,51 @@ mod tests {
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll names the conv: {poll}");
         assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
+    }
+
+    #[test]
+    fn courtesy_skips_dead_sessions() {
+        // A bot tell was acked, the session exits with a full inbox
+        // (failure retry pending): the courtesy sweep must not push
+        // a Reminder to the removed queue — nobody will drain it.
+        use crate::bot::{BotKind, INBOX_CAP};
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "tell_session", r#"{"target":"b","message":"hi"}"#)
+            .expect("tell validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("session acks");
+        {
+            let client = p
+                .state
+                .broker
+                .clients
+                .get_mut("skippy")
+                .expect("client registered");
+            for n in 0..INBOX_CAP {
+                let _ = client.deposit(BotKind::Tell, "pad", "s", "a", &n.to_string(), 1);
+            }
+        }
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        assert!(p.state.broker.dead_sessions.contains(&p.b), "retry pending");
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert_eq!(
+            p.state.broker.queued(p.b),
+            0,
+            "no reminder to a dead session"
+        );
+        assert!(
+            p.state.broker.dead_sessions.contains(&p.b),
+            "failure retry still pending"
+        );
     }
 
     #[test]
