@@ -6,7 +6,7 @@
 //! is restored on normal exit, on panic, and on drop.
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event;
 use crossterm::tty::IsTty;
@@ -24,6 +24,19 @@ pub const TICK_MS: u64 = 16;
 
 /// Background events drained per iteration (anti-starvation bound).
 pub const MAX_DRAIN: usize = 100;
+
+/// Slowest background repaint, in milliseconds. Streaming pane output
+/// (spinners, progress renders) dirties the frame up to 60 times a
+/// second; repainting that often burns a core redrawing an unchanged
+/// viewport, so background frames pace to at most 10fps. Human input
+/// (keys, mouse, paste, resize) always paints at once.
+pub const BACKGROUND_FRAME_MS: u64 = 100;
+
+/// A dirty frame paints now when input arrived this tick, otherwise
+/// only once the background budget elapsed since the last paint.
+fn paint_due(last_paint: Instant, now: Instant, input_this_tick: bool) -> bool {
+    input_this_tick || now.duration_since(last_paint) >= Duration::from_millis(BACKGROUND_FRAME_MS)
+}
 
 /// Grace window on quit: SIGTERM'd agents share this long to save state
 /// before the state drop SIGKILLs stragglers.
@@ -294,6 +307,11 @@ fn loop_until_quit(
     }
     fit_active_pane(state);
     let mut cursor_shown = true;
+    // Frame pacer: the first paint is immediate, background repaints
+    // wait out BACKGROUND_FRAME_MS, input repaints skip the wait.
+    let mut last_paint = Instant::now()
+        .checked_sub(Duration::from_millis(BACKGROUND_FRAME_MS))
+        .unwrap_or_else(Instant::now);
     // OS theme watcher: a switch repaints with the new map next frame,
     // no restart. Missing state (non-Omarchy, SSH) polls false forever.
     let mut theme_watcher = crate::theme::ThemeWatcher::omarchy();
@@ -321,9 +339,11 @@ fn loop_until_quit(
                 }
             }
         }
+        let mut input_this_tick = false;
         if event::poll(Duration::from_millis(TICK_MS))? {
             match event::read()? {
                 event::Event::Key(key) => {
+                    input_this_tick = true;
                     if state.restore_picker.is_some() {
                         handle_restore_key(state, key);
                     } else if state.create_dialog.is_some() {
@@ -336,8 +356,12 @@ fn loop_until_quit(
                         handle_key(state, &mut router, key);
                     }
                 }
-                event::Event::Mouse(mev) => forward_mouse(state, mev),
+                event::Event::Mouse(mev) => {
+                    input_this_tick = true;
+                    forward_mouse(state, mev);
+                }
                 event::Event::Paste(text) => {
+                    input_this_tick = true;
                     if state.restore_picker.is_none()
                         && state.create_dialog.is_none()
                         && state.group_dialog.is_none()
@@ -363,6 +387,7 @@ fn loop_until_quit(
                     }
                 }
                 event::Event::Resize(cols, rows) => {
+                    input_this_tick = true;
                     state.apply(AppEvent::Resize(rows, cols));
                     fit_active_pane(state);
                 }
@@ -378,7 +403,11 @@ fn loop_until_quit(
         state.settle_hooks(policy, audit_path);
         state.settle_comms();
         state.drain_visual();
-        if state.dirty {
+        // Streaming pane output paces to BACKGROUND_FRAME_MS; input
+        // paints at once. A skipped tick keeps dirty set, so no frame
+        // is lost, only delayed past the budget.
+        if state.dirty && paint_due(last_paint, Instant::now(), input_this_tick) {
+            last_paint = Instant::now();
             if state.grid_mode {
                 fit_grid_panes(state);
             }
@@ -1846,6 +1875,26 @@ mod tests {
     fn loop_constants_match_blueprint() {
         assert_eq!(TICK_MS, 16);
         assert_eq!(MAX_DRAIN, 100);
+    }
+
+    #[test]
+    fn background_frames_pace_input_paints_at_once() {
+        let start = Instant::now();
+        // Input always paints, even right after a paint.
+        assert!(paint_due(start, start, true));
+        // Background waits out the budget...
+        assert!(!paint_due(start, start, false));
+        assert!(!paint_due(
+            start,
+            start + Duration::from_millis(BACKGROUND_FRAME_MS - 1),
+            false
+        ));
+        // ...then paints once it elapsed.
+        assert!(paint_due(
+            start,
+            start + Duration::from_millis(BACKGROUND_FRAME_MS),
+            false
+        ));
     }
 
     #[test]
