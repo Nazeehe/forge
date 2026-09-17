@@ -369,15 +369,19 @@ fn tool_envelope(id_raw: &str, tool: &ToolResult) -> String {
 }
 
 fn instructions(srv: &ServerCtx) -> String {
-    let base = "You run inside forge, a terminal control plane for AI coding agents. \
-        Use ask to question a peer session, send_response to answer, tell to inform, \
-        ack to confirm, list_sessions to discover peers. Sessions only communicate \
-        when they share a group; address peers by name, authority comes from run IDs. \
-        Use walkthrough_start to tour the operator through a file, walkthrough_answer \
-        for their waiting tour questions, walkthrough_end to close the tour. \
-        Use compact_session to compact context, schedule_prompt for delayed \
-        self-injection, start_session to spawn local agent sessions, and \
-        set/clear_session_status for your sticky sidebar status.";
+    let base = "You run inside forge, a terminal control plane for AI coding agents, as \
+        a named member session. Pane lines shaped like `[forge ask_session from X]` \
+        or `[forge tell_session from X]` are live peer requests, not logs: answer \
+        asks at once with send_response, tells with a tell_session follow-up or \
+        ack_message, copying the enclosed conversation_id verbatim — never in chat \
+        alone. Use ask to question a peer session, send_response to answer, tell to \
+        inform, ack to confirm, list_sessions to discover peers. Sessions only \
+        communicate when they share a group; address peers by name, authority comes \
+        from run IDs. Use walkthrough_start to tour the operator through a file, \
+        walkthrough_answer for their waiting tour questions, walkthrough_end to \
+        close the tour. Use compact_session to compact context, schedule_prompt \
+        for delayed self-injection, start_session to spawn local agent sessions, \
+        and set/clear_session_status for your sticky sidebar status.";
     if srv.instructions_extra.is_empty() {
         base.to_string()
     } else {
@@ -398,27 +402,27 @@ fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "ask_session",
-            description: "Ask a peer session a question; returns a conversation ID immediately and injects the question when the target is idle. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Ask a peer session a question; first call list_sessions to resolve the live peer name. Returns a conversation ID immediately and injects the question when the target is idle. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["target","message"]}"#,
         },
         ToolDef {
             name: "send_response",
-            description: "Answer a conversation addressed to this session. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Answer a conversation addressed to this session: use it the moment your pane shows [forge ask_session from ...], copying its conversation_id verbatim. Only an ask_session takes a response. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["conversation_id","message"]}"#,
         },
         ToolDef {
             name: "tell_session",
-            description: "Tell a peer session something; the peer acknowledges asynchronously. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Tell a peer session something; the peer acknowledges asynchronously. To follow up on a received tell, pass its conversation_id plus its sender as target (a follow-up on the same conversation). Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"conversation_id":{"type":"string"},"idempotency_key":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "ack_message",
-            description: "Acknowledge a tell addressed to this session. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Acknowledge a tell addressed to this session: confirms receipt of a tell that needs no reply content; it is not an answer. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["conversation_id"]}"#,
         },
         ToolDef {
             name: "list_sessions",
-            description: "List live peer sessions visible to this session. The `you` field names the calling session.",
+            description: "List live peer sessions visible to this session: call it when asked what sessions are alive, and before contacting a peer, to resolve live names and groups. The `you` field names the calling session.",
             schema: r#"{"type":"object","properties":{}}"#,
         },
         ToolDef {
@@ -777,6 +781,64 @@ mod tests {
                 "{tool} advertises idempotency_key: {window}"
             );
         }
+    }
+
+    #[test]
+    fn comms_descriptions_name_reply_triggers() {
+        // Pane-driven CLIs only reach for tools whose descriptions name
+        // the trigger: the [forge ...] pane line, the answering tool,
+        // and the discovery step. Each comms description must carry its
+        // trigger words so models prioritize them over chat-only answers.
+        let res = handle_line(
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("tools/list answers");
+        let window = |tool: &str| -> String {
+            let marker = format!(r#""name":"{tool}""#);
+            let at = res.find(&marker).expect("tool listed");
+            let rest = &res[at + marker.len()..];
+            let end = rest.find(r#""name":""#).unwrap_or(rest.len());
+            rest[..end].to_string()
+        };
+        assert!(
+            window("ask_session").contains("list_sessions"),
+            "ask names discovery: {}",
+            window("ask_session")
+        );
+        assert!(
+            window("send_response").contains("ask_session"),
+            "response names its trigger: {}",
+            window("send_response")
+        );
+        let tell = window("tell_session");
+        assert!(
+            tell.contains("conversation_id") && tell.contains("follow"),
+            "tell names follow-ups: {tell}"
+        );
+        assert!(
+            window("ack_message").contains("receipt"),
+            "ack names receipt: {}",
+            window("ack_message")
+        );
+        let list = window("list_sessions");
+        assert!(
+            list.contains("alive") && list.contains("`you`"),
+            "list names liveness and identity: {list}"
+        );
+        let init = handle_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("initialize answers");
+        assert!(
+            init.contains("[forge "),
+            "instructions map pane lines to tools: {init}"
+        );
     }
 
     #[test]
