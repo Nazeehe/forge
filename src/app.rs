@@ -158,6 +158,28 @@ pub struct VisualSlot {
     /// Viewport origin in displayed cells into the zoomed frame.
     pub scroll_x: u16,
     pub scroll_y: u16,
+    /// Selectable shapes in SVG units plus the SVG viewBox
+    /// `[x, y, w, h]` they are measured in; empty shapes when the
+    /// layout produced none.
+    pub shapes: Vec<crate::visual::ShapeBox>,
+    pub vb: [f32; 4],
+    /// Selected shape index into `shapes`, if the human clicked one.
+    /// Boxes live in zoom-independent SVG units, so the selection
+    /// stays glued to its shape across zoom and scroll.
+    pub selected: Option<usize>,
+    /// Unsent ask-about-shape draft, typed in input mode.
+    pub draft: Option<String>,
+    /// Ask-row input mode: Enter focuses it, Enter submits, Esc
+    /// leaves it. Outside input mode typing stays dead so `+`/`-`
+    /// keep zooming.
+    pub input_active: bool,
+    /// Chat footer visibility: selecting a shape opens it, the strip
+    /// button or `c` flips it, a new frame closes it.
+    pub chat_open: bool,
+    /// History rows scrolled up from the tail (0 shows latest).
+    pub chat_scroll: u16,
+    /// Asked questions about shapes with their answers, oldest first.
+    pub questions: Vec<crate::visual::VisualQuestion>,
 }
 
 /// Production image budget: decoded bytes across all slots.
@@ -424,7 +446,8 @@ impl AppState {
     }
 
     /// Whether the focused tab is a session Visual tab: arrows,
-    /// `+`/`-`, wheel, and zoom clicks route to its viewport.
+    /// `+`/`-`, wheel, zoom clicks, and image clicks route to its
+    /// viewport.
     #[cfg(feature = "visual")]
     pub fn visual_tab_focused(&self) -> bool {
         self.visual_overlay_active().is_some()
@@ -476,6 +499,7 @@ impl AppState {
             sy: crop.sy,
             sw: crop.sw,
             sh: crop.sh,
+            selected: slot.selected,
         })
     }
 
@@ -499,6 +523,9 @@ impl AppState {
         let dir = match dir {
             crate::ui::VisualButton::ZoomIn => ZoomDir::In,
             crate::ui::VisualButton::ZoomOut => ZoomDir::Out,
+            // The chat toggle never reaches zoom: the mouse path
+            // routes it to the toggle first. Unreachable by design.
+            crate::ui::VisualButton::Chat => return false,
         };
         let next = zoom_step(slot.zoom, dir);
         if next == slot.zoom {
@@ -555,6 +582,223 @@ impl AppState {
         true
     }
 
+    /// Flip one slot's chat footer, dirtying on change. Dismissing
+    /// reclaims the footer rows for the diagram; the selection and
+    /// history survive underneath until the next selection reopens.
+    #[cfg(feature = "visual")]
+    pub fn visual_toggle_chat(&mut self, id: crate::session::SessionId) -> bool {
+        let Some(slot) = self.visual_slots.get_mut(&id) else {
+            return false;
+        };
+        slot.chat_open = !slot.chat_open;
+        self.dirty = true;
+        true
+    }
+
+    /// Reserved chat footer rows for one slot: 30% of the content
+    /// height while open, zero while dismissed. Render and mouse
+    /// handling both derive from this, so the footer never desyncs
+    /// from the image region.
+    #[cfg(feature = "visual")]
+    pub fn visual_footer_rows(&self, id: crate::session::SessionId, content_h: u16) -> u16 {
+        match self.visual_slots.get(&id) {
+            Some(slot) if slot.chat_open => crate::ui::visual_chat_footer_rows(content_h),
+            _ => 0,
+        }
+    }
+
+    /// Content width the chat footer wraps to: the same pane content
+    /// rect the chrome derives from, so wrapped rows match the tab.
+    #[cfg(feature = "visual")]
+    fn visual_footer_width(&self) -> u16 {
+        // History wraps to the box interior: content minus borders
+        // and side pads, so sided rows stay exactly content-wide.
+        let (rows, cols) = self.term_size;
+        let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+        crate::ui::pane_content_area(&areas).width.saturating_sub(6)
+    }
+
+    /// All chat history rows for one slot, oldest first: one wrapped
+    /// question row plus markdown answer rows (or the waiting marker)
+    /// per pair. The viewport shows the tail of these.
+    #[cfg(feature = "visual")]
+    fn visual_chat_history_lines(&self, slot: &VisualSlot) -> Vec<Vec<crate::ui::SpanView>> {
+        use crate::theme::{style, Role};
+        let width = self.visual_footer_width();
+        let text = style(Role::Text);
+        let muted = style(Role::Muted);
+        let mut rows = Vec::new();
+        for q in &slot.questions {
+            rows.extend(crate::ui::wrap_spans(
+                vec![crate::ui::SpanView {
+                    text: format!(
+                        "Q ({}): {}",
+                        crate::safe_text::encode_for_display(&q.shape_label),
+                        crate::safe_text::encode_for_display(&q.question)
+                    ),
+                    style: text,
+                }],
+                width,
+            ));
+            match q.answer.as_deref() {
+                Some(a) => {
+                    for line in crate::walkthrough::md_text(a).lines {
+                        let spans: Vec<crate::ui::SpanView> = line
+                            .spans
+                            .iter()
+                            .map(|s| crate::ui::SpanView {
+                                text: s.content.to_string(),
+                                style: s.style,
+                            })
+                            .collect();
+                        if spans.is_empty() {
+                            rows.push(Vec::new());
+                        } else {
+                            rows.extend(crate::ui::wrap_spans(spans, width));
+                        }
+                    }
+                }
+                None => rows.push(vec![crate::ui::SpanView {
+                    text: crate::visual::VISUAL_WAITING_TEXT.to_string(),
+                    style: muted,
+                }]),
+            }
+        }
+        rows
+    }
+
+    /// Scroll one slot's chat history by rows up from the tail
+    /// (positive reads back, negative comes forward), clamped to the
+    /// rendered history. `visible` is the history viewport rows the
+    /// tab currently shows (footer minus the ask row). Returns whether
+    /// the offset changed.
+    #[cfg(feature = "visual")]
+    pub fn visual_chat_scroll(&mut self, id: crate::session::SessionId, delta: i16, visible: u16) -> bool {
+        let max = match self.visual_slots.get(&id) {
+            Some(slot) => self
+                .visual_chat_history_lines(slot)
+                .len()
+                .saturating_sub(visible as usize) as i16,
+            None => return false,
+        };
+        let Some(slot) = self.visual_slots.get_mut(&id) else {
+            return false;
+        };
+        let next = (slot.chat_scroll as i16 + delta).clamp(0, max.max(0)) as u16;
+        if next == slot.chat_scroll {
+            return false;
+        }
+        slot.chat_scroll = next;
+        self.dirty = true;
+        true
+    }
+
+    /// Clear one slot's shape selection, dirtying on change. Margin
+    /// clicks share it: empty space always means no selection.
+    #[cfg(feature = "visual")]
+    fn visual_clear_selection(state: &mut AppState, id: crate::session::SessionId) -> bool {
+        let Some(slot) = state.visual_slots.get_mut(&id) else {
+            return false;
+        };
+        if slot.selected.take().is_some() {
+            state.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Select the shape under an image-region click (`vx`, `vy` in
+    /// region cells), zoom- and scroll-aware. `centered` must match
+    /// the backend that painted: the Kitty image centers a smaller
+    /// diagram in the region (same offset the paint cursor adds)
+    /// while the half-block fallback draws from the top-left.
+    /// Clicking the selected shape toggles it off; clicking empty
+    /// space clears. Returns whether the selection changed.
+    #[cfg(feature = "visual")]
+    pub fn visual_select_at(
+        &mut self,
+        id: crate::session::SessionId,
+        vx: u16,
+        vy: u16,
+        area_cols: u16,
+        area_rows: u16,
+        cell_w: f64,
+        cell_h: f64,
+        centered: bool,
+    ) -> bool {
+        use crate::visual::{fit_display, hit_shape, source_to_svg, view_to_source};
+        let hit = {
+            let Some(slot) = self.visual_slots.get(&id) else {
+                return false;
+            };
+            if slot.shapes.is_empty() {
+                return false;
+            }
+            let (disp_cols, disp_rows) = fit_display(
+                slot.width,
+                slot.height,
+                slot.zoom,
+                area_cols,
+                area_rows,
+                cell_w,
+                cell_h,
+            );
+            // Mirror crop_for_view's bounds, then drop the centering
+            // offset the paint cursor adds on the Kitty path. Clicks
+            // landing in the margin resolve to no shape (clear).
+            let out_cols = disp_cols.saturating_sub(slot.scroll_x).min(area_cols).max(1);
+            let out_rows = disp_rows.saturating_sub(slot.scroll_y).min(area_rows).max(1);
+            let (off_x, off_y) = if centered {
+                (
+                    area_cols.saturating_sub(out_cols) / 2,
+                    area_rows.saturating_sub(out_rows) / 2,
+                )
+            } else {
+                (0, 0)
+            };
+            let inside = match (vx.checked_sub(off_x), vy.checked_sub(off_y)) {
+                (Some(rx), Some(ry)) if rx < out_cols && ry < out_rows => Some((rx, ry)),
+                _ => None,
+            };
+            let Some((rx, ry)) = inside else {
+                return Self::visual_clear_selection(self, id);
+            };
+            let (px, py) = view_to_source(
+                rx,
+                ry,
+                slot.scroll_x,
+                slot.scroll_y,
+                disp_cols,
+                disp_rows,
+                slot.width,
+                slot.height,
+            );
+            let (sx, sy) =
+                source_to_svg(px, py, slot.width, slot.height, &slot.vb);
+            hit_shape(&slot.shapes, sx, sy)
+        };
+        let Some(slot) = self.visual_slots.get_mut(&id) else {
+            return false;
+        };
+        let next = match (slot.selected, hit) {
+            (Some(a), Some(b)) if a == b => None,
+            _ => hit,
+        };
+        if next == slot.selected {
+            return false;
+        }
+        slot.selected = next;
+        // A fresh selection opens the dismissed chat and drops input
+        // mode (the draft survives); toggling off keeps both.
+        slot.input_active = false;
+        if next.is_some() {
+            slot.chat_open = true;
+        }
+        self.dirty = true;
+        true
+    }
+
     /// The focused Visual tab's (session, generation), if the overlay
     /// sits on a visual slot with a stored frame.
     #[cfg(feature = "visual")]
@@ -575,8 +819,9 @@ impl AppState {
 
     /// PNG bytes for one paint of a stored frame: the frame itself
     /// when the viewport shows it whole (no re-encode), else the
-    /// cropped region re-encoded for transmit. Independent of the
-    /// show gate, so the TUI only claims a transmit it can render.
+    /// cropped region re-encoded for transmit. A selection always
+    /// re-encodes so the highlight border bakes in. Independent of
+    /// the show gate, so the TUI only claims a transmit it can render.
     #[cfg(feature = "visual")]
     pub fn visual_frame_png(
         &self,
@@ -588,7 +833,13 @@ impl AppState {
         if slot.generation != generation {
             return None;
         }
-        if paint.sx == 0 && paint.sy == 0 && paint.sw == slot.width && paint.sh == slot.height {
+        let selected = slot.selected.and_then(|i| slot.shapes.get(i));
+        if selected.is_none()
+            && paint.sx == 0
+            && paint.sy == 0
+            && paint.sw == slot.width
+            && paint.sh == slot.height
+        {
             return Some(slot.png.clone());
         }
         let crop = crate::visual::ViewCrop {
@@ -599,7 +850,46 @@ impl AppState {
             out_cols: paint.out_cols,
             out_rows: paint.out_rows,
         };
-        let cut = crate::visual::crop_rgba(&slot.rgba, slot.width, slot.height, crop);
+        let mut cut = crate::visual::crop_rgba(&slot.rgba, slot.width, slot.height, crop);
+        if let Some(shape) = selected {
+            // Shape box (SVG units) to source pixels, clipped to the
+            // crop so off-view shapes draw nothing.
+            let (ex, ey) = (
+                paint.sx.saturating_add(paint.sw),
+                paint.sy.saturating_add(paint.sh),
+            );
+            let (bx0, by0) = crate::visual::svg_to_source(
+                shape.x,
+                shape.y,
+                slot.width,
+                slot.height,
+                &slot.vb,
+            );
+            let (bx1, by1) = crate::visual::svg_to_source(
+                shape.x + shape.width,
+                shape.y + shape.height,
+                slot.width,
+                slot.height,
+                &slot.vb,
+            );
+            let x0 = bx0.clamp(paint.sx, ex);
+            let x1 = bx1.clamp(paint.sx, ex);
+            let y0 = by0.clamp(paint.sy, ey);
+            let y1 = by1.clamp(paint.sy, ey);
+            if x1 > x0 && y1 > y0 {
+                crate::visual::stroke_rect(
+                    &mut cut,
+                    paint.sw,
+                    paint.sh,
+                    x0 - paint.sx,
+                    y0 - paint.sy,
+                    x1 - paint.sx,
+                    y1 - paint.sy,
+                    crate::visual::SELECT_RGB,
+                    crate::visual::SELECT_BORDER_PX,
+                );
+            }
+        }
         crate::visual::encode_png(&cut, paint.sw, paint.sh).ok()
     }
 
@@ -663,18 +953,53 @@ impl AppState {
         // the region below the strip, and the mouse hit test assumes
         // these exact rows and columns.
         lines.push(Vec::new());
-        let mut strip = crate::ui::visual_button_spans(self.pill_tabs);
+        // One chrome for both backends: the strip, image, and footer
+        // rows below must match the rects the mouse path hit-tests,
+        // or clicks and wheel routing desync from the paint.
+        let (rows, cols) = self.term_size;
+        let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+        let content = crate::ui::pane_content_area(&areas);
+        let foot_rows = self.visual_footer_rows(id, content.height);
+        let chrome = crate::ui::visual_chrome(content, self.pill_tabs, foot_rows);
+        let mut strip = crate::ui::visual_button_spans(self.pill_tabs, slot.chat_open);
         strip.push(crate::ui::SpanView {
             text: "  ←→↑↓ scroll · wheel scrolls".to_string(),
             style: muted,
         });
         // The title rides the strip row: the fitted image fills every
         // row below it, so a title line there would be painted over.
+        // A selection appends its shape label the same way. In Kitty
+        // mode the alt text rides here too, shortened to fit: its own
+        // line would hide under the transmitted image.
         if !slot.title.is_empty() {
             strip.push(crate::ui::SpanView {
                 text: format!("  ·  {}", slot.title),
                 style: text,
             });
+        }
+        if let Some(shape) = slot.selected.and_then(|i| slot.shapes.get(i)) {
+            strip.push(crate::ui::SpanView {
+                text: format!(
+                    "  ▸  {}",
+                    crate::safe_text::encode_for_display(&shape.label)
+                ),
+                style: text,
+            });
+        }
+        if kitty && !slot.alt.is_empty() {
+            // Shortened: the strip is chrome, so the description
+            // arrives capped with an ellipsis, never a sentence.
+            let alt = vec![crate::ui::SpanView {
+                text: format!(
+                    "  ·  {}",
+                    crate::safe_text::encode_for_display(&slot.alt)
+                ),
+                style: muted,
+            }];
+            strip.extend(crate::ui::truncate_spans(
+                alt,
+                crate::ui::VISUAL_STRIP_ALT_MAX,
+            ));
         }
         lines.push(strip);
         if !kitty {
@@ -682,12 +1007,6 @@ impl AppState {
             // fallback layout uses the fixed 8x16 cell, never the
             // terminal pixel report. Art covers the visible crop only,
             // capped at the tab image region like the Kitty paint.
-            let (rows, cols) = self.term_size;
-            let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
-            let chrome = crate::ui::visual_chrome(
-                crate::ui::pane_content_area(&areas),
-                self.pill_tabs,
-            );
             let image = chrome.image;
             if let Some(paint) =
                 self.visual_paint(id, image, crate::visual::FALLBACK_CELL_PX.0, crate::visual::FALLBACK_CELL_PX.1)
@@ -701,27 +1020,162 @@ impl AppState {
                     out_rows: paint.out_rows,
                 };
                 let cut = crate::visual::crop_rgba(&slot.rgba, slot.width, slot.height, crop);
-                for row in crate::visual::halfblock_rows(
+                let selected = slot.selected.and_then(|i| slot.shapes.get(i));
+                let cols = (paint.sw as usize).min(paint.out_cols.max(1) as usize).max(1);
+                for (r, row) in crate::visual::halfblock_rows(
                     &cut,
                     paint.sw,
                     paint.sh,
                     paint.out_cols.max(1) as usize,
-                ) {
+                )
+                .into_iter()
+                .enumerate()
+                {
                     lines.push(
                         row.into_iter()
-                            .map(|cell| crate::ui::SpanView {
-                                text: cell.ch.to_string(),
-                                style: Style::default()
+                            .enumerate()
+                            .map(|(dx, cell)| {
+                                let mut style = Style::default()
                                     .fg(Color::Rgb(cell.fg.0, cell.fg.1, cell.fg.2))
-                                    .bg(Color::Rgb(cell.bg.0, cell.bg.1, cell.bg.2)),
+                                    .bg(Color::Rgb(cell.bg.0, cell.bg.1, cell.bg.2));
+                                // Reverse cells inside the selected shape:
+                                // the Kitty backend cannot style cells,
+                                // so it bakes a border into the bytes
+                                // instead (see visual_frame_png).
+                                if let Some(shape) = selected {
+                                    let px = paint.sx.saturating_add(
+                                        (dx as u32).saturating_mul(paint.sw) / cols.max(1) as u32,
+                                    );
+                                    let py = paint.sy.saturating_add((r as u32).saturating_mul(2));
+                                    let (sx, sy) = crate::visual::source_to_svg(
+                                        px,
+                                        py,
+                                        slot.width,
+                                        slot.height,
+                                        &slot.vb,
+                                    );
+                                    if crate::visual::shape_contains(shape, sx, sy) {
+                                        style = style.add_modifier(
+                                            ratatui::style::Modifier::REVERSED,
+                                        );
+                                    }
+                                }
+                                crate::ui::SpanView {
+                                    text: cell.ch.to_string(),
+                                    style,
+                                }
                             })
                             .collect(),
                     );
                 }
             }
         }
-        if !slot.alt.is_empty() {
+        // Fallback only: in Kitty mode the alt text rides the strip
+        // row, since this line would hide under the image.
+        if !kitty && !slot.alt.is_empty() {
             lines.push(line(&slot.alt, muted));
+        }
+        // Dismissable Q/A footer: a bordered box while open, none
+        // while dismissed. Blank filler first: the Kitty backend
+        // emits no art and small diagrams leave empty image rows, so
+        // without it the box would paint under the strip (beneath
+        // the image in Kitty mode) while the click map and wheel
+        // routing use the chrome footer pinned to the bottom.
+        if slot.chat_open {
+            let used = lines.len().saturating_sub(2) as u16;
+            for _ in used..chrome.image.height {
+                lines.push(Vec::new());
+            }
+            // Box metrics: full content width, two-cell side pads, one
+            // pad row under the title; the history viewport is what
+            // remains (see visual_chat_history_rows). Every emitted
+            // row is exactly content-wide so the sides align.
+            let width = content.width as usize;
+            let inner = width.saturating_sub(6);
+            let side = |pad: &str| crate::ui::SpanView {
+                text: pad.to_string(),
+                style: muted,
+            };
+            let fill_content = |mut row: Vec<crate::ui::SpanView>| {
+                let w = crate::ui::spans_width(&row);
+                let style = row.last().map(|s| s.style).unwrap_or(muted);
+                row.push(crate::ui::SpanView {
+                    text: " ".repeat(inner.saturating_sub(w)),
+                    style,
+                });
+                row
+            };
+            let foot_start = lines.len();
+            let mut top = String::from("╭─ Q/A ");
+            top.push_str(&"─".repeat(width.saturating_sub(8)));
+            top.push('╮');
+            lines.push(line(&top, muted));
+            lines.push(vec![
+                side("│"),
+                side(&" ".repeat(width.saturating_sub(2))),
+                side("│"),
+            ]);
+            let label = slot
+                .selected
+                .and_then(|i| slot.shapes.get(i))
+                .map(|s| s.label.as_str())
+                .unwrap_or("shape");
+            // Prompt plus placeholder: `> type question here`
+            // in gray until the first keystroke swaps the hint for
+            // the draft text.
+            let ask_spans: Vec<crate::ui::SpanView> = match (slot.selected.is_some(), slot.draft.as_deref()) {
+                (false, _) => line("Click a shape to ask · c toggles chat", text),
+                (true, Some(d)) if !d.is_empty() => {
+                    let cursor = if slot.input_active { "▌" } else { "" };
+                    vec![
+                        crate::ui::SpanView {
+                            text: format!("Ask about {:?}: ", crate::safe_text::encode_for_display(label)),
+                            style: text,
+                        },
+                        crate::ui::SpanView { text: "> ".to_string(), style: text },
+                        crate::ui::SpanView {
+                            text: format!("{}{}", crate::safe_text::encode_for_display(d), cursor),
+                            style: text,
+                        },
+                    ]
+                }
+                _ => vec![
+                    crate::ui::SpanView {
+                        text: format!("Ask about {:?}: ", crate::safe_text::encode_for_display(label)),
+                        style: text,
+                    },
+                    crate::ui::SpanView { text: "> ".to_string(), style: text },
+                    crate::ui::SpanView { text: "type question here".to_string(), style: muted },
+                ],
+            };
+            let mut ask_line = vec![side("│  ")];
+            ask_line.extend(fill_content(crate::ui::truncate_spans(
+                ask_spans,
+                inner as u16,
+            )));
+            ask_line.push(side("  │"));
+            lines.push(ask_line);
+            let history = self.visual_chat_history_lines(slot);
+            let tail = history.len().saturating_sub(slot.chat_scroll as usize);
+            let start = tail.saturating_sub(
+                crate::ui::visual_chat_history_rows(foot_rows) as usize,
+            );
+            for row in history[start..tail.min(history.len())].iter().cloned() {
+                let mut history_line = vec![side("│  ")];
+                history_line.extend(fill_content(row));
+                history_line.push(side("  │"));
+                lines.push(history_line);
+            }
+            while lines.len() - foot_start < foot_rows.saturating_sub(1) as usize {
+                let mut blank = vec![side("│  ")];
+                blank.extend(fill_content(Vec::new()));
+                blank.push(side("  │"));
+                lines.push(blank);
+            }
+            let mut bottom = String::from("╰");
+            bottom.push_str(&"─".repeat(width.saturating_sub(2)));
+            bottom.push('╯');
+            lines.push(line(&bottom, muted));
         }
         crate::ui::PaneView {
             title,
@@ -785,6 +1239,59 @@ impl AppState {
         };
         wt.take_draft();
         wt.push_question(draft);
+        self.dirty = true;
+        true
+    }
+
+    /// Submit the visual ask draft as a question about the selected
+    /// shape: the markup goes straight into the agent pane and the
+    /// Enter stages for a later tick — the same split write comms
+    /// injections use. The question is logged only after the pane
+    /// write lands, so the footer never claims an undelivered ask.
+    /// The highlight stays so the answer reads against its shape.
+    #[cfg(feature = "visual")]
+    pub fn submit_visual_question(&mut self, id: crate::session::SessionId) -> bool {
+        let Some(slot) = self.visual_slots.get(&id) else {
+            return false;
+        };
+        let draft = match slot.draft.as_ref() {
+            Some(buf) if !buf.trim().is_empty() => buf.trim().to_string(),
+            _ => return false,
+        };
+        let (shape_id, shape_label) = match slot.selected.and_then(|i| slot.shapes.get(i)) {
+            Some(shape) => (shape.id.clone(), shape.label.clone()),
+            None => return false,
+        };
+        let markup = crate::visual::question_markup(
+            &slot.title,
+            &shape_id,
+            &shape_label,
+            &draft,
+        );
+        if self.manager.inject_write(id, markup.as_bytes()).is_err() {
+            return false;
+        }
+        self.pending_enter.insert(id, (std::time::Instant::now(), None));
+        let Some(slot) = self.visual_slots.get_mut(&id) else {
+            return false;
+        };
+        slot.draft = None;
+        slot.input_active = false;
+        slot.chat_scroll = 0;
+        slot.questions.push(crate::visual::VisualQuestion {
+            shape_id,
+            shape_label,
+            question: draft,
+            answer: None,
+        });
+        while slot.questions.len() > crate::visual::MAX_VISUAL_QUESTIONS {
+            // Oldest answered go first; an all-pending log drops its
+            // head rather than growing unbounded.
+            match slot.questions.iter().position(|q| q.answer.is_some()) {
+                Some(i) => slot.questions.remove(i),
+                None => slot.questions.remove(0),
+            };
+        }
         self.dirty = true;
         true
     }
@@ -892,6 +1399,53 @@ impl AppState {
                 Some(Ok(r#"{"ended":true}"#.to_string()))
             }
         }
+    }
+
+    /// Answer the caller's latest pending visual question, if any.
+    /// `None` when the name is not a visual tool and the broker
+    /// should answer instead.
+    #[cfg(feature = "visual")]
+    fn visual_tool(
+        &mut self,
+        run_id: &str,
+        tool: &str,
+        args: &str,
+    ) -> Option<Result<String, String>> {
+        if tool != "visual_answer" {
+            return None;
+        }
+        let id = match self.resolve_tool_caller(run_id) {
+            Ok(id) => id,
+            Err(e) => return Some(Err(e)),
+        };
+        let answer = match Self::tool_arg(args, "answer") {
+            Some(answer) => answer,
+            None => return Some(Err("visual_answer needs an answer".to_string())),
+        };
+        let Some(slot) = self.visual_slots.get_mut(&id) else {
+            return Some(Err("no visual for this session".to_string()));
+        };
+        match slot.questions.iter_mut().rev().find(|q| q.answer.is_none()) {
+            Some(q) => {
+                q.answer = Some(answer);
+                slot.chat_scroll = 0;
+                self.dirty = true;
+                Some(Ok(r#"{"answered":true}"#.to_string()))
+            }
+            None => Some(Err("no visual question waiting".to_string())),
+        }
+    }
+
+    /// Answer stub when the feature is off: the tool name never
+    /// advertises, so reaching here means a forged call.
+    #[cfg(not(feature = "visual"))]
+    fn visual_tool(
+        &mut self,
+        _run_id: &str,
+        _tool: &str,
+        _args: &str,
+    ) -> Option<Result<String, String>> {
+        None
     }
 
     /// Open a tour over a file: relative paths resolve against the
@@ -1094,10 +1648,20 @@ impl AppState {
                 title: done.title,
                 alt: done.alt,
                 // A new frame resets the viewport: whole diagram
-                // fitted to the tab, no scroll.
+                // fitted to the tab, no scroll, no selection, no
+                // questions (shape references belong to the old art),
+                // chat closed.
                 zoom: 1.0,
                 scroll_x: 0,
                 scroll_y: 0,
+                shapes: frame.shapes,
+                vb: frame.vb,
+                selected: None,
+                draft: None,
+                input_active: false,
+                chat_open: false,
+                chat_scroll: 0,
+                questions: Vec::new(),
             },
         );
         self.visual_evict();
@@ -1950,17 +2514,20 @@ impl AppState {
                     self.dirty = true;
                     return;
                 }
-                // Walkthrough and session tools answer here (they own
-                // overlay and manager state the broker cannot see);
-                // everything else goes to the broker at once. The
-                // verdict goes straight back to `mcp-serve`. Failures
-                // stay single-line JSON, escaped.
+                // Walkthrough, visual, and session tools answer here
+                // (they own overlay and manager state the broker
+                // cannot see); everything else goes to the broker at
+                // once. The verdict goes straight back to `mcp-serve`.
+                // Failures stay single-line JSON, escaped.
                 let now = std::time::Instant::now();
                 let verdict = match self.walkthrough_tool(&req.run_id, &req.tool, &req.args) {
                     Some(verdict) => verdict,
-                    None => match self.session_tool(&req.run_id, &req.tool, &req.args) {
+                    None => match self.visual_tool(&req.run_id, &req.tool, &req.args) {
                         Some(verdict) => verdict,
-                        None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                        None => match self.session_tool(&req.run_id, &req.tool, &req.args) {
+                            Some(verdict) => verdict,
+                            None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                        },
                     },
                 };
                 let line = match verdict {
@@ -4062,6 +4629,8 @@ mod tests {
                 rgba: Vec::new(),
                 width,
                 height,
+                shapes: Vec::new(),
+                vb: [0.0, 0.0, width as f32, height as f32],
             }),
         });
     }
@@ -4186,6 +4755,8 @@ mod tests {
                 rgba: Vec::new(),
                 width: 10,
                 height: 10,
+                shapes: Vec::new(),
+                vb: [0.0, 0.0, 10.0, 10.0],
             }),
         }).unwrap();
         state.drain_visual();
@@ -4389,12 +4960,21 @@ mod tests {
             zoom: 1.0,
             scroll_x: 0,
             scroll_y: 0,
+            shapes: Vec::new(),
+            vb: [0.0, 0.0, 2.0, 2.0],
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
         });
         let full = crate::visual::VisualPaint {
             zoom_bits: 1f32.to_bits(),
             ox: 0, oy: 0, out_cols: 1, out_rows: 1,
             cursor_x: 0, cursor_y: 0,
             sx: 0, sy: 0, sw: 2, sh: 2,
+            selected: None,
         };
         assert_eq!(state.visual_frame_png(id, 1, full).unwrap(), fake_png(30, 2, 2));
         // A cropped viewport re-encodes just its region: top-left red.
@@ -4438,6 +5018,901 @@ mod tests {
 
     #[cfg(feature = "visual")]
     #[test]
+    fn visual_click_selects_shape_toggles_and_clears() {
+        // Click resolution honors zoom and scroll: the same shape
+        // selects whether the viewport is fitted or zoomed in and
+        // panned. Clicking the selected shape toggles off; clicking
+        // empty space clears.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 200,
+            height: 100,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: vec![
+                ShapeBox { id: "big".to_string(), label: "Big".to_string(), x: 10.0, y: 10.0, width: 180.0, height: 80.0 },
+                ShapeBox { id: "small".to_string(), label: "Small".to_string(), x: 50.0, y: 30.0, width: 40.0, height: 20.0 },
+            ],
+            vb: [0.0, 0.0, 200.0, 100.0],
+        });
+        // Fitted: display matches the area, so pixel == SVG unit.
+        assert!(state.visual_select_at(id, 60, 20, 200, 50, 8.0, 16.0, false));
+        assert_eq!(state.visual_slots.get(&id).unwrap().selected, Some(1));
+        assert!(state.visual_select_at(id, 60, 20, 200, 50, 8.0, 16.0, false), "toggle off");
+        assert_eq!(state.visual_slots.get(&id).unwrap().selected, None);
+        assert!(!state.visual_select_at(id, 5, 5, 200, 50, 8.0, 16.0, false), "empty space, nothing selected");
+        // Zoomed and panned: the same shape still resolves.
+        assert!(state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        assert!(state.visual_scroll(id, 10, 5, 200, 50, 8.0, 16.0));
+        assert!(state.visual_select_at(id, 65, 19, 200, 50, 8.0, 16.0, false));
+        assert_eq!(state.visual_slots.get(&id).unwrap().selected, Some(1));
+        // Empty space with a selection clears it.
+        assert!(state.visual_select_at(id, 0, 0, 200, 50, 8.0, 16.0, false));
+        assert_eq!(state.visual_slots.get(&id).unwrap().selected, None);
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_click_selects_real_node_through_full_chain() {
+        // End to end on a real render: node A's box center maps to a
+        // viewport cell that selects A, and the fallback view shows
+        // its label highlighted. This exercises layout, inversion,
+        // selection, and rendering together instead of synthetics.
+        let source = "flowchart LR\n    A[Start] --> B{Decision}\n    B -->|Yes| C[OK]\n    B -->|No| D[Cancel]\n";
+        let frame = crate::visual::render_frame(source).expect("renders");
+        let a = frame.shapes.iter().position(|s| s.id == "A").expect("node A");
+        let node = &frame.shapes[a];
+        let (disp_cols, disp_rows) =
+            crate::visual::fit_display(frame.width, frame.height, 1.0, 200, 50, 8.0, 16.0);
+        let (cpx, cpy) = crate::visual::svg_to_source(
+            node.x + node.width / 2.0,
+            node.y + node.height / 2.0,
+            frame.width,
+            frame.height,
+            &frame.vb,
+        );
+        let vx = cpx.saturating_mul(disp_cols as u32) / frame.width.max(1);
+        let vy = cpy.saturating_mul(disp_rows as u32) / frame.height.max(1);
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: frame.png,
+            rgba: frame.rgba,
+            width: frame.width,
+            height: frame.height,
+            title: "chain".to_string(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: frame.shapes,
+            vb: frame.vb,
+        });
+        assert!(
+            state.visual_select_at(id, vx.min(199) as u16, vy.min(49) as u16, 200, 50, 8.0, 16.0, false),
+            "center of A selects (cell {vx},{vy})"
+        );
+        assert_eq!(state.visual_slots.get(&id).unwrap().selected, Some(a));
+        let view = state.visual_view(id, false);
+        let text: String = view.lines.iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
+        assert!(text.contains("Start"), "strip names the node: {text:?}");
+        assert!(
+            view.lines.iter().flat_map(|r| r.iter()).any(|s| {
+                s.style.add_modifier.contains(ratatui::style::Modifier::REVERSED)
+            }),
+            "highlight renders"
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_click_accounts_for_centered_diagram() {
+        // Live Ghostty geometry: a tall fitted diagram centers in a
+        // wider region on the Kitty path, so the picker must subtract
+        // the same offset the paint cursor adds. The click below hit
+        // the raster edge left-aligned and the CFG node centered.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 408,
+            height: 1496,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: vec![
+                ShapeBox { id: "CFG".to_string(), label: "Cfg".to_string(), x: 70.0, y: 311.0, width: 227.0, height: 51.0 },
+            ],
+            vb: [0.0, 0.0, 408.0, 1496.0],
+        });
+        assert!(
+            !state.visual_select_at(id, 92, 15, 184, 68, 8.0, 16.0, false),
+            "left-aligned misses the centered diagram"
+        );
+        assert_eq!(state.visual_slots.get(&id).unwrap().selected, None);
+        assert!(
+            state.visual_select_at(id, 92, 15, 184, 68, 8.0, 16.0, true),
+            "centered hits the node"
+        );
+        assert_eq!(state.visual_slots.get(&id).unwrap().selected, Some(0));
+        assert!(
+            state.visual_select_at(id, 5, 5, 184, 68, 8.0, 16.0, true),
+            "margin click clears"
+        );
+        assert_eq!(state.visual_slots.get(&id).unwrap().selected, None);
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_selection_marks_fallback_cells() {
+        // The half-block fallback shows selection as reversed cells;
+        // with no selection no cell reverses.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: vec![0u8; 64 * 64 * 4],
+            width: 64,
+            height: 64,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: vec![
+                ShapeBox { id: "left".to_string(), label: "Left".to_string(), x: 0.0, y: 0.0, width: 20.0, height: 64.0 },
+            ],
+            vb: [0.0, 0.0, 64.0, 64.0],
+        });
+        let plain: String = state.visual_view(id, false).lines.iter()
+            .flat_map(|r| r.iter()).map(|s| s.text.as_str()).collect();
+        assert!(!plain.is_empty());
+        let reversed = |view: crate::ui::PaneView| {
+            view.lines.iter().flat_map(|r| r.iter()).filter(|s| {
+                s.style.add_modifier.contains(ratatui::style::Modifier::REVERSED)
+            }).count()
+        };
+        assert_eq!(reversed(state.visual_view(id, false)), 0, "no selection, no marks");
+        state.visual_slots.get_mut(&id).unwrap().selected = Some(0);
+        assert!(reversed(state.visual_view(id, false)) > 0, "selection marks cells");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_kitty_frame_bakes_selection_border() {
+        // Kitty has no cell styles: the selection rides as a baked
+        // border in the transmitted bytes, so the fingerprint must
+        // change with it or the gate would swallow the highlight.
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        let rgba = vec![0u8; 64 * 64 * 4];
+        let png = crate::visual::encode_png(&rgba, 64, 64).expect("encodes");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png,
+            rgba,
+            width: 64,
+            height: 64,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: vec![
+                crate::visual::ShapeBox { id: "box".to_string(), label: "Box".to_string(), x: 8.0, y: 8.0, width: 32.0, height: 32.0 },
+            ],
+            vb: [0.0, 0.0, 64.0, 64.0],
+        });
+        show_visual_overlay(&mut state, id);
+        let has_border = |bytes: &[u8]| {
+            let (rgba, _, _) = crate::visual::decode_rgba(bytes).expect("decodes");
+            rgba.chunks_exact(4).any(|p| {
+                p[0] == crate::visual::SELECT_RGB.0
+                    && p[1] == crate::visual::SELECT_RGB.1
+                    && p[2] == crate::visual::SELECT_RGB.2
+            })
+        };
+        let paint = paint_for(&state, id);
+        let plain = state.visual_frame_png(id, 1, paint).expect("bytes");
+        assert!(!has_border(&plain), "no selection, no border");
+        state.visual_slots.get_mut(&id).unwrap().selected = Some(0);
+        let paint = paint_for(&state, id);
+        assert_ne!(paint.selected, None, "fingerprint carries selection");
+        let marked = state.visual_frame_png(id, 1, paint).expect("bytes");
+        assert_ne!(marked, plain, "bytes change with selection");
+        assert!(has_border(&marked), "border baked in");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_question_submit_needs_selection_and_draft() {
+        // Asking mirrors the walkthrough: selection plus a typed draft
+        // submits shape context as markup, logs the pending question,
+        // and clears the draft while keeping the highlight.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 64,
+            height: 64,
+            title: "flow".to_string(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: vec![
+                ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 64.0, height: 64.0 },
+            ],
+            vb: [0.0, 0.0, 64.0, 64.0],
+        });
+        assert!(!state.submit_visual_question(id), "no selection, no draft");
+        state.visual_slots.get_mut(&id).unwrap().selected = Some(0);
+        assert!(!state.submit_visual_question(id), "no draft yet");
+        state.visual_slots.get_mut(&id).unwrap().draft = Some("  what does it do? ".to_string());
+        assert!(state.submit_visual_question(id));
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert_eq!(slot.questions.len(), 1);
+        assert_eq!(slot.questions[0].shape_id, "A");
+        assert_eq!(slot.questions[0].shape_label, "Start");
+        assert_eq!(slot.questions[0].question, "what does it do?");
+        assert!(slot.questions[0].answer.is_none());
+        assert_eq!(slot.draft, None, "draft clears");
+        assert_eq!(slot.selected, Some(0), "highlight stays");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_answer_resolves_latest_pending_only() {
+        // The agent answers through the visual_answer tool, latest
+        // pending first; thin air errors like the walkthrough twin.
+        let mut state = AppState::new();
+        let (id, live_run) = spawn_visual_agent(&mut state, "agent");
+        let early = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"x"}"#);
+        assert!(early.contains("no visual"), "early: {early}");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: Vec::new(),
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        state.visual_slots.get_mut(&id).unwrap().shapes =
+            vec![crate::visual::ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 }];
+        state.visual_slots.get_mut(&id).unwrap().vb = [0.0, 0.0, 8.0, 8.0];
+        state.visual_slots.get_mut(&id).unwrap().selected = Some(0);
+        state.visual_slots.get_mut(&id).unwrap().draft = Some("why?".to_string());
+        assert!(state.submit_visual_question(id));
+        let answered = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"because"}"#);
+        assert!(answered.contains(r#""answered":true"#), "answered: {answered}");
+        assert_eq!(
+            state.visual_slots.get(&id).unwrap().questions[0].answer.as_deref(),
+            Some("because")
+        );
+        let stale = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"again"}"#);
+        assert!(stale.contains("no visual question waiting"), "stale: {stale}");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_toggle_chat_flips_footer_rows() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        assert_eq!(state.visual_footer_rows(id, 20), 0, "no slot yet");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        assert_eq!(state.visual_footer_rows(id, 20), 0, "closed by default");
+        assert!(state.visual_toggle_chat(id));
+        assert!(state.visual_slots.get(&id).unwrap().chat_open);
+        assert_eq!(state.visual_footer_rows(id, 20), 6, "open reserves 30%");
+        assert_eq!(state.visual_footer_rows(id, 100), 30, "scales with the tab");
+        assert!(state.visual_toggle_chat(id));
+        assert!(!state.visual_slots.get(&id).unwrap().chat_open);
+        assert_eq!(state.visual_footer_rows(id, 20), 0);
+        let (other, _) = spawn_visual_agent(&mut state, "other");
+        assert!(!state.visual_toggle_chat(other), "no slot, no toggle");
+        assert!(state.manager.remove(other));
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_selection_opens_chat() {
+        // Clicking a shape opens the dismissed chat again; the
+        // toggle only wins until the next selection.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 200,
+            height: 100,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            draft: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            questions: Vec::new(),
+            shapes: vec![
+                ShapeBox { id: "b".to_string(), label: "B".to_string(), x: 10.0, y: 10.0, width: 180.0, height: 80.0 },
+            ],
+            vb: [0.0, 0.0, 200.0, 100.0],
+        });
+        assert!(state.visual_select_at(id, 60, 20, 200, 50, 8.0, 16.0, false));
+        assert!(state.visual_slots.get(&id).unwrap().chat_open, "select opens");
+        assert!(state.visual_toggle_chat(id), "dismissed");
+        assert!(state.visual_select_at(id, 60, 20, 200, 50, 8.0, 16.0, false), "toggle off");
+        assert!(state.visual_select_at(id, 60, 20, 200, 50, 8.0, 16.0, false), "reselect opens");
+        assert!(state.visual_slots.get(&id).unwrap().chat_open);
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_footer_draws_a_titled_qa_box() {
+        // The Q/A panel reads as one bordered box: rounded top with
+        // the title, padded ask and history rows with solid sides,
+        // rounded bottom. Every footer row is exactly content-wide so
+        // the box edges align and nothing wraps.
+        use ratatui::layout::Rect;
+        let mut state = AppState::new();
+        state.term_size = (40, 100);
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        assert!(state.visual_toggle_chat(id));
+        let view = state.visual_view(id, true);
+        let areas = crate::ui::chrome_areas(Rect::new(0, 0, 100, 40));
+        let content = crate::ui::pane_content_area(&areas);
+        let foot = state.visual_footer_rows(id, content.height);
+        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let ask_idx = (chrome.footer.y - content.y) as usize;
+        let block = &view.lines[ask_idx..ask_idx + foot as usize];
+        let width = content.width as usize;
+        for (i, row) in block.iter().enumerate() {
+            assert_eq!(crate::ui::spans_width(row), width, "box row {i} fills");
+        }
+        let text = |row: &Vec<crate::ui::SpanView>| {
+            row.iter().map(|s| s.text.as_str()).collect::<String>()
+        };
+        assert!(text(&block[0]).starts_with("╭") && text(&block[0]).contains("Q/A"), "titled top");
+        assert!(text(&block[0]).ends_with("╮"), "top closes");
+        assert!(text(&block[1]).starts_with("│"), "pad row sided");
+        assert!(text(&block[2]).contains("Click a shape to ask"), "ask inside the box");
+        assert!(text(&block[foot as usize - 1]).starts_with("╰"), "bottom closes");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_ask_row_shows_prompt_placeholder_until_typed() {
+        // Selected but nothing typed yet: `Ask about "S": >` plus a
+        // gray `type question here` hint. The first keystroke swaps
+        // the hint for the draft text.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: vec![0u8; 8 * 8 * 4],
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: Some(0),
+            draft: None,
+            input_active: false,
+            chat_open: true,
+            chat_scroll: 0,
+            questions: Vec::new(),
+            shapes: vec![
+                ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
+            ],
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        let find_ask = |view: crate::ui::PaneView| {
+            view.lines
+                .into_iter()
+                .find(|r| r.iter().any(|s| s.text.contains("Ask about")))
+                .expect("ask row")
+        };
+        let row = find_ask(state.visual_view(id, true));
+        let text: String = row.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains(">"), "prompt marker: {text:?}");
+        assert!(text.contains("type question here"), "placeholder: {text:?}");
+        let hint = row.iter().find(|s| s.text.contains("type question here")).unwrap();
+        assert_eq!(
+            hint.style,
+            crate::theme::style(crate::theme::Role::Muted),
+            "placeholder is gray"
+        );
+        state.visual_slots.get_mut(&id).unwrap().draft = Some("why?".to_string());
+        let row = find_ask(state.visual_view(id, true));
+        let text: String = row.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains(">") && text.contains("why?"), "typed text: {text:?}");
+        assert!(!text.contains("type question here"), "hint swapped out");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_strip_carries_a_shortened_alt_in_kitty_mode() {
+        // Kitty mode paints no art, so a standalone alt line would
+        // hide under the image: the description rides the strip row
+        // instead, capped with an ellipsis, and no second copy paints
+        // below it. Short descriptions arrive whole.
+        let mut state = AppState::new();
+        state.term_size = (40, 100);
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        state.visual_slots.get_mut(&id).unwrap().alt =
+            "a very long diagram description that cannot fit the strip row at all".to_string();
+        let view = state.visual_view(id, true);
+        let strip = &view.lines[1];
+        let text: String = strip.iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains("a very long diagram"), "alt head: {text:?}");
+        assert!(text.contains("…"), "long alt shortens: {text:?}");
+        assert!(!text.contains("at all"), "tail cut: {text:?}");
+        let rest: String = view.lines[2..].iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
+        assert!(!rest.contains("a very long diagram"), "no occluded copy");
+        state.visual_slots.get_mut(&id).unwrap().alt = "a diagram".to_string();
+        let view = state.visual_view(id, true);
+        let text: String = view.lines[1].iter().map(|s| s.text.as_str()).collect();
+        assert!(text.contains("a diagram") && !text.contains("…"), "short alt whole: {text:?}");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_footer_grows_to_thirty_percent_of_a_tall_tab() {
+        // A tall tab gives the Q/A panel room: 30% of content height
+        // (ask row plus history), not the old fixed seven rows.
+        use ratatui::layout::Rect;
+        let mut state = AppState::new();
+        state.term_size = (40, 100);
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        assert!(state.visual_toggle_chat(id));
+        assert_eq!(state.visual_footer_rows(id, 36), 11);
+        let view = state.visual_view(id, true);
+        let areas = crate::ui::chrome_areas(Rect::new(0, 0, 100, 40));
+        let content = crate::ui::pane_content_area(&areas);
+        assert_eq!(content.height, 36);
+        let chrome = crate::ui::visual_chrome(
+            content,
+            state.pill_tabs,
+            state.visual_footer_rows(id, content.height),
+        );
+        let ask_idx = (chrome.footer.y - content.y) as usize;
+        assert_eq!(view.lines.len() - ask_idx, 11, "ask plus ten history rows");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_footer_renders_fixed_rows_with_markdown() {
+        // Open chat costs its 30% footer rows: the ask row plus the
+        // history viewport padded with blanks. Answers reuse the
+        // walkthrough markdown skin, not plain text.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: vec![0u8; 8 * 8 * 4],
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: Some(0),
+            draft: Some("why?".to_string()),
+            input_active: true,
+            chat_open: true,
+            chat_scroll: 0,
+            questions: vec![crate::visual::VisualQuestion {
+                shape_id: "A".to_string(),
+                shape_label: "Start".to_string(),
+                question: "what?".to_string(),
+                answer: Some("**bold** done".to_string()),
+            }],
+            shapes: vec![
+                ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
+            ],
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        let view = state.visual_view(id, false);
+        let foot = state.visual_footer_rows(id, 20) as usize;
+        assert!(view.lines.len() >= foot, "footer present");
+        let tail = &view.lines[view.lines.len() - foot..];
+        let text: String = tail.iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
+        assert!(text.contains("why?"), "ask row with draft: {text:?}");
+        assert!(text.contains("what?"), "question: {text:?}");
+        assert!(text.contains("bold") && text.contains("done"), "answer: {text:?}");
+        assert!(
+            tail.iter().flat_map(|r| r.iter()).any(|s| {
+                s.style.add_modifier.contains(ratatui::style::Modifier::BOLD)
+            }),
+            "markdown skin, not plain text"
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chat_scroll_clamps_and_retails() {
+        // Wheel offset counts rows up from the tail; answering or
+        // asking re-tails so fresh content is never stranded above.
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            draft: None,
+            input_active: false,
+            chat_open: true,
+            chat_scroll: 0,
+            questions: (0..10)
+                .map(|i| crate::visual::VisualQuestion {
+                    shape_id: "A".to_string(),
+                    shape_label: "S".to_string(),
+                    question: format!("q{i}"),
+                    answer: Some(format!("a{i}")),
+                })
+                .collect(),
+            shapes: Vec::new(),
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        assert!(state.visual_chat_scroll(id, 3, 5));
+        assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 3);
+        assert!(state.visual_chat_scroll(id, -99, 5));
+        assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "clamped to tail");
+        assert!(state.visual_chat_scroll(id, 9999, 5));
+        let max = state.visual_slots.get(&id).unwrap().chat_scroll;
+        assert!(max > 0, "history exceeds the viewport");
+        assert!(!state.visual_chat_scroll(id, 9999, 5), "clamped at head");
+        assert!(!state.visual_chat_scroll(id, 0, 5), "no-op at rest");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_submit_and_answer_retail_the_chat() {
+        // Asking or answering re-tails so fresh content is never
+        // stranded above the viewport.
+        let mut state = AppState::new();
+        let (id, live_run) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: Some(0),
+            draft: Some("why?".to_string()),
+            input_active: true,
+            chat_open: true,
+            chat_scroll: 5,
+            questions: Vec::new(),
+            shapes: vec![
+                crate::visual::ShapeBox { id: "A".to_string(), label: "S".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
+            ],
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        assert!(state.submit_visual_question(id));
+        assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "ask re-tails");
+        assert!(!state.visual_slots.get(&id).unwrap().input_active, "submit exits input");
+        state.visual_slots.get_mut(&id).unwrap().chat_scroll = 5;
+        let out = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"because"}"#);
+        assert!(out.contains(r#""answered":true"#), "answered: {out}");
+        assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "answer re-tails");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_view_shows_input_row_and_pending_answer() {
+        // The footer pins the ask row under a selection and the latest
+        // Q&A beneath it: question plus waiting marker until answered.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: vec![0u8; 8 * 8 * 4],
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: Some(0),
+            input_active: false,
+            chat_open: true,
+            chat_scroll: 0,
+            draft: Some("why?".to_string()),
+            questions: vec![crate::visual::VisualQuestion {
+                shape_id: "A".to_string(),
+                shape_label: "Start".to_string(),
+                question: "what?".to_string(),
+                answer: None,
+            }],
+            shapes: vec![
+                ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
+            ],
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        let view = state.visual_view(id, false);
+        let text: String = view.lines.iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
+        assert!(text.contains("Start") && text.contains("why?"), "ask row: {text:?}");
+        assert!(text.contains("what?"), "question: {text:?}");
+        assert!(text.contains(crate::visual::VISUAL_WAITING_TEXT), "waiting: {text:?}");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_view_pins_footer_to_chrome_footer_in_kitty_mode() {
+        // Kitty mode emits no art: blank filler must push the ask row
+        // onto the chrome footer rows. Without it the footer paints
+        // under the strip, the transmitted image paints over it, and
+        // wheel routing (which uses the chrome rect) desyncs from
+        // what is on screen.
+        use ratatui::layout::Rect;
+        let mut state = AppState::new();
+        state.term_size = (40, 100);
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        assert!(state.visual_toggle_chat(id));
+        let view = state.visual_view(id, true);
+        let (rows, cols) = state.term_size;
+        let areas = crate::ui::chrome_areas(Rect::new(0, 0, cols, rows));
+        let content = crate::ui::pane_content_area(&areas);
+        let foot = state.visual_footer_rows(id, content.height);
+        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let ask_idx = (chrome.footer.y - content.y) as usize;
+        assert!(
+            ask_idx < view.lines.len(),
+            "ask row on screen: {} lines for footer at {ask_idx}",
+            view.lines.len()
+        );
+        let top: String = view.lines[ask_idx].iter().map(|s| s.text.as_str()).collect();
+        assert!(top.contains("Q/A"), "box opens the footer: {top:?}");
+        let ask: String = view.lines[ask_idx + 2].iter().map(|s| s.text.as_str()).collect();
+        assert!(ask.contains("Click a shape to ask"), "ask row: {ask:?}");
+        assert_eq!(view.lines.len() - ask_idx, foot as usize, "footer is the last block");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_view_pins_footer_below_small_fallback_art() {
+        // A diagram smaller than the image region leaves blank rows;
+        // the footer must still land on the chrome footer, not float
+        // directly under the art.
+        use ratatui::layout::Rect;
+        let mut state = AppState::new();
+        state.term_size = (40, 100);
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: vec![0u8; 8 * 8 * 4],
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            shapes: Vec::new(),
+            vb: [0.0, 0.0, 8.0, 8.0],
+            selected: None,
+            input_active: false,
+            chat_open: true,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+        });
+        let view = state.visual_view(id, false);
+        let (rows, cols) = state.term_size;
+        let areas = crate::ui::chrome_areas(Rect::new(0, 0, cols, rows));
+        let content = crate::ui::pane_content_area(&areas);
+        let foot = state.visual_footer_rows(id, content.height);
+        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let ask_idx = (chrome.footer.y - content.y) as usize;
+        assert!(
+            ask_idx < view.lines.len(),
+            "ask row on screen: {} lines for footer at {ask_idx}",
+            view.lines.len()
+        );
+        let top: String = view.lines[ask_idx].iter().map(|s| s.text.as_str()).collect();
+        assert!(top.contains("Q/A"), "box opens the footer: {top:?}");
+        let ask: String = view.lines[ask_idx + 2].iter().map(|s| s.text.as_str()).collect();
+        assert!(ask.contains("Click a shape to ask"), "ask row: {ask:?}");
+        assert_eq!(view.lines.len() - ask_idx, foot as usize, "footer is the last block");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chat_renders_on_the_bottom_rows_of_the_real_screen() {
+        // End to end through the real renderer: a diagram with an
+        // open chat and a waiting question must paint the strip at
+        // the top and the footer pinned to the bottom, with nothing
+        // leaking into the image rows between.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        let mut state = AppState::new();
+        state.term_size = (40, 100);
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        assert!(state.visual_toggle_chat(id));
+        state
+            .visual_slots
+            .get_mut(&id)
+            .unwrap()
+            .questions
+            .push(crate::visual::VisualQuestion {
+                shape_id: "A".to_string(),
+                shape_label: "Start".to_string(),
+                question: "what is this?".to_string(),
+                answer: None,
+            });
+        let view = state.visual_view(id, true);
+        let (rows, cols) = state.term_size;
+        let area = Rect::new(0, 0, cols, rows);
+        let areas = crate::ui::chrome_areas(area);
+        let content = crate::ui::pane_content_area(&areas);
+        let foot = state.visual_footer_rows(id, content.height);
+        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let chrome_ui = crate::ui::Chrome {
+            tabs: vec![crate::ui::SessionTab {
+                title: "agent".to_string(),
+                live: true,
+                focused: true,
+                group: None,
+                group_color: None,
+            }],
+            topbar: crate::ui::TopBar { tabs: Vec::new() },
+            detail: None,
+            pending: 0,
+            mode: "off",
+            grid: false,
+            pills: true,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, area, &[view], &chrome_ui)).unwrap();
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        let screen: Vec<String> = buf
+            .content
+            .chunks(w)
+            .map(|row| row.iter().map(|c| c.symbol().to_string()).collect())
+            .collect();
+        assert!(screen[content.y as usize + 1].contains("chat"), "strip: {:?}", screen[3]);
+        let foot_y = chrome.footer.y as usize;
+        assert!(screen[foot_y].contains("╭─ Q/A"), "box opens on screen");
+        assert!(screen[foot_y + foot as usize - 1].contains("╰"), "box closes on screen");
+        let bottom: String = screen[foot_y..foot_y + foot as usize].join("\n");
+        assert!(bottom.contains("Click a shape to ask"), "ask row: {bottom:?}");
+        assert!(bottom.contains("what is this?"), "question: {bottom:?}");
+        assert!(
+            bottom.contains(crate::visual::VISUAL_WAITING_TEXT),
+            "waiting: {bottom:?}"
+        );
+        let middle: String = screen[content.y as usize + 2..foot_y].join("\n");
+        assert!(
+            !middle.contains("what is this?"),
+            "footer must not float under the strip"
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
     fn visual_view_falls_back_to_halfblock_with_alt() {
         let mut state = AppState::new();
         let (id, _) = spawn_visual_agent(&mut state, "agent");
@@ -4457,6 +5932,14 @@ mod tests {
             zoom: 1.0,
             scroll_x: 0,
             scroll_y: 0,
+            shapes: Vec::new(),
+            vb: [0.0, 0.0, 2.0, 2.0],
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
         });
         let view = state.visual_view(id, false);
         assert!(view.title.contains("Visual"), "pane title: {}", view.title);

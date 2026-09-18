@@ -10,16 +10,21 @@ pub const MAX_RASTER_PIXELS: u64 = 2048 * 2048;
 
 /// One rasterized diagram, measured and pixel-capped: PNG bytes for
 /// Kitty transmit plus decoded RGBA8 for the half-block fallback.
+/// Shape boxes ride along so clicks resolve without re-layout.
 pub struct RasterFrame {
     pub png: Vec<u8>,
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    pub shapes: Vec<ShapeBox>,
+    pub vb: [f32; 4],
 }
 
 /// Render plus measure plus pixel cap plus RGBA decode, all on the
 /// worker. In-memory raster would need a direct resvg dep; the
-/// scratch file stands until that earns its keep.
+/// scratch file stands until that earns its keep. A shape-map miss
+/// degrades to no selection (SVG dims fall back to raster dims) so a
+/// diagram never fails to show for lack of boxes.
 pub fn render_frame(source: &str) -> Result<RasterFrame, String> {
     let png = render_png_bytes(source)?;
     let (width, height) = png_dimensions(&png)?;
@@ -32,7 +37,9 @@ pub fn render_frame(source: &str) -> Result<RasterFrame, String> {
     if dw != width || dh != height {
         return Err("decoded dimensions disagree with IHDR".to_string());
     }
-    Ok(RasterFrame { png, rgba, width, height })
+    let (shapes, vb) = shapes_for(source)
+        .unwrap_or_else(|_| (Vec::new(), [0.0, 0.0, width as f32, height as f32]));
+    Ok(RasterFrame { png, rgba, width, height, shapes, vb })
 }
 
 /// Render one Mermaid diagram to PNG bytes. The crate's PNG writer is
@@ -52,6 +59,236 @@ pub fn render_png_bytes(source: &str) -> Result<Vec<u8>, String> {
         std::fs::read(&path).map_err(|e| format!("cannot read scratch png: {e}"))?;
     let _ = std::fs::remove_file(&path);
     Ok(bytes)
+}
+
+/// One selectable diagram shape in SVG units: the node's layout box
+/// plus its human label. Stored per raster so clicks resolve without
+/// re-running layout on the event path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapeBox {
+    pub id: String,
+    pub label: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Cap on stored shapes per raster: bounds slot memory and keeps
+/// hit-testing linear-time cheap on pathological diagrams.
+pub const MAX_SHAPES: usize = 256;
+
+/// Shape boxes for a diagram source, laid out with the same options
+/// `render_frame` renders with, so boxes match the displayed raster.
+/// Hidden and empty nodes never select. Returns the boxes plus the
+/// SVG viewBox `[x, y, w, h]` the boxes are measured in: diagram
+/// kinds with padded or offset viewBoxes (sequence, C4, mindmap)
+/// resolve through it instead of assuming a zero origin.
+pub fn shapes_for(source: &str) -> Result<(Vec<ShapeBox>, [f32; 4]), String> {
+    let parsed =
+        mermaid_rs_renderer::parse_mermaid_strict(source).map_err(|e| e.to_string())?;
+    let layout = mermaid_rs_renderer::layout::compute_layout(
+        &parsed.graph,
+        &mermaid_rs_renderer::Theme::modern(),
+        &mermaid_rs_renderer::config::LayoutConfig::default(),
+    );
+    let viewbox = mermaid_rs_renderer::measure(
+        source,
+        mermaid_rs_renderer::RenderOptions::default(),
+    )
+    .map(|d| [d.viewbox_x, d.viewbox_y, d.viewbox_width, d.viewbox_height])
+    .unwrap_or([0.0, 0.0, layout.width, layout.height]);
+    let mut shapes = Vec::new();
+    for node in layout.nodes.values() {
+        if node.hidden || node.width <= 0.0 || node.height <= 0.0 {
+            continue;
+        }
+        if shapes.len() >= MAX_SHAPES {
+            break;
+        }
+        let label = node
+            .label
+            .lines
+            .iter()
+            .find(|line| !line.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| node.id.clone());
+        shapes.push(ShapeBox {
+            id: node.id.clone(),
+            label,
+            x: node.x,
+            y: node.y,
+            width: node.width,
+            height: node.height,
+        });
+    }
+    Ok((shapes, viewbox))
+}
+
+/// Viewport click to source pixels, zoom-aware: the inverse of
+/// `crop_for_view`'s cell-to-pixel mapping. (`col`, `row`) address
+/// the image region; (`ox`, `oy`) is the current scroll origin. Maps
+/// the cell center, not its top-left corner, so a click on a cell
+/// visibly showing a shape resolves into that shape even when the
+/// cell spans many source pixels at fit zoom.
+pub fn view_to_source(
+    col: u16,
+    row: u16,
+    ox: u16,
+    oy: u16,
+    disp_cols: u16,
+    disp_rows: u16,
+    img_w: u32,
+    img_h: u32,
+) -> (u32, u32) {
+    let (img_w, img_h) = (img_w.max(1) as u64, img_h.max(1) as u64);
+    let (disp_cols, disp_rows) = (disp_cols.max(1) as u64, disp_rows.max(1) as u64);
+    let dx = ox as u64 + col as u64;
+    let dy = oy as u64 + row as u64;
+    let px = ((2 * dx + 1) * img_w / (2 * disp_cols)).min(img_w - 1) as u32;
+    let py = ((2 * dy + 1) * img_h / (2 * disp_rows)).min(img_h - 1) as u32;
+    (px, py)
+}
+
+/// Source pixels to SVG units for shape hit-testing, through the
+/// viewBox `[x, y, w, h]` so padded or offset kinds resolve exactly.
+pub fn source_to_svg(
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    vb: &[f32; 4],
+) -> (f32, f32) {
+    let (img_w, img_h) = (img_w.max(1) as f32, img_h.max(1) as f32);
+    (
+        vb[0] + px as f32 * vb[2].max(0.0) / img_w,
+        vb[1] + py as f32 * vb[3].max(0.0) / img_h,
+    )
+}
+
+/// SVG units back to source pixels (the inverse of `source_to_svg`),
+/// for baking highlight borders into a crop.
+pub fn svg_to_source(
+    x: f32,
+    y: f32,
+    img_w: u32,
+    img_h: u32,
+    vb: &[f32; 4],
+) -> (u32, u32) {
+    let (img_w, img_h) = (img_w.max(1) as f32, img_h.max(1) as f32);
+    (
+        ((x - vb[0]) * img_w / vb[2].max(1.0)).round().max(0.0) as u32,
+        ((y - vb[1]) * img_h / vb[3].max(1.0)).round().max(0.0) as u32,
+    )
+}
+
+/// Whether the point sits inside the shape box, edges inclusive.
+/// Degenerate (empty) boxes never contain.
+pub fn shape_contains(s: &ShapeBox, x: f32, y: f32) -> bool {
+    s.width > 0.0
+        && s.height > 0.0
+        && x >= s.x
+        && y >= s.y
+        && x <= s.x + s.width
+        && y <= s.y + s.height
+}
+
+/// Topmost shape containing the point: smallest area wins so labels
+/// nested in big containers resolve to the inner shape. `None`
+/// outside every box.
+pub fn hit_shape(shapes: &[ShapeBox], x: f32, y: f32) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, s) in shapes.iter().enumerate() {
+        if !shape_contains(s, x, y) {
+            continue;
+        }
+        let area = s.width * s.height;
+        if best.is_none_or(|(_, a)| area < a) {
+            best = Some((i, area));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Selection border color in the transmitted raster: amber reads on
+/// both light and dark diagram themes.
+pub const SELECT_RGB: (u8, u8, u8) = (255, 176, 0);
+
+/// Selection border thickness in source pixels: visible at fit zoom
+/// without swallowing small shapes.
+pub const SELECT_BORDER_PX: u32 = 2;
+
+/// Placeholder while the agent's answer is in flight.
+pub const VISUAL_WAITING_TEXT: &str = "<waiting for answer>";
+
+/// Cap on stored visual questions per slot: the log stays bounded
+/// over long sessions; oldest answered go first.
+pub const MAX_VISUAL_QUESTIONS: usize = 32;
+
+/// One human question about a shape, plus its answer once the
+/// `visual_answer` tool lands. `None` renders as the waiting
+/// placeholder, like the walkthrough twin.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VisualQuestion {
+    pub shape_id: String,
+    pub shape_label: String,
+    pub question: String,
+    pub answer: Option<String>,
+}
+
+/// Injection body for one question: diagram title plus the selected
+/// shape for agent context, wrapped in the `<visual-question>`
+/// markup the agent answers via the `visual_answer` tool.
+pub fn question_markup(title: &str, shape_id: &str, shape_label: &str, question: &str) -> String {
+    format!(
+        "[forge visual \"{title}\" shape \"{shape_label}\" ({shape_id})]:\n<visual-question>\n{question}\n</visual-question>"
+    )
+}
+
+/// Stroke an inclusive pixel rectangle into RGBA8, clamped to the
+/// image. Out-of-range boxes draw nothing instead of panicking on a
+/// stale layout racing a new raster.
+pub fn stroke_rect(
+    rgba: &mut [u8],
+    img_w: u32,
+    img_h: u32,
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+    color: (u8, u8, u8),
+    thickness: u32,
+) {
+    let (img_w, img_h) = (img_w.max(1) as usize, img_h.max(1) as usize);
+    if rgba.len() < img_w * img_h * 4 || thickness == 0 {
+        return;
+    }
+    let (x0, y0) = (x0 as usize, y0 as usize);
+    let (mut x1, mut y1) = (x1 as usize, y1 as usize);
+    if x0 >= img_w || y0 >= img_h {
+        return;
+    }
+    x1 = x1.min(img_w - 1);
+    y1 = y1.min(img_h - 1);
+    if x1 < x0 || y1 < y0 {
+        return;
+    }
+    let t = thickness as usize;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let on_border = x - x0 < t || x1 - x < t || y - y0 < t || y1 - y < t;
+            if !on_border {
+                continue;
+            }
+            let i = (y * img_w + x) * 4;
+            if let Some(px) = rgba.get_mut(i..i + 4) {
+                px[0] = color.0;
+                px[1] = color.1;
+                px[2] = color.2;
+                px[3] = 255;
+            }
+        }
+    }
 }
 
 /// Largest diagram source accepted: enforced before any allocation.
@@ -407,9 +644,9 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Strin
 }
 
 /// Fingerprint of exactly what the terminal shows for one visual:
-/// zoom/scroll plus the placed crop and cursor. The show gate
-/// repaints only when this changes, so scrolling and zooming
-/// re-transmit while an untouched frame costs nothing.
+/// zoom/scroll plus the placed crop, cursor, and selection. The show
+/// gate repaints only when this changes, so scrolling, zooming, and
+/// selecting re-transmit while an untouched frame costs nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VisualPaint {
     pub zoom_bits: u32,
@@ -423,11 +660,110 @@ pub struct VisualPaint {
     pub sy: u32,
     pub sw: u32,
     pub sh: u32,
+    pub selected: Option<usize>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shapes_follow_the_rendered_layout() {
+        // Click-to-ask needs typed shape boxes in SVG units, recomputed
+        // with the same options render_frame uses so boxes match the
+        // displayed raster. The spike flowchart's nodes must all land
+        // inside the SVG dims, deterministically.
+        let source = "flowchart LR\n    A[Start] --> B{Decision}\n    B -->|Yes| C[OK]\n    B -->|No| D[Cancel]\n";
+        let (shapes, vb) = shapes_for(source).expect("shapes compute");
+        assert!(vb[2] > 0.0 && vb[3] > 0.0, "viewBox size: {vb:?}");
+        for want in ["A", "B", "C", "D"] {
+            assert!(shapes.iter().any(|s| s.id == want), "node {want}: {shapes:?}");
+        }
+        let start = shapes.iter().find(|s| s.id == "A").unwrap();
+        assert!(start.label.contains("Start"), "label: {start:?}");
+        for s in &shapes {
+            assert!(s.x >= vb[0] && s.y >= vb[1], "origin: {s:?} in {vb:?}");
+            assert!(
+                s.x + s.width <= vb[0] + vb[2] && s.y + s.height <= vb[1] + vb[3],
+                "inside: {s:?} in {vb:?}"
+            );
+        }
+        assert_eq!(shapes_for(source).unwrap().0, shapes, "deterministic");
+    }
+
+    #[test]
+    fn shape_viewbox_matches_rasterized_output() {
+        // The load-bearing premise: boxes resolve through the SVG
+        // viewBox onto raster pixels. On real output the flowchart
+        // viewBox starts at the origin, the raster scale is uniform,
+        // and every shape center lands inside the raster.
+        let source = "flowchart LR\n    A[Start] --> B{Decision}\n    B -->|Yes| C[OK]\n    B -->|No| D[Cancel]\n";
+        let frame = render_frame(source).expect("renders");
+        assert!(frame.vb[0].abs() < 0.001 && frame.vb[1].abs() < 0.001, "origin: {:?}", frame.vb);
+        let sx = frame.width as f32 / frame.vb[2];
+        let sy = frame.height as f32 / frame.vb[3];
+        assert!((sx - sy).abs() / sx.max(sy) < 0.05, "uniform scale: {sx} vs {sy}");
+        assert!(!frame.shapes.is_empty());
+        for s in &frame.shapes {
+            let (cx, cy) = svg_to_source(
+                s.x + s.width / 2.0,
+                s.y + s.height / 2.0,
+                frame.width,
+                frame.height,
+                &frame.vb,
+            );
+            assert!(cx < frame.width && cy < frame.height, "center inside: {s:?}");
+        }
+    }
+
+    #[test]
+    fn svg_source_round_trip_is_stable() {
+        let vb = [10.0, 20.0, 200.0, 100.0];
+        let (x, y) = source_to_svg(50, 25, 400, 200, &vb);
+        let (px, py) = svg_to_source(x, y, 400, 200, &vb);
+        assert_eq!((px, py), (50, 25), "offset viewBox round-trips");
+    }
+
+    #[test]
+    fn hit_shape_picks_smallest_containing_box() {
+        let shapes = vec![
+            ShapeBox { id: "big".to_string(), label: String::new(), x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+            ShapeBox { id: "small".to_string(), label: String::new(), x: 10.0, y: 10.0, width: 20.0, height: 20.0 },
+        ];
+        assert_eq!(hit_shape(&shapes, 15.0, 15.0), Some(1), "overlap prefers smaller");
+        assert_eq!(hit_shape(&shapes, 50.0, 50.0), Some(0), "only big contains");
+        assert_eq!(hit_shape(&shapes, 150.0, 150.0), None, "outside all");
+    }
+
+    #[test]
+    fn view_click_inverts_crop_math_at_zoom() {
+        // A click on viewport cell (0,0) must resolve to the crop origin
+        // the same scroll produces: the selection stays glued to the
+        // shape at any zoom or scroll offset.
+        let (img_w, img_h) = (1000u32, 800u32);
+        for zoom in [1.0, 2.5, 8.0] {
+            let (disp_cols, disp_rows) = fit_display(img_w, img_h, zoom, 140, 30, 8.0, 16.0);
+            for (ox, oy) in [(0u16, 0u16), (7, 5), (40, 20)] {
+                let crop = crop_for_view(img_w, img_h, disp_cols, disp_rows, 140, 30, ox, oy);
+                let (px, py) = view_to_source(0, 0, ox, oy, disp_cols, disp_rows, img_w, img_h);
+                // Cell center: within half a displayed cell past the
+                // crop origin, never outside the raster.
+                assert!(px >= crop.sx && py >= crop.sy, "zoom {zoom} scroll {ox},{oy}");
+                assert!(
+                    px - crop.sx <= img_w / disp_cols as u32 + 1
+                        && py - crop.sy <= img_h / disp_rows as u32 + 1,
+                    "half-cell: {px},{py} from {},{}",
+                    crop.sx,
+                    crop.sy
+                );
+                assert!(px < img_w && py < img_h, "inside raster");
+                // A click one viewport cell right/down steps forward by
+                // exactly one displayed cell in source pixels.
+                let (qx, qy) = view_to_source(1, 1, ox, oy, disp_cols, disp_rows, img_w, img_h);
+                assert!(qx >= px && qy >= py, "monotone: {qx},{qy} from {px},{py}");
+            }
+        }
+    }
 
     #[test]
     fn visual_spike_flowchart_renders_png_bytes() {

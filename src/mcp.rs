@@ -381,7 +381,9 @@ fn instructions(srv: &ServerCtx) -> String {
         NEVER use your CLI's own messaging (session-message commands, subagents, \
         shell signals, or files as a message bus) — only Forge tools resolve Forge \
         session names, enforce shared-group routing, and carry run-ID authority. \
-        Use walkthrough_start to tour the operator through a file, \
+        A `[forge visual ...]` question with `<visual-question>` markup \
+        is the operator asking about a diagram shape: answer it at once with \
+        visual_answer. Use walkthrough_start to tour the operator through a file, \
         walkthrough_answer for their waiting tour questions, walkthrough_end to \
         close the tour. Use compact_session to compact context, schedule_prompt \
         for delayed self-injection, start_session to spawn local agent sessions, \
@@ -443,6 +445,11 @@ fn tool_defs() -> Vec<ToolDef> {
             name: "walkthrough_end",
             description: "Close the tour with an optional summary line.",
             schema: r#"{"type":"object","properties":{"summary":{"type":"string"}}}"#,
+        },
+        ToolDef {
+            name: "visual_answer",
+            description: "Answer the operator's latest waiting visual question about a diagram shape: use it the moment a [forge visual ...] question with <visual-question> markup lands in your pane. It renders as plain text under the diagram. Errors when nothing is waiting.",
+            schema: r#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#,
         },
         ToolDef {
             name: "compact_session",
@@ -748,6 +755,7 @@ mod tests {
             "walkthrough_start",
             "walkthrough_answer",
             "walkthrough_end",
+            "visual_answer",
             "compact_session",
             "schedule_prompt",
             "cancel_scheduled_prompt",

@@ -187,97 +187,160 @@ pub const VISUAL_ZOOM_OUT_LABEL: &str = "[- zoom out]";
 pub const VISUAL_ZOOM_IN_TEXT: &str = "+ zoom in";
 #[cfg(feature = "visual")]
 pub const VISUAL_ZOOM_OUT_TEXT: &str = "- zoom out";
+/// Pill inner text for the chat toggle.
+#[cfg(feature = "visual")]
+pub const VISUAL_CHAT_TEXT: &str = "chat";
+/// Legacy bracketed chat toggle label.
+#[cfg(feature = "visual")]
+pub const VISUAL_CHAT_LABEL: &str = "[chat]";
 
-/// Zoom button widths in cells: pills add caps plus inner pads, like
+/// Share of the tab content height reserved for the dismissable
+/// chat footer while open: ask row plus history. Scales with the
+/// tab instead of pinning a fixed height.
+#[cfg(feature = "visual")]
+pub const VISUAL_CHAT_FOOTER_PCT: u32 = 30;
+
+/// Footer rows for one content height, rounded to the nearest row.
+/// Zero content means zero footer; the chrome still sheds what does
+/// not fit, so tiny tabs degrade the same way.
+#[cfg(feature = "visual")]
+pub fn visual_chat_footer_rows(content_h: u16) -> u16 {
+    if content_h == 0 {
+        return 0;
+    }
+    ((content_h as u32 * VISUAL_CHAT_FOOTER_PCT + 50) / 100) as u16
+}
+
+/// Button widths in cells: pills add caps plus inner pads, like
 /// the sidebar mode pills; legacy is the bare bracketed label.
 #[cfg(feature = "visual")]
-pub fn visual_button_widths(pills: bool) -> (u16, u16) {
+pub fn visual_button_widths(pills: bool) -> (u16, u16, u16) {
     if pills {
         (
             VISUAL_ZOOM_IN_TEXT.len() as u16 + 4,
             VISUAL_ZOOM_OUT_TEXT.len() as u16 + 4,
+            VISUAL_CHAT_TEXT.len() as u16 + 4,
         )
     } else {
         (
             VISUAL_ZOOM_IN_LABEL.len() as u16,
             VISUAL_ZOOM_OUT_LABEL.len() as u16,
+            VISUAL_CHAT_LABEL.len() as u16,
         )
     }
 }
 
-/// Zoom button strip spans (both buttons plus the two-space gap),
-/// pill or legacy to match the active chrome. Widths equal
-/// [`visual_button_widths`], so the hit rects never desync.
+/// Button strip spans (zoom pair, chat toggle, two-space gaps), pill
+/// or legacy to match the active chrome. The chat toggle renders in
+/// the focus style while open. Widths equal [`visual_button_widths`],
+/// so the hit rects never desync.
 #[cfg(feature = "visual")]
-pub fn visual_button_spans(pills: bool) -> Vec<SpanView> {
+pub fn visual_button_spans(pills: bool, chat_open: bool) -> Vec<SpanView> {
     if pills {
-        let cap = Style::default().fg(Color::DarkGray);
+        // Caps match their container like the sidebar mode pills, so
+        // every toggle reads as one solid pill. The open chat pill
+        // uses the active container: a bare focus style has no
+        // background and paints terminal-black in the middle.
+        let gray_cap = Style::default().fg(Color::DarkGray);
+        let yellow_cap = Style::default().fg(Color::Yellow);
         let label = theme::style(theme::Role::TabInactive);
+        let (chat, chat_cap) = if chat_open {
+            (theme::style(theme::Role::TabActive), yellow_cap)
+        } else {
+            (theme::style(theme::Role::TabInactive), gray_cap)
+        };
         let mut spans = Vec::new();
-        for text in [VISUAL_ZOOM_IN_TEXT, VISUAL_ZOOM_OUT_TEXT] {
+        for (text, style, cap) in [
+            (VISUAL_ZOOM_IN_TEXT, label, gray_cap),
+            (VISUAL_ZOOM_OUT_TEXT, label, gray_cap),
+            (VISUAL_CHAT_TEXT, chat, chat_cap),
+        ] {
             if !spans.is_empty() {
                 spans.push(SpanView { text: "  ".to_string(), style: Style::default() });
             }
             spans.push(SpanView { text: PILL_LEFT.to_string(), style: cap });
-            spans.push(SpanView { text: " ".to_string(), style: label });
-            spans.push(SpanView { text: text.to_string(), style: label });
-            spans.push(SpanView { text: " ".to_string(), style: label });
+            spans.push(SpanView { text: " ".to_string(), style });
+            spans.push(SpanView { text: text.to_string(), style });
+            spans.push(SpanView { text: " ".to_string(), style });
             spans.push(SpanView { text: PILL_RIGHT.to_string(), style: cap });
         }
         spans
     } else {
         let button = theme::style(theme::Role::Focus);
+        let chat = if chat_open {
+            button
+        } else {
+            theme::style(theme::Role::TabInactive)
+        };
         vec![
             SpanView { text: VISUAL_ZOOM_IN_LABEL.to_string(), style: button },
             SpanView { text: "  ".to_string(), style: Style::default() },
             SpanView { text: VISUAL_ZOOM_OUT_LABEL.to_string(), style: button },
+            SpanView { text: "  ".to_string(), style: Style::default() },
+            SpanView { text: VISUAL_CHAT_LABEL.to_string(), style: chat },
         ]
     }
 }
 
-/// Which Visual tab zoom button a click hit, if any.
+/// Which Visual tab strip button a click hit, if any.
 #[cfg(feature = "visual")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VisualButton {
     ZoomIn,
     ZoomOut,
+    Chat,
 }
 
 /// Visual tab chrome inside its content rect: a blank spacer row on
 /// top, the one-row button strip below it, the image region under
-/// that. Render and mouse handling both recompute these from the
-/// same content rect, so clicks never desync from what the tab
-/// paints. Tiny heights shed the buttons first, then the spacer.
+/// that, and the dismissable chat footer pinned to the bottom.
+/// Render and mouse handling both recompute these from the same
+/// content rect, so clicks never desync from what the tab paints.
+/// Tiny heights shed the footer first, then the buttons, then the
+/// spacer.
 #[cfg(feature = "visual")]
 pub struct VisualChrome {
     pub image: Rect,
     pub zoom_in: Rect,
     pub zoom_out: Rect,
+    pub chat: Rect,
+    pub footer: Rect,
 }
 
 #[cfg(feature = "visual")]
-pub fn visual_chrome(content: Rect, pills: bool) -> VisualChrome {
+pub fn visual_chrome(content: Rect, pills: bool, footer_h: u16) -> VisualChrome {
     let spacer_h = if content.height > 0 { 1 } else { 0 };
     let row_h = if content.height > spacer_h { 1 } else { 0 };
     let btn_y = content.y.saturating_add(spacer_h);
+    let foot_h = footer_h.min(content.height.saturating_sub(spacer_h + row_h));
     let image = Rect::new(
         content.x,
         btn_y.saturating_add(row_h),
         content.width,
-        content.height.saturating_sub(spacer_h + row_h),
+        content.height.saturating_sub(spacer_h + row_h + foot_h),
     );
-    let (zin_full, zout_full) = visual_button_widths(pills);
+    let footer = Rect::new(
+        content.x,
+        btn_y.saturating_add(row_h).saturating_add(image.height),
+        content.width,
+        foot_h,
+    );
+    let (zin_full, zout_full, chat_full) = visual_button_widths(pills);
     let zin_w = zin_full.min(content.width);
     let zout_x = content.x.saturating_add(zin_w + 2);
     let zout_w = zout_full.min(content.width.saturating_sub(zin_w + 2));
+    let chat_x = zout_x.saturating_add(zout_w + 2);
+    let chat_w = chat_full.min(content.width.saturating_sub(chat_x.saturating_sub(content.x)));
     VisualChrome {
         image,
         zoom_in: Rect::new(content.x, btn_y, zin_w, row_h),
         zoom_out: Rect::new(zout_x, btn_y, zout_w, row_h),
+        chat: Rect::new(chat_x, btn_y, chat_w, row_h),
+        footer,
     }
 }
 
-/// Hit-test a click against the Visual tab zoom buttons.
+/// Hit-test a click against the Visual tab strip buttons.
 #[cfg(feature = "visual")]
 pub fn visual_button_at(chrome: &VisualChrome, col: u16, row: u16) -> Option<VisualButton> {
     let hit = |r: Rect| {
@@ -287,10 +350,142 @@ pub fn visual_button_at(chrome: &VisualChrome, col: u16, row: u16) -> Option<Vis
         Some(VisualButton::ZoomIn)
     } else if hit(chrome.zoom_out) {
         Some(VisualButton::ZoomOut)
+    } else if hit(chrome.chat) {
+        Some(VisualButton::Chat)
     } else {
         None
     }
 }
+
+/// Wrap one row of spans to `width` display cells, splitting overlong
+/// spans on char boundaries with wide chars counting double. Styles
+/// ride along on every piece; empty input yields no rows.
+#[cfg(feature = "visual")]
+pub fn wrap_spans(spans: Vec<SpanView>, width: u16) -> Vec<Vec<SpanView>> {
+    use ratatui::text::Line;
+    fn char_width(c: char) -> usize {
+        let mut buf = [0u8; 4];
+        Line::from(c.encode_utf8(&mut buf) as &str).width()
+    }
+    let width = width.max(1) as usize;
+    let mut rows: Vec<Vec<SpanView>> = Vec::new();
+    let mut cur: Vec<SpanView> = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let chars: Vec<char> = span.text.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let room = width.saturating_sub(used);
+            if room == 0 {
+                rows.push(std::mem::take(&mut cur));
+                used = 0;
+                continue;
+            }
+            let mut acc = 0usize;
+            let mut j = i;
+            while j < chars.len() {
+                let cw = char_width(chars[j]);
+                if acc + cw > room {
+                    break;
+                }
+                acc += cw;
+                j += 1;
+            }
+            if j == i {
+                j = i + 1;
+                acc = char_width(chars[i]);
+            }
+            cur.push(SpanView {
+                text: chars[i..j].iter().collect(),
+                style: span.style,
+            });
+            used += acc;
+            i = j;
+        }
+    }
+    if !cur.is_empty() {
+        rows.push(cur);
+    }
+    rows
+}
+
+/// Display width of one span row in cells, wide chars counting
+/// double: the same measure [`wrap_spans`] splits on.
+#[cfg(feature = "visual")]
+pub fn spans_width(row: &[SpanView]) -> usize {
+    use ratatui::text::Line;
+    row.iter().map(|s| Line::from(s.text.as_str()).width()).sum()
+}
+
+/// Cut one span row to `max` display cells, ending a cut row with an
+/// ellipsis that inherits the cut span's style. Fitting rows pass
+/// through untouched; wide chars never split. Shortens one-row UI
+/// suffixes (like the Visual strip alt text) without touching the
+/// buttons and hints ahead of them.
+#[cfg(feature = "visual")]
+pub fn truncate_spans(spans: Vec<SpanView>, max: u16) -> Vec<SpanView> {
+    use ratatui::text::Line;
+    fn char_width(c: char) -> usize {
+        let mut buf = [0u8; 4];
+        Line::from(c.encode_utf8(&mut buf) as &str).width()
+    }
+    let max = max as usize;
+    if max == 0 {
+        return Vec::new();
+    }
+    let total: usize = spans
+        .iter()
+        .flat_map(|s| s.text.chars())
+        .map(char_width)
+        .sum();
+    if total <= max {
+        return spans;
+    }
+    let mut out: Vec<SpanView> = Vec::new();
+    let mut piece = String::new();
+    let mut piece_style = Style::default();
+    let mut started = false;
+    let mut used = 0usize;
+    let mut mark_style = Style::default();
+    let budget = max.saturating_sub(1);
+    'spans: for span in &spans {
+        for c in span.text.chars() {
+            let cw = char_width(c);
+            if used + cw > budget {
+                mark_style = span.style;
+                break 'spans;
+            }
+            if !started {
+                piece_style = span.style;
+                started = true;
+            }
+            piece.push(c);
+            used += cw;
+        }
+        if started {
+            out.push(SpanView { text: std::mem::take(&mut piece), style: piece_style });
+            started = false;
+        }
+    }
+    if started {
+        out.push(SpanView { text: std::mem::take(&mut piece), style: piece_style });
+    }
+    out.push(SpanView { text: "…".to_string(), style: mark_style });
+    out
+}
+
+/// History rows inside the bordered Q/A footer: the total minus the
+/// top/bottom border, the pad row under the title, and the ask row.
+#[cfg(feature = "visual")]
+pub fn visual_chat_history_rows(footer_h: u16) -> u16 {
+    footer_h.saturating_sub(4)
+}
+
+/// Max cells for the alt-text suffix on the Visual strip row: the
+/// strip is chrome, so long descriptions shorten with an ellipsis
+/// instead of running on as a caption.
+#[cfg(feature = "visual")]
+pub const VISUAL_STRIP_ALT_MAX: u16 = 48;
 
 /// One per-session tab: the agent CLI tab plus the human terminal tab.
 #[derive(Clone, Debug, Default)]
@@ -1702,7 +1897,7 @@ mod tests {
     fn visual_chrome_leaves_a_spacer_row_above_the_buttons() {
         // Breathing room from the tab strip: row zero of the content
         // is always blank, the zoom strip rides row one, art below.
-        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false);
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false, 0);
         assert_eq!((chrome.zoom_in.x, chrome.zoom_in.y), (10, 6));
         assert_eq!(
             (chrome.image.x, chrome.image.y, chrome.image.width, chrome.image.height),
@@ -1714,8 +1909,61 @@ mod tests {
 
     #[cfg(feature = "visual")]
     #[test]
+    fn visual_chrome_reserves_footer_rows_off_the_image() {
+        // The dismissable chat footer pins to the bottom: fixed rows
+        // the Kitty paint and the click map both exclude.
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false, 7);
+        assert_eq!((chrome.zoom_in.x, chrome.zoom_in.y), (10, 6));
+        assert_eq!(
+            (chrome.image.x, chrome.image.y, chrome.image.width, chrome.image.height),
+            (10, 7, 60, 11),
+            "image sheds strip and footer"
+        );
+        assert_eq!(
+            (chrome.footer.x, chrome.footer.y, chrome.footer.width, chrome.footer.height),
+            (10, 18, 60, 7),
+            "footer pins to the bottom"
+        );
+        assert_eq!(visual_button_at(&chrome, 10, 6), Some(VisualButton::ZoomIn));
+        assert_eq!(visual_button_at(&chrome, 10, 7), None, "image rows are not buttons");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chat_button_hits_after_zoom_out() {
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false, 0);
+        // Legacy widths: [+ zoom in]=11, gap 2, [- zoom out]=12, gap 2.
+        assert_eq!((chrome.chat.x, chrome.chat.width), (37, 6), "[chat]");
+        assert_eq!(visual_button_at(&chrome, 37, 6), Some(VisualButton::Chat));
+        assert_eq!(visual_button_at(&chrome, 42, 6), Some(VisualButton::Chat));
+        assert_eq!(visual_button_at(&chrome, 43, 6), None, "past the label");
+        assert_eq!(visual_button_at(&chrome, 37, 5), None, "spacer row is dead");
+        assert_eq!(visual_button_at(&chrome, 37, 7), None, "image rows are not buttons");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn wrap_spans_splits_by_display_width() {
+        use ratatui::style::Style;
+        let spans = vec![SpanView { text: "hello world".to_string(), style: Style::default() }];
+        let rows = wrap_spans(spans, 5);
+        let text: Vec<String> = rows.iter().map(|r| r.iter().map(|s| s.text.as_str()).collect()).collect();
+        assert_eq!(text, vec!["hello", " worl", "d"], "hard splits words: {text:?}");
+        // Styles ride along, wide chars count double.
+        let spans = vec![
+            SpanView { text: "ab".to_string(), style: Style::default() },
+            SpanView { text: "日本".to_string(), style: Style::default() },
+        ];
+        let rows = wrap_spans(spans, 4);
+        let text: Vec<String> = rows.iter().map(|r| r.iter().map(|s| s.text.as_str()).collect()).collect();
+        assert_eq!(text, vec!["ab日", "本"], "width-aware greedy: {text:?}");
+        assert!(wrap_spans(Vec::new(), 10).is_empty(), "empty in, empty out");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
     fn visual_chrome_splits_buttons_row_and_image_region() {
-        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false);
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false, 0);
         assert_eq!(
             (chrome.zoom_in.x, chrome.zoom_in.y),
             (10, 6),
@@ -1742,10 +1990,12 @@ mod tests {
     #[test]
     fn visual_chrome_pills_widen_the_buttons() {
         // Pill text plus caps and pads: "+ zoom in" fills 13 cells,
-        // "- zoom out" 14, like the sidebar mode pills.
-        assert_eq!(visual_button_widths(true), (13, 14));
-        assert_eq!(visual_button_widths(false), (11, 12));
-        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), true);
+        // "- zoom out" 14, "chat" 8, like the sidebar mode pills.
+        assert_eq!(visual_button_widths(true), (13, 14, 8));
+        assert_eq!(visual_button_widths(false), (11, 12, 6));
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), true, 0);
+        assert_eq!((chrome.chat.x, chrome.chat.width), (41, 8), "chat pill");
+        assert_eq!(visual_button_at(&chrome, 41, 6), Some(VisualButton::Chat));
         assert_eq!((chrome.zoom_in.x, chrome.zoom_in.y), (10, 6));
         assert_eq!((chrome.zoom_in.x, chrome.zoom_in.width), (10, 13));
         assert_eq!((chrome.zoom_out.x, chrome.zoom_out.width), (25, 14));
@@ -1760,33 +2010,98 @@ mod tests {
     #[cfg(feature = "visual")]
     #[test]
     fn visual_button_spans_match_the_active_style() {
-        let strip: String = visual_button_spans(true)
+        let strip: String = visual_button_spans(true, false)
             .iter()
             .map(|s| s.text.as_str())
             .collect();
         assert!(strip.contains(PILL_LEFT), "pill caps: {strip:?}");
-        assert!(strip.contains("+ zoom in") && strip.contains("- zoom out"));
+        assert!(strip.contains("+ zoom in") && strip.contains("- zoom out") && strip.contains("chat"));
         assert!(!strip.contains('['), "no legacy brackets: {strip:?}");
-        let width: usize = visual_button_spans(true).iter().map(|s| s.text.chars().count()).sum();
-        assert_eq!(width, 13 + 2 + 14, "buttons plus gap");
-        let legacy: String = visual_button_spans(false)
+        let width: usize = visual_button_spans(true, false).iter().map(|s| s.text.chars().count()).sum();
+        assert_eq!(width, 13 + 2 + 14 + 2 + 8, "buttons plus gaps");
+        let legacy: String = visual_button_spans(false, false)
             .iter()
             .map(|s| s.text.as_str())
             .collect();
-        assert!(legacy.contains("[+ zoom in]") && legacy.contains("[- zoom out]"));
+        assert!(legacy.contains("[+ zoom in]") && legacy.contains("[- zoom out]") && legacy.contains("[chat]"));
         assert!(!legacy.contains(PILL_LEFT), "no caps: {legacy:?}");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chat_pill_uses_active_container_while_open() {
+        // The open chat toggle must read as one solid pill like the
+        // zoom pair: active container plus matching caps. A bare
+        // focus style has no background, which paints the middle
+        // terminal-black against the gray pills.
+        let open = visual_button_spans(true, true);
+        let at = open.iter().position(|s| s.text == VISUAL_CHAT_TEXT).expect("chat pill");
+        assert_eq!(open[at].style, theme::style(theme::Role::TabActive), "open fill");
+        assert_eq!(open[at - 2].style, Style::default().fg(Color::Yellow), "left cap");
+        assert_eq!(open[at + 2].style, Style::default().fg(Color::Yellow), "right cap");
+        let closed = visual_button_spans(true, false);
+        let at = closed.iter().position(|s| s.text == VISUAL_CHAT_TEXT).expect("chat pill");
+        assert_eq!(closed[at].style, theme::style(theme::Role::TabInactive), "closed fill");
+        assert_eq!(closed[at - 2].style, Style::default().fg(Color::DarkGray), "left cap");
+        assert_eq!(closed[at + 2].style, Style::default().fg(Color::DarkGray), "right cap");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chat_history_rows_subtract_the_box_chrome() {
+        // Inside the bordered footer the history viewport is the
+        // total minus top/bottom border, pad row, and ask row.
+        assert_eq!(visual_chat_history_rows(11), 7);
+        assert_eq!(visual_chat_history_rows(7), 3);
+        assert_eq!(visual_chat_history_rows(4), 0);
+        assert_eq!(visual_chat_history_rows(0), 0);
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn truncate_spans_cuts_to_width_with_ellipsis() {
+        // The strip must stay exactly one row: fitting spans pass
+        // through, overflow cuts at a char boundary with an ellipsis,
+        // wide chars never split.
+        let spans = vec![
+            SpanView { text: "ab".to_string(), style: Style::default() },
+            SpanView { text: "cdef".to_string(), style: Style::default() },
+        ];
+        let same = truncate_spans(spans.clone(), 10);
+        assert_eq!(same.len(), 2, "fits, untouched");
+        assert!(!same.iter().any(|s| s.text.contains('…')), "no ellipsis");
+        let cut = truncate_spans(spans.clone(), 4);
+        let text: String = cut.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "abc…", "cut plus marker: {text:?}");
+        assert_eq!(spans_width(&cut), 4);
+        assert!(truncate_spans(spans.clone(), 0).is_empty(), "zero width");
+        let wide = vec![SpanView { text: "日本語".to_string(), style: Style::default() }];
+        let cut = truncate_spans(wide, 5);
+        let text: String = cut.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "日本…", "no split wide char: {text:?}");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chat_footer_rows_take_thirty_percent() {
+        // The Q/A panel scales with the tab instead of pinning a
+        // fixed height: ask row plus history share 30% of content.
+        assert_eq!(visual_chat_footer_rows(100), 30);
+        assert_eq!(visual_chat_footer_rows(36), 11);
+        assert_eq!(visual_chat_footer_rows(10), 3);
+        assert_eq!(visual_chat_footer_rows(0), 0);
     }
 
     #[cfg(feature = "visual")]
     #[test]
     fn visual_chrome_degrades_on_tiny_content() {
         for pills in [false, true] {
-            let chrome = visual_chrome(Rect::new(0, 0, 0, 0), pills);
+            let chrome = visual_chrome(Rect::new(0, 0, 0, 0), pills, 0);
             assert_eq!(chrome.image.height, 0);
             assert_eq!(visual_button_at(&chrome, 0, 0), None);
             // One row keeps the spacer only: the buttons shed first so
             // a stray click can never hit an invisible button.
-            let chrome = visual_chrome(Rect::new(0, 0, 10, 1), pills);
+            let chrome = visual_chrome(Rect::new(0, 0, 10, 1), pills, 0);
             assert_eq!(chrome.image.height, 0);
             assert_eq!(visual_button_at(&chrome, 0, 0), None);
         }

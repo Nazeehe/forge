@@ -667,6 +667,8 @@ on stdio):
   `tell_session(target, message, conversation_id)`.
 - `send_response(conversation_id, message)` answers a question addressed to
   this session.
+- `visual_answer(answer)` answers the operator's question about a
+  diagram shape (`<visual-question>` markup in this session's pane).
 
 Cross-session communication MUST go through these Forge tools; NEVER use
 your CLI's own messaging — only Forge tools resolve Forge session names

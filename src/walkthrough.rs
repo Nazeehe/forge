@@ -703,7 +703,9 @@ fn md_opts() -> tui_markdown::Options<ForgeSheet> {
     tui_markdown::Options::new(ForgeSheet)
 }
 
-fn md_text(source: &str) -> ratatui::text::Text<'_> {
+/// Theme-skinned Markdown for agent text, shared with the visual
+/// chat footer so answers render identically in both places.
+pub(crate) fn md_text(source: &str) -> ratatui::text::Text<'_> {
     tui_markdown::from_str_with_options(source, &md_opts())
 }
 
