@@ -591,6 +591,12 @@ impl AppState {
             return false;
         };
         slot.chat_open = !slot.chat_open;
+        // Reopening onto a selection arms the prompt, same as a
+        // fresh selection: typing starts immediately.
+        if slot.chat_open && slot.selected.is_some() {
+            slot.input_active = true;
+            slot.draft.get_or_insert_with(String::new);
+        }
         self.dirty = true;
         true
     }
@@ -789,9 +795,14 @@ impl AppState {
             return false;
         }
         slot.selected = next;
-        // A fresh selection opens the dismissed chat and drops input
-        // mode (the draft survives); toggling off keeps both.
-        slot.input_active = false;
+        // A fresh selection opens the dismissed chat and arms the
+        // prompt at once (the draft survives): typing starts
+        // immediately, no Enter needed. Deselecting disarms.
+        // Toggling off keeps both.
+        slot.input_active = next.is_some();
+        if slot.input_active {
+            slot.draft.get_or_insert_with(String::new);
+        }
         if next.is_some() {
             slot.chat_open = true;
         }
@@ -1088,8 +1099,10 @@ impl AppState {
             }
             // Box metrics: full content width, two-cell side pads, one
             // pad row under the title; the history viewport is what
-            // remains (see visual_chat_history_rows). Every emitted
-            // row is exactly content-wide so the sides align.
+            // remains (see visual_chat_history_rows). Claude-style
+            // order: history on top, a divider, then the prompt row
+            // docked above the bottom border. Every emitted row is
+            // exactly content-wide so the sides align.
             let width = content.width as usize;
             let inner = width.saturating_sub(6);
             let side = |pad: &str| crate::ui::SpanView {
@@ -1115,46 +1128,6 @@ impl AppState {
                 side(&" ".repeat(width.saturating_sub(2))),
                 side("│"),
             ]);
-            let label = slot
-                .selected
-                .and_then(|i| slot.shapes.get(i))
-                .map(|s| s.label.as_str())
-                .unwrap_or("shape");
-            // Prompt plus placeholder: `> type question here`
-            // in gray until the first keystroke swaps the hint for
-            // the draft text.
-            let ask_spans: Vec<crate::ui::SpanView> = match (slot.selected.is_some(), slot.draft.as_deref()) {
-                (false, _) => line("Click a shape to ask · c toggles chat", text),
-                (true, Some(d)) if !d.is_empty() => {
-                    let cursor = if slot.input_active { "▌" } else { "" };
-                    vec![
-                        crate::ui::SpanView {
-                            text: format!("Ask about {:?}: ", crate::safe_text::encode_for_display(label)),
-                            style: text,
-                        },
-                        crate::ui::SpanView { text: "> ".to_string(), style: text },
-                        crate::ui::SpanView {
-                            text: format!("{}{}", crate::safe_text::encode_for_display(d), cursor),
-                            style: text,
-                        },
-                    ]
-                }
-                _ => vec![
-                    crate::ui::SpanView {
-                        text: format!("Ask about {:?}: ", crate::safe_text::encode_for_display(label)),
-                        style: text,
-                    },
-                    crate::ui::SpanView { text: "> ".to_string(), style: text },
-                    crate::ui::SpanView { text: "type question here".to_string(), style: muted },
-                ],
-            };
-            let mut ask_line = vec![side("│  ")];
-            ask_line.extend(fill_content(crate::ui::truncate_spans(
-                ask_spans,
-                inner as u16,
-            )));
-            ask_line.push(side("  │"));
-            lines.push(ask_line);
             let history = self.visual_chat_history_lines(slot);
             let tail = history.len().saturating_sub(slot.chat_scroll as usize);
             let start = tail.saturating_sub(
@@ -1166,12 +1139,49 @@ impl AppState {
                 history_line.push(side("  │"));
                 lines.push(history_line);
             }
-            while lines.len() - foot_start < foot_rows.saturating_sub(1) as usize {
+            while lines.len() - foot_start < foot_rows.saturating_sub(3) as usize {
                 let mut blank = vec![side("│  ")];
                 blank.extend(fill_content(Vec::new()));
                 blank.push(side("  │"));
                 lines.push(blank);
             }
+            let mut divider = String::from("├");
+            divider.push_str(&"─".repeat(width.saturating_sub(2)));
+            divider.push('┤');
+            lines.push(line(&divider, muted));
+            // Docked prompt row: `>` plus a gray hint until the first
+            // keystroke swaps it for the draft. Typing is armed by
+            // selection itself, so Enter is only ever submit.
+            let input_spans: Vec<crate::ui::SpanView> = match (slot.selected.is_some(), slot.draft.as_deref()) {
+                (false, _) => vec![
+                    crate::ui::SpanView { text: "> ".to_string(), style: text },
+                    crate::ui::SpanView {
+                        text: "Click a shape to ask · c toggles chat".to_string(),
+                        style: muted,
+                    },
+                ],
+                (true, Some(d)) if !d.is_empty() => {
+                    let cursor = if slot.input_active { "▌" } else { "" };
+                    vec![
+                        crate::ui::SpanView { text: "> ".to_string(), style: text },
+                        crate::ui::SpanView {
+                            text: format!("{}{}", crate::safe_text::encode_for_display(d), cursor),
+                            style: text,
+                        },
+                    ]
+                }
+                _ => vec![
+                    crate::ui::SpanView { text: "> ".to_string(), style: text },
+                    crate::ui::SpanView { text: "type question here".to_string(), style: muted },
+                ],
+            };
+            let mut input_line = vec![side("│  ")];
+            input_line.extend(fill_content(crate::ui::truncate_spans(
+                input_spans,
+                inner as u16,
+            )));
+            input_line.push(side("  │"));
+            lines.push(input_line);
             let mut bottom = String::from("╰");
             bottom.push_str(&"─".repeat(width.saturating_sub(2)));
             bottom.push('╯');
@@ -1276,7 +1286,8 @@ impl AppState {
             return false;
         };
         slot.draft = None;
-        slot.input_active = false;
+        // Typing stays armed so the next question needs no Enter
+        // either; Esc disarms back to viewport keys.
         slot.chat_scroll = 0;
         slot.questions.push(crate::visual::VisualQuestion {
             shape_id,
@@ -5457,7 +5468,8 @@ mod tests {
         assert!(text(&block[0]).starts_with("╭") && text(&block[0]).contains("Q/A"), "titled top");
         assert!(text(&block[0]).ends_with("╮"), "top closes");
         assert!(text(&block[1]).starts_with("│"), "pad row sided");
-        assert!(text(&block[2]).contains("Click a shape to ask"), "ask inside the box");
+        assert!(text(&block[foot as usize - 3]).starts_with("├"), "divider above input");
+        assert!(text(&block[foot as usize - 2]).contains("Click a shape to ask"), "prompt docked at bottom");
         assert!(text(&block[foot as usize - 1]).starts_with("╰"), "bottom closes");
         assert!(state.manager.remove(id));
     }
@@ -5496,8 +5508,11 @@ mod tests {
         let find_ask = |view: crate::ui::PaneView| {
             view.lines
                 .into_iter()
-                .find(|r| r.iter().any(|s| s.text.contains("Ask about")))
-                .expect("ask row")
+                .find(|r| {
+                    r.iter().any(|s| s.text.contains(">"))
+                        && !r.iter().any(|s| s.text.contains("waiting"))
+                })
+                .expect("prompt row")
         };
         let row = find_ask(state.visual_view(id, true));
         let text: String = row.iter().map(|s| s.text.as_str()).collect();
@@ -5514,6 +5529,98 @@ mod tests {
         let text: String = row.iter().map(|s| s.text.as_str()).collect();
         assert!(text.contains(">") && text.contains("why?"), "typed text: {text:?}");
         assert!(!text.contains("type question here"), "hint swapped out");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_select_arms_typing_without_enter() {
+        // Selecting a shape arms the prompt at once: the first
+        // keystroke types, no Enter needed to focus first.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 200,
+            height: 100,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            draft: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            questions: Vec::new(),
+            shapes: vec![
+                ShapeBox { id: "b".to_string(), label: "B".to_string(), x: 10.0, y: 10.0, width: 180.0, height: 80.0 },
+            ],
+            vb: [0.0, 0.0, 200.0, 100.0],
+        });
+        assert!(state.visual_select_at(id, 60, 20, 200, 50, 8.0, 16.0, false));
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert!(slot.input_active, "select arms typing");
+        assert_eq!(slot.draft.as_deref(), Some(""), "empty draft ready");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_input_row_docks_at_box_bottom_with_divider() {
+        // Claude-style layout: history on top, a divider line, then
+        // the prompt row pinned above the bottom border.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        state.term_size = (40, 100);
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: vec![0u8; 8 * 8 * 4],
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: Some(0),
+            draft: Some("why?".to_string()),
+            input_active: true,
+            chat_open: true,
+            chat_scroll: 0,
+            questions: vec![crate::visual::VisualQuestion {
+                shape_id: "A".to_string(),
+                shape_label: "Start".to_string(),
+                question: "what?".to_string(),
+                answer: Some("because".to_string()),
+            }],
+            shapes: vec![
+                ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
+            ],
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        let view = state.visual_view(id, true);
+        use ratatui::layout::Rect;
+        let areas = crate::ui::chrome_areas(Rect::new(0, 0, 100, 40));
+        let content = crate::ui::pane_content_area(&areas);
+        let foot = state.visual_footer_rows(id, content.height);
+        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let base = (chrome.footer.y - content.y) as usize;
+        let text = |i: usize| {
+            view.lines[i].iter().map(|s| s.text.as_str()).collect::<String>()
+        };
+        assert!(text(base + foot as usize - 1).starts_with("╰"), "bottom closes");
+        assert!(text(base + foot as usize - 3).starts_with("├"), "divider above input");
+        let input = text(base + foot as usize - 2);
+        assert!(input.contains(">") && input.contains("why?"), "prompt row: {input:?}");
+        let history: String = view.lines[base + 2..base + foot as usize - 3].iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
+        assert!(history.contains("what?") && history.contains("because"), "history on top");
         assert!(state.manager.remove(id));
     }
 
@@ -5576,9 +5683,11 @@ mod tests {
     fn visual_footer_renders_fixed_rows_with_markdown() {
         // Open chat costs its 30% footer rows: the ask row plus the
         // history viewport padded with blanks. Answers reuse the
-        // walkthrough markdown skin, not plain text.
+        // walkthrough markdown skin, not plain text. A tall term
+        // leaves the whole fixture visible in the viewport.
         use crate::visual::ShapeBox;
         let mut state = AppState::new();
+        state.term_size = (40, 100);
         let (id, _) = spawn_visual_agent(&mut state, "agent");
         state.visual_slots.insert(id, crate::app::VisualSlot {
             generation: 1,
@@ -5608,7 +5717,7 @@ mod tests {
             vb: [0.0, 0.0, 8.0, 8.0],
         });
         let view = state.visual_view(id, false);
-        let foot = state.visual_footer_rows(id, 20) as usize;
+        let foot = state.visual_footer_rows(id, 36) as usize;
         assert!(view.lines.len() >= foot, "footer present");
         let tail = &view.lines[view.lines.len() - foot..];
         let text: String = tail.iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
@@ -5701,7 +5810,7 @@ mod tests {
         });
         assert!(state.submit_visual_question(id));
         assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "ask re-tails");
-        assert!(!state.visual_slots.get(&id).unwrap().input_active, "submit exits input");
+        assert!(state.visual_slots.get(&id).unwrap().input_active, "submit stays armed");
         state.visual_slots.get_mut(&id).unwrap().chat_scroll = 5;
         let out = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"because"}"#);
         assert!(out.contains(r#""answered":true"#), "answered: {out}");
@@ -5712,10 +5821,12 @@ mod tests {
     #[cfg(feature = "visual")]
     #[test]
     fn visual_view_shows_input_row_and_pending_answer() {
-        // The footer pins the ask row under a selection and the latest
-        // Q&A beneath it: question plus waiting marker until answered.
+        // The footer pins the prompt row under a selection and the
+        // latest Q&A above it: question plus waiting marker until
+        // answered. A tall term leaves both visible in the viewport.
         use crate::visual::ShapeBox;
         let mut state = AppState::new();
+        state.term_size = (40, 100);
         let (id, _) = spawn_visual_agent(&mut state, "agent");
         state.visual_slots.insert(id, crate::app::VisualSlot {
             generation: 1,
@@ -5780,8 +5891,8 @@ mod tests {
         );
         let top: String = view.lines[ask_idx].iter().map(|s| s.text.as_str()).collect();
         assert!(top.contains("Q/A"), "box opens the footer: {top:?}");
-        let ask: String = view.lines[ask_idx + 2].iter().map(|s| s.text.as_str()).collect();
-        assert!(ask.contains("Click a shape to ask"), "ask row: {ask:?}");
+        let ask: String = view.lines[ask_idx + foot as usize - 2].iter().map(|s| s.text.as_str()).collect();
+        assert!(ask.contains("Click a shape to ask"), "prompt docked: {ask:?}");
         assert_eq!(view.lines.len() - ask_idx, foot as usize, "footer is the last block");
     }
 
@@ -5829,8 +5940,8 @@ mod tests {
         );
         let top: String = view.lines[ask_idx].iter().map(|s| s.text.as_str()).collect();
         assert!(top.contains("Q/A"), "box opens the footer: {top:?}");
-        let ask: String = view.lines[ask_idx + 2].iter().map(|s| s.text.as_str()).collect();
-        assert!(ask.contains("Click a shape to ask"), "ask row: {ask:?}");
+        let ask: String = view.lines[ask_idx + foot as usize - 2].iter().map(|s| s.text.as_str()).collect();
+        assert!(ask.contains("Click a shape to ask"), "prompt docked: {ask:?}");
         assert_eq!(view.lines.len() - ask_idx, foot as usize, "footer is the last block");
         assert!(state.manager.remove(id));
     }

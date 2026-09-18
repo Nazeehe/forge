@@ -1427,9 +1427,10 @@ mod tests {
     #[cfg(feature = "visual")]
     #[test]
     fn visual_enter_gates_typing_and_submits() {
-        // Walkthrough-style input mode: typing stays dead until Enter
-        // focuses the ask row (so `+`/`-` keep zooming outside it),
-        // Backspace edits, Enter asks, empty Enter just exits input.
+        // Typing arms on selection, so live tabs never need Enter to
+        // focus first; Enter still arms as a fallback (so `+`/`-`
+        // keep zooming outside input), Backspace edits, Enter asks,
+        // and asking leaves typing armed for the next question.
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(40, 180));
@@ -1463,7 +1464,7 @@ mod tests {
         assert_eq!(slot.questions[0].question, "hi");
         assert_eq!(slot.questions[0].shape_id, "A");
         assert_eq!(slot.draft, None, "draft clears on submit");
-        assert!(!slot.input_active, "submit exits input");
+        assert!(slot.input_active, "submit stays armed");
         assert!(state.manager.remove(id));
     }
 

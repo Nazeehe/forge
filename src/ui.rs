@@ -475,10 +475,11 @@ pub fn truncate_spans(spans: Vec<SpanView>, max: u16) -> Vec<SpanView> {
 }
 
 /// History rows inside the bordered Q/A footer: the total minus the
-/// top/bottom border, the pad row under the title, and the ask row.
+/// top/bottom border, the pad row under the title, the divider, and
+/// the docked prompt row.
 #[cfg(feature = "visual")]
 pub fn visual_chat_history_rows(footer_h: u16) -> u16 {
-    footer_h.saturating_sub(4)
+    footer_h.saturating_sub(5)
 }
 
 /// Max cells for the alt-text suffix on the Visual strip row: the
@@ -2050,10 +2051,11 @@ mod tests {
     #[test]
     fn visual_chat_history_rows_subtract_the_box_chrome() {
         // Inside the bordered footer the history viewport is the
-        // total minus top/bottom border, pad row, and ask row.
-        assert_eq!(visual_chat_history_rows(11), 7);
-        assert_eq!(visual_chat_history_rows(7), 3);
-        assert_eq!(visual_chat_history_rows(4), 0);
+        // total minus top/bottom border, pad row, divider, and the
+        // docked prompt row.
+        assert_eq!(visual_chat_history_rows(11), 6);
+        assert_eq!(visual_chat_history_rows(7), 2);
+        assert_eq!(visual_chat_history_rows(5), 0);
         assert_eq!(visual_chat_history_rows(0), 0);
     }
 
