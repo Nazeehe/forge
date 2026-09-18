@@ -1412,7 +1412,9 @@ impl AppState {
         }
     }
 
-    /// Answer the caller's latest pending visual question, if any.
+    /// Visual-family tools: answering carries the caller's session
+    /// (overlay state), screenshots capture desktop apps and need no
+    /// session — the commit claim already authorized the run.
     /// `None` when the name is not a visual tool and the broker
     /// should answer instead.
     #[cfg(feature = "visual")]
@@ -1422,6 +1424,10 @@ impl AppState {
         tool: &str,
         args: &str,
     ) -> Option<Result<String, String>> {
+        #[cfg(all(target_os = "linux", feature = "visual"))]
+        if tool == "screenshot" {
+            return Some(self.screenshot_tool(args));
+        }
         if tool != "visual_answer" {
             return None;
         }
@@ -1444,6 +1450,29 @@ impl AppState {
                 Some(Ok(r#"{"answered":true}"#.to_string()))
             }
             None => Some(Err("no visual question waiting".to_string())),
+        }
+    }
+
+    /// Capture one named desktop app window (Hyprland): match by
+    /// class then title, refuse hidden windows without focus:true,
+    /// fit the PNG to the raster budget. Failures are plain error
+    /// strings so the harness always gets an answer.
+    #[cfg(all(target_os = "linux", feature = "visual"))]
+    fn screenshot_tool(&self, args: &str) -> Result<String, String> {
+        let app = match Self::tool_arg(args, "app") {
+            Some(app) => app,
+            None => return Err("screenshot needs an app name".to_string()),
+        };
+        let focus = Self::tool_bool(args, "focus").unwrap_or(false);
+        match crate::screenshot::capture(&app, focus) {
+            Ok(shot) => Ok(format!(
+                "{{\"path\":{},\"app\":{},\"width\":{},\"height\":{}}}",
+                crate::mcp::escape_json(&shot.path),
+                crate::mcp::escape_json(&format!("{} — {}", shot.class, shot.title)),
+                shot.width,
+                shot.height,
+            )),
+            Err(e) => Err(e),
         }
     }
 
@@ -5815,6 +5844,20 @@ mod tests {
         let out = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"because"}"#);
         assert!(out.contains(r#""answered":true"#), "answered: {out}");
         assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "answer re-tails");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "visual"))]
+    #[test]
+    fn screenshot_tool_needs_an_app_name() {
+        // Broker wiring without touching the compositor: arg
+        // validation answers before any subprocess spawns.
+        let mut state = AppState::new();
+        let (id, live_run) = spawn_visual_agent(&mut state, "agent");
+        let out = comms_reply(&mut state, &live_run, "screenshot", "{}");
+        assert!(out.contains("needs an app name"), "out: {out}");
+        let out = comms_reply(&mut state, &live_run, "screenshot", r#"{"app":""}"#);
+        assert!(out.contains("needs an app name"), "blank: {out}");
         assert!(state.manager.remove(id));
     }
 

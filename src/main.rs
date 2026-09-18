@@ -23,6 +23,8 @@ mod pty;
 mod quit;
 mod relay;
 mod safe_text;
+#[cfg(all(target_os = "linux", feature = "visual"))]
+mod screenshot;
 mod session;
 mod session_status;
 mod theme;

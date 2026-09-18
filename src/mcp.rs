@@ -383,7 +383,8 @@ fn instructions(srv: &ServerCtx) -> String {
         session names, enforce shared-group routing, and carry run-ID authority. \
         A `[forge visual ...]` question with `<visual-question>` markup \
         is the operator asking about a diagram shape: answer it at once with \
-        visual_answer. Use walkthrough_start to tour the operator through a file, \
+        visual_answer. Use screenshot to capture a named desktop app window \
+        (Hyprland; hidden windows need focus:true). Use walkthrough_start to tour the operator through a file, \
         walkthrough_answer for their waiting tour questions, walkthrough_end to \
         close the tour. Use compact_session to compact context, schedule_prompt \
         for delayed self-injection, start_session to spawn local agent sessions, \
@@ -450,6 +451,12 @@ fn tool_defs() -> Vec<ToolDef> {
             name: "visual_answer",
             description: "Answer the operator's latest waiting visual question about a diagram shape: use it the moment a [forge visual ...] question with <visual-question> markup lands in your pane. It renders as plain text under the diagram. Errors when nothing is waiting.",
             schema: r#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#,
+        },
+        #[cfg(all(target_os = "linux", feature = "visual"))]
+        ToolDef {
+            name: "screenshot",
+            description: "Capture a named desktop app window on this Linux desktop (Hyprland): matches the app against window class then title, captures its region, and returns the PNG path plus dimensions. Hidden windows need focus:true to bring them forward first; without it they are an error, never a surprise focus steal. Errors when nothing matches, several match, or no compositor answers.",
+            schema: r#"{"type":"object","properties":{"app":{"type":"string"},"focus":{"type":"boolean"}},"required":["app"]}"#,
         },
         ToolDef {
             name: "compact_session",
@@ -756,6 +763,8 @@ mod tests {
             "walkthrough_answer",
             "walkthrough_end",
             "visual_answer",
+            #[cfg(all(target_os = "linux", feature = "visual"))]
+            "screenshot",
             "compact_session",
             "schedule_prompt",
             "cancel_scheduled_prompt",
