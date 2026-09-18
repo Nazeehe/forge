@@ -377,7 +377,11 @@ fn instructions(srv: &ServerCtx) -> String {
         alone. Use ask to question a peer session, send_response to answer, tell to \
         inform, ack to confirm, list_sessions to discover peers. Sessions only \
         communicate when they share a group; address peers by name, authority comes \
-        from run IDs. Use walkthrough_start to tour the operator through a file, \
+        from run IDs. Cross-session communication MUST go through these Forge tools; \
+        NEVER use your CLI's own messaging (session-message commands, subagents, \
+        shell signals, or files as a message bus) — only Forge tools resolve Forge \
+        session names, enforce shared-group routing, and carry run-ID authority. \
+        Use walkthrough_start to tour the operator through a file, \
         walkthrough_answer for their waiting tour questions, walkthrough_end to \
         close the tour. Use compact_session to compact context, schedule_prompt \
         for delayed self-injection, start_session to spawn local agent sessions, \
@@ -402,27 +406,27 @@ fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "ask_session",
-            description: "Ask a peer session a question; first call list_sessions to resolve the live peer name. Returns a conversation ID immediately and injects the question when the target is idle. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Use this, not your CLI's own messaging, to ask a Forge peer session a question; first call list_sessions to resolve the live peer name. Returns a conversation ID immediately and injects the question when the target is idle. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["target","message"]}"#,
         },
         ToolDef {
             name: "send_response",
-            description: "Answer a conversation addressed to this session: use it the moment your pane shows [forge ask_session from ...], copying its conversation_id verbatim. Only an ask_session takes a response. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Use this, not your CLI's own messaging, to answer a conversation addressed to this session: use it the moment your pane shows [forge ask_session from ...], copying its conversation_id verbatim. Only an ask_session takes a response. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["conversation_id","message"]}"#,
         },
         ToolDef {
             name: "tell_session",
-            description: "Tell a peer session something; the peer acknowledges asynchronously. To follow up on a received tell, pass its conversation_id plus its sender as target (a follow-up on the same conversation). Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Use this, not your CLI's own messaging, to tell a Forge peer session something; the peer acknowledges asynchronously. To follow up on a received tell, pass its conversation_id plus its sender as target (a follow-up on the same conversation). Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"conversation_id":{"type":"string"},"idempotency_key":{"type":"string"}}}"#,
         },
         ToolDef {
             name: "ack_message",
-            description: "Acknowledge a tell addressed to this session: confirms receipt of a tell that needs no reply content; it is not an answer. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Use this, not your CLI's own messaging, to acknowledge a tell addressed to this session: confirms receipt of a tell that needs no reply content; it is not an answer. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["conversation_id"]}"#,
         },
         ToolDef {
             name: "list_sessions",
-            description: "List live peer sessions visible to this session: call it when asked what sessions are alive, and before contacting a peer, to resolve live names and groups. The `you` field names the calling session.",
+            description: "Use this, not your CLI's own session listing, to discover Forge peers. List live peer sessions visible to this session: call it when asked what sessions are alive, and before contacting a peer, to resolve live names and groups. The `you` field names the calling session.",
             schema: r#"{"type":"object","properties":{}}"#,
         },
         ToolDef {
@@ -839,6 +843,51 @@ mod tests {
             init.contains("[forge "),
             "instructions map pane lines to tools: {init}"
         );
+    }
+
+    #[test]
+    fn forge_comms_override_native_messaging() {
+        // Forge hosts peer agent sessions side by side: cross-session
+        // traffic MUST go through Forge tools, never the CLI's own
+        // messaging. The global instructions carry the MUST/NEVER rule
+        // (always in context); each comms description repeats a short
+        // clause so models considering that tool see the override.
+        let init = handle_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("initialize answers");
+        assert!(init.contains("MUST go through these Forge tools"), "init: {init}");
+        assert!(init.contains("NEVER use your CLI's own messaging"), "init: {init}");
+        let res = handle_line(
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("tools/list answers");
+        let window = |tool: &str| -> String {
+            let marker = format!(r#""name":"{tool}""#);
+            let at = res.find(&marker).expect("tool listed");
+            let rest = &res[at + marker.len()..];
+            let end = rest.find(r#""name":""#).unwrap_or(rest.len());
+            rest[..end].to_string()
+        };
+        for tool in [
+            "ask_session",
+            "send_response",
+            "tell_session",
+            "ack_message",
+            "list_sessions",
+        ] {
+            assert!(
+                window(tool).contains("not your CLI's own"),
+                "{tool} overrides native messaging: {}",
+                window(tool)
+            );
+        }
     }
 
     #[test]

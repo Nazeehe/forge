@@ -510,12 +510,16 @@ impl SessionManager {
         if self.lookup_harness_session(harness).is_some() {
             return true;
         }
+        // Muse scrubs the hook env and reports its cwd without a trailing
+        // slash, while the create dialog keeps the slash the user typed
+        // (`PathBuf` preserves it). Compare paths (components), not strings.
+        let hook_cwd = std::path::Path::new(cwd);
         let mut candidates = self.sessions.iter().filter(|(_, rec)| {
             rec.state.is_live()
                 && crate::harness::Harness::from_name(&rec.cli_tool)
                     .is_some_and(|h| h.cwd_window_attribution())
                 && rec.harness_session_id.is_none()
-                && rec.cwd.to_string_lossy() == cwd
+                && rec.cwd.as_path() == hook_cwd
                 && rec.spawned_at.elapsed() < BOOTSTRAP_WINDOW
         });
         let first = candidates.next();
@@ -1308,6 +1312,29 @@ mod tests {
         assert_eq!(m.lookup_harness_session("sid-1"), Some(id));
         assert_eq!(m.lookup_harness_session(""), None);
         assert_eq!(m.lookup_harness_session("nope"), None);
+        assert!(m.remove(id));
+    }
+
+    #[test]
+    fn harness_bootstrap_ignores_trailing_slash() {
+        // Grounded in live muse payloads: the hook reports
+        // `{"cwd":"/work","hook_event_name":"SessionStart","session_id":"..."}`,
+        // no trailing slash, while the dialog keeps the trailing slash the
+        // user typed (`PathBuf` preserves it). The bind must compare paths,
+        // not strings, or every slashed muse session stays null.
+        let mut m = SessionManager::new();
+        let cwd = workdir();
+        let slashed = format!("{}/", cwd.to_string_lossy().trim_end_matches('/'));
+        let slashed_path = std::path::PathBuf::from(&slashed);
+        let id = m
+            .spawn_agent("m", &slashed_path, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let hook_cwd = cwd.to_string_lossy().trim_end_matches('/').to_owned();
+        assert!(m.bind_harness_session("sid-slash", &hook_cwd));
+        assert_eq!(
+            m.get(id).unwrap().harness_session_id.as_deref(),
+            Some("sid-slash")
+        );
         assert!(m.remove(id));
     }
 

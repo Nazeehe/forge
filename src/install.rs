@@ -667,6 +667,10 @@ on stdio):
   `tell_session(target, message, conversation_id)`.
 - `send_response(conversation_id, message)` answers a question addressed to
   this session.
+
+Cross-session communication MUST go through these Forge tools; NEVER use
+your CLI's own messaging — only Forge tools resolve Forge session names
+and enforce shared-group routing.
 "#;
 
 /// Install the forge skill for one harness. Only harnesses with grounded
@@ -1131,6 +1135,20 @@ mod tests {
             let out = uninstall_one_skills(&home, h);
             assert!(out.removed, "out: {out:?}");
         }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn forge_skill_mandates_forge_comms() {
+        // Skill-following harnesses weight SKILL.md over tool text: it
+        // must carry the same MUST/NEVER override as the MCP instructions.
+        let home = scratch_home();
+        install_one_skills(&home, "claude");
+        let text =
+            std::fs::read_to_string(home.join(".claude/skills/forge/SKILL.md")).unwrap();
+        assert!(text.contains("MUST go through these Forge tools"), "skill: {text:?}");
+        assert!(text.contains("NEVER use"), "skill: {text:?}");
+        assert!(text.contains("your CLI's own messaging"), "skill: {text:?}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
