@@ -151,13 +151,16 @@ pub fn kitty_transmit(png: &[u8], image_id: u32, cols: u16, rows: u16) -> String
             // Fixed placement id: re-transmitting the same (image,
             // placement) pair replaces in place without flicker, per
             // the spec. Without `p`, a same-id re-display flashes.
+            // `q=2`: without it the terminal answers `ESC _Gi=..;OK`
+            // on stdin, which crossterm parses as keys, and the `=`s
+            // in it zoom the focused Visual tab in a feedback loop.
             out.push_str(&format!(
-                "\x1b_Ga=T,f=100,t=d,S={},V={},i={image_id},p=1,c={cols},r={rows},m={more};",
+                "\x1b_Ga=T,f=100,t=d,q=2,S={},V={},i={image_id},p=1,c={cols},r={rows},m={more};",
                 png.len(),
                 png.len()
             ));
         } else {
-            out.push_str(&format!("\x1b_Gm={more};"));
+            out.push_str(&format!("\x1b_Gq=2,m={more};"));
         }
         out.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
         out.push_str("\x1b\\");
@@ -168,16 +171,17 @@ pub fn kitty_transmit(png: &[u8], image_id: u32, cols: u16, rows: u16) -> String
 /// Delete one image by id, freeing its data too (`a=d,d=I`). The
 /// action is lowercase: an uppercase action is ignored and the
 /// placement leaks, ghosting over later tabs and stacking a fresh
-/// copy on every revisit.
+/// copy on every revisit. `q=2` keeps the reply off stdin, as in
+/// [`kitty_transmit`].
 pub fn kitty_delete(image_id: u32) -> String {
-    format!("\x1b_Ga=d,d=I,i={image_id}\x1b\\")
+    format!("\x1b_Ga=d,d=I,q=2,i={image_id}\x1b\\")
 }
 
 /// Delete all visible placements (`a=d` alone). Startup purge for
 /// placements leaked while the delete above was malformed: those ids
 /// are untracked, so only a blanket clear reclaims them.
 pub fn kitty_delete_all() -> String {
-    "\x1b_Ga=d\x1b\\".to_string()
+    "\x1b_Ga=d,q=2\x1b\\".to_string()
 }
 
 /// One half-block cell: upper pixel on lower pixel.
@@ -286,11 +290,11 @@ pub fn cell_px(term_cols: u16, term_rows: u16, px_w: u32, px_h: u32) -> (f64, f6
     (cw, ch)
 }
 
-/// Display size in cells for an image in a tab region: contain the
-/// native pixels (never upscale past 1.0, so a small diagram stays
-/// small and centered instead of taking the tab fullscreen), then
-/// apply the zoom factor, which may overflow the region for
-/// scrolling. Always at least one cell per axis.
+/// Display size in cells for an image in a tab region: at zoom 1.0
+/// the image scales up or down to the largest size that fits the
+/// region with aspect kept, so a diagram is readable without zooming.
+/// Other zoom factors scale from there and may overflow the region,
+/// which then scrolls. Always at least one cell per axis.
 pub fn fit_display(
     img_w: u32,
     img_h: u32,
@@ -302,9 +306,7 @@ pub fn fit_display(
 ) -> (u16, u16) {
     let (img_w, img_h) = (img_w.max(1) as f64, img_h.max(1) as f64);
     let (cell_w, cell_h) = (cell_w.max(1.0), cell_h.max(1.0));
-    let fit = (1.0f64)
-        .min(area_cols as f64 * cell_w / img_w)
-        .min(area_rows as f64 * cell_h / img_h);
+    let fit = (area_cols as f64 * cell_w / img_w).min(area_rows as f64 * cell_h / img_h);
     let scale = (fit * zoom.max(MIN_ZOOM) as f64).max(0.0);
     let cols = (img_w * scale / cell_w).round().max(1.0) as u16;
     let rows = (img_h * scale / cell_h).round().max(1.0) as u16;
@@ -464,7 +466,7 @@ mod tests {
         let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4];
         let esc = kitty_transmit(&png, 7, 80, 24);
         assert!(esc.starts_with("\x1b_G"), "APC open");
-        for key in ["a=T", "f=100", "t=d", "i=7", "p=1", "c=80", "r=24"] {
+        for key in ["a=T", "f=100", "t=d", "q=2", "i=7", "p=1", "c=80", "r=24"] {
             assert!(esc.contains(key), "carries {key}: {esc:?}");
         }
         assert!(esc.contains(&base64_encode(&png)), "payload rides");
@@ -473,7 +475,7 @@ mod tests {
         let esc = kitty_transmit(&big, 9, 80, 24);
         assert_eq!(esc.matches("\x1b_G").count(), 2, "two chunks");
         assert!(esc.contains("m=1;"), "continuation marked");
-        assert!(esc.contains("m=0;"), "final marked");
+        assert!(esc.contains("q=2,m=0;"), "final marked, reply suppressed");
     }
 
     #[test]
@@ -481,13 +483,13 @@ mod tests {
         // Spec section "How are images deleted": the action is
         // lowercase `a=d`; uppercase `d=I` also frees the image data.
         // An uppercase action is ignored, leaking the placement.
-        assert_eq!(kitty_delete(9), "\x1b_Ga=d,d=I,i=9\x1b\\");
+        assert_eq!(kitty_delete(9), "\x1b_Ga=d,d=I,q=2,i=9\x1b\\");
     }
 
     #[test]
     fn kitty_delete_all_clears_visible_placements() {
         // Spec example: `a=d` alone deletes all visible placements.
-        assert_eq!(kitty_delete_all(), "\x1b_Ga=d\x1b\\");
+        assert_eq!(kitty_delete_all(), "\x1b_Ga=d,q=2\x1b\\");
     }
 
     fn px(r: u8, g: u8, b: u8) -> [u8; 4] {
@@ -536,12 +538,14 @@ mod tests {
     }
 
     #[test]
-    fn fit_display_never_upscales_a_small_diagram() {
-        // 400x200px on 8x16 cells is natively 50x12.5 cells; a
-        // 200x50-cell tab must show it at native size, centered, not
-        // stretched to the full tab width.
+    fn fit_display_upscales_a_small_diagram_to_the_region() {
+        // 400x200px on 8x16 cells is natively 50x12.5 cells; in a
+        // 200x50-cell tab (1600x800px) it scales 4x to fill the width.
         let (cols, rows) = fit_display(400, 200, 1.0, 200, 50, 8.0, 16.0);
-        assert_eq!((cols, rows), (50, 13));
+        assert_eq!((cols, rows), (200, 50));
+        // Height-bound: 400x400 fills the 50 rows, not the width.
+        let (cols, rows) = fit_display(400, 400, 1.0, 200, 50, 8.0, 16.0);
+        assert_eq!((cols, rows), (100, 50));
     }
 
     #[test]
@@ -557,12 +561,12 @@ mod tests {
     #[test]
     fn fit_display_zoom_may_exceed_the_tab_for_scrolling() {
         let (cols, rows) = fit_display(400, 200, 2.0, 200, 50, 8.0, 16.0);
-        assert_eq!((cols, rows), (100, 25));
+        assert_eq!((cols, rows), (400, 100));
     }
 
     #[test]
     fn fit_display_never_returns_zero_cells() {
-        assert_eq!(fit_display(10, 10, 0.25, 200, 50, 8.0, 16.0), (1, 1));
+        assert_eq!(fit_display(10, 10, 0.25, 1, 1, 8.0, 16.0), (1, 1));
     }
 
     #[test]

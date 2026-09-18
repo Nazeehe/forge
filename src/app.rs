@@ -152,8 +152,8 @@ pub struct VisualSlot {
     pub height: u32,
     pub title: String,
     pub alt: String,
-    /// Zoom factor for the Visual tab viewport: 1.0 shows the whole
-    /// frame contained in the tab, higher zooms scrollable overflow.
+    /// Zoom factor for the Visual tab viewport: 1.0 scales the whole
+    /// frame to fill the tab, higher zooms scrollable overflow.
     pub zoom: f32,
     /// Viewport origin in displayed cells into the zoomed frame.
     pub scroll_x: u16,
@@ -665,10 +665,15 @@ impl AppState {
             text: "  ←→↑↓ scroll · wheel scrolls".to_string(),
             style: muted,
         });
-        lines.push(strip);
+        // The title rides the strip row: the fitted image fills every
+        // row below it, so a title line there would be painted over.
         if !slot.title.is_empty() {
-            lines.push(line(&slot.title, text));
+            strip.push(crate::ui::SpanView {
+                text: format!("  ·  {}", slot.title),
+                style: text,
+            });
         }
+        lines.push(strip);
         if !kitty {
             // Half-block cells are exactly 1:2 by construction, so the
             // fallback layout uses the fixed 8x16 cell, never the
@@ -1086,14 +1091,33 @@ impl AppState {
                 title: done.title,
                 alt: done.alt,
                 // A new frame resets the viewport: whole diagram
-                // contained in the tab, no scroll.
+                // fitted to the tab, no scroll.
                 zoom: 1.0,
                 scroll_x: 0,
                 scroll_y: 0,
             },
         );
         self.visual_evict();
+        self.focus_visual_tab(done.session);
         self.dirty = true;
+    }
+
+    /// Bring a fresh visual forward: switch the session to its Visual
+    /// tab. A background session only takes the overlay slot when the
+    /// active session is not using it, so a diagram never yanks the
+    /// operator off an Events or Walkthrough view they opened. Narrow
+    /// terminals (under 100 columns) have no overlay tabs.
+    #[cfg(feature = "visual")]
+    fn focus_visual_tab(&mut self, id: crate::session::SessionId) {
+        if self.term_size.1 < 100 {
+            return;
+        }
+        if self.manager.active() != Some(id) && self.overlay_active() {
+            return;
+        }
+        if let Some(slot) = self.visual_slot(id) {
+            self.overlay_view = Some((id, slot));
+        }
     }
 
     /// Image bytes held across all slots: transmit PNG plus fallback RGBA.
@@ -4080,6 +4104,39 @@ mod tests {
 
     #[cfg(feature = "visual")]
     #[test]
+    fn visual_complete_focuses_the_visual_tab() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let (a, _) = spawn_visual_agent(&mut state, "a");
+        let (b, _) = spawn_visual_agent(&mut state, "b");
+        state.manager.switch(a);
+        complete(&mut state, a, 1, fake_png(64, 400, 200));
+        assert!(state.visual_tab_focused(), "active session jumps to Visual");
+        // A background visual never steals an overlay the operator has open.
+        complete(&mut state, b, 1, fake_png(64, 400, 200));
+        assert_eq!(state.overlay_view, Some((a, state.visual_slot(a).unwrap())));
+        // With no overlay open, it pre-selects Visual for when they switch.
+        state.overlay_view = None;
+        complete(&mut state, b, 2, fake_png(64, 400, 200));
+        state.manager.switch(b);
+        assert!(state.visual_tab_focused(), "background visual waits in its tab");
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_complete_skips_focus_on_narrow_terminals() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 90));
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 400, 200));
+        assert!(state.overlay_view.is_none(), "no overlay tabs under 100 cols");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
     fn visual_lru_evicts_oldest_inactive_first() {
         let mut state = AppState::new();
         state.visual_budget_count = 2;
@@ -4295,18 +4352,18 @@ mod tests {
 
     #[cfg(feature = "visual")]
     #[test]
-    fn visual_paint_contains_and_centers_a_small_diagram() {
+    fn visual_paint_fits_and_centers_a_small_diagram() {
         let mut state = AppState::new();
         let (id, _) = spawn_visual_agent(&mut state, "agent");
-        complete(&mut state, id, 1, fake_png(64, 400, 200));
-        // 400x200 at 8x16 cells is natively 50x13: contained, not
-        // stretched to the 200-column region.
+        complete(&mut state, id, 1, fake_png(64, 400, 400));
+        // 400x400 at 8x16 cells is natively 50x25: scaled up until the
+        // 50 rows are full, then centered across the 200 columns.
         let paint = state
             .visual_paint(id, ratatui::layout::Rect::new(1, 2, 200, 50), 8.0, 16.0)
             .expect("paint");
-        assert_eq!((paint.out_cols, paint.out_rows), (50, 13));
-        assert_eq!((paint.cursor_x, paint.cursor_y), (76, 20), "centered");
-        assert_eq!((paint.sx, paint.sy, paint.sw, paint.sh), (0, 0, 400, 200));
+        assert_eq!((paint.out_cols, paint.out_rows), (100, 50));
+        assert_eq!((paint.cursor_x, paint.cursor_y), (51, 2), "centered");
+        assert_eq!((paint.sx, paint.sy, paint.sw, paint.sh), (0, 0, 400, 400));
     }
 
     #[cfg(feature = "visual")]
@@ -4387,11 +4444,12 @@ mod tests {
         assert!(text.contains("flow"), "title line: {text:?}");
         assert!(text.contains("a diagram"), "alt line: {text:?}");
         assert!(text.contains('▀'), "half-block art: {text:?}");
-        // Row zero is the zoom strip; title, then art.
+        // Row zero is the zoom strip carrying the title; art follows,
+        // since the fitted image fills every row below the strip.
         let strip: String = view.lines[0].iter().map(|s| s.text.as_str()).collect();
         assert!(strip.contains("zoom in") && strip.contains("zoom out"), "buttons: {strip:?}");
-        assert!(view.lines[1].iter().any(|s| s.text == "flow"), "title row: {text:?}");
-        let cell = &view.lines[2][0];
+        assert!(strip.contains("flow"), "title on the strip: {strip:?}");
+        let cell = &view.lines[1][0];
         assert_eq!(cell.style.fg, Some(ratatui::style::Color::Rgb(255, 0, 0)));
         assert_eq!(cell.style.bg, Some(ratatui::style::Color::Rgb(0, 0, 255)));
         // Kitty mode carries title and alt for the record, no art.
