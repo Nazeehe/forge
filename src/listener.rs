@@ -609,9 +609,16 @@ mod tests {
     #[test]
     fn overlong_line_is_rejected() {
         let (mut a, mut b) = UnixStream::pair().unwrap();
-        b.write_all(&vec![b'x'; MAX_LINE + 1]).unwrap();
-        drop(b);
+        // Write from a thread: macOS buffers ~8 KB per Unix socket, so
+        // an inline write of MAX_LINE + 1 blocks with nobody reading.
+        // The reader bails at the cap, so the tail may hit a closed
+        // peer; the write result is irrelevant.
+        let writer = std::thread::spawn(move || {
+            let _ = b.write_all(&vec![b'x'; MAX_LINE + 1]);
+        });
         assert!(read_record_line(&mut a, MAX_LINE).is_err());
+        drop(a);
+        writer.join().unwrap();
     }
 
     #[test]
@@ -834,8 +841,15 @@ mod tests {
             }
             other => panic!("wrong event: {other:?}"),
         }
-        conn.set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
+        // macOS rejects setsockopt with EINVAL once the peer has hung
+        // up, which is exactly what this handler does at once: that
+        // error already proves the close, and the read below is then
+        // immediate EOF with no timeout needed.
+        match conn.set_read_timeout(Some(std::time::Duration::from_secs(5))) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {}
+            Err(e) => panic!("set_read_timeout: {e}"),
+        }
         let mut buf = [0u8; 1];
         use std::io::Read;
         assert!(matches!(conn.read(&mut buf), Ok(0)), "handler closed promptly");
