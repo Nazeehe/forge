@@ -657,9 +657,12 @@ impl AppState {
             };
         };
         let mut lines = Vec::new();
-        // Row zero is always the zoom strip, in both backends: the
-        // Kitty image paints only the region below it, and the mouse
-        // hit test assumes these exact columns.
+        // Row zero is always blank: breathing room between the tab
+        // strip and the zoom strip, which rides row one with the
+        // title. Both backends share this: the Kitty image paints only
+        // the region below the strip, and the mouse hit test assumes
+        // these exact rows and columns.
+        lines.push(Vec::new());
         let mut strip = crate::ui::visual_button_spans(self.pill_tabs);
         strip.push(crate::ui::SpanView {
             text: "  ←→↑↓ scroll · wheel scrolls".to_string(),
@@ -4410,10 +4413,27 @@ mod tests {
         let (id, _) = spawn_visual_agent(&mut state, "agent");
         complete(&mut state, id, 1, fake_png(64, 10, 10));
         let view = state.visual_view(id, true);
-        let strip: String = view.lines[0].iter().map(|s| s.text.as_str()).collect();
+        let blank: String = view.lines[0].iter().map(|s| s.text.as_str()).collect();
+        assert!(blank.is_empty(), "spacer row: {blank:?}");
+        let strip: String = view.lines[1].iter().map(|s| s.text.as_str()).collect();
         assert!(strip.contains("zoom in") && strip.contains("zoom out"), "buttons: {strip:?}");
         let text: String = view.lines.iter().flat_map(|r| r.iter().map(|s| s.text.as_str())).collect();
         assert!(!text.contains('▀'), "image paints over the pane");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_view_leaves_a_spacer_row_above_the_strip() {
+        // Row zero is always blank so the zoom strip and title sit one
+        // row below the tab strip; the strip rides row one.
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        let view = state.visual_view(id, true);
+        let blank: String = view.lines[0].iter().map(|s| s.text.as_str()).collect();
+        assert!(blank.is_empty(), "spacer row: {blank:?}");
+        let strip: String = view.lines[1].iter().map(|s| s.text.as_str()).collect();
+        assert!(strip.contains("zoom in") && strip.contains("zoom out"), "buttons: {strip:?}");
     }
 
     #[cfg(feature = "visual")]
@@ -4444,12 +4464,15 @@ mod tests {
         assert!(text.contains("flow"), "title line: {text:?}");
         assert!(text.contains("a diagram"), "alt line: {text:?}");
         assert!(text.contains('▀'), "half-block art: {text:?}");
-        // Row zero is the zoom strip carrying the title; art follows,
-        // since the fitted image fills every row below the strip.
-        let strip: String = view.lines[0].iter().map(|s| s.text.as_str()).collect();
+        // Row zero is the blank spacer; the zoom strip carrying the
+        // title rides row one and art follows, since the fitted image
+        // fills every row below the strip.
+        let blank: String = view.lines[0].iter().map(|s| s.text.as_str()).collect();
+        assert!(blank.is_empty(), "spacer row: {blank:?}");
+        let strip: String = view.lines[1].iter().map(|s| s.text.as_str()).collect();
         assert!(strip.contains("zoom in") && strip.contains("zoom out"), "buttons: {strip:?}");
         assert!(strip.contains("flow"), "title on the strip: {strip:?}");
-        let cell = &view.lines[1][0];
+        let cell = &view.lines[2][0];
         assert_eq!(cell.style.fg, Some(ratatui::style::Color::Rgb(255, 0, 0)));
         assert_eq!(cell.style.bg, Some(ratatui::style::Color::Rgb(0, 0, 255)));
         // Kitty mode carries title and alt for the record, no art.

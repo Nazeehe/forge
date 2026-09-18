@@ -935,8 +935,8 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     let Some(active) = state.manager.active() else {
         return;
     };
-    // A focused Visual tab owns the wheel (vertical pan) and its
-    // zoom buttons; every other main-area event dies here so clicks
+    // A focused Visual tab owns the wheel (pan) and its zoom
+    // buttons; every other main-area event dies here so clicks
     // never reach the agent pane behind the diagram.
     #[cfg(feature = "visual")]
     if state.visual_tab_focused() {
@@ -948,6 +948,12 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                 }
                 event::MouseEventKind::ScrollDown => {
                     state.visual_scroll(id, 0, 3, area_cols, area_rows, cell_w, cell_h);
+                }
+                event::MouseEventKind::ScrollLeft => {
+                    state.visual_scroll(id, -3, 0, area_cols, area_rows, cell_w, cell_h);
+                }
+                event::MouseEventKind::ScrollRight => {
+                    state.visual_scroll(id, 3, 0, area_cols, area_rows, cell_w, cell_h);
                 }
                 event::MouseEventKind::Down(event::MouseButton::Left) => {
                     if let Some(button) = ui::visual_button_at(&chrome, mev.column, mev.row) {
@@ -1181,6 +1187,31 @@ mod tests {
         assert!(state.visual_tab_focused(), "plain keys are swallowed");
         handle_key(&mut state, &mut router, key(KeyCode::Esc));
         assert!(!state.visual_tab_focused());
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_wheel_pans_horizontally_like_vertically() {
+        use crossterm::event::{MouseEvent, MouseEventKind, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = open_visual_overlay(&mut state);
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let chrome = ui::visual_chrome(ui::pane_content_area(&areas), state.pill_tabs);
+        let (area_cols, area_rows) = (chrome.image.width, chrome.image.height);
+        // Zoom to the max: the square test image only overflows the
+        // wide tab horizontally at high zoom (at low zoom the height
+        // is the limiting axis, so x clamps to zero).
+        while state.visual_zoom(id, ui::VisualButton::ZoomIn, area_cols, area_rows, 8.0, 16.0) {}
+        let wheel = |kind| MouseEvent {
+            kind, column: chrome.image.x + 2, row: chrome.image.y + 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        forward_mouse(&mut state, wheel(MouseEventKind::ScrollRight));
+        assert_eq!(state.visual_slots.get(&id).unwrap().scroll_x, 3);
+        forward_mouse(&mut state, wheel(MouseEventKind::ScrollLeft));
+        assert_eq!(state.visual_slots.get(&id).unwrap().scroll_x, 0);
         assert!(state.manager.remove(id));
     }
 

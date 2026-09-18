@@ -243,10 +243,11 @@ pub enum VisualButton {
     ZoomOut,
 }
 
-/// Visual tab chrome inside its content rect: a one-row button strip
-/// on top, the image region below it. Render and mouse handling both
-/// recompute these from the same content rect, so clicks never
-/// desync from what the tab paints.
+/// Visual tab chrome inside its content rect: a blank spacer row on
+/// top, the one-row button strip below it, the image region under
+/// that. Render and mouse handling both recompute these from the
+/// same content rect, so clicks never desync from what the tab
+/// paints. Tiny heights shed the buttons first, then the spacer.
 #[cfg(feature = "visual")]
 pub struct VisualChrome {
     pub image: Rect,
@@ -256,12 +257,14 @@ pub struct VisualChrome {
 
 #[cfg(feature = "visual")]
 pub fn visual_chrome(content: Rect, pills: bool) -> VisualChrome {
-    let row_h = if content.height > 0 { 1 } else { 0 };
+    let spacer_h = if content.height > 0 { 1 } else { 0 };
+    let row_h = if content.height > spacer_h { 1 } else { 0 };
+    let btn_y = content.y.saturating_add(spacer_h);
     let image = Rect::new(
         content.x,
-        content.y.saturating_add(row_h),
+        btn_y.saturating_add(row_h),
         content.width,
-        content.height.saturating_sub(row_h),
+        content.height.saturating_sub(spacer_h + row_h),
     );
     let (zin_full, zout_full) = visual_button_widths(pills);
     let zin_w = zin_full.min(content.width);
@@ -269,8 +272,8 @@ pub fn visual_chrome(content: Rect, pills: bool) -> VisualChrome {
     let zout_w = zout_full.min(content.width.saturating_sub(zin_w + 2));
     VisualChrome {
         image,
-        zoom_in: Rect::new(content.x, content.y, zin_w, row_h),
-        zoom_out: Rect::new(zout_x, content.y, zout_w, row_h),
+        zoom_in: Rect::new(content.x, btn_y, zin_w, row_h),
+        zoom_out: Rect::new(zout_x, btn_y, zout_w, row_h),
     }
 }
 
@@ -1696,27 +1699,43 @@ mod tests {
 
     #[cfg(feature = "visual")]
     #[test]
+    fn visual_chrome_leaves_a_spacer_row_above_the_buttons() {
+        // Breathing room from the tab strip: row zero of the content
+        // is always blank, the zoom strip rides row one, art below.
+        let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false);
+        assert_eq!((chrome.zoom_in.x, chrome.zoom_in.y), (10, 6));
+        assert_eq!(
+            (chrome.image.x, chrome.image.y, chrome.image.width, chrome.image.height),
+            (10, 7, 60, 18)
+        );
+        assert_eq!(visual_button_at(&chrome, 10, 5), None, "spacer row is dead");
+        assert_eq!(visual_button_at(&chrome, 10, 6), Some(VisualButton::ZoomIn));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
     fn visual_chrome_splits_buttons_row_and_image_region() {
         let chrome = visual_chrome(Rect::new(10, 5, 60, 20), false);
         assert_eq!(
             (chrome.zoom_in.x, chrome.zoom_in.y),
-            (10, 5),
-            "buttons paint on the first content row"
+            (10, 6),
+            "buttons paint one row below the tab strip"
         );
         assert_eq!(
             (chrome.image.x, chrome.image.y, chrome.image.width, chrome.image.height),
-            (10, 6, 60, 19),
+            (10, 7, 60, 18),
             "image region fills the rest"
         );
         assert_eq!((chrome.zoom_in.x, chrome.zoom_in.width), (10, 11));
         assert_eq!((chrome.zoom_out.x, chrome.zoom_out.width), (23, 12));
-        assert_eq!(visual_button_at(&chrome, 10, 5), Some(VisualButton::ZoomIn));
-        assert_eq!(visual_button_at(&chrome, 20, 5), Some(VisualButton::ZoomIn));
-        assert_eq!(visual_button_at(&chrome, 21, 5), None, "gap is dead");
-        assert_eq!(visual_button_at(&chrome, 23, 5), Some(VisualButton::ZoomOut));
-        assert_eq!(visual_button_at(&chrome, 34, 5), Some(VisualButton::ZoomOut));
-        assert_eq!(visual_button_at(&chrome, 35, 5), None, "past the label");
-        assert_eq!(visual_button_at(&chrome, 10, 6), None, "image rows are not buttons");
+        assert_eq!(visual_button_at(&chrome, 10, 5), None, "spacer row is dead");
+        assert_eq!(visual_button_at(&chrome, 10, 6), Some(VisualButton::ZoomIn));
+        assert_eq!(visual_button_at(&chrome, 20, 6), Some(VisualButton::ZoomIn));
+        assert_eq!(visual_button_at(&chrome, 21, 6), None, "gap is dead");
+        assert_eq!(visual_button_at(&chrome, 23, 6), Some(VisualButton::ZoomOut));
+        assert_eq!(visual_button_at(&chrome, 34, 6), Some(VisualButton::ZoomOut));
+        assert_eq!(visual_button_at(&chrome, 35, 6), None, "past the label");
+        assert_eq!(visual_button_at(&chrome, 10, 7), None, "image rows are not buttons");
     }
 
     #[cfg(feature = "visual")]
@@ -1727,13 +1746,15 @@ mod tests {
         assert_eq!(visual_button_widths(true), (13, 14));
         assert_eq!(visual_button_widths(false), (11, 12));
         let chrome = visual_chrome(Rect::new(10, 5, 60, 20), true);
+        assert_eq!((chrome.zoom_in.x, chrome.zoom_in.y), (10, 6));
         assert_eq!((chrome.zoom_in.x, chrome.zoom_in.width), (10, 13));
         assert_eq!((chrome.zoom_out.x, chrome.zoom_out.width), (25, 14));
-        assert_eq!(visual_button_at(&chrome, 22, 5), Some(VisualButton::ZoomIn));
-        assert_eq!(visual_button_at(&chrome, 23, 5), None, "gap is dead");
-        assert_eq!(visual_button_at(&chrome, 25, 5), Some(VisualButton::ZoomOut));
-        assert_eq!(visual_button_at(&chrome, 38, 5), Some(VisualButton::ZoomOut));
-        assert_eq!(visual_button_at(&chrome, 39, 5), None, "past the cap");
+        assert_eq!(visual_button_at(&chrome, 10, 5), None, "spacer row is dead");
+        assert_eq!(visual_button_at(&chrome, 22, 6), Some(VisualButton::ZoomIn));
+        assert_eq!(visual_button_at(&chrome, 23, 6), None, "gap is dead");
+        assert_eq!(visual_button_at(&chrome, 25, 6), Some(VisualButton::ZoomOut));
+        assert_eq!(visual_button_at(&chrome, 38, 6), Some(VisualButton::ZoomOut));
+        assert_eq!(visual_button_at(&chrome, 39, 6), None, "past the cap");
     }
 
     #[cfg(feature = "visual")]
@@ -1761,6 +1782,11 @@ mod tests {
     fn visual_chrome_degrades_on_tiny_content() {
         for pills in [false, true] {
             let chrome = visual_chrome(Rect::new(0, 0, 0, 0), pills);
+            assert_eq!(chrome.image.height, 0);
+            assert_eq!(visual_button_at(&chrome, 0, 0), None);
+            // One row keeps the spacer only: the buttons shed first so
+            // a stray click can never hit an invisible button.
+            let chrome = visual_chrome(Rect::new(0, 0, 10, 1), pills);
             assert_eq!(chrome.image.height, 0);
             assert_eq!(visual_button_at(&chrome, 0, 0), None);
         }
