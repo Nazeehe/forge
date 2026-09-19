@@ -1,9 +1,7 @@
-//! Telegram mobile transport core: pure `getUpdates`/`sendMessage` logic.
-//!
-//! No network here: the poller thread (a later phase) does I/O and this
-//! module shapes and interprets the payloads. The token itself is never
-//! stored in this module and must never be logged; [`read_token`] loads it
-//! from a `0600` file on each use so rotation bites at once.
+//! Telegram mobile transport: bounded `getUpdates` polling plus an
+//! independently wakeable `sendMessage` worker. The token itself is never
+//! stored here or logged; [`read_token`] loads it from a private file on each
+//! use so rotation takes effect without restarting Forge.
 
 /// Longest `sendMessage` text in chars (Telegram limit).
 pub const MAX_TEXT: usize = 4096;
@@ -12,6 +10,26 @@ pub const MAX_UPDATES: usize = 100;
 /// Shortest acceptable bot token: operator-minted, never trivial.
 /// Mirrors the `bot.rs` credential bound.
 pub const TOKEN_MIN_LEN: usize = 16;
+/// Telegram response bodies are small JSON envelopes. Bound reads well
+/// below ureq's general-purpose default so a broken peer cannot grow us.
+pub const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
+/// DNS/TCP/TLS establishment must never strand the only transport worker.
+pub const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Non-polling requests have a short end-to-end budget.
+pub const HTTP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Disabled workers wake periodically to observe live configuration without
+/// consuming a core in a tight loop.
+pub const DISABLED_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+/// Long failure backoffs are checked in short slices so a settings change is
+/// observed promptly instead of waiting as long as fifteen minutes.
+pub const BACKOFF_SLICE: std::time::Duration = std::time::Duration::from_millis(250);
+/// A reply gets a small bounded retry budget before it becomes a visible drop.
+pub const MAX_SEND_ATTEMPTS: u8 = 3;
+
+/// Give Telegram's server-side long poll a bounded transport margin.
+pub fn poll_http_timeout(poll_secs: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(poll_secs.saturating_add(10))
+}
 
 /// One fresh inbound text message from `getUpdates`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +104,30 @@ pub fn next_offset(updates: &[Update]) -> Option<i64> {
         .map(|m| m.saturating_add(1))
 }
 
+/// Confirmation offset from every raw update, including edits, callback
+/// queries, media, and malformed message records that are not actionable.
+/// Leaving one of those unconfirmed makes Telegram return it forever.
+pub fn response_next_offset(body: &str) -> Result<Option<i64>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("invalid JSON: {e}"))?;
+    if value.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let desc = value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("telegram error: {desc}"));
+    }
+    Ok(value
+        .get("result")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .take(MAX_UPDATES)
+        .filter_map(|entry| entry.get("update_id").and_then(|v| v.as_i64()))
+        .max()
+        .map(|id| id.saturating_add(1)))
+}
+
 /// Sender allowlist. An empty list denies everyone: Telegram delivery
 /// fails closed until the operator configures users.
 pub fn is_allowed(user_id: i64, allowed: &[i64]) -> bool {
@@ -117,6 +159,11 @@ pub fn send_payload(chat_id: i64, text: &str) -> String {
         crate::mcp::escape_json(cut)
     )
 }
+
+/// The only token location: the settings form writes here and the
+/// poller/tester read here. No UI edits it; `~/` expands via
+/// [`expand_user`] at every use.
+pub const TELEGRAM_TOKEN_FILE: &str = "~/.forge/telegram.token";
 
 /// Expand a leading `~/` against `$HOME`. Anything else passes
 /// through unchanged; an unset `HOME` leaves even tildes alone (the
@@ -177,6 +224,7 @@ pub struct PollReport {
 #[derive(Clone, Debug)]
 pub struct Poller {
     offset: Option<i64>,
+    pending_offset: Option<i64>,
     failures: u32,
 }
 
@@ -184,6 +232,7 @@ impl Poller {
     pub fn new() -> Self {
         Poller {
             offset: None,
+            pending_offset: None,
             failures: 0,
         }
     }
@@ -196,6 +245,19 @@ impl Poller {
     /// Consecutive failures (transport or parse) since the last success.
     pub fn failures(&self) -> u32 {
         self.failures
+    }
+
+    /// Commit the raw response offset after an actionable report has been
+    /// handed to the bounded owner queue.
+    pub fn confirm_observed(&mut self) {
+        if let Some(next) = self.pending_offset.take() {
+            self.offset = Some(next);
+        }
+    }
+
+    /// Forget an unhanded observation so the next poll requests it again.
+    pub fn abandon_observed(&mut self) {
+        self.pending_offset = None;
     }
 
     /// Fold one fetch result into poller state. `Ok(body)` parses and
@@ -225,10 +287,9 @@ impl Poller {
                     })
                 }
                 Ok(updates) => {
+                    let recovered = self.failures > 0;
                     self.failures = 0;
-                    if let Some(next) = next_offset(&updates) {
-                        self.offset = Some(next);
-                    }
+                    let raw_next = response_next_offset(&body).ok().flatten();
                     let messages = updates
                         .into_iter()
                         .filter(|u| is_allowed(u.user_id, allowed))
@@ -239,8 +300,16 @@ impl Poller {
                         })
                         .collect::<Vec<_>>();
                     if messages.is_empty() {
-                        None
+                        if let Some(next) = raw_next {
+                            self.offset = Some(next);
+                        }
+                        if !recovered {
+                            return None;
+                        }
                     } else {
+                        self.pending_offset = raw_next;
+                    }
+                    {
                         Some(PollReport {
                             messages,
                             failed: false,
@@ -283,10 +352,16 @@ pub fn fetch_updates(
 ) -> Result<String, String> {
     let url = updates_url(token, offset, timeout_secs);
     let mut response = ureq::get(&url)
+        .config()
+        .timeout_connect(Some(HTTP_CONNECT_TIMEOUT))
+        .timeout_global(Some(poll_http_timeout(timeout_secs)))
+        .build()
         .call()
         .map_err(|_| "telegram poll failed".to_string())?;
     response
         .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
         .read_to_string()
         .map_err(|_| "telegram poll failed".to_string())
 }
@@ -369,10 +444,16 @@ pub fn me_url(token: &str) -> String {
 /// [`me_detail`]). Errors stay opaque: they must never carry the token.
 pub fn fetch_me(token: &str) -> Result<String, String> {
     let mut response = ureq::get(&me_url(token))
+        .config()
+        .timeout_connect(Some(HTTP_CONNECT_TIMEOUT))
+        .timeout_global(Some(HTTP_SEND_TIMEOUT))
+        .build()
         .call()
         .map_err(|_| "telegram test failed".to_string())?;
     let body = response
         .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
         .read_to_string()
         .map_err(|_| "telegram test failed".to_string())?;
     me_detail(&body).map_err(|_| "telegram test failed".to_string())
@@ -386,19 +467,30 @@ pub fn send_message(token: &str, chat_id: i64, text: &str) -> Result<(), String>
     let payload: serde_json::Value =
         serde_json::from_str(&body).map_err(|_| "telegram send failed".to_string())?;
     ureq::post(&send_url(token))
+        .config()
+        .timeout_connect(Some(HTTP_CONNECT_TIMEOUT))
+        .timeout_global(Some(HTTP_SEND_TIMEOUT))
+        .build()
         .send_json(payload)
         .map_err(|_| "telegram send failed".to_string())?;
     Ok(())
 }
 
-/// One Telegram reply queued for the poller thread to send.
+/// One Telegram reply queued for the dedicated sender worker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutboundMessage {
     pub chat_id: i64,
     pub text: String,
+    attempts: u8,
 }
 
-/// Most replies held for the poller thread. Past this newcomers drop
+impl OutboundMessage {
+    pub fn new(chat_id: i64, text: impl Into<String>) -> Self {
+        Self { chat_id, text: text.into(), attempts: 0 }
+    }
+}
+
+/// Most replies held for the sender worker. Past this newcomers drop
 /// and count, so a command loop cannot grow the owner without limit.
 pub const OUTBOX_CAP: usize = 64;
 /// Most replies the poller thread sends per loop turn: paced, never a burst.
@@ -406,6 +498,62 @@ pub const OUTBOX_DRAIN: usize = 8;
 /// Most inbox messages routed per settle: a flood drains over ticks,
 /// at most one injection each; commands and errors also send one reply.
 pub const ROUTE_BATCH: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendOutcome {
+    Empty,
+    Sent,
+    Retrying(u8),
+    Dropped,
+}
+
+/// Owner-visible health transition for one attempted delivery.
+pub fn delivery_status(outcome: SendOutcome) -> Option<(bool, bool)> {
+    match outcome {
+        SendOutcome::Empty => None,
+        SendOutcome::Sent => Some((false, false)),
+        SendOutcome::Retrying(_) => Some((true, false)),
+        SendOutcome::Dropped => Some((true, true)),
+    }
+}
+
+/// Attempt the queue head once. Success removes it; a transient failure keeps
+/// it at the head with a bounded attempt count; the final failure drops loudly.
+pub fn send_outbox_head(
+    queue: &mut std::collections::VecDeque<OutboundMessage>,
+    mut send: impl FnMut(&OutboundMessage) -> Result<(), String>,
+) -> SendOutcome {
+    let Some(mut msg) = queue.pop_front() else {
+        return SendOutcome::Empty;
+    };
+    if send(&msg).is_ok() {
+        return SendOutcome::Sent;
+    }
+    msg.attempts = msg.attempts.saturating_add(1);
+    if msg.attempts >= MAX_SEND_ATTEMPTS {
+        SendOutcome::Dropped
+    } else {
+        let attempt = msg.attempts;
+        queue.push_front(msg);
+        SendOutcome::Retrying(attempt)
+    }
+}
+
+/// Wait for one queued reply. `notify_one` makes the common path immediate;
+/// the timeout lets workers re-read live configuration even without traffic.
+pub fn wait_outbound(
+    outbox: &std::sync::Arc<
+        std::sync::Mutex<std::collections::VecDeque<OutboundMessage>>,
+    >,
+    wake: &std::sync::Arc<std::sync::Condvar>,
+    timeout: std::time::Duration,
+) -> Option<OutboundMessage> {
+    let queue = outbox.lock().ok()?;
+    let (mut queue, _) = wake
+        .wait_timeout_while(queue, timeout, |queue| queue.is_empty())
+        .ok()?;
+    queue.pop_front()
+}
 
 /// Pop up to `limit` replies and send each. Failures still pop: Telegram
 /// replies are best-effort operator feedback, and requeueing a failing
@@ -418,30 +566,77 @@ pub fn drain_outbox(
 ) -> usize {
     let mut sent = 0;
     for _ in 0..limit {
-        let Some(msg) = queue.pop_front() else {
-            break;
-        };
-        if send(&msg).is_ok() {
-            sent += 1;
+        match send_outbox_head(queue, &mut send) {
+            SendOutcome::Sent => sent += 1,
+            SendOutcome::Empty | SendOutcome::Retrying(_) => break,
+            SendOutcome::Dropped => {}
         }
     }
     sent
 }
 
-/// One poller turn: idle when disabled, a fetch plus outbox drain when
-/// live, stop when the owner is gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerKind {
+    Poller,
+    Sender,
+}
+
+/// One poller turn: idle when disabled, a fetch when live, bounded backoff
+/// after failure, or stop when the owner is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PollTurn {
     IdleDisabled,
     Live,
+    Backoff(std::time::Duration),
     Stopped,
 }
 
-/// Block forever polling Telegram into `tx` and draining `outbox`. The
+const HANDOFF_RETRIES: usize = 20;
+const HANDOFF_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoffOutcome {
+    Delivered,
+    Busy,
+    Stopped,
+}
+
+/// Put one report on the bounded owner queue without either blocking forever
+/// or confirming a command that Forge did not accept.
+pub fn handoff_report(
+    poller: &mut Poller,
+    tx: &std::sync::mpsc::SyncSender<crate::event::AppEvent>,
+    report: PollReport,
+) -> HandoffOutcome {
+    let mut event = crate::event::AppEvent::TelegramPoll(report);
+    for attempt in 0..HANDOFF_RETRIES {
+        match tx.try_send(event) {
+            Ok(()) => {
+                poller.confirm_observed();
+                return HandoffOutcome::Delivered;
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                poller.abandon_observed();
+                return HandoffOutcome::Stopped;
+            }
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                event = returned;
+                if attempt + 1 < HANDOFF_RETRIES {
+                    std::thread::sleep(HANDOFF_WAIT);
+                }
+            }
+        }
+    }
+    poller.abandon_observed();
+    HandoffOutcome::Busy
+}
+
+/// Block forever polling Telegram into `tx`. The
 /// section is re-read every turn so modal saves land without a restart;
 /// the token file itself is re-read too, so rotation bites at once.
 /// Disabling stops all traffic until re-enabled. Without a readable
-/// token both directions wait out backoff. Fail-soft by design: every
+/// token polling waits out backoff. Outbound delivery remains independent.
+/// Fail-soft by design: every
 /// failure waits and retries; only a dead owner ends the thread. Quiet
 /// polls send nothing. The offset lives only in memory: a restart
 /// repolls from scratch, which can redeliver recent operator text but
@@ -449,13 +644,15 @@ pub enum PollTurn {
 pub fn poll_forever(
     shared: std::sync::Arc<std::sync::Mutex<crate::config::TelegramConfig>>,
     tx: std::sync::mpsc::SyncSender<crate::event::AppEvent>,
-    outbox: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<OutboundMessage>>>,
 ) {
     let mut poller = Poller::new();
     loop {
         let cfg = shared.lock().map(|cfg| cfg.clone()).unwrap_or_default();
-        if matches!(poll_turn(&mut poller, &cfg, &tx, &outbox), PollTurn::Stopped) {
-            return;
+        match poll_turn(&mut poller, &cfg, &tx) {
+            PollTurn::Stopped => return,
+            PollTurn::IdleDisabled => std::thread::sleep(DISABLED_WAIT),
+            PollTurn::Backoff(wait) => sleep_backoff_while_unchanged(&shared, &cfg, wait),
+            PollTurn::Live => {}
         }
     }
 }
@@ -466,29 +663,11 @@ pub fn poll_turn(
     poller: &mut Poller,
     cfg: &crate::config::TelegramConfig,
     tx: &std::sync::mpsc::SyncSender<crate::event::AppEvent>,
-    outbox: &std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<OutboundMessage>>>,
 ) -> PollTurn {
     if !cfg.enabled {
         return PollTurn::IdleDisabled;
     }
     let token = read_token(&cfg.token_file).ok();
-    // Replies jump the queue ahead of the next long-poll hold.
-    if let Some(ref token) = token {
-        let mut batch = Vec::new();
-        if let Ok(mut queue) = outbox.lock() {
-            drain_outbox(
-                &mut queue,
-                |msg| {
-                    batch.push(msg.clone());
-                    Ok(())
-                },
-                OUTBOX_DRAIN,
-            );
-        }
-        for msg in &batch {
-            let _ = send_message(token, msg.chat_id, &msg.text);
-        }
-    }
     let fetch = match token {
         Some(ref token) => fetch_updates(token, poller.offset(), cfg.poll_seconds),
         None => Err("telegram token unreadable".to_string()),
@@ -496,22 +675,102 @@ pub fn poll_turn(
     match poller.observe(fetch, &cfg.allowed_user_ids) {
         None => {}
         Some(report) => {
-            if report.failed {
-                let wait = backoff_delay(
+            let failed = report.failed;
+            match handoff_report(poller, tx, report) {
+                HandoffOutcome::Delivered => {}
+                HandoffOutcome::Busy => return PollTurn::Backoff(DISABLED_WAIT),
+                HandoffOutcome::Stopped => return PollTurn::Stopped,
+            }
+            if failed {
+                return PollTurn::Backoff(std::time::Duration::from_secs(backoff_delay(
                     poller.failures().saturating_sub(1),
                     cfg.backoff_min_seconds,
                     cfg.backoff_max_seconds,
-                );
-                std::thread::sleep(std::time::Duration::from_secs(wait));
-            }
-            match tx.try_send(crate::event::AppEvent::TelegramPoll(report)) {
-                Ok(()) => {}
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return PollTurn::Stopped,
-                Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                )));
             }
         }
     }
     PollTurn::Live
+}
+
+fn sleep_backoff_while_unchanged(
+    shared: &std::sync::Arc<std::sync::Mutex<crate::config::TelegramConfig>>,
+    original: &crate::config::TelegramConfig,
+    total: std::time::Duration,
+) {
+    let start = std::time::Instant::now();
+    loop {
+        let elapsed = start.elapsed();
+        if elapsed >= total {
+            return;
+        }
+        std::thread::sleep(BACKOFF_SLICE.min(total - elapsed));
+        if shared.lock().map(|cfg| &*cfg != original).unwrap_or(true) {
+            return;
+        }
+    }
+}
+
+/// Dedicated outbound worker. A condition variable wakes it as soon as the
+/// owner queues a reply, independently of any in-flight long poll.
+pub fn sender_forever(
+    shared: std::sync::Arc<std::sync::Mutex<crate::config::TelegramConfig>>,
+    outbox: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<OutboundMessage>>>,
+    wake: std::sync::Arc<std::sync::Condvar>,
+    tx: std::sync::mpsc::SyncSender<crate::event::AppEvent>,
+) {
+    let mut failed = false;
+    loop {
+        let cfg = shared.lock().map(|cfg| cfg.clone()).unwrap_or_default();
+        if !cfg.enabled {
+            let Ok(queue) = outbox.lock() else { return };
+            let _ = wake.wait_timeout(queue, DISABLED_WAIT);
+            continue;
+        }
+        let token = match read_token(&cfg.token_file) {
+            Ok(token) => token,
+            Err(_) => {
+                if !failed {
+                    if tx.send(crate::event::AppEvent::TelegramSendStatus { failed: true, dropped: false }).is_err() {
+                        return;
+                    }
+                    failed = true;
+                }
+                let Ok(queue) = outbox.lock() else { return };
+                let _ = wake.wait_timeout(queue, DISABLED_WAIT);
+                continue;
+            }
+        };
+        let message = wait_outbound(&outbox, &wake, DISABLED_WAIT);
+        let Some(mut message) = message else { continue };
+        match send_message(&token, message.chat_id, &message.text) {
+            Ok(()) => {
+                if tx.send(crate::event::AppEvent::TelegramSendStatus { failed: false, dropped: false }).is_err() {
+                    return;
+                }
+                failed = false;
+            }
+            Err(_) => {
+                failed = true;
+                message.attempts = message.attempts.saturating_add(1);
+                let dropped = message.attempts >= MAX_SEND_ATTEMPTS;
+                let attempt = message.attempts;
+                if !dropped {
+                    if let Ok(mut queue) = outbox.lock() {
+                        queue.push_front(message);
+                    } else {
+                        return;
+                    }
+                }
+                if tx.send(crate::event::AppEvent::TelegramSendStatus { failed: true, dropped }).is_err() {
+                    return;
+                }
+                let delay = std::time::Duration::from_secs(1u64 << attempt.min(5));
+                let Ok(queue) = outbox.lock() else { return };
+                let _ = wake.wait_timeout(queue, delay);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -547,6 +806,15 @@ mod tests {
         let updates = parse_updates(FIXTURE).expect("fixture parses");
         assert_eq!(next_offset(&updates), Some(12));
         assert_eq!(next_offset(&[]), None, "empty poll keeps its offset");
+    }
+
+    #[test]
+    fn response_offset_advances_past_non_text_updates() {
+        assert_eq!(
+            response_next_offset(FIXTURE).expect("fixture envelope parses"),
+            Some(13),
+            "edited/callback/non-text updates must still be confirmed"
+        );
     }
 
     #[test]
@@ -590,19 +858,50 @@ mod tests {
         assert_eq!(report.messages[0].user_id, 11);
         assert_eq!(report.messages[0].chat_id, 11);
         assert_eq!(report.messages[0].text, "/sessions");
-        assert_eq!(p.offset(), Some(12), "denied updates still advance");
+        assert_eq!(p.offset(), None, "actionable updates wait for owner handoff");
+        p.confirm_observed();
+        assert_eq!(p.offset(), Some(13), "handoff confirms all raw updates, including edits");
         assert_eq!(p.failures(), 0);
+    }
+
+    #[test]
+    fn failed_handoff_leaves_actionable_updates_unconfirmed() {
+        let mut p = Poller::new();
+        let report = p.observe(Ok(FIXTURE.to_string()), &[11]).expect("actionable");
+        assert_eq!(report.messages.len(), 1);
+        assert_eq!(p.offset(), None);
+        p.abandon_observed();
+        assert_eq!(p.offset(), None, "a full/disconnected owner queue must not lose commands");
+    }
+
+    #[test]
+    fn bounded_full_owner_handoff_preserves_the_offset() {
+        let mut p = Poller::new();
+        let report = p.observe(Ok(FIXTURE.to_string()), &[11]).expect("actionable");
+        let (tx, _rx) = std::sync::mpsc::sync_channel(0);
+        assert_eq!(handoff_report(&mut p, &tx, report), HandoffOutcome::Busy);
+        assert_eq!(p.offset(), None, "a full owner queue leaves Telegram unconfirmed");
+    }
+
+    #[test]
+    fn successful_owner_handoff_confirms_the_offset() {
+        let mut p = Poller::new();
+        let report = p.observe(Ok(FIXTURE.to_string()), &[11]).expect("actionable");
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        assert_eq!(handoff_report(&mut p, &tx, report), HandoffOutcome::Delivered);
+        assert!(matches!(rx.try_recv(), Ok(crate::event::AppEvent::TelegramPoll(_))));
+        assert_eq!(p.offset(), Some(13));
     }
 
     #[test]
     fn poller_stays_quiet_without_actionable_text() {
         let mut p = Poller::new();
         assert!(p.observe(Ok(FIXTURE.to_string()), &[7]).is_none(), "all-denied is quiet");
-        assert_eq!(p.offset(), Some(12), "denied updates are still confirmed");
+        assert_eq!(p.offset(), Some(13), "denied and non-text updates are still confirmed");
         assert!(p
             .observe(Ok(r#"{"ok":true,"result":[]}"#.to_string()), &[7])
             .is_none(), "empty poll is quiet");
-        assert_eq!(p.offset(), Some(12), "empty poll advances nothing");
+        assert_eq!(p.offset(), Some(13), "empty poll advances nothing");
         assert_eq!(p.failures(), 0);
     }
 
@@ -657,10 +956,7 @@ mod tests {
     fn outbox_drain_sends_bounded_batches() {
         use std::collections::VecDeque;
         let mut queue: VecDeque<OutboundMessage> = (0..10)
-            .map(|i| OutboundMessage {
-                chat_id: i,
-                text: format!("m{i}"),
-            })
+            .map(|i| OutboundMessage::new(i, format!("m{i}")))
             .collect();
         let mut sent = Vec::new();
         let n = drain_outbox(
@@ -676,7 +972,83 @@ mod tests {
         assert_eq!(queue.len(), 6);
         let failed = drain_outbox(&mut queue, |_| Err::<(), String>("down".to_string()), 8);
         assert_eq!(failed, 0, "failures send nothing");
-        assert!(queue.is_empty(), "failed sends still pop: replies are best-effort");
+        assert_eq!(queue.len(), 6, "failed sends remain queued for retry");
+        assert_eq!(queue.front().map(|m| m.chat_id), Some(4), "FIFO head is preserved");
+    }
+
+    #[test]
+    fn quiet_success_reports_recovery_once() {
+        let mut p = Poller::new();
+        assert!(p.observe(Err("down".to_string()), &[11]).unwrap().failed);
+        let recovered = p
+            .observe(Ok(r#"{"ok":true,"result":[]}"#.to_string()), &[11])
+            .expect("first success clears visible failure");
+        assert!(!recovered.failed);
+        assert!(recovered.messages.is_empty());
+        assert!(p
+            .observe(Ok(r#"{"ok":true,"result":[]}"#.to_string()), &[11])
+            .is_none(), "later quiet success stays quiet");
+    }
+
+    #[test]
+    fn transport_limits_are_finite_and_cover_long_poll() {
+        assert!(HTTP_CONNECT_TIMEOUT > std::time::Duration::ZERO);
+        assert!(HTTP_SEND_TIMEOUT > std::time::Duration::ZERO);
+        assert!(poll_http_timeout(20) > std::time::Duration::from_secs(20));
+        assert!(MAX_RESPONSE_BYTES < 1024 * 1024, "Telegram envelopes stay tightly bounded");
+    }
+
+    #[test]
+    fn sender_attempt_retries_then_drops_at_the_bound() {
+        let mut queue = std::collections::VecDeque::from([OutboundMessage::new(7, "reply")]);
+        for attempt in 1..MAX_SEND_ATTEMPTS {
+            let outcome = send_outbox_head(&mut queue, |_| Err("offline".to_string()));
+            assert_eq!(outcome, SendOutcome::Retrying(attempt));
+            assert_eq!(queue.len(), 1);
+        }
+        assert_eq!(
+            send_outbox_head(&mut queue, |_| Err("offline".to_string())),
+            SendOutcome::Dropped
+        );
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn every_success_clears_visible_delivery_failure() {
+        assert_eq!(delivery_status(SendOutcome::Sent), Some((false, false)));
+        assert_eq!(delivery_status(SendOutcome::Retrying(1)), Some((true, false)));
+        assert_eq!(delivery_status(SendOutcome::Dropped), Some((true, true)));
+        assert_eq!(delivery_status(SendOutcome::Empty), None);
+    }
+
+    #[test]
+    fn disabled_sender_and_poller_wait_instead_of_spinning() {
+        assert!(DISABLED_WAIT >= std::time::Duration::from_millis(50));
+        assert!(DISABLED_WAIT <= std::time::Duration::from_secs(1));
+        assert!(BACKOFF_SLICE <= std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn outbound_enqueue_wakes_sender_without_waiting_for_a_poll() {
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let wake = std::sync::Arc::new(std::sync::Condvar::new());
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let (got_tx, got_rx) = std::sync::mpsc::sync_channel(0);
+        let worker_queue = queue.clone();
+        let worker_wake = wake.clone();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let msg = wait_outbound(&worker_queue, &worker_wake, std::time::Duration::from_secs(2));
+            got_tx.send(msg.map(|m| m.text)).unwrap();
+        });
+        ready_rx.recv().unwrap();
+        queue.lock().unwrap().push_back(OutboundMessage::new(7, "now"));
+        wake.notify_one();
+        assert_eq!(
+            got_rx.recv_timeout(std::time::Duration::from_millis(250)).unwrap(),
+            Some("now".to_string())
+        );
+        worker.join().unwrap();
     }
 
     #[test]
@@ -687,8 +1059,7 @@ mod tests {
             ..crate::config::TelegramConfig::default()
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
-        let outbox = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        assert!(matches!(poll_turn(&mut poller, &cfg, &tx, &outbox), PollTurn::IdleDisabled));
+        assert!(matches!(poll_turn(&mut poller, &cfg, &tx), PollTurn::IdleDisabled));
         assert!(rx.try_recv().is_err(), "disabled sends no events");
         assert_eq!(poller.offset(), None, "disabled confirms nothing");
         assert_eq!(poller.failures(), 0, "disabled counts no failures");

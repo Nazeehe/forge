@@ -18,17 +18,17 @@ use tuirealm::state::{State, StateValue};
 
 use crate::config::TelegramConfig;
 
-/// Focus rows in Tab order.
+/// Focus rows in Tab order. The token lives at
+/// [`crate::telegram::TELEGRAM_TOKEN_FILE`] and has no row.
 const FOCUS_ENABLED: usize = 0;
 const FOCUS_TOKEN: usize = 1;
-const FOCUS_TOKEN_FILE: usize = 2;
-const FOCUS_ALLOWED: usize = 3;
-const FOCUS_NOTIFY: usize = 4;
-const FOCUS_POLL: usize = 5;
-const FOCUS_BMIN: usize = 6;
-const FOCUS_BMAX: usize = 7;
-const FOCUS_ACTIONS: usize = 8;
-const FIELD_COUNT: usize = 9;
+const FOCUS_ALLOWED: usize = 2;
+const FOCUS_NOTIFY: usize = 3;
+const FOCUS_POLL: usize = 4;
+const FOCUS_BMIN: usize = 5;
+const FOCUS_BMAX: usize = 6;
+const FOCUS_ACTIONS: usize = 7;
+const FIELD_COUNT: usize = 8;
 
 /// Validated dialog output: the section plus the new token
 /// (empty keeps the existing file).
@@ -45,22 +45,27 @@ pub enum TelegramOutcome {
     Pending,
     Cancelled,
     Submitted(TelegramForm),
-    Test { token: String, token_file: String },
+    Test { token: String },
 }
 
-/// Settings form: one select, six text inputs, and a three-way action
+/// Settings form: one select, five text inputs, and a three-way action
 /// row. Numeric rows start empty and fall back to blueprint defaults on
-/// submit; placeholders show those defaults.
+/// submit; placeholders show those defaults. The token file path is
+/// fixed ([`crate::telegram::TELEGRAM_TOKEN_FILE`]), never a row.
 pub struct TelegramDialog {
     enabled: Select,
     token: Input,
-    token_file: Input,
     allowed: Input,
     notify: Input,
     poll: Input,
     bmin: Input,
     bmax: Input,
+    token_file: String,
+    poll_default: u64,
+    bmin_default: u64,
+    bmax_default: u64,
     actions: Radio,
+    pills: bool,
     focus: usize,
     error: Option<String>,
     testing: bool,
@@ -71,14 +76,11 @@ impl TelegramDialog {
     /// Prefill from the live section. The token row always starts empty
     /// (blank keeps the file); numeric rows start empty and show their
     /// defaults as placeholders.
-    pub fn new(cfg: &TelegramConfig) -> Self {
+    pub fn new(cfg: &TelegramConfig, pills: bool) -> Self {
         let enabled = Select::default()
             .choices(vec!["Off".to_string(), "On".to_string()])
             .value(usize::from(cfg.enabled))
             .rewind(true);
-        let token_file = Input::default()
-            .title("Token file")
-            .value(cfg.token_file.clone());
         let allowed = Input::default().title("Allowed IDs").value(
             cfg.allowed_user_ids
                 .iter()
@@ -100,13 +102,21 @@ impl TelegramDialog {
         TelegramDialog {
             enabled,
             token: Input::default().title("Token"),
-            token_file,
             allowed,
             notify,
             poll: Input::default().title("Poll secs"),
             bmin: Input::default().title("Backoff min"),
             bmax: Input::default().title("Backoff max"),
+            token_file: if cfg.token_file.is_empty() {
+                crate::telegram::TELEGRAM_TOKEN_FILE.to_string()
+            } else {
+                cfg.token_file.clone()
+            },
+            poll_default: cfg.poll_seconds,
+            bmin_default: cfg.backoff_min_seconds,
+            bmax_default: cfg.backoff_max_seconds,
             actions,
+            pills,
             focus: 0,
             error: None,
             testing: false,
@@ -142,7 +152,6 @@ impl TelegramDialog {
     pub fn paste(&mut self, text: &str) {
         let field = match self.focus {
             FOCUS_TOKEN => &mut self.token,
-            FOCUS_TOKEN_FILE => &mut self.token_file,
             FOCUS_ALLOWED => &mut self.allowed,
             FOCUS_NOTIFY => &mut self.notify,
             FOCUS_POLL => &mut self.poll,
@@ -176,11 +185,6 @@ impl TelegramDialog {
             self.error = Some("token too short".to_string());
             return TelegramOutcome::Pending;
         }
-        let token_file = Self::text_of(&self.token_file).trim().to_string();
-        if !token.is_empty() && token_file.is_empty() {
-            self.error = Some("token file path needed to store the token".to_string());
-            return TelegramOutcome::Pending;
-        }
         let allowed = match parse_ids(&Self::text_of(&self.allowed)) {
             Ok(ids) => ids,
             Err(e) => {
@@ -195,7 +199,7 @@ impl TelegramDialog {
                 return TelegramOutcome::Pending;
             }
         };
-        let poll_seconds = match parse_opt_u64(&Self::text_of(&self.poll), 20) {
+        let poll_seconds = match parse_opt_u64(&Self::text_of(&self.poll), self.poll_default) {
             Ok(v) if v >= 1 => v,
             Ok(_) => {
                 self.error = Some("poll seconds must be at least 1".to_string());
@@ -206,14 +210,14 @@ impl TelegramDialog {
                 return TelegramOutcome::Pending;
             }
         };
-        let backoff_min_seconds = match parse_opt_u64(&Self::text_of(&self.bmin), 60) {
+        let backoff_min_seconds = match parse_opt_u64(&Self::text_of(&self.bmin), self.bmin_default) {
             Ok(v) => v,
             Err(_) => {
                 self.error = Some("backoff seconds must be numbers".to_string());
                 return TelegramOutcome::Pending;
             }
         };
-        let backoff_max_seconds = match parse_opt_u64(&Self::text_of(&self.bmax), 900) {
+        let backoff_max_seconds = match parse_opt_u64(&Self::text_of(&self.bmax), self.bmax_default) {
             Ok(v) => v,
             Err(_) => {
                 self.error = Some("backoff seconds must be numbers".to_string());
@@ -228,7 +232,7 @@ impl TelegramDialog {
         TelegramOutcome::Submitted(TelegramForm {
             config: TelegramConfig {
                 enabled,
-                token_file,
+                token_file: self.token_file.clone(),
                 allowed_user_ids: allowed,
                 notify_chat_id,
                 poll_seconds,
@@ -264,17 +268,7 @@ impl TelegramDialog {
             }
             KeyCode::Enter => {
                 if self.focus == FOCUS_ACTIONS {
-                    return match self.actions.states.choice {
-                        0 => self.submit(),
-                        1 => {
-                            self.error = None;
-                            TelegramOutcome::Test {
-                                token: Self::text_of(&self.token),
-                                token_file: Self::text_of(&self.token_file).trim().to_string(),
-                            }
-                        }
-                        _ => TelegramOutcome::Cancelled,
-                    };
+                    return self.fire_action(self.actions.states.choice);
                 }
                 return self.submit();
             }
@@ -298,7 +292,6 @@ impl TelegramDialog {
             _ => {
                 let field = match self.focus {
                     FOCUS_TOKEN => &mut self.token,
-                    FOCUS_TOKEN_FILE => &mut self.token_file,
                     FOCUS_ALLOWED => &mut self.allowed,
                     FOCUS_NOTIFY => &mut self.notify,
                     FOCUS_POLL => &mut self.poll,
@@ -331,7 +324,136 @@ impl TelegramDialog {
         TelegramOutcome::Pending
     }
 
-    /// Centered modal: the eight-row form, one action row, one fixed
+    /// Fire one action button: Save submits, Test requests a
+    /// connection check, anything else cancels. Shared by Enter and
+    /// mouse so both paths agree.
+    fn fire_action(&mut self, index: usize) -> TelegramOutcome {
+        match index {
+            0 => self.submit(),
+            1 => {
+                self.error = None;
+                TelegramOutcome::Test {
+                    token: Self::text_of(&self.token),
+                }
+            }
+            _ => TelegramOutcome::Cancelled,
+        }
+    }
+
+    /// Action-row spans the view paints: pill buttons with the accent
+    /// default and `>` chosen-marker, or the legacy bracket labels
+    /// without pills. [`Self::click`] hit-tests these same spans, so
+    /// the mouse can never desync from the paint.
+    fn action_spans(&self) -> Vec<ratatui::text::Span<'static>> {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::Span;
+        use crate::theme::{Role, focus_row, style};
+        let text = style(Role::Text);
+        let choice = self.actions.states.choice;
+        let focused = self.focus == FOCUS_ACTIONS;
+        if !self.pills {
+            let button = |label: &str, index: usize, default: bool| {
+                let tag = if default { format!("[{label}*]") } else { format!("[{label}]") };
+                if focused && choice == index {
+                    Span::styled(format!(">{tag}"), focus_row())
+                } else if default {
+                    Span::styled(tag, style(Role::Brand))
+                } else {
+                    Span::styled(tag, text)
+                }
+            };
+            return vec![
+                button("Save", 0, true),
+                Span::styled("  ", text),
+                button("Test", 1, false),
+                Span::styled("  ", text),
+                button("Cancel", 2, false),
+            ];
+        }
+        let frame = |glyph: char, color: Color| {
+            Span::styled(glyph.to_string(), Style::default().fg(color))
+        };
+        let mut spans = Vec::new();
+        for (index, label) in ["Save", "Test", "Cancel"].iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::styled("  ", text));
+            }
+            let default = index == 0;
+            let chosen = focused && choice == index;
+            let hot = default || chosen;
+            if chosen {
+                spans.push(Span::styled(">", focus_row()));
+            }
+            let fill = if hot { style(Role::TabActive) } else { style(Role::TabInactive) };
+            let cap = if hot { Color::Yellow } else { Color::DarkGray };
+            let tag = if default { format!("{label}*") } else { label.to_string() };
+            spans.push(frame(crate::ui::PILL_LEFT, cap));
+            spans.push(Span::styled(" ", fill));
+            spans.push(Span::styled(tag, fill));
+            spans.push(Span::styled(" ", fill));
+            spans.push(frame(crate::ui::PILL_RIGHT, cap));
+        }
+        spans
+    }
+
+    /// Left-click dispatch inside the modal rect the view paints:
+    /// form rows take focus, action buttons fire at once. `None` is
+    /// dead space or outside; the caller still swallows everything
+    /// while the modal is open.
+    pub fn click(&mut self, col: u16, row: u16, area: Rect) -> Option<TelegramOutcome> {
+        use ratatui::widgets::{Block, Borders};
+        if col < area.x || col >= area.right() || row < area.y || row >= area.bottom() {
+            return None;
+        }
+        let inner = Block::default().borders(Borders::ALL).inner(area);
+        if inner.height < 14 || inner.width < 44 {
+            return None;
+        }
+        let status_row = inner.y + inner.height.saturating_sub(2);
+        for index in 0..FOCUS_ACTIONS {
+            let r = inner.y + 1 + index as u16;
+            if r >= status_row {
+                break;
+            }
+            if row == r {
+                self.focus = index;
+                self.error = None;
+                return Some(TelegramOutcome::Pending);
+            }
+        }
+        let action_row = inner.y + 1 + FOCUS_ACTIONS as u16;
+        if row != action_row || action_row >= status_row {
+            return None;
+        }
+        let spans = self.action_spans();
+        let cx = inner.x + 2;
+        let cw = inner.width.saturating_sub(4);
+        let width: u16 = spans.iter().map(|s| s.width() as u16).sum::<u16>().min(cw);
+        // Buttons are the span groups between the `"  "` separators
+        // (the `>` marker rides with its button); separators and the
+        // clipped tail belong to nothing.
+        let mut x = cx + cw.saturating_sub(width) / 2;
+        let end = x + width;
+        let mut index = 0usize;
+        for span in &spans {
+            let w = span.width() as u16;
+            if x >= end {
+                break;
+            }
+            if span.content == "  " {
+                index += 1;
+            } else if index < 3 && col >= x && col < x + w {
+                self.actions.states.choice = index;
+                self.focus = FOCUS_ACTIONS;
+                self.error = None;
+                return Some(self.fire_action(index));
+            }
+            x += w;
+        }
+        None
+    }
+
+    /// Centered modal: the seven-row form, one action row, one fixed
     /// status slot (error, test result, or testing), and a pinned key
     /// hint. Content keeps two cells of border padding.
     pub fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -416,7 +538,6 @@ impl TelegramDialog {
                 ),
             ),
             ("Token", field(&token_display, self.focus == FOCUS_TOKEN, "keep current")),
-            ("Token file", field(&Self::text_of(&self.token_file), self.focus == FOCUS_TOKEN_FILE, "~/.forge/telegram.token")),
             ("Allowed IDs", field(&Self::text_of(&self.allowed), self.focus == FOCUS_ALLOWED, "11, 22")),
             ("Notify chat", field(&Self::text_of(&self.notify), self.focus == FOCUS_NOTIFY, "unset")),
             ("Poll secs", field(&Self::text_of(&self.poll), self.focus == FOCUS_POLL, "20")),
@@ -434,28 +555,10 @@ impl TelegramDialog {
             );
             row += 1;
         }
-        // Centered action row: `[Save*]  [Test]  [Cancel]`, the `>`
-        // marker tracking the chosen button.
+        // Centered action row: pill buttons (or bracket labels
+        // without pills), the `>` marker tracking the chosen button.
         {
-            let choice = self.actions.states.choice;
-            let focused = self.focus == FOCUS_ACTIONS;
-            let button = |label: &str, index: usize, default: bool| {
-                let tag = if default { format!("[{label}*]") } else { format!("[{label}]") };
-                if focused && choice == index {
-                    Span::styled(format!(">{tag}"), focus_row())
-                } else if default {
-                    Span::styled(tag, style(Role::Brand))
-                } else {
-                    Span::styled(tag, text)
-                }
-            };
-            let spans = vec![
-                button("Save", 0, true),
-                Span::styled("  ", text),
-                button("Test", 1, false),
-                Span::styled("  ", text),
-                button("Cancel", 2, false),
-            ];
+            let spans = self.action_spans();
             let width: u16 = spans.iter().map(|s| s.width() as u16).sum::<u16>().min(cw);
             let ax = cx + cw.saturating_sub(width) / 2;
             frame.render_widget(
@@ -588,7 +691,7 @@ mod tests {
     }
 
     fn fresh() -> TelegramDialog {
-        TelegramDialog::new(&crate::config::TelegramConfig::default())
+        TelegramDialog::new(&crate::config::TelegramConfig::default(), true)
     }
 
     fn typed(dialog: &mut TelegramDialog, text: &str) {
@@ -606,12 +709,10 @@ mod tests {
 
     fn fill_valid(dialog: &mut TelegramDialog) {
         // Focus 0 is Enabled: Right turns it On. Token (row 1) stays
-        // empty to keep the file; the file row is next.
+        // empty to keep the file; Allowed IDs is two tabs on.
         assert!(matches!(dialog.key(&key(KeyCode::Right)), TelegramOutcome::Pending));
-        // Token file, IDs, notify chat, poll, backoff rows in order.
+        // IDs, notify chat, poll, backoff rows in order.
         tab(dialog, 2);
-        typed(dialog, "/run/tg.token");
-        tab(dialog, 1);
         typed(dialog, "11, 22");
         tab(dialog, 1);
         typed(dialog, "42");
@@ -635,7 +736,7 @@ mod tests {
     #[test]
     fn save_with_bad_ids_stays_open_with_error() {
         let mut d = fresh();
-        tab(&mut d, 3);
+        tab(&mut d, 2);
         typed(&mut d, "abc");
         tab(&mut d, 5);
         let outcome = d.key(&key(KeyCode::Enter));
@@ -651,7 +752,7 @@ mod tests {
         match d.key(&key(KeyCode::Enter)) {
             TelegramOutcome::Submitted(form) => {
                 assert!(form.config.enabled);
-                assert_eq!(form.config.token_file, "/run/tg.token");
+                assert_eq!(form.config.token_file, crate::telegram::TELEGRAM_TOKEN_FILE);
                 assert_eq!(form.config.allowed_user_ids, vec![11, 22]);
                 assert_eq!(form.config.notify_chat_id, 42);
                 assert_eq!(form.config.poll_seconds, 20);
@@ -664,11 +765,33 @@ mod tests {
     }
 
     #[test]
+    fn saving_preserves_configured_timing_values() {
+        let cfg = crate::config::TelegramConfig {
+            token_file: "/run/custom-forge.token".to_string(),
+            poll_seconds: 7,
+            backoff_min_seconds: 9,
+            backoff_max_seconds: 33,
+            ..crate::config::TelegramConfig::default()
+        };
+        let mut d = TelegramDialog::new(&cfg, true);
+        tab(&mut d, 7);
+        match d.key(&key(KeyCode::Enter)) {
+            TelegramOutcome::Submitted(form) => {
+                assert_eq!(form.config.poll_seconds, 7);
+                assert_eq!(form.config.backoff_min_seconds, 9);
+                assert_eq!(form.config.backoff_max_seconds, 33);
+                assert_eq!(form.config.token_file, "/run/custom-forge.token");
+            }
+            other => panic!("expected submit, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn short_token_and_bad_timing_reject() {
         let mut d = fresh();
         tab(&mut d, 1);
         typed(&mut d, "tiny");
-        tab(&mut d, 7);
+        tab(&mut d, 6);
         assert!(matches!(d.key(&key(KeyCode::Enter)), TelegramOutcome::Pending));
         assert!(d.error().is_some_and(|e| e.contains("short")), "error: {:?}", d.error());
 
@@ -688,7 +811,7 @@ mod tests {
         let mut d = fresh();
         tab(&mut d, 1);
         typed(&mut d, "0123456789abcdef0123456789abcdef");
-        tab(&mut d, 7);
+        tab(&mut d, 6);
         assert!(matches!(d.key(&key(KeyCode::Right)), TelegramOutcome::Pending));
         match d.key(&key(KeyCode::Enter)) {
             TelegramOutcome::Test { token, .. } => {
@@ -704,14 +827,12 @@ mod tests {
         let mut d = fresh();
         d.paste("ignored-on-select");
         tab(&mut d, 2);
-        d.paste("/run/tg.token");
-        tab(&mut d, 1);
-        typed(&mut d, "11");
+        d.paste("11");
         tab(&mut d, 5);
         match d.key(&key(KeyCode::Enter)) {
             TelegramOutcome::Submitted(form) => {
                 assert!(!form.config.enabled, "select untouched by paste");
-                assert_eq!(form.config.token_file, "/run/tg.token");
+                assert_eq!(form.config.token_file, crate::telegram::TELEGRAM_TOKEN_FILE);
                 assert_eq!(form.config.allowed_user_ids, vec![11]);
             }
             other => panic!("expected submit, got {other:?}"),
@@ -746,5 +867,78 @@ mod tests {
             .map(|x| buf[(x, slot_y)].symbol())
             .collect();
         assert!(slot.trim().is_empty(), "empty error slot: {slot:?}");
+    }
+
+    fn action_row_text(buf: &ratatui::buffer::Buffer, area: ratatui::layout::Rect) -> (u16, String) {
+        // Seven form rows paint from the second inner row; the action
+        // row follows immediately.
+        let y = area.y + 2 + 7;
+        let text: String = (area.x..area.x + area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect();
+        (y, text)
+    }
+
+    fn click_text(d: &mut TelegramDialog, area: ratatui::layout::Rect, y: u16, needle: &str) -> Option<TelegramOutcome> {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| d.view(f, area)).unwrap();
+        let buf = terminal.backend().buffer();
+        // Cell columns, not byte offsets: pill caps are multi-byte.
+        let cells: Vec<String> = (area.x..area.x + area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect();
+        let start = (0..cells.len())
+            .find(|&i| cells[i..].concat().starts_with(needle))
+            .unwrap_or_else(|| panic!("{needle:?} visible: {:?}", cells.concat()));
+        let mid = area.x + start as u16 + (needle.chars().count() as u16) / 2;
+        d.click(mid, y, area)
+    }
+
+    #[test]
+    fn action_row_uses_pill_buttons() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        terminal.draw(|f| d.view(f, area)).unwrap();
+        let (_, text) = action_row_text(terminal.backend().buffer(), area);
+        assert!(text.contains(crate::ui::PILL_LEFT), "pill caps: {text:?}");
+        assert!(text.contains("Save"), "save button: {text:?}");
+    }
+
+    #[test]
+    fn click_save_submits_with_hardcoded_token_file() {
+        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        assert!(matches!(d.key(&key(KeyCode::Right)), TelegramOutcome::Pending));
+        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let y = area.y + 2 + 7;
+        match click_text(&mut d, area, y, "Save") {
+            Some(TelegramOutcome::Submitted(form)) => {
+                assert_eq!(form.config.token_file, crate::telegram::TELEGRAM_TOKEN_FILE);
+            }
+            other => panic!("clicking Save submits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn click_test_and_cancel_fire() {
+        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let y = area.y + 2 + 7;
+        assert!(matches!(click_text(&mut d, area, y, "Test"), Some(TelegramOutcome::Test { .. })));
+        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        assert!(matches!(click_text(&mut d, area, y, "Cancel"), Some(TelegramOutcome::Cancelled)));
+    }
+
+    #[test]
+    fn click_row_focuses_and_outside_is_ignored() {
+        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        // Allowed IDs is the third form row (Enabled, Token, Allowed).
+        let row = area.y + 2 + 2;
+        assert!(matches!(d.click(area.x + 5, row, area), Some(TelegramOutcome::Pending)));
+        assert_eq!(d.focus(), 2);
+        assert!(d.click(0, 0, area).is_none(), "outside the modal");
     }
 }

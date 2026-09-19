@@ -50,14 +50,17 @@ pub struct AppState {
     /// Latest in-app `message_user` badge text per session. Always
     /// records, even when forwarding is off.
     pub message_user_badges: std::collections::HashMap<crate::session::SessionId, String>,
-    /// Replies for the Telegram poller thread to send, shared by handle.
+    /// Replies for the dedicated Telegram sender, shared by handle.
     /// Bounded by [`crate::telegram::OUTBOX_CAP`]; overflow counts in
     /// `telegram_outbox_dropped` instead of growing the owner.
     pub telegram_outbox: std::sync::Arc<
         std::sync::Mutex<std::collections::VecDeque<crate::telegram::OutboundMessage>>,
     >,
+    /// Wakes the dedicated sender immediately when a reply is queued.
+    pub telegram_outbox_wake: std::sync::Arc<std::sync::Condvar>,
     /// Telegram replies dropped past the outbox cap.
     telegram_outbox_dropped: u64,
+    telegram_last_send_failed: bool,
     /// Session most recently badged by `message_user`: bare operator
     /// text answers it. `None` until the first badge.
     last_telegram_badged: Option<crate::session::SessionId>,
@@ -65,6 +68,8 @@ pub struct AppState {
     /// the thread the first pass it sees Telegram enabled, so enabling
     /// from the modal needs no restart.
     pub telegram_poller: bool,
+    /// Dedicated outbound worker; independent of the blocking long poll.
+    pub telegram_sender: bool,
     /// Operator presence: false while input flows. Twenty input-free
     /// minutes flip it (see [`Self::settle_presence`]); any input flips
     /// it back.
@@ -246,11 +251,11 @@ pub const DEFAULT_VISUAL_BUDGET_BYTES: usize = 48 * 1024 * 1024;
 #[cfg(feature = "visual")]
 pub const DEFAULT_VISUAL_BUDGET_COUNT: usize = 8;
 
-/// Overlay slot past the PTY tabs: Events, Tasks, Visual, Walkthrough.
-/// Agent sessions always carry exactly three PTY tabs, so absolute
-/// indices stay stable (3/4/5/6); other overlays are unreachable on
-/// single-tab shells by the same gate as the topbar.
-pub const OVERLAY_TABS: [&str; 4] = ["Events", "Tasks", "Visual", "Walkthrough"];
+/// Overlay slot past the PTY tabs: Visual, Walkthrough. Agent
+/// sessions always carry exactly three PTY tabs, so absolute indices
+/// stay stable (3/4); other overlays are unreachable on single-tab
+/// shells by the same gate as the topbar.
+pub const OVERLAY_TABS: [&str; 2] = ["Visual", "Walkthrough"];
 
 impl AppState {
     pub fn new() -> Self {
@@ -278,9 +283,12 @@ impl AppState {
             telegram_outbox: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            telegram_outbox_wake: std::sync::Arc::new(std::sync::Condvar::new()),
             telegram_outbox_dropped: 0,
+            telegram_last_send_failed: false,
             last_telegram_badged: None,
             telegram_poller: false,
+            telegram_sender: false,
             away: false,
             last_input: std::time::Instant::now(),
             telegram_seq: 0,
@@ -392,7 +400,7 @@ impl AppState {
         // (no VS16, no ambiguous-width glyphs) and `Line::width`
         // measures the buttons exactly.
         if self.term_size.1 >= 100 {
-            for (tab, icon) in tabs.iter_mut().zip(["🤖", "💻", "🔀", "🔔", "📝", "📷", "📖"]) {
+            for (tab, icon) in tabs.iter_mut().zip(["🤖", "💻", "🔀", "📷", "📖"]) {
                 tab.label = format!("{icon} {}", tab.label);
             }
         }
@@ -1026,10 +1034,13 @@ impl AppState {
         let Some(slot) = self.visual_slots.get(&id) else {
             return crate::ui::PaneView {
                 title,
-                lines: vec![line(
-                    "No visualization yet — ask this session to show one",
-                    muted,
-                )],
+                lines: vec![
+                    line("Visual renders diagrams to visualize code flow.", text),
+                    line(
+                        "Ask this session, e.g. \"visualize the flow for <...>\"",
+                        muted,
+                    ),
+                ],
                 live,
                 focused: true,
                 cursor: None,
@@ -1280,17 +1291,25 @@ impl AppState {
     pub fn walkthrough_view(&self, id: crate::session::SessionId) -> crate::ui::PaneView {
         let rec = self.manager.get(id).expect("ordered session exists");
         let live = rec.state.is_live();
-        let hint = if self.walkthroughs.contains_key(&id) {
-            "Walkthrough tour"
+        let muted = crate::theme::style(crate::theme::Role::Muted);
+        let text = crate::theme::style(crate::theme::Role::Text);
+        let line = |content: &str, style: ratatui::style::Style| {
+            vec![crate::ui::SpanView {
+                text: content.to_string(),
+                style,
+            }]
+        };
+        let lines = if self.walkthroughs.contains_key(&id) {
+            vec![line("Walkthrough tour", muted)]
         } else {
-            "No walkthrough started for this session"
+            vec![
+                line("Walkthrough plays a step-by-step tour of the code.", text),
+                line("Ask this session, e.g. \"walk me through <...>\"", muted),
+            ]
         };
         crate::ui::PaneView {
             title: format!("{} · Walkthrough", rec.name),
-            lines: vec![vec![crate::ui::SpanView {
-                text: hint.to_string(),
-                style: crate::theme::style(crate::theme::Role::Muted),
-            }]],
+            lines,
             live,
             focused: true,
             cursor: None,
@@ -1805,7 +1824,7 @@ impl AppState {
     /// Bring a fresh visual forward: switch the session to its Visual
     /// tab. A background session only takes the overlay slot when the
     /// active session is not using it, so a diagram never yanks the
-    /// operator off an Events or Walkthrough view they opened. Narrow
+    /// operator off a Visual or Walkthrough view they opened. Narrow
     /// terminals (under 100 columns) have no overlay tabs.
     #[cfg(feature = "visual")]
     fn focus_visual_tab(&mut self, id: crate::session::SessionId) {
@@ -2035,18 +2054,7 @@ impl AppState {
         let forwarded = cfg.enabled
             && cfg.notify_chat_id != 0
             && crate::telegram::read_token(&cfg.token_file).is_ok()
-            && std::thread::Builder::new()
-                .name("telegram-send".to_string())
-                .spawn(move || {
-                    let Ok(token) = crate::telegram::read_token(&cfg.token_file) else {
-                        return;
-                    };
-                    if crate::telegram::send_message(&token, cfg.notify_chat_id, &outgoing).is_err()
-                    {
-                        eprintln!("warning: telegram forward failed");
-                    }
-                })
-                .is_ok();
+            && self.telegram_send(cfg.notify_chat_id, &outgoing);
         self.dirty = true;
         let result = format!(r#"{{"conversation_id":"{conv}","forwarded":{forwarded}}}"#);
         if let Some(key) = idem_key {
@@ -2058,19 +2066,24 @@ impl AppState {
     /// Operator command help surfaced by `/help`.
     const TELEGRAM_HELP: &'static str = "forge operator commands:\n/sessions — list live sessions\n/help — this help\n/int <session> — interrupt the agent (Ctrl-C)\n/clear <session> — drop queued injections\nAddress a session with `[name] message`; bare text answers the last badged session.";
 
-    /// Queue one Telegram reply for the poller thread. Truncated and
+    /// Queue one Telegram reply for the dedicated sender. Truncated and
     /// bounded: past [`crate::telegram::OUTBOX_CAP`] newcomers drop and
     /// count instead of growing the owner.
-    fn telegram_send(&mut self, chat_id: i64, text: &str) {
+    fn telegram_send(&mut self, chat_id: i64, text: &str) -> bool {
         let text =
             crate::telegram::truncate_text(text, crate::telegram::MAX_TEXT).to_string();
         let Ok(mut outbox) = self.telegram_outbox.lock() else {
-            return;
+            return false;
         };
         if outbox.len() >= crate::telegram::OUTBOX_CAP {
             self.telegram_outbox_dropped += 1;
+            self.telegram_last_send_failed = true;
+            self.dirty = true;
+            false
         } else {
-            outbox.push_back(crate::telegram::OutboundMessage { chat_id, text });
+            outbox.push_back(crate::telegram::OutboundMessage::new(chat_id, text));
+            self.telegram_outbox_wake.notify_one();
+            true
         }
     }
 
@@ -2106,8 +2119,9 @@ impl AppState {
         let mut lines = vec!["sessions:".to_string()];
         for &id in self.manager.order() {
             if let Some(rec) = self.manager.get(id) {
-                let state = if rec.state.is_live() { "live" } else { "exited" };
-                lines.push(format!("{} ({state})", rec.name));
+                if rec.state.is_live() {
+                    lines.push(format!("{} (live)", rec.name));
+                }
             }
         }
         if lines.len() == 1 {
@@ -2158,14 +2172,14 @@ impl AppState {
             let name = name.split('@').next().unwrap_or("").to_string();
             let rest = parts.collect::<Vec<_>>().join(" ");
             match name.as_str() {
-                "sessions" => self.telegram_send(msg.chat_id, &self.telegram_session_list()),
-                "help" => self.telegram_send(msg.chat_id, Self::TELEGRAM_HELP),
+                "sessions" => { self.telegram_send(msg.chat_id, &self.telegram_session_list()); }
+                "help" => { self.telegram_send(msg.chat_id, Self::TELEGRAM_HELP); }
                 "int" => self.telegram_interrupt(msg.chat_id, &rest),
                 "clear" => self.telegram_clear(msg.chat_id, &rest),
-                _ => self.telegram_send(
+                _ => { self.telegram_send(
                     msg.chat_id,
                     &format!("unknown command /{name}; /help lists commands"),
-                ),
+                ); }
             }
             return;
         }
@@ -2233,6 +2247,7 @@ impl AppState {
                 text: format!("{body}\n\n({})", Self::TELEGRAM_REPLY_HINT),
             },
         );
+        self.telegram_send(msg.chat_id, &format!("queued for {name}"));
         self.dirty = true;
     }
 
@@ -2254,7 +2269,7 @@ impl AppState {
         match self.manager.inject_write(id, b"\x03") {
             Ok(()) => self.telegram_send(chat_id, &format!("interrupted {name}")),
             Err(e) => self.telegram_send(chat_id, &format!("cannot interrupt {name}: {e}")),
-        }
+        };
     }
 
     /// `/clear <session>`: drop its queued (undelivered) injections and
@@ -2348,6 +2363,15 @@ impl AppState {
                 .unwrap_or(false)
     }
 
+    pub fn telegram_sender_wanted(&self) -> bool {
+        !self.telegram_sender
+            && self
+                .telegram_config
+                .lock()
+                .map(|cfg| cfg.enabled)
+                .unwrap_or(false)
+    }
+
     /// Open the Telegram settings form prefilled from the live section.
     pub fn open_telegram_dialog(&mut self) {
         let cfg = self
@@ -2355,7 +2379,7 @@ impl AppState {
             .lock()
             .map(|cfg| cfg.clone())
             .unwrap_or_default();
-        self.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(&cfg));
+        self.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(&cfg, self.pill_tabs));
         self.dirty = true;
     }
 
@@ -2382,21 +2406,22 @@ impl AppState {
         if let Ok(mut live) = self.telegram_config.lock() {
             *live = form.config;
         }
+        self.telegram_outbox_wake.notify_all();
         self.telegram_dialog = None;
         self.dirty = true;
         Ok(())
     }
 
     /// Start a connection test for the open dialog. A dialog-provided
-    /// token wins; otherwise the file reads now and reports inline.
-    /// Network runs on a worker thread; the verdict returns as
-    /// [`crate::event::AppEvent::TelegramTested`].
-    pub fn start_telegram_test(&mut self, token: String, token_file: String) {
+    /// token wins; otherwise the fixed token file reads now and
+    /// reports inline. Network runs on a worker thread; the verdict
+    /// returns as [`crate::event::AppEvent::TelegramTested`].
+    pub fn start_telegram_test(&mut self, token: String) {
         let Some(dialog) = self.telegram_dialog.as_mut() else {
             return;
         };
         let token = if token.is_empty() {
-            match crate::telegram::read_token(&token_file) {
+            match crate::telegram::read_token(crate::telegram::TELEGRAM_TOKEN_FILE) {
                 Ok(token) => token,
                 Err(e) => {
                     dialog.set_test_result(false, e);
@@ -2441,7 +2466,7 @@ impl AppState {
                 let live = rec.state.is_live();
                 if let Some((view_id, index)) = self.overlay_view {
                     if Some(id) == active && view_id == id {
-                        let label = ["", "", "", "Events", "Tasks", "Visual", "Walkthrough"]
+                        let label = ["", "", "", "Visual", "Walkthrough"]
                             .get(index).copied().unwrap_or("View");
                         if label == "Walkthrough" {
                             return self.walkthrough_view(id);
@@ -3002,7 +3027,9 @@ impl AppState {
         // A failing last poll shows as retrying: without it a stalled
         // poller (e.g. long backoff after early failures) looks exactly
         // like a quiet healthy one.
-        let telegram_state = if telegram_on && self.telegram_last_poll_failed {
+        let telegram_state = if telegram_on && self.telegram_last_send_failed {
+            "on · delivery failed"
+        } else if telegram_on && self.telegram_last_poll_failed {
             "on · retrying"
         } else if telegram_on {
             "on"
@@ -3035,8 +3062,6 @@ impl AppState {
     ) {
         while let Some(req) = self.pending_hooks.pop_front() {
             let (decision, reason) = policy.decide(&req.hook, &req.body);
-            let line = crate::policy::decision_line(&req.hook, decision, reason);
-            let _ = req.reply.send(line);
             // Same attribution as enqueue: run ID first, harness
             // fallback second. A verdict for a fallback-attributed
             // hook protects its pane too, not just run-bound ones.
@@ -3047,6 +3072,19 @@ impl AppState {
                 None
             };
             let attributed = self.manager.lookup_run(&req.run_id).or(fallback_id);
+            // Codex rejects a bare PreToolUse allow (and ask) as
+            // "unsupported permissionDecision"; it only accepts allow with
+            // an updatedInput rewrite, which forge never emits. Render the
+            // verdict per harness so attributed codex allow/ask stay silent
+            // (empty stdout lets Codex's own approval flow decide) while
+            // everyone else keeps the explicit shape. Unattributed senders
+            // keep the long-standing explicit output.
+            let cli_tool = attributed
+                .and_then(|id| self.manager.get(id))
+                .map(|rec| rec.cli_tool.as_str())
+                .unwrap_or("");
+            let line = crate::policy::decision_line_for(cli_tool, &req.hook, decision, reason);
+            let _ = req.reply.send(line);
             // The verdict races bodies only in its own pane: stamp the
             // attributed session, never the whole app.
             if let Some(id) = attributed {
@@ -3180,22 +3218,29 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::TelegramPoll(report) => {
-                // Inbound texts queue for routing; failures only flip
-                // the flag Phase 5 surfaces. The inbox is bounded: past
-                // the cap newcomers drop and count, never grow the owner.
                 self.telegram_last_poll_failed = report.failed;
-                let mut queued = false;
+                let mut routed = false;
                 for msg in report.messages {
-                    if self.telegram_inbox.len() >= crate::telegram::INBOX_CAP {
-                        self.telegram_dropped += 1;
-                    } else {
-                        self.telegram_inbox.push_back(msg);
-                        queued = true;
-                    }
+                    self.route_telegram(msg);
+                    routed = true;
                 }
-                if queued || report.failed {
+                if routed || report.failed {
                     self.dirty = true;
                 }
+            }
+            AppEvent::TelegramSendStatus { failed, dropped } => {
+                self.telegram_last_send_failed = failed;
+                if dropped {
+                    self.telegram_outbox_dropped = self.telegram_outbox_dropped.saturating_add(1);
+                }
+                self.dirty = true;
+            }
+            AppEvent::TelegramWorkerStopped(kind) => {
+                match kind {
+                    crate::telegram::WorkerKind::Poller => self.telegram_poller = false,
+                    crate::telegram::WorkerKind::Sender => self.telegram_sender = false,
+                }
+                self.dirty = true;
             }
             AppEvent::Resize(rows, cols) => {
                 self.term_size = (rows, cols);
@@ -3291,6 +3336,78 @@ mod tests {
             reply: reply_tx,
             timed_out: Default::default(),
         })
+    }
+
+    #[test]
+    fn codex_pre_tool_use_allow_is_silent_claude_stays_explicit() {
+        use crate::config::PermissionMode;
+        let audit = std::env::temp_dir().join(format!(
+            "forge-codex-silent-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut policy =
+            crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+        let mut s = AppState::new();
+        let codex_run = RunId::generate();
+        let codex_id = s
+            .manager
+            .spawn_agent(
+                "cx",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                codex_run.clone(),
+                "codex",
+            )
+            .unwrap();
+        let claude_run = RunId::generate();
+        let claude_id = s
+            .manager
+            .spawn_agent(
+                "cl",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                claude_run.clone(),
+                "claude",
+            )
+            .unwrap();
+        let body = r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string();
+        let (codex_tx, codex_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: body.clone(),
+            run_id: codex_run.to_string(),
+            sync: true,
+            reply: codex_tx,
+            timed_out: Default::default(),
+        }));
+        let (claude_tx, claude_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body,
+            run_id: claude_run.to_string(),
+            sync: true,
+            reply: claude_tx,
+            timed_out: Default::default(),
+        }));
+        s.settle_hooks(&mut policy, &audit);
+        let codex_line = codex_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(
+            codex_line.is_empty(),
+            "codex bare allow must be silent, else codex reports unsupported permissionDecision:allow: {codex_line:?}"
+        );
+        let claude_line = claude_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(
+            claude_line.contains(r#""permissionDecision":"allow""#),
+            "claude keeps explicit allow: {claude_line:?}"
+        );
+        assert!(s.manager.remove(codex_id));
+        assert!(s.manager.remove(claude_id));
+        let _ = std::fs::remove_file(&audit);
     }
 
     #[test]
@@ -5108,14 +5225,58 @@ mod tests {
             crate::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "🔔 Events", "📝 Tasks", "📷 Visual", "📖 Walkthrough"]);
+        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
         assert!(state.select_top_tab(3));
         assert!(state.topbar().tabs[3].active);
         let view = state.views().into_iter().find(|v| v.focused).unwrap();
-        assert!(view.lines.iter().flatten().any(|span| span.text.contains("Events")));
-        assert!(view.lines.iter().flatten().any(|span| span.text.contains("unavailable")));
+        assert!(view.lines.iter().flatten().any(|span| span.text.contains("renders diagrams")));
+        assert!(view.lines.iter().flatten().any(|span| span.text.contains("visualize the flow for")));
         assert!(state.select_top_tab(0));
         assert!(state.topbar().tabs[0].active);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn topbar_omits_events_and_tasks() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
+        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_empty_state_describes_tab_and_invocation() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let view = state.visual_view(id, false);
+        let text: String = view.lines.iter().flatten().map(|span| span.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("renders diagrams"), "describes the tab: {text:?}");
+        assert!(text.contains("visualize the flow for"), "shows how to invoke it: {text:?}");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn walkthrough_empty_state_describes_tab_and_invocation() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let view = state.walkthrough_view(id);
+        let text: String = view.lines.iter().flatten().map(|span| span.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("step-by-step"), "describes the tab: {text:?}");
+        assert!(text.contains("walk me through"), "shows how to invoke it: {text:?}");
         assert!(state.manager.remove(id));
     }
 
@@ -5212,7 +5373,7 @@ mod tests {
     }
 
     #[test]
-    fn telegram_poll_queues_inbound_and_flags_failure() {
+    fn telegram_poll_routes_inbound_and_flags_failure() {
         let mut s = AppState::new();
         s.apply(AppEvent::TelegramPoll(crate::telegram::PollReport {
             messages: vec![crate::telegram::InboundMessage {
@@ -5222,32 +5383,66 @@ mod tests {
             }],
             failed: false,
         }));
-        assert_eq!(s.telegram_inbox.len(), 1);
+        assert!(s.telegram_inbox.is_empty(), "owner routes directly without a lossy second queue");
+        assert_eq!(s.telegram_outbox.lock().unwrap().len(), 1, "unaddressed text gets guidance");
         assert!(!s.telegram_last_poll_failed);
         s.apply(AppEvent::TelegramPoll(crate::telegram::PollReport {
             messages: Vec::new(),
             failed: true,
         }));
         assert!(s.telegram_last_poll_failed);
-        assert_eq!(s.telegram_inbox.len(), 1, "failures queue nothing");
+        assert!(s.telegram_inbox.is_empty(), "failures queue nothing");
     }
 
     #[test]
-    fn telegram_inbox_is_bounded_and_counts_drops() {
+    fn telegram_poll_routes_directly_without_a_lossy_second_queue() {
+        let (mut state, id, _run) = tg_agent("agent");
+        state.apply(AppEvent::TelegramPoll(crate::telegram::PollReport {
+            messages: vec![crate::telegram::InboundMessage {
+                user_id: 11,
+                chat_id: 11,
+                text: "/sessions".to_string(),
+            }],
+            failed: false,
+        }));
+        assert!(state.telegram_inbox.is_empty());
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("agent"));
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn stopped_telegram_workers_are_restartable() {
+        let mut state = AppState::new();
+        state.telegram_config.lock().unwrap().enabled = true;
+        state.telegram_poller = true;
+        state.telegram_sender = true;
+        state.apply(AppEvent::TelegramWorkerStopped(crate::telegram::WorkerKind::Poller));
+        state.apply(AppEvent::TelegramWorkerStopped(crate::telegram::WorkerKind::Sender));
+        assert!(state.telegram_poller_wanted());
+        assert!(state.telegram_sender_wanted());
+    }
+
+    #[test]
+    fn telegram_poll_burst_stays_bounded_at_the_outbox() {
         let mut s = AppState::new();
-        for i in 0..(crate::telegram::INBOX_CAP as i64 + 5) {
+        for i in 0..(crate::telegram::OUTBOX_CAP as i64 + 5) {
             s.apply(AppEvent::TelegramPoll(crate::telegram::PollReport {
                 messages: vec![crate::telegram::InboundMessage {
                     user_id: i,
                     chat_id: i,
-                    text: "m".to_string(),
+                    text: "/help".to_string(),
                 }],
                 failed: false,
             }));
         }
-        assert_eq!(s.telegram_inbox.len(), crate::telegram::INBOX_CAP);
-        assert_eq!(s.telegram_dropped, 5);
-        assert_eq!(s.telegram_inbox[0].user_id, 0, "oldest kept: FIFO drain");
+        assert!(s.telegram_inbox.is_empty());
+        assert_eq!(s.telegram_outbox.lock().unwrap().len(), crate::telegram::OUTBOX_CAP);
+        assert_eq!(s.telegram_outbox_dropped, 5);
+        assert!(s.telegram_last_send_failed, "overflow is visible, never silent");
+        s.telegram_config.lock().unwrap().enabled = true;
+        assert_eq!(s.sidebar_info().telegram, "on · delivery failed");
     }
 
     #[cfg(feature = "visual")]
@@ -6997,6 +7192,30 @@ mod tests {
     }
 
     #[test]
+    fn telegram_sessions_command_omits_exited_sessions() {
+        let (mut state, id, _run) = tg_agent("gone");
+        assert!(state.manager.remove(id));
+        tg_inbox(&mut state, 11, &["/sessions"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(!replies[0].text.contains("gone"), "only live sessions: {}", replies[0].text);
+        assert!(replies[0].text.contains("(none)"));
+    }
+
+    #[test]
+    fn telegram_routed_text_acknowledges_the_queue() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["[agent] do the thing"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].text, "queued for agent");
+        assert_eq!(state.broker.queued(id), 1);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
     fn telegram_help_names_commands() {
         let (mut state, id, _run) = tg_agent("agent");
         tg_inbox(&mut state, 11, &["/help"]);
@@ -7045,7 +7264,8 @@ mod tests {
         assert!(head.text.contains("do the thing"), "body: {}", head.text);
         assert!(head.text.contains("message_user"), "reply guidance: {}", head.text);
         let replies = tg_outbox(&state);
-        assert!(replies.is_empty(), "routed text stays silent: {replies:?}");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].text, "queued for agent");
         assert!(state.manager.remove(id));
     }
 
@@ -7141,7 +7361,7 @@ mod tests {
         tg_inbox(&mut state, 11, &["[agent] one", "[agent] two"]);
         state.drain_telegram();
         assert_eq!(state.broker.queued(id), 2);
-        assert!(tg_outbox(&state).is_empty(), "routes stay silent");
+        assert_eq!(tg_outbox(&state).len(), 2, "each accepted route is acknowledged");
         tg_inbox(&mut state, 11, &["/clear agent"]);
         state.drain_telegram();
         let replies = tg_outbox(&state);
@@ -7173,6 +7393,7 @@ mod tests {
         let mut state = AppState::new();
         state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
             &crate::config::TelegramConfig::default(),
+            true,
         ));
         let form = crate::telegram_dialog::TelegramForm {
             config: crate::config::TelegramConfig {
@@ -7210,6 +7431,7 @@ mod tests {
         let mut state = AppState::new();
         state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
             &crate::config::TelegramConfig::default(),
+            true,
         ));
         state
             .telegram_test_tx
@@ -7239,17 +7461,28 @@ mod tests {
 
     #[test]
     fn telegram_test_with_unreadable_token_reports_inline() {
+        // The fixed token path resolves against HOME: point it at a
+        // scratch dir with no token file so the read fails inline.
+        let prior = std::env::var("HOME").ok();
+        let scratch = std::env::temp_dir().join(format!("forge-tg-nofile-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_var("HOME", &scratch);
         let mut state = AppState::new();
         state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
             &crate::config::TelegramConfig::default(),
+            true,
         ));
-        state.start_telegram_test(String::new(), "/nonexistent-forge-tg.token".to_string());
+        state.start_telegram_test(String::new());
         let dialog = state.telegram_dialog.as_ref().expect("dialog stays open");
         assert!(
             dialog.test_result().is_some_and(|(ok, detail)| !ok && detail.contains("unreadable")),
             "inline failure, no thread: {:?}",
             dialog.test_result()
         );
+        match prior {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]
@@ -7284,6 +7517,9 @@ mod tests {
             Some("hello"),
             "badge stays raw; only the Telegram text carries [name]"
         );
+        let queued = tg_outbox(&state);
+        assert_eq!(queued.len(), 1, "forward uses the supervised sender queue");
+        assert_eq!(queued[0].text, "[agent] hello");
         let _ = std::fs::remove_dir_all(&dir);
         assert!(state.manager.remove(id));
     }
@@ -7580,9 +7816,8 @@ mod tests {
         assert!(labels[0].starts_with("🤖 "));
         assert!(labels[1].starts_with("💻 "));
         assert!(labels[2].starts_with("🔀 "));
-        assert!(labels[3].starts_with("🔔 "));
-        assert!(labels[4].starts_with("📝 "));
-        assert!(labels[5].starts_with("📷 "));
+        assert!(labels[3].starts_with("📷 "));
+        assert!(labels[4].starts_with("📖 "));
         assert!(state.manager.remove(id));
     }
 
@@ -7609,14 +7844,14 @@ mod tests {
             "agent", &std::env::temp_dir(), "exec cat",
             crate::ids::RunId::generate(), "codex",
         ).unwrap();
-        assert_eq!(state.topbar().tabs.len(), 7);
+        assert_eq!(state.topbar().tabs.len(), 5);
         let bar = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
-        assert_eq!(crate::ui::layout_topbar(bar, &state.topbar().tabs, false).len(), 7);
+        assert_eq!(crate::ui::layout_topbar(bar, &state.topbar().tabs, false).len(), 5);
         assert!(state.manager.remove(id));
     }
 
     #[test]
-    fn events_tab_does_not_mislabel_tool_calls_as_event_count() {
+    fn visual_tab_keeps_its_label_under_hook_traffic() {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(40, 180));
         let run = crate::ids::RunId::generate();
@@ -7626,7 +7861,7 @@ mod tests {
             hook: "PreToolUse".into(), body: "{}".into(), run_id: run.as_str().into(),
             sync: false, reply, timed_out: Default::default(),
         }));
-        assert_eq!(state.topbar().tabs[3].label, "🔔 Events");
+        assert_eq!(state.topbar().tabs[3].label, "📷 Visual");
         assert!(state.manager.remove(id));
     }
 

@@ -31,6 +31,11 @@ pub enum AppEvent {
     /// there is something to act on (fresh inbound text or a poll
     /// failure); quiet polls stay silent so the loop never wakes.
     TelegramPoll(crate::telegram::PollReport),
+    /// Outbound worker health and a terminal retry-budget drop.
+    TelegramSendStatus { failed: bool, dropped: bool },
+    /// A transport worker exited or panicked; the owner clears its live flag
+    /// so the next loop turn can supervise a replacement.
+    TelegramWorkerStopped(crate::telegram::WorkerKind),
     Shutdown,
 }
 

@@ -158,11 +158,9 @@ pub fn run(
             None
         }
     };
-    // The Telegram poller starts inside the loop on the first pass
-    // that sees the section enabled, so enabling from the settings
-    // modal needs no restart. The thread only ever emits bounded
-    // AppEvents; a dead owner ends it, anything else waits out backoff
-    // and retries.
+    // Telegram's independent polling and sending workers start lazily in
+    // the loop, so enabling from settings needs no restart. Both emit only
+    // bounded AppEvents and are supervised back into service after exit.
     let mut terminal = match Terminal::new(CrosstermBackend::new(io::stdout())) {
         Ok(t) => t,
         Err(e) => {
@@ -377,7 +375,14 @@ fn loop_until_quit(
                 }
                 event::Event::Mouse(mev) => {
                     input_this_tick = true;
-                    forward_mouse(state, mev);
+                    if state.telegram_dialog.is_some() {
+                        // The settings modal owns the mouse like every
+                        // other modal: clicks inside hit rows/buttons,
+                        // everything else dies here.
+                        handle_telegram_mouse(state, loaded, home, mev);
+                    } else {
+                        forward_mouse(state, mev);
+                    }
                 }
                 event::Event::Paste(text) => {
                     input_this_tick = true;
@@ -436,11 +441,34 @@ fn loop_until_quit(
         // launches the thread exactly once, so the settings modal can
         // enable delivery without a restart.
         if state.telegram_poller_wanted() {
-            state.telegram_poller = true;
             let tg_cfg = state.telegram_config.clone();
             let tg_tx = ipc_tx.clone();
+            let done_tx = ipc_tx.clone();
+            match std::thread::Builder::new().name("telegram-poller".to_string()).spawn(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::telegram::poll_forever(tg_cfg, tg_tx)
+                }));
+                let _ = done_tx.send(AppEvent::TelegramWorkerStopped(crate::telegram::WorkerKind::Poller));
+            }) {
+                Ok(_) => state.telegram_poller = true,
+                Err(_) => state.telegram_last_poll_failed = true,
+            }
+        }
+        if state.telegram_sender_wanted() {
+            let tg_cfg = state.telegram_config.clone();
+            let tg_tx = ipc_tx.clone();
+            let done_tx = ipc_tx.clone();
             let tg_outbox = state.telegram_outbox.clone();
-            std::thread::spawn(move || crate::telegram::poll_forever(tg_cfg, tg_tx, tg_outbox));
+            let tg_wake = state.telegram_outbox_wake.clone();
+            match std::thread::Builder::new().name("telegram-sender".to_string()).spawn(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::telegram::sender_forever(tg_cfg, tg_outbox, tg_wake, tg_tx)
+                }));
+                let _ = done_tx.send(AppEvent::TelegramWorkerStopped(crate::telegram::WorkerKind::Sender));
+            }) {
+                Ok(_) => state.telegram_sender = true,
+                Err(_) => state.telegram_last_poll_failed = true,
+            }
         }
         // Streaming pane output paces to BACKGROUND_FRAME_MS; input
         // paints at once. A skipped tick keeps dirty set, so no frame
@@ -773,15 +801,15 @@ fn handle_group_key(state: &mut AppState, key: event::KeyEvent) {
     }
 }
 
-/// One Telegram-settings key: submit saves and closes, test requests
-/// stay open, cancel closes, edits redraw.
-fn handle_telegram_key(
+/// Settle one Telegram-settings outcome from keyboard or mouse:
+/// submit saves and closes, test requests stay open, cancel closes,
+/// edits redraw.
+fn settle_telegram_outcome(
     state: &mut AppState,
     loaded: &mut crate::config::LoadedConfig,
     home: &std::path::Path,
-    key: event::KeyEvent,
+    outcome: Option<crate::telegram_dialog::TelegramOutcome>,
 ) {
-    let outcome = state.telegram_dialog.as_mut().map(|d| d.key(&key));
     match outcome {
         Some(crate::telegram_dialog::TelegramOutcome::Submitted(form)) => {
             if let Err(e) = state.apply_telegram_form(loaded, home, form) {
@@ -791,8 +819,8 @@ fn handle_telegram_key(
             }
             state.dirty = true;
         }
-        Some(crate::telegram_dialog::TelegramOutcome::Test { token, token_file }) => {
-            state.start_telegram_test(token, token_file);
+        Some(crate::telegram_dialog::TelegramOutcome::Test { token }) => {
+            state.start_telegram_test(token);
         }
         Some(crate::telegram_dialog::TelegramOutcome::Cancelled) => {
             state.telegram_dialog = None;
@@ -801,6 +829,39 @@ fn handle_telegram_key(
         _ => {
             state.dirty = true;
         }
+    }
+}
+
+/// One Telegram-settings key: Tab cycles rows, Enter fires.
+fn handle_telegram_key(
+    state: &mut AppState,
+    loaded: &mut crate::config::LoadedConfig,
+    home: &std::path::Path,
+    key: event::KeyEvent,
+) {
+    let outcome = state.telegram_dialog.as_mut().map(|d| d.key(&key));
+    settle_telegram_outcome(state, loaded, home, outcome);
+}
+
+/// One Telegram-settings click: rows take focus, buttons fire.
+/// Clicks outside the modal die here so nothing behind it moves.
+fn handle_telegram_mouse(
+    state: &mut AppState,
+    loaded: &mut crate::config::LoadedConfig,
+    home: &std::path::Path,
+    mev: event::MouseEvent,
+) {
+    if !matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+        return;
+    }
+    let (rows, cols) = state.term_size;
+    let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let outcome = state
+        .telegram_dialog
+        .as_mut()
+        .and_then(|d| d.click(mev.column, mev.row, area));
+    if outcome.is_some() {
+        settle_telegram_outcome(state, loaded, home, outcome);
     }
 }
 
@@ -1357,8 +1418,8 @@ mod tests {
             draft: None,
             questions: Vec::new(),
         });
-        // Agent tabs: CLI, terminal, SCM, then Events/Tasks/Visual.
-        assert!(state.select_top_tab(5));
+        // Agent tabs: CLI, terminal, SCM, then Visual.
+        assert!(state.select_top_tab(3));
         assert!(state.visual_tab_focused());
         id
     }
@@ -1724,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    fn topbar_click_opens_events_and_returns_to_agent() {
+    fn topbar_click_opens_visual_and_returns_to_agent() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind, KeyModifiers};
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(40, 180));
@@ -1738,7 +1799,7 @@ mod tests {
             kind: MouseEventKind::Down(MouseButton::Left), column, row: areas.topbar.y,
             modifiers: KeyModifiers::NONE,
         };
-        // Index 2 is the live SCM tab; Events overlay sits at 3.
+        // Index 2 is the live SCM tab; Visual overlay sits at 3.
         forward_mouse(&mut state, click(buttons[3].start));
         assert!(state.overlay_active());
         assert!(state.topbar().tabs[3].active);
@@ -1770,7 +1831,7 @@ mod tests {
         ).unwrap();
         state.walkthroughs.insert(id, tour);
         // Walkthrough is the last overlay slot past the three PTY tabs.
-        assert!(state.select_top_tab(6));
+        assert!(state.select_top_tab(4));
         assert!(state.walkthrough_overlay_active());
         let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -1817,7 +1878,7 @@ mod tests {
             }],
         ).unwrap();
         state.walkthroughs.insert(id, tour);
-        assert!(state.select_top_tab(6));
+        assert!(state.select_top_tab(4));
         let wheel = |kind| MouseEvent {
             kind, column: 90, row: 20, modifiers: KeyModifiers::NONE,
         };
@@ -2125,6 +2186,80 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
         );
         assert!(state.create_dialog.is_some());
+    }
+
+    /// Cell column of `needle` on the modal action row, read back
+    /// from a real paint so the click tests real geometry.
+    fn telegram_button_cell(state: &mut AppState, needle: &str) -> (u16, u16) {
+        use ratatui::backend::TestBackend;
+        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
+        if let Some(dialog) = state.telegram_dialog.as_mut() {
+            terminal.draw(|f| dialog.view(f, area)).unwrap();
+        }
+        let buf = terminal.backend().buffer();
+        let y = area.y + 2 + 7;
+        let cells: Vec<String> = (area.x..area.x + area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect();
+        let start = (0..cells.len())
+            .find(|&i| cells[i..].concat().starts_with(needle))
+            .unwrap_or_else(|| panic!("{needle:?} visible: {:?}", cells.concat()));
+        (area.x + start as u16 + (needle.chars().count() as u16) / 2, y)
+    }
+
+    fn telegram_test_ctx() -> (crate::config::LoadedConfig, std::path::PathBuf) {
+        let home = std::env::temp_dir().join(format!("forge-tg-click-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let loaded = crate::config::LoadedConfig::load(&home.join("config.toml"))
+            .expect("missing file loads defaults");
+        (loaded, home)
+    }
+
+    #[test]
+    fn telegram_modal_click_cancel_closes_and_keeps_session() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            RunId::generate(), "codex",
+        ).unwrap();
+        state.open_telegram_dialog();
+        let (col, row) = telegram_button_cell(&mut state, "Cancel");
+        let (mut loaded, home) = telegram_test_ctx();
+        handle_telegram_mouse(
+            &mut state, &mut loaded, &home,
+            MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: col, row, modifiers: KeyModifiers::NONE },
+        );
+        assert!(state.telegram_dialog.is_none(), "Cancel click closes");
+        assert_eq!(state.manager.active_tab_kind(id), Some(crate::session::TabKind::Agent));
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_modal_swallows_chrome_clicks() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            RunId::generate(), "codex",
+        ).unwrap();
+        state.open_telegram_dialog();
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let (mut loaded, home) = telegram_test_ctx();
+        // Topbar click behind the modal: nothing switches, modal stays.
+        handle_telegram_mouse(
+            &mut state, &mut loaded, &home,
+            MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 10, row: areas.topbar.y, modifiers: KeyModifiers::NONE },
+        );
+        assert!(state.telegram_dialog.is_some(), "modal stays open");
+        assert_eq!(state.manager.active_tab_kind(id), Some(crate::session::TabKind::Agent));
+        assert!(state.overlay_view.is_none(), "no overlay opens behind the modal");
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(state.manager.remove(id));
     }
 
     #[test]
