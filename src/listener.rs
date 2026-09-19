@@ -407,6 +407,13 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
             )
         }
     };
+    // An empty verdict is the deliberate Codex pass-through (PreToolUse
+    // allow/ask): close without writing so the relay emits no stdout and
+    // Codex's own approval flow decides. Writing even a bare newline would
+    // risk Codex treating it as (rejected) hook output.
+    if decision.trim().is_empty() {
+        return;
+    }
     {
         let mut bytes = decision.into_bytes();
         if !bytes.ends_with(b"\n") {
@@ -850,6 +857,44 @@ mod tests {
         let mut buf = [0u8; 1];
         use std::io::Read;
         assert!(matches!(conn.read(&mut buf), Ok(0)), "handler closed promptly");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn empty_sync_verdict_closes_without_output() {
+        // Codex PreToolUse allow/ask render as empty: the handler must
+        // close without writing so the relay emits no stdout. Even a bare
+        // newline would risk Codex treating it as rejected hook output.
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "forge-listen-test-{}-empty.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (tx, rx) = std::sync::mpsc::sync_channel(super::IPC_QUEUE_CAP);
+        let _guard = spawn_unix(&path, tx, 8).unwrap();
+        let mut conn = UnixStream::connect(&path).unwrap();
+        conn.write_all(b"{\"v\":1,\"hook\":\"PreToolUse\",\"body\":{\"tool\":\"Bash\"}}\n")
+            .unwrap();
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("hook event arrives");
+        let crate::event::AppEvent::HookRequest(req) = event else {
+            panic!("wrong event");
+        };
+        assert!(req.sync, "PreToolUse waits");
+        req.reply.send(String::new()).unwrap();
+        match conn.set_read_timeout(Some(std::time::Duration::from_secs(5))) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {}
+            Err(e) => panic!("set_read_timeout: {e}"),
+        }
+        let mut buf = [0u8; 1];
+        use std::io::Read;
+        assert!(
+            matches!(conn.read(&mut buf), Ok(0)),
+            "empty verdict closes with no bytes"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

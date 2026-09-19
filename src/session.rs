@@ -623,6 +623,36 @@ impl SessionManager {
         true
     }
 
+    /// Cluster group buttons: starting at the first listed session, place
+    /// each next one directly to its right. Order follows the given list
+    /// (callers pass group order); unknown IDs vanish, duplicates collapse
+    /// to first use, and empty/singleton sets are a no-op. Other sessions
+    /// keep their relative order around the block.
+    pub fn cluster_sessions(&mut self, ids: &[SessionId]) {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        let mut block: Vec<SessionId> = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if seen.insert(id) && self.order.contains(&id) {
+                block.push(id);
+            }
+        }
+        if block.len() < 2 {
+            return;
+        }
+        let anchor = self
+            .order
+            .iter()
+            .position(|id| *id == block[0])
+            .unwrap_or(0);
+        let wanted: HashSet<SessionId> = block.iter().copied().collect();
+        self.order.retain(|id| !wanted.contains(id));
+        let anchor = anchor.min(self.order.len());
+        for (i, id) in block.into_iter().enumerate() {
+            self.order.insert(anchor + i, id);
+        }
+    }
+
     /// Current PTY dimensions of the visible tab, if it has a live pane.
     pub fn pane_size(&self, id: SessionId) -> Option<(u16, u16)> {
         self.active_pane(id).map(|pane| pane.size())
@@ -974,6 +1004,34 @@ mod tests {
         assert!(m.remove(b));
         assert!(m.is_empty());
         assert!(!m.remove(a));
+    }
+
+    #[test]
+    fn cluster_sessions_groups_members_next_to_first() {
+        // Feature: adding a session to a group clusters all group buttons
+        // together, starting at the first member with the rest to its right.
+        let mut m = SessionManager::new();
+        let a = m.spawn("a", &workdir(), "exec sleep 30", RunId::generate(), "shell").unwrap();
+        let b = m.spawn("b", &workdir(), "exec sleep 30", RunId::generate(), "shell").unwrap();
+        let c = m.spawn("c", &workdir(), "exec sleep 30", RunId::generate(), "shell").unwrap();
+        let d = m.spawn("d", &workdir(), "exec sleep 30", RunId::generate(), "shell").unwrap();
+        assert_eq!(m.order(), &[a, b, c, d]);
+        m.cluster_sessions(&[b, d]);
+        assert_eq!(m.order(), &[a, b, d, c], "d joins b's cluster");
+        m.cluster_sessions(&[d, b]);
+        assert_eq!(m.order(), &[a, c, d, b], "listed order decides placement");
+        m.cluster_sessions(&[a, c, d]);
+        assert_eq!(m.order(), &[a, c, d, b], "anchor at first member a");
+        m.cluster_sessions(&[b]);
+        assert_eq!(m.order(), &[a, c, d, b], "single member is a no-op");
+        m.cluster_sessions(&[]);
+        assert_eq!(m.order(), &[a, c, d, b], "empty is a no-op");
+        m.cluster_sessions(&[SessionId::fresh()]);
+        assert_eq!(m.order(), &[a, c, d, b], "unknown ids ignored");
+        assert!(m.remove(a));
+        assert!(m.remove(b));
+        assert!(m.remove(c));
+        assert!(m.remove(d));
     }
 
     #[test]

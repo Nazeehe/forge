@@ -142,6 +142,24 @@ pub fn command_of(body: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Harness-aware decision rendering. Codex accepts a bare
+/// `permissionDecision:"allow"` only with an `updatedInput` rewrite (which
+/// forge never emits) and rejects `ask` on PreToolUse outright ("unsupported
+/// permissionDecision:allow"); both must be silent (empty stdout, exit 0) so
+/// Codex's own approval flow decides. Only an attributed codex sender goes
+/// silent; unattributed senders keep the long-standing explicit shape so
+/// existing behavior (and its tests) is unchanged. Deny keeps the explicit
+/// deny shape all harnesses accept.
+pub fn decision_line_for(cli_tool: &str, hook: &str, decision: Decision, reason: &str) -> String {
+    if hook == "PreToolUse"
+        && matches!(decision, Decision::Allow | Decision::Ask)
+        && cli_tool.eq_ignore_ascii_case("codex")
+    {
+        return String::new();
+    }
+    decision_line(hook, decision, reason)
+}
+
 /// Canonical one-line decision for the relay to print to the harness.
 /// PreToolUse answers use the `hookSpecificOutput` shape: newer Claude
 /// and muse both reject the legacy top-level `decision` field there
@@ -354,6 +372,27 @@ mod tests {
                 "validators reject reason-less denies: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn codex_pre_tool_use_allow_and_ask_are_silent() {
+        // Grounded in codex-cli hooks: a bare `permissionDecision:"allow"`
+        // (no `updatedInput` rewrite) is rejected as "unsupported
+        // permissionDecision:allow", and `ask` is likewise unsupported.
+        // Forge never rewrites input, so allow/ask must be empty stdout
+        // (exit 0, no output) and let Codex's own approval flow decide.
+        // Deny keeps the explicit deny shape both harnesses accept.
+        let allow = super::decision_line_for("codex", "PreToolUse", Decision::Allow, "yolo mode");
+        assert!(allow.is_empty(), "codex allow must be silent: {allow:?}");
+        let ask = super::decision_line_for("codex", "PreToolUse", Decision::Ask, "off: harness asks");
+        assert!(ask.is_empty(), "codex ask must defer silently: {ask:?}");
+        let deny = super::decision_line_for("codex", "PreToolUse", Decision::Deny, "block pattern");
+        assert!(deny.contains(r#""permissionDecision":"deny""#), "deny stays explicit: {deny:?}");
+        // Claude-style harnesses keep the explicit allow/ask shapes.
+        let claude_allow = super::decision_line_for("claude", "PreToolUse", Decision::Allow, "yolo mode");
+        assert!(claude_allow.contains(r#""permissionDecision":"allow""#), "claude allow: {claude_allow:?}");
+        let claude_ask = super::decision_line_for("claude", "PreToolUse", Decision::Ask, "off: harness asks");
+        assert!(claude_ask.contains(r#""permissionDecision":"ask""#), "claude ask: {claude_ask:?}");
     }
 
     #[test]

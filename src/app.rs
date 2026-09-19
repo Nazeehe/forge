@@ -2653,6 +2653,10 @@ impl AppState {
                         self.broker.leave(id, &group);
                     }
                 }
+                // Added sessions cluster with their group: starting at the
+                // first member, each next one sits directly to its right.
+                let clustered = self.broker.group_members(&group);
+                self.manager.cluster_sessions(&clustered);
             }
             Out::Pending | Out::Closed => {}
         }
@@ -2714,6 +2718,8 @@ impl AppState {
                 Ok(id) => {
                     for group in &saved.groups {
                         let _ = self.broker.join(&self.manager, id, group);
+                        let clustered = self.broker.group_members(group);
+                        self.manager.cluster_sessions(&clustered);
                     }
                     report.spawned += 1;
                 }
@@ -2767,6 +2773,8 @@ impl AppState {
         // it a moment ago).
         if let Some(group) = spec.group.as_deref() {
             let _ = self.broker.join(&self.manager, id, group);
+            let clustered = self.broker.group_members(group);
+            self.manager.cluster_sessions(&clustered);
         }
         // Creating focuses the new session: the user just asked for it,
         // and the caller fits the active pane to the dialog's area.
@@ -3408,6 +3416,32 @@ mod tests {
         assert!(s.manager.remove(codex_id));
         assert!(s.manager.remove(claude_id));
         let _ = std::fs::remove_file(&audit);
+    }
+
+    #[test]
+    fn adding_to_group_clusters_member_buttons() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let c = s
+            .manager
+            .spawn("c", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        assert_eq!(s.manager.order(), &[a, b, c]);
+        s.apply_group(crate::groups::GroupOutcome::SetMembers {
+            group: "peers".to_string(),
+            members: vec![a, c],
+        });
+        assert_eq!(s.manager.order(), &[a, c, b], "c clusters right of a");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+        assert!(s.manager.remove(c));
     }
 
     #[test]
