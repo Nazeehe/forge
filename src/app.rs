@@ -64,6 +64,13 @@ pub struct AppState {
     /// Session most recently badged by `message_user`: bare operator
     /// text answers it. `None` until the first badge.
     last_telegram_badged: Option<crate::session::SessionId>,
+    /// Telegram `message_id` of every delivered `message_user` forward,
+    /// mapped to the session it spoke for. A native Telegram reply to one
+    /// of these addresses that session directly, insertion order so the
+    /// oldest entry evicts first once [`Self::TELEGRAM_REPLY_TARGET_CAP`]
+    /// is reached.
+    telegram_reply_targets: std::collections::HashMap<i64, crate::session::SessionId>,
+    telegram_reply_target_order: std::collections::VecDeque<i64>,
     /// Poller thread running. Set once at spawn; the main loop starts
     /// the thread the first pass it sees Telegram enabled, so enabling
     /// from the modal needs no restart.
@@ -287,6 +294,8 @@ impl AppState {
             telegram_outbox_dropped: 0,
             telegram_last_send_failed: false,
             last_telegram_badged: None,
+            telegram_reply_targets: std::collections::HashMap::new(),
+            telegram_reply_target_order: std::collections::VecDeque::new(),
             telegram_poller: false,
             telegram_sender: false,
             away: false,
@@ -2054,7 +2063,7 @@ impl AppState {
         let forwarded = cfg.enabled
             && cfg.notify_chat_id != 0
             && crate::telegram::read_token(&cfg.token_file).is_ok()
-            && self.telegram_send(cfg.notify_chat_id, &outgoing);
+            && self.telegram_send_for_session(cfg.notify_chat_id, &outgoing, caller);
         self.dirty = true;
         let result = format!(r#"{{"conversation_id":"{conv}","forwarded":{forwarded}}}"#);
         if let Some(key) = idem_key {
@@ -2070,8 +2079,29 @@ impl AppState {
     /// bounded: past [`crate::telegram::OUTBOX_CAP`] newcomers drop and
     /// count instead of growing the owner.
     fn telegram_send(&mut self, chat_id: i64, text: &str) -> bool {
-        let text =
-            crate::telegram::truncate_text(text, crate::telegram::MAX_TEXT).to_string();
+        self.telegram_enqueue(crate::telegram::OutboundMessage::new(
+            chat_id,
+            crate::telegram::truncate_text(text, crate::telegram::MAX_TEXT),
+        ))
+    }
+
+    /// Like [`Self::telegram_send`], but tags the message as speaking for
+    /// `session` so a native Telegram reply to it can later address that
+    /// session directly (see [`Self::record_telegram_reply_target`]).
+    fn telegram_send_for_session(
+        &mut self,
+        chat_id: i64,
+        text: &str,
+        session: crate::session::SessionId,
+    ) -> bool {
+        self.telegram_enqueue(crate::telegram::OutboundMessage::for_session(
+            chat_id,
+            crate::telegram::truncate_text(text, crate::telegram::MAX_TEXT),
+            session,
+        ))
+    }
+
+    fn telegram_enqueue(&mut self, message: crate::telegram::OutboundMessage) -> bool {
         let Ok(mut outbox) = self.telegram_outbox.lock() else {
             return false;
         };
@@ -2081,7 +2111,7 @@ impl AppState {
             self.dirty = true;
             false
         } else {
-            outbox.push_back(crate::telegram::OutboundMessage::new(chat_id, text));
+            outbox.push_back(message);
             self.telegram_outbox_wake.notify_one();
             true
         }
@@ -2164,6 +2194,27 @@ impl AppState {
     /// (possibly much later) real reply.
     const TELEGRAM_REPLY_HINT: &'static str = "Reply to the operator with message_user. If this will take more than a moment, first send a brief message_user acknowledging the ask before you start working on it.";
 
+    /// Most `message_user` forwards remembered for reply-link routing.
+    /// `message_user` is already capped at
+    /// [`crate::telegram::MESSAGE_USER_CAP`] per session per minute, so this
+    /// comfortably covers every session an operator could plausibly still
+    /// want to reply to; past it the oldest link evicts first.
+    pub const TELEGRAM_REPLY_TARGET_CAP: usize = 256;
+
+    /// Remember that Telegram `message_id` speaks for `session`, so a
+    /// native Telegram reply to it can address that session directly
+    /// without the operator typing `[name]`. Bounded FIFO: the oldest
+    /// link evicts once the cap is reached.
+    fn record_telegram_reply_target(&mut self, message_id: i64, session: crate::session::SessionId) {
+        if self.telegram_reply_targets.len() >= Self::TELEGRAM_REPLY_TARGET_CAP {
+            if let Some(oldest) = self.telegram_reply_target_order.pop_front() {
+                self.telegram_reply_targets.remove(&oldest);
+            }
+        }
+        self.telegram_reply_targets.insert(message_id, session);
+        self.telegram_reply_target_order.push_back(message_id);
+    }
+
     /// Route one allowlisted operator text: `/` commands and errors
     /// answer directly, while `<name>:` prefixes and bare text (to the
     /// last badged session) queue a silent idle-gated injection.
@@ -2186,10 +2237,20 @@ impl AppState {
             }
             return;
         }
-        // A bracketed `[name]` head is the only explicit address.
+        // A native Telegram "reply" to a message forge can trace back to
+        // a still-live session addresses it directly — the natural
+        // mobile-UI way to keep talking to the same agent without typing
+        // `[name]`. An explicit `[name]` bracket is the more deliberate
+        // signal and always wins when both are present.
+        let reply_target_name = msg
+            .reply_to_message_id
+            .and_then(|mid| self.telegram_reply_targets.get(&mid).copied())
+            .and_then(|id| self.manager.get(id))
+            .filter(|rec| rec.state.is_live())
+            .map(|rec| rec.name.clone());
         let (target, body) = match Self::parse_bracketed(&text) {
             Some((name, body)) => (Some(name), body),
-            None => (None, text.clone()),
+            None => (reply_target_name, text.clone()),
         };
         let target = match target {
             Some(name) => Some(name),
@@ -3258,6 +3319,9 @@ impl AppState {
                 if routed || report.failed {
                     self.dirty = true;
                 }
+            }
+            AppEvent::TelegramMessageSent { message_id, session } => {
+                self.record_telegram_reply_target(message_id, session);
             }
             AppEvent::TelegramSendStatus { failed, dropped } => {
                 self.telegram_last_send_failed = failed;
@@ -7317,6 +7381,78 @@ mod tests {
             out.push(m);
         }
         out
+    }
+
+    #[test]
+    fn telegram_reply_routes_directly_to_the_replied_session() {
+        let (mut state, a, _run_a) = tg_agent("a");
+        let b = state
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        // "a" forwarded a message_user to Telegram as message 501; the
+        // operator never badged "a" as last-addressed (b's spawn, or any
+        // other traffic, could have moved that), so only the reply link
+        // can route this correctly.
+        state.apply(AppEvent::TelegramMessageSent { message_id: 501, session: a });
+        state.last_telegram_badged = Some(b);
+        tg_inbox_reply(&mut state, 11, "keep going with the refactor", 501);
+        state.drain_telegram();
+        assert_eq!(state.broker.queued(a), 1, "reply must reach the session that sent 501");
+        assert_eq!(state.broker.queued(b), 0, "not the merely last-badged session");
+        let queued = state.broker.peek_due(a).expect("queued");
+        assert!(queued.text.contains("keep going with the refactor"));
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
+    }
+
+    #[test]
+    fn telegram_explicit_bracket_still_wins_over_a_reply_link() {
+        let (mut state, a, _run_a) = tg_agent("a");
+        let b = state
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        state.apply(AppEvent::TelegramMessageSent { message_id: 501, session: a });
+        tg_inbox_reply(&mut state, 11, "[b] ignore the reply link", 501);
+        state.drain_telegram();
+        assert_eq!(state.broker.queued(a), 0, "explicit [name] overrides the reply link");
+        assert_eq!(state.broker.queued(b), 1);
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
+    }
+
+    #[test]
+    fn telegram_reply_to_unknown_or_exited_session_falls_back_to_badge() {
+        let (mut state, a, _run_a) = tg_agent("a");
+        state.last_telegram_badged = Some(a);
+        // Replying to a message_id forge never recorded (or whose session
+        // has since exited) must degrade to the ordinary badge fallback,
+        // not silently drop the operator's text.
+        tg_inbox_reply(&mut state, 11, "still here?", 999);
+        state.drain_telegram();
+        assert_eq!(state.broker.queued(a), 1, "falls back to the last-badged session");
+        assert!(state.manager.remove(a));
+    }
+
+    #[test]
+    fn telegram_reply_target_map_stays_bounded() {
+        let mut state = AppState::new();
+        for i in 0..(crate::app::AppState::TELEGRAM_REPLY_TARGET_CAP as i64 + 5) {
+            state.apply(AppEvent::TelegramMessageSent {
+                message_id: i,
+                session: crate::session::SessionId::fresh(),
+            });
+        }
+        assert_eq!(
+            state.telegram_reply_targets.len(),
+            crate::app::AppState::TELEGRAM_REPLY_TARGET_CAP,
+            "oldest entries must evict, never grow past the cap"
+        );
+        assert!(
+            !state.telegram_reply_targets.contains_key(&0),
+            "message 0 is the oldest and must be the first evicted"
+        );
     }
 
     #[test]

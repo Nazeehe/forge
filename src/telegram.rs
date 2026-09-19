@@ -472,21 +472,49 @@ pub fn fetch_me(token: &str) -> Result<String, String> {
     me_detail(&body).map_err(|_| "telegram test failed".to_string())
 }
 
+/// `message_id` Telegram assigned the message a `sendMessage` call just
+/// created, so the caller can later match an inbound reply back to it.
+/// Distinct from [`response_next_offset`]'s shape: this reads a single
+/// `result` object, not an array of updates.
+pub fn sent_message_id(body: &str) -> Result<i64, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("invalid JSON: {e}"))?;
+    if value.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let desc = value
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        return Err(format!("telegram error: {desc}"));
+    }
+    value
+        .get("result")
+        .and_then(|r| r.get("message_id"))
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "telegram send response carried no message_id".to_string())
+}
+
 /// One blocking `sendMessage` POST. Overlong text truncates first (see
 /// [`send_payload`]); errors stay opaque for the same reason as
-/// [`fetch_updates`].
-pub fn send_message(token: &str, chat_id: i64, text: &str) -> Result<(), String> {
+/// [`fetch_updates`]. Returns the new message's `message_id` (see
+/// [`sent_message_id`]).
+pub fn send_message(token: &str, chat_id: i64, text: &str) -> Result<i64, String> {
     let body = send_payload(chat_id, text);
     let payload: serde_json::Value =
         serde_json::from_str(&body).map_err(|_| "telegram send failed".to_string())?;
-    ureq::post(&send_url(token))
+    let mut response = ureq::post(&send_url(token))
         .config()
         .timeout_connect(Some(HTTP_CONNECT_TIMEOUT))
         .timeout_global(Some(HTTP_SEND_TIMEOUT))
         .build()
         .send_json(payload)
         .map_err(|_| "telegram send failed".to_string())?;
-    Ok(())
+    let reply_body = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_RESPONSE_BYTES)
+        .read_to_string()
+        .map_err(|_| "telegram send failed".to_string())?;
+    sent_message_id(&reply_body).map_err(|_| "telegram send failed".to_string())
 }
 
 /// One Telegram reply queued for the dedicated sender worker.
@@ -495,11 +523,24 @@ pub struct OutboundMessage {
     pub chat_id: i64,
     pub text: String,
     attempts: u8,
+    /// The session this message speaks for, when it is one (a
+    /// `message_user` forward), never a control-plane reply. Once sent,
+    /// the owner can map its Telegram `message_id` back to this session
+    /// so a native Telegram "reply" addresses it directly.
+    pub session: Option<crate::session::SessionId>,
 }
 
 impl OutboundMessage {
     pub fn new(chat_id: i64, text: impl Into<String>) -> Self {
-        Self { chat_id, text: text.into(), attempts: 0 }
+        Self { chat_id, text: text.into(), attempts: 0, session: None }
+    }
+
+    pub fn for_session(
+        chat_id: i64,
+        text: impl Into<String>,
+        session: crate::session::SessionId,
+    ) -> Self {
+        Self { chat_id, text: text.into(), attempts: 0, session: Some(session) }
     }
 }
 
@@ -757,7 +798,15 @@ pub fn sender_forever(
         let message = wait_outbound(&outbox, &wake, DISABLED_WAIT);
         let Some(mut message) = message else { continue };
         match send_message(&token, message.chat_id, &message.text) {
-            Ok(()) => {
+            Ok(message_id) => {
+                if let Some(session) = message.session {
+                    if tx
+                        .send(crate::event::AppEvent::TelegramMessageSent { message_id, session })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 if tx.send(crate::event::AppEvent::TelegramSendStatus { failed: false, dropped: false }).is_err() {
                     return;
                 }
@@ -869,6 +918,18 @@ mod tests {
         let text = value["text"].as_str().expect("text field");
         assert_eq!(text.chars().count(), MAX_TEXT, "truncated to the Telegram limit");
         assert!(long.starts_with(text), "prefix-preserving truncation");
+    }
+
+    #[test]
+    fn sent_message_id_reads_the_new_message_id() {
+        let body = r#"{"ok":true,"result":{"message_id":77,"chat":{"id":11},"text":"hi"}}"#;
+        assert_eq!(sent_message_id(body), Ok(77));
+        assert!(sent_message_id(r#"{"ok":false,"description":"blocked"}"#).is_err());
+        assert!(sent_message_id("not json").is_err());
+        assert!(
+            sent_message_id(r#"{"ok":true,"result":{"chat":{"id":11}}}"#).is_err(),
+            "a response with no message_id must not be mistaken for id 0"
+        );
     }
 
     #[test]

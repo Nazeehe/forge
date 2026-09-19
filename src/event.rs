@@ -38,6 +38,10 @@ pub enum AppEvent {
     TelegramPoll(crate::telegram::PollReport),
     /// Outbound worker health and a terminal retry-budget drop.
     TelegramSendStatus { failed: bool, dropped: bool },
+    /// A `message_user` forward was delivered: `message_id` is what
+    /// Telegram assigned it. The owner remembers the mapping so a native
+    /// Telegram reply to that message can address `session` directly.
+    TelegramMessageSent { message_id: i64, session: SessionId },
     /// A transport worker exited or panicked; the owner clears its live flag
     /// so the next loop turn can supervise a replacement.
     TelegramWorkerStopped(crate::telegram::WorkerKind),
@@ -115,6 +119,14 @@ mod tests {
         let exited = AppEvent::SessionExited { id, code: Some(3) };
         match exited {
             AppEvent::SessionExited { code, .. } => assert_eq!(code, Some(3)),
+            _ => panic!("wrong variant"),
+        }
+        let sent = AppEvent::TelegramMessageSent { message_id: 42, session: id };
+        match sent {
+            AppEvent::TelegramMessageSent { message_id, session } => {
+                assert_eq!(message_id, 42);
+                assert_eq!(session, id);
+            }
             _ => panic!("wrong variant"),
         }
     }
