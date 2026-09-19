@@ -42,6 +42,18 @@ fn paint_due(last_paint: Instant, now: Instant, input_this_tick: bool) -> bool {
 /// before the state drop SIGKILLs stragglers.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
+/// `io::Stdout` is `LineWriter`-backed with only a ~1KB internal buffer, so
+/// a large per-frame cell diff can trigger several write syscalls before
+/// ratatui's own end-of-draw flush ever runs. A generously sized
+/// `BufWriter` batches a whole frame's escape sequences into one write
+/// instead, mirroring how tmux and ghostty always flush a complete frame
+/// at once rather than dribbling it out.
+fn stdout_writer() -> io::BufWriter<io::Stdout> {
+    io::BufWriter::with_capacity(64 * 1024, io::stdout())
+}
+
+type StdoutTerminal = Terminal<CrosstermBackend<io::BufWriter<io::Stdout>>>;
+
 /// RAII terminal setup: raw mode plus the alternate screen while alive.
 pub struct TerminalGuard {
     active: bool,
@@ -161,7 +173,7 @@ pub fn run(
     // Telegram's independent polling and sending workers start lazily in
     // the loop, so enabling from settings needs no restart. Both emit only
     // bounded AppEvents and are supervised back into service after exit.
-    let mut terminal = match Terminal::new(CrosstermBackend::new(io::stdout())) {
+    let mut terminal = match Terminal::new(CrosstermBackend::new(stdout_writer())) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("error: cannot open terminal: {e}");
@@ -252,7 +264,7 @@ fn visual_viewport(
 #[cfg(feature = "visual")]
 fn sync_visual_terminal(
     state: &mut AppState,
-    _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    _terminal: &mut StdoutTerminal,
 ) -> io::Result<()> {
     use std::io::Write as _;
     if let Some(image_id) = state.visual_take_hide() {
@@ -302,7 +314,7 @@ fn sync_visual_terminal(
 
 fn loop_until_quit(
     state: &mut AppState,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut StdoutTerminal,
     ipc: std::sync::mpsc::Receiver<AppEvent>,
     ipc_tx: &std::sync::mpsc::SyncSender<AppEvent>,
     policy: &mut crate::policy::Policy,
@@ -1299,6 +1311,21 @@ fn fit_grid_panes(state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdout_writer_batches_a_frame_into_one_buffered_flush() {
+        // `io::Stdout` is `LineWriter`-backed with a small (~1KB) internal
+        // buffer, so a large per-frame cell diff can trigger several write
+        // syscalls before ratatui's own end-of-draw flush. Wrapping it in a
+        // generously sized `BufWriter` (tmux/ghostty both batch a full
+        // frame into one write) means the draw's many small `queue!`
+        // writes coalesce into a single flush instead.
+        let w = stdout_writer();
+        assert!(
+            w.capacity() >= 64 * 1024,
+            "buffer must hold a full frame's worth of escape sequences without flushing early"
+        );
+    }
 
     #[test]
     fn new_session_fits_main_pane() {
