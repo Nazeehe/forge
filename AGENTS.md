@@ -81,8 +81,22 @@ Rules:
   content width — text never wraps or clips silently.
 - Mouse hit areas recompute live from the same rects the render paints,
   so clicks can never desync from what is on screen.
+- Every keyboard-activatable control is mouse-activatable, no exceptions:
+  buttons fire on left-click, rows take focus on left-click. Dialogs
+  expose `click()` hit-testing the exact spans the view paints (see
+  `groups.rs` / `telegram_dialog.rs`), and an open modal swallows ALL
+  mouse input — clicks behind it must move nothing (see the
+  `forward_mouse` dispatch). Never ship a keyboard-only button or row.
+- Action buttons are pills everywhere, never bracket labels: rounded
+  `ui::PILL_LEFT` / `ui::PILL_RIGHT` caps (Nerd Font), accent-filled
+  default carrying `*`, `>` chosen-marker — mirror `create.rs`
+  `pill_actions` / `quit.rs` `buttons`. New dialogs take the global
+  pills flag at construction like they do.
 - Render tests pin the geometry: coordinates, centering math, pinned
   rows, and both layout modes live as colocated buffer assertions.
+  Click behavior gets the same treatment: drive `click()` from cells
+  read back off a real `TestBackend` paint, never from hand-computed
+  coordinates.
 
 ## 6. Scope (locked for this bring-up)
 
