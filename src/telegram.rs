@@ -38,6 +38,10 @@ pub struct Update {
     pub user_id: i64,
     pub chat_id: i64,
     pub text: String,
+    /// `message_id` of the message this one replies to, when the operator
+    /// used Telegram's native reply action. Lets a reply address the
+    /// session that sent the original message without typing `[name]`.
+    pub reply_to_message_id: Option<i64>,
 }
 
 /// Parse a `getUpdates` response body. Only entries carrying fresh
@@ -83,11 +87,16 @@ pub fn parse_updates(body: &str) -> Result<Vec<Update>, String> {
         else {
             continue;
         };
+        let reply_to_message_id = msg
+            .get("reply_to_message")
+            .and_then(|r| r.get("message_id"))
+            .and_then(|v| v.as_i64());
         out.push(Update {
             update_id,
             user_id,
             chat_id,
             text: text.to_string(),
+            reply_to_message_id,
         });
     }
     Ok(out)
@@ -206,6 +215,9 @@ pub struct InboundMessage {
     pub user_id: i64,
     pub chat_id: i64,
     pub text: String,
+    /// `message_id` this one replies to, when the operator used
+    /// Telegram's native reply action. See [`Update::reply_to_message_id`].
+    pub reply_to_message_id: Option<i64>,
 }
 
 /// One poller delivery: fresh inbound text, a poll failure, or both.
@@ -297,6 +309,7 @@ impl Poller {
                             user_id: u.user_id,
                             chat_id: u.chat_id,
                             text: u.text,
+                            reply_to_message_id: u.reply_to_message_id,
                         })
                         .collect::<Vec<_>>();
                     if messages.is_empty() {
@@ -792,6 +805,18 @@ mod tests {
         assert_eq!(updates[0].chat_id, 11);
         assert_eq!(updates[0].text, "/sessions");
         assert_eq!(updates[1].user_id, 99);
+    }
+
+    #[test]
+    fn parses_reply_to_message_id_when_present() {
+        let body = r#"{"ok":true,"result":[
+            {"update_id":20,"message":{"message_id":5,"from":{"id":11},"chat":{"id":11},"date":1,"text":"do more","reply_to_message":{"message_id":2}}},
+            {"update_id":21,"message":{"message_id":6,"from":{"id":11},"chat":{"id":11},"date":2,"text":"no reply here"}}
+        ]}"#;
+        let updates = parse_updates(body).expect("fixture parses");
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].reply_to_message_id, Some(2));
+        assert_eq!(updates[1].reply_to_message_id, None);
     }
 
     #[test]

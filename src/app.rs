@@ -5507,6 +5507,7 @@ mod tests {
                 user_id: 11,
                 chat_id: 11,
                 text: "hi".to_string(),
+                reply_to_message_id: None,
             }],
             failed: false,
         }));
@@ -5529,6 +5530,7 @@ mod tests {
                 user_id: 11,
                 chat_id: 11,
                 text: "/sessions".to_string(),
+                reply_to_message_id: None,
             }],
             failed: false,
         }));
@@ -5560,6 +5562,7 @@ mod tests {
                     user_id: i,
                     chat_id: i,
                     text: "/help".to_string(),
+                    reply_to_message_id: None,
                 }],
                 failed: false,
             }));
@@ -7293,8 +7296,18 @@ mod tests {
                 user_id: 11,
                 chat_id: chat,
                 text: text.to_string(),
+                reply_to_message_id: None,
             });
         }
+    }
+
+    fn tg_inbox_reply(state: &mut AppState, chat: i64, text: &str, reply_to: i64) {
+        state.telegram_inbox.push_back(crate::telegram::InboundMessage {
+            user_id: 11,
+            chat_id: chat,
+            text: text.to_string(),
+            reply_to_message_id: Some(reply_to),
+        });
     }
 
     fn tg_outbox(state: &AppState) -> Vec<crate::telegram::OutboundMessage> {

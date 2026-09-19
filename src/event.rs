@@ -91,6 +91,7 @@ mod tests {
                 user_id: 11,
                 chat_id: 11,
                 text: "hi".to_string(),
+                reply_to_message_id: None,
             }],
             failed: false,
         });
