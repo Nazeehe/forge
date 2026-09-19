@@ -2297,9 +2297,11 @@ impl AppState {
     /// Input-free minutes before the operator counts as away.
     const AWAY_AFTER: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
-    /// Away notice, injected into every live session on the flip.
-    const AWAY_NOTICE: &'static str =
-        "user is away at the moment, use message_user to message them if need be";
+    /// Away notice, injected into every live session on the flip. Some
+    /// models read "the user is away" as a stop signal and idle waiting
+    /// for a reply instead of continuing the task, so this spells out
+    /// that away means keep going, not pause.
+    const AWAY_NOTICE: &'static str = "user is away at the moment; keep working on whatever you were doing rather than waiting for a reply, and use message_user if you need to update them or ask something";
     /// Back notice, injected into every live session on return.
     const BACK_NOTICE: &'static str =
         "user is back, don't use message_user - communicate normally";
@@ -7683,6 +7685,14 @@ mod tests {
         assert_eq!(head.kind, crate::comms::InjectKind::Command);
         assert!(head.text.contains("user is away"), "body: {}", head.text);
         assert!(head.text.contains("message_user"), "guidance: {}", head.text);
+        // Some models read "the user is away" as a stop signal and idle
+        // waiting for a reply instead of continuing the task; the notice
+        // must explicitly tell them to keep going.
+        assert!(
+            head.text.contains("keep working") || head.text.contains("continue working"),
+            "must tell the model to keep working, not stop and wait: {}",
+            head.text
+        );
         // Further idle settles never duplicate the notice.
         state.settle_presence(false, t0 + std::time::Duration::from_secs(40 * 60));
         assert_eq!(state.broker.queued(id), 1, "away announced once");
