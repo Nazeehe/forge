@@ -473,10 +473,10 @@ mod tests {
             picker.view(f, RestorePicker::picker_area(f.area()));
         }).unwrap();
         let buf = terminal.backend().buffer();
-        assert_eq!(buf.get(9, 4).symbol(), " ", "border padding");
-        assert_eq!(buf.get(11, 4).symbol(), " ", "older entry unmarked");
-        assert_eq!(buf.get(11, 5).symbol(), ">", "newest preselected");
-        let hint: String = (11..70).map(|x| buf.get(x, 20).symbol()).collect();
+        assert_eq!(buf[(9, 4)].symbol(), " ", "border padding");
+        assert_eq!(buf[(11, 4)].symbol(), " ", "older entry unmarked");
+        assert_eq!(buf[(11, 5)].symbol(), ">", "newest preselected");
+        let hint: String = (11..70).map(|x| buf[(x, 20)].symbol()).collect();
         assert!(hint.contains("Enter load"), "pinned hint: {hint:?}");
     }
 
@@ -493,7 +493,7 @@ mod tests {
         let buf = terminal.backend().buffer();
         // Padded content width is 58: the row fits exactly, ellipsis
         // marking the cut.
-        let row: String = (11..11 + 58).map(|x| buf.get(x, 4).symbol()).collect();
+        let row: String = (11..11 + 58).map(|x| buf[(x, 4)].symbol()).collect();
         assert_eq!(row.chars().count(), 58);
         assert!(row.contains("…"), "truncated: {row:?}");
         assert!(!row.contains("xxxxxxxxxx "), "no overflow past the box");

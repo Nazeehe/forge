@@ -818,32 +818,32 @@ mod tests {
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         // create_area centers 78x12; padded content starts at (4, 8).
-        let mark = buf.get(4, 8);
+        let mark = &buf[(4, 8)];
         assert_eq!(mark.symbol(), ">", "focus marker");
         assert_eq!(mark.fg, Color::Cyan, "focus is cyan, not yellow");
         assert!(mark.modifier.contains(Modifier::REVERSED), "focus reverses");
         // Unfocused body labels stay full-contrast white; the dialog owns
         // no yellow except selection marks and the default action. (Row 0
         // is focused, so its label reverses with the row.)
-        assert_eq!(buf.get(6, 9).fg, Color::White, "label");
+        assert_eq!(buf[(6, 9)].fg, Color::White, "label");
         // CLI Tool row (y 11): `< claude >` cycler like Comm Group.
         // Content starts at x4; marker (2) + label (11) put the control
         // at x17.
-        assert_eq!(buf.get(17, 11).symbol(), "<", "left chevron");
-        assert_eq!(buf.get(26, 11).symbol(), ">", "right chevron");
-        let tool: String = (19..25).map(|x| buf.get(x, 11).symbol()).collect();
+        assert_eq!(buf[(17, 11)].symbol(), "<", "left chevron");
+        assert_eq!(buf[(26, 11)].symbol(), ">", "right chevron");
+        let tool: String = (19..25).map(|x| buf[(x, 11)].symbol()).collect();
         assert_eq!(tool, "claude", "current agent shown");
-        assert_eq!(buf.get(19, 11).fg, Color::White, "value in text style");
+        assert_eq!(buf[(19, 11)].fg, Color::White, "value in text style");
         // Actions row (y 14) centers `[Create*]`: 19 wide in 72 content
         // columns starting at x4, so the `*` lands at x37.
-        let star = buf.get(37, 14);
+        let star = &buf[(37, 14)];
         assert_eq!(star.symbol(), "*", "default mark");
         assert_eq!(star.fg, Color::Yellow);
         assert!(star.modifier.contains(Modifier::BOLD));
         // Hint row pins to the bottom inner row (y 16): keys cyan.
-        assert_eq!(buf.get(4, 16).fg, Color::Cyan, "hint key");
+        assert_eq!(buf[(4, 16)].fg, Color::Cyan, "hint key");
         // Builtin stays transparent: no modal fill behind the rows.
-        assert_eq!(buf.get(5, 9).bg, Color::Reset, "transparent on builtin");
+        assert_eq!(buf[(5, 9)].bg, Color::Reset, "transparent on builtin");
     }
 
     #[test]
@@ -858,12 +858,12 @@ mod tests {
         let buf = terminal.backend().buffer();
         // Centered 20-wide row at x30: `[Create*]` plus two spaces,
         // then `>[Cancel]` whose marker lands at x41.
-        let mark = buf.get(41, 14);
+        let mark = &buf[(41, 14)];
         assert_eq!(mark.symbol(), ">", "chosen button marked");
         assert_eq!(mark.fg, Color::Cyan);
         assert!(mark.modifier.contains(Modifier::REVERSED));
         // Create keeps its default `*` even while Cancel is chosen.
-        assert_eq!(buf.get(37, 14).symbol(), "*");
+        assert_eq!(buf[(37, 14)].symbol(), "*");
     }
 
     #[test]
@@ -905,7 +905,7 @@ mod tests {
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         // Content columns only: the modal border frames the row.
         let blank: String = (4..76)
-            .map(|x| terminal.backend().buffer().get(x, 15).symbol())
+            .map(|x| terminal.backend().buffer()[(x, 15)].symbol())
             .collect();
         assert!(blank.trim().is_empty(), "error slot rests blank");
         // Submit the prefilled name as taken: error appears in its
@@ -916,11 +916,11 @@ mod tests {
         ));
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        let err: String = (0..80).map(|x| buf.get(x, 15).symbol()).collect();
+        let err: String = (0..80).map(|x| buf[(x, 15)].symbol()).collect();
         assert!(err.contains("already taken"), "fixed slot: {err:?}");
-        assert_eq!(buf.get(4, 15).symbol(), "!", "inset to content");
-        assert_eq!(buf.get(4, 16).symbol(), "T", "hint stays pinned");
-        assert_eq!(buf.get(4, 16).fg, ratatui::style::Color::Cyan);
+        assert_eq!(buf[(4, 15)].symbol(), "!", "inset to content");
+        assert_eq!(buf[(4, 16)].symbol(), "T", "hint stays pinned");
+        assert_eq!(buf[(4, 16)].fg, ratatui::style::Color::Cyan);
     }
 
     #[test]
@@ -933,9 +933,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 11)).unwrap();
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        assert_eq!(buf.get(4, 1).symbol(), ">", "content still padded");
-        assert_eq!(buf.get(4, 8).symbol(), "T", "hint follows the form");
-        assert_eq!(buf.get(4, 8).fg, Color::Cyan);
+        assert_eq!(buf[(4, 1)].symbol(), ">", "content still padded");
+        assert_eq!(buf[(4, 8)].symbol(), "T", "hint follows the form");
+        assert_eq!(buf[(4, 8)].fg, Color::Cyan);
     }
 
     #[test]
@@ -949,10 +949,10 @@ mod tests {
         terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         // Unfocused Name label goes black for light terminals.
-        assert_eq!(buf.get(6, 9).fg, Color::Black);
+        assert_eq!(buf[(6, 9)].fg, Color::Black);
         // The block interior carries the opaque light fill.
-        assert_eq!(buf.get(5, 9).bg, Color::White, "modal fill");
-        assert_eq!(buf.get(40, 9).bg, Color::White, "modal fill");
+        assert_eq!(buf[(5, 9)].bg, Color::White, "modal fill");
+        assert_eq!(buf[(40, 9)].bg, Color::White, "modal fill");
     }
 
     #[test]
@@ -1227,7 +1227,7 @@ mod tests {
         let buf = terminal.backend().buffer();
         // Directory row (y 8): `[` at x 17, then the `…tail` box.
         let row: String = (17..17 + 59)
-            .map(|x| buf.get(x, 8).symbol().to_string())
+            .map(|x| buf[(x, 8)].symbol().to_string())
             .collect();
         assert_eq!(row, format!("[{}]", fit_start(long, 57)));
         assert!(row.starts_with("[…"));

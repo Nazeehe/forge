@@ -33,6 +33,8 @@ pub enum UserCommand {
     TerminateSession,
     /// Toggle grid mode: every session tiles the main area at once.
     ToggleGrid,
+    /// Open the Telegram mobile-transport settings dialog.
+    TelegramSettings,
 }
 
 /// Encode a forwarded key as PTY input bytes (xterm-style). `app_cursor`
@@ -71,6 +73,9 @@ pub fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
             }
         }
         KeyCode::Enter if alt && !ctrl => Some(b"\x1b\r".to_vec()),
+        // Shift-only Enter: distinct CSI-u, never merged into submit.
+        // (Shift+Alt / Ctrl chords stay dropped: no agreed encoding.)
+        KeyCode::Enter if shift && !alt && !ctrl => Some(b"\x1b[13;2u".to_vec()),
         KeyCode::Enter if mods.is_empty() => Some(b"\r".to_vec()),
         KeyCode::Tab if shift => Some(b"\x1b[Z".to_vec()),
         KeyCode::Tab if mods.is_empty() => Some(b"\t".to_vec()),
@@ -310,6 +315,7 @@ impl InputRouter {
                     KeyCode::Char('y') => RoutedKey::Command(UserCommand::TogglePermissionMode),
                     KeyCode::Char('x') => RoutedKey::Command(UserCommand::TerminateSession),
                     KeyCode::Char('w') => RoutedKey::Command(UserCommand::ToggleGrid),
+                    KeyCode::Char('m') => RoutedKey::Command(UserCommand::TelegramSettings),
                     KeyCode::Char(d @ '1'..='9') => {
                         RoutedKey::Command(UserCommand::SelectSession(d as usize - '1' as usize))
                     }
@@ -427,6 +433,12 @@ mod tests {
         assert_eq!(
             r.feed(key(KeyCode::Char('w'))),
             RoutedKey::Command(UserCommand::ToggleGrid)
+        );
+
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('m'))),
+            RoutedKey::Command(UserCommand::TelegramSettings)
         );
     }
 
@@ -626,6 +638,12 @@ mod tests {
             Some(b"\x1b\x03".to_vec())
         );
         assert_eq!(encode_key(&ev(KeyCode::Enter, alt), false), Some(b"\x1b\r".to_vec()));
+        // Shift-only Enter stays distinct (CSI-u) instead of dropping:
+        // agents like Claude read it as newline, not submit.
+        assert_eq!(
+            encode_key(&ev(KeyCode::Enter, KeyModifiers::SHIFT), false),
+            Some(b"\x1b[13;2u".to_vec())
+        );
         // Releases must never double-send a press.
         let release = KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Release);
         assert_eq!(encode_key(&release, false), None);

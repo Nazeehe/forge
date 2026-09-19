@@ -22,6 +22,62 @@ pub struct AppState {
     /// newcomers are dropped and their relays fail open on timeout.
     pub pending_hooks: std::collections::VecDeque<crate::listener::HookRequest>,
     /// Open create-session dialog, if any. Captures all input while present.
+    /// Telegram inbound texts awaiting routing (Phase 5 drains this).
+    /// Bounded by [`crate::telegram::INBOX_CAP`]; overflow counts in
+    /// `telegram_dropped` instead of growing the owner.
+    pub telegram_inbox: std::collections::VecDeque<crate::telegram::InboundMessage>,
+    /// Inbound Telegram texts dropped past the inbox cap.
+    pub telegram_dropped: u64,
+    /// The last Telegram poll failed (transport or parse). Cleared by
+    /// the next successful poll.
+    pub telegram_last_poll_failed: bool,
+    /// Live Telegram transport config, shared by handle with the
+    /// poller thread: modal saves land within one poll turn, and the
+    /// token file itself is re-read every turn, so rotation and edits
+    /// bite at once without a restart.
+    pub telegram_config: std::sync::Arc<std::sync::Mutex<crate::config::TelegramConfig>>,
+    /// Open Telegram settings form (`Ctrl-b m`), if any.
+    pub telegram_dialog: Option<crate::telegram_dialog::TelegramDialog>,
+    /// Connection-test results from the worker thread (see
+    /// [`Self::start_telegram_test`]).
+    telegram_test_tx: std::sync::mpsc::Sender<crate::telegram::TelegramTested>,
+    telegram_test_rx: std::sync::mpsc::Receiver<crate::telegram::TelegramTested>,
+    /// Per-session `message_user` sliding rate windows, pruned on entry.
+    message_user_windows: std::collections::HashMap<
+        crate::session::SessionId,
+        std::collections::VecDeque<std::time::Instant>,
+    >,
+    /// Latest in-app `message_user` badge text per session. Always
+    /// records, even when forwarding is off.
+    pub message_user_badges: std::collections::HashMap<crate::session::SessionId, String>,
+    /// Replies for the Telegram poller thread to send, shared by handle.
+    /// Bounded by [`crate::telegram::OUTBOX_CAP`]; overflow counts in
+    /// `telegram_outbox_dropped` instead of growing the owner.
+    pub telegram_outbox: std::sync::Arc<
+        std::sync::Mutex<std::collections::VecDeque<crate::telegram::OutboundMessage>>,
+    >,
+    /// Telegram replies dropped past the outbox cap.
+    telegram_outbox_dropped: u64,
+    /// Session most recently badged by `message_user`: bare operator
+    /// text answers it. `None` until the first badge.
+    last_telegram_badged: Option<crate::session::SessionId>,
+    /// Poller thread running. Set once at spawn; the main loop starts
+    /// the thread the first pass it sees Telegram enabled, so enabling
+    /// from the modal needs no restart.
+    pub telegram_poller: bool,
+    /// Operator presence: false while input flows. Twenty input-free
+    /// minutes flip it (see [`Self::settle_presence`]); any input flips
+    /// it back.
+    away: bool,
+    /// Last observed operator input (key, mouse, or paste). The
+    /// presence clock, not wall time, so tests drive it exactly.
+    last_input: std::time::Instant,
+    /// Operator-injection sequence: each routed text carries a unique
+    /// `tg-{n}` conversation tag for traceability.
+    telegram_seq: u64,
+    /// `message_user` idempotency replays, one bounded cache shared by
+    /// all sessions (keys carry their session).
+    message_user_idem: crate::bot::IdemCache,
     pub create_dialog: Option<crate::create::CreateDialog>,
     /// Open group-management dialog, if any. Captures all input while
     /// present; never both dialogs at once (openers are unreachable
@@ -200,12 +256,34 @@ impl AppState {
     pub fn new() -> Self {
         #[cfg(feature = "visual")]
         let (visual_tx, visual_rx) = std::sync::mpsc::channel();
+        let (telegram_test_tx, telegram_test_rx) = std::sync::mpsc::channel();
         AppState {
             manager: SessionManager::new(),
             dirty: true,
             should_quit: false,
             term_size: (24, 80),
             pending_hooks: std::collections::VecDeque::new(),
+            telegram_inbox: std::collections::VecDeque::new(),
+            telegram_dropped: 0,
+            telegram_last_poll_failed: false,
+            telegram_config: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::config::TelegramConfig::default(),
+            )),
+            telegram_dialog: None,
+            telegram_test_tx,
+            telegram_test_rx,
+            message_user_windows: std::collections::HashMap::new(),
+            message_user_badges: std::collections::HashMap::new(),
+            message_user_idem: crate::bot::IdemCache::new(),
+            telegram_outbox: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            telegram_outbox_dropped: 0,
+            last_telegram_badged: None,
+            telegram_poller: false,
+            away: false,
+            last_input: std::time::Instant::now(),
+            telegram_seq: 0,
             create_dialog: None,
             group_dialog: None,
             restore_picker: None,
@@ -1588,7 +1666,7 @@ impl AppState {
         args: &str,
     ) -> Option<Result<String, String>> {
         match tool {
-            "start_session" | "set_session_status" | "clear_session_status" => {}
+            "start_session" | "set_session_status" | "clear_session_status" | "message_user" => {}
             #[cfg(feature = "visual")]
             "visual_show" => {}
             _ => return None,
@@ -1600,6 +1678,7 @@ impl AppState {
         match tool {
             "start_session" => Some(self.start_session_tool(id, args)),
             "set_session_status" => Some(self.set_session_status(id, args)),
+            "message_user" => Some(self.message_user_tool(id, args)),
             #[cfg(feature = "visual")]
             "visual_show" => Some(self.visual_show_tool(id, args)),
             _ => Some(self.clear_session_status(id)),
@@ -1658,6 +1737,20 @@ impl AppState {
     /// feature gate at the call site.
     #[cfg(not(feature = "visual"))]
     pub fn drain_visual(&mut self) {}
+
+    /// Collect finished Telegram connection tests into the open dialog.
+    /// Called once per main-loop pass; never blocks. A closed dialog
+    /// drops the verdict.
+    pub fn drain_telegram_test(&mut self) {
+        let results: Vec<crate::telegram::TelegramTested> =
+            self.telegram_test_rx.try_iter().collect();
+        for tested in results {
+            if let Some(dialog) = self.telegram_dialog.as_mut() {
+                dialog.set_test_result(tested.ok, tested.detail);
+                self.dirty = true;
+            }
+        }
+    }
 
     /// Store a finished raster unless it is stale (an older generation
     /// than the slot holds) or its session is gone. Raster failures
@@ -1891,6 +1984,450 @@ impl AppState {
         rec.status = None;
         self.dirty = true;
         Ok(r#"{"status_cleared":true}"#.to_string())
+    }
+
+    /// Badge the operator in-app and optionally forward to Telegram.
+    /// The badge always records; forwarding needs an enabled transport,
+    /// a notify chat, and a readable token, and runs on a worker thread
+    /// so slow I/O never stalls the loop. Retries with the same
+    /// `idempotency_key` replay; a changed message under a reused key
+    /// conflicts. Sends are capped per session (see
+    /// [`crate::telegram::MESSAGE_USER_CAP`]).
+    fn message_user_tool(
+        &mut self,
+        caller: crate::session::SessionId,
+        args: &str,
+    ) -> Result<String, String> {
+        let session_name = match self.manager.get(caller) {
+            Some(rec) => rec.name.clone(),
+            None => return Err("unknown or stale run ID".to_string()),
+        };
+        let message = Self::tool_arg(args, "message")
+            .ok_or_else(|| "message_user needs a message".to_string())?;
+        let now = std::time::Instant::now();
+        let fingerprint = crate::bot::fingerprint("message_user", &[&message]);
+        let idem_key = Self::tool_arg(args, "idempotency_key").map(|k| format!("{caller:?}:{k}"));
+        if let Some(ref key) = idem_key {
+            match self.message_user_idem.check(key, fingerprint, now) {
+                crate::bot::IdemCheck::Hit(result) => return Ok(result),
+                crate::bot::IdemCheck::Conflict => {
+                    return Err(
+                        "idempotency_key conflict: same key, different message".to_string(),
+                    )
+                }
+                crate::bot::IdemCheck::Miss => {}
+            }
+        }
+        let window = self.message_user_windows.entry(caller).or_default();
+        if !crate::telegram::check_message_rate(window, now) {
+            return Err("message_user rate limited: 3 per 60 seconds".to_string());
+        }
+        let text = crate::telegram::truncate_text(&message, crate::telegram::MAX_TEXT).to_string();
+        self.message_user_badges.insert(caller, text.clone());
+        self.last_telegram_badged = Some(caller);
+        let conv = crate::ids::ConversationId::generate().to_string();
+        let cfg = self
+            .telegram_config
+            .lock()
+            .map(|cfg| cfg.clone())
+            .unwrap_or_default();
+        let outgoing = crate::telegram::forward_text(&session_name, &text);
+        let forwarded = cfg.enabled
+            && cfg.notify_chat_id != 0
+            && crate::telegram::read_token(&cfg.token_file).is_ok()
+            && std::thread::Builder::new()
+                .name("telegram-send".to_string())
+                .spawn(move || {
+                    let Ok(token) = crate::telegram::read_token(&cfg.token_file) else {
+                        return;
+                    };
+                    if crate::telegram::send_message(&token, cfg.notify_chat_id, &outgoing).is_err()
+                    {
+                        eprintln!("warning: telegram forward failed");
+                    }
+                })
+                .is_ok();
+        self.dirty = true;
+        let result = format!(r#"{{"conversation_id":"{conv}","forwarded":{forwarded}}}"#);
+        if let Some(key) = idem_key {
+            self.message_user_idem.store(&key, fingerprint, &result, now);
+        }
+        Ok(result)
+    }
+
+    /// Operator command help surfaced by `/help`.
+    const TELEGRAM_HELP: &'static str = "forge operator commands:\n/sessions — list live sessions\n/help — this help\n/int <session> — interrupt the agent (Ctrl-C)\n/clear <session> — drop queued injections\nAddress a session with `[name] message`; bare text answers the last badged session.";
+
+    /// Queue one Telegram reply for the poller thread. Truncated and
+    /// bounded: past [`crate::telegram::OUTBOX_CAP`] newcomers drop and
+    /// count instead of growing the owner.
+    fn telegram_send(&mut self, chat_id: i64, text: &str) {
+        let text =
+            crate::telegram::truncate_text(text, crate::telegram::MAX_TEXT).to_string();
+        let Ok(mut outbox) = self.telegram_outbox.lock() else {
+            return;
+        };
+        if outbox.len() >= crate::telegram::OUTBOX_CAP {
+            self.telegram_outbox_dropped += 1;
+        } else {
+            outbox.push_back(crate::telegram::OutboundMessage { chat_id, text });
+        }
+    }
+
+    /// Resolve an exact live session by name for the operator. Ambiguous
+    /// names fail rather than guess; exited and unknown names fail with
+    /// the same dead end so replies never reach a live pane by mistake.
+    fn resolve_telegram_session(
+        &self,
+        name: &str,
+    ) -> Result<crate::session::SessionId, String> {
+        let mut found = None;
+        let mut ambiguous = false;
+        for &id in self.manager.order() {
+            let live = self
+                .manager
+                .get(id)
+                .is_some_and(|rec| rec.name == name && rec.state.is_live());
+            if live {
+                if found.is_some() {
+                    ambiguous = true;
+                }
+                found = Some(id);
+            }
+        }
+        if ambiguous {
+            return Err(format!("ambiguous session name {name:?}"));
+        }
+        found.ok_or_else(|| format!("no live session named {name:?}"))
+    }
+
+    /// One-line session roster for `/sessions`, each tagged live/exited.
+    fn telegram_session_list(&self) -> String {
+        let mut lines = vec!["sessions:".to_string()];
+        for &id in self.manager.order() {
+            if let Some(rec) = self.manager.get(id) {
+                let state = if rec.state.is_live() { "live" } else { "exited" };
+                lines.push(format!("{} ({state})", rec.name));
+            }
+        }
+        if lines.len() == 1 {
+            lines.push("(none)".to_string());
+        }
+        lines.join("\n")
+    }
+
+    /// Split a leading `[name] body` address. The name must be a
+    /// single non-empty token and the body non-empty; anything else is
+    /// bare text for the badge path.
+    fn parse_bracketed(text: &str) -> Option<(String, String)> {
+        let tail = text.strip_prefix('[')?;
+        let (head, body) = tail.split_once(']')?;
+        let name = head.trim();
+        let body = body.trim();
+        if name.is_empty() || name.contains(char::is_whitespace) || body.is_empty() {
+            return None;
+        }
+        Some((name.to_string(), body.to_string()))
+    }
+
+    /// Drain inbox messages into replies and session injections, at most
+    /// [`crate::telegram::ROUTE_BATCH`] per settle so a flood drains over
+    /// ticks. Called from [`Self::settle_comms`], ahead of delivery, so
+    /// freshly routed injections can go out on the same tick when idle.
+    fn drain_telegram(&mut self) {
+        for _ in 0..crate::telegram::ROUTE_BATCH {
+            let Some(msg) = self.telegram_inbox.pop_front() else {
+                break;
+            };
+            self.route_telegram(msg);
+        }
+    }
+
+    /// Operator reply guidance appended to every routed injection, so
+    /// the agent knows how to answer.
+    const TELEGRAM_REPLY_HINT: &'static str = "Reply to the operator with message_user.";
+
+    /// Route one allowlisted operator text: `/` commands and errors
+    /// answer directly, while `<name>:` prefixes and bare text (to the
+    /// last badged session) queue a silent idle-gated injection.
+    fn route_telegram(&mut self, msg: crate::telegram::InboundMessage) {
+        let text = msg.text.trim().to_string();
+        if let Some(command) = text.strip_prefix('/') {
+            let mut parts = command.split_whitespace();
+            let name = parts.next().unwrap_or("").to_lowercase();
+            let name = name.split('@').next().unwrap_or("").to_string();
+            let rest = parts.collect::<Vec<_>>().join(" ");
+            match name.as_str() {
+                "sessions" => self.telegram_send(msg.chat_id, &self.telegram_session_list()),
+                "help" => self.telegram_send(msg.chat_id, Self::TELEGRAM_HELP),
+                "int" => self.telegram_interrupt(msg.chat_id, &rest),
+                "clear" => self.telegram_clear(msg.chat_id, &rest),
+                _ => self.telegram_send(
+                    msg.chat_id,
+                    &format!("unknown command /{name}; /help lists commands"),
+                ),
+            }
+            return;
+        }
+        // A bracketed `[name]` head is the only explicit address.
+        let (target, body) = match Self::parse_bracketed(&text) {
+            Some((name, body)) => (Some(name), body),
+            None => (None, text.clone()),
+        };
+        let target = match target {
+            Some(name) => Some(name),
+            None => {
+                // The old `name:` form with a live name hints at
+                // brackets instead of landing on the wrong session;
+                // anything else falls through to the badge.
+                if let Some((head, _)) = text.split_once(':') {
+                    let head = head.trim();
+                    if !head.is_empty()
+                        && !head.contains(char::is_whitespace)
+                        && self.resolve_telegram_session(head).is_ok()
+                    {
+                        self.telegram_send(
+                            msg.chat_id,
+                            &format!(
+                                "address sessions as [{head}] message; /sessions lists live sessions"
+                            ),
+                        );
+                        return;
+                    }
+                }
+                self.last_telegram_badged
+                    .and_then(|id| self.manager.get(id))
+                    .filter(|rec| rec.state.is_live())
+                    .map(|rec| rec.name.clone())
+            }
+        };
+        let Some(name) = target else {
+            self.telegram_send(
+                msg.chat_id,
+                "no session addressed; reply with `[name] message`, or /sessions to list live sessions",
+            );
+            return;
+        };
+        let id = match self.resolve_telegram_session(&name) {
+            Ok(id) => id,
+            Err(e) => {
+                self.telegram_send(msg.chat_id, &e);
+                return;
+            }
+        };
+        if self.broker.queued(id) >= crate::comms::QUEUE_CAP {
+            self.telegram_send(
+                msg.chat_id,
+                &format!("queue full for {name}; /clear {name} drops pending"),
+            );
+            return;
+        }
+        self.telegram_seq += 1;
+        let conv = format!("tg-{}", self.telegram_seq);
+        self.broker.push(
+            id,
+            crate::comms::Injection {
+                conv,
+                kind: crate::comms::InjectKind::Command,
+                from: "operator".to_string(),
+                text: format!("{body}\n\n({})", Self::TELEGRAM_REPLY_HINT),
+            },
+        );
+        self.dirty = true;
+    }
+
+    /// `/int <session>`: Ctrl-C straight to the agent pane. Bypasses the
+    /// idle gate on purpose: interrupts must land in a busy session.
+    fn telegram_interrupt(&mut self, chat_id: i64, rest: &str) {
+        let name = rest.split_whitespace().next().unwrap_or("").to_string();
+        if name.is_empty() {
+            self.telegram_send(chat_id, "usage: /int <session>");
+            return;
+        }
+        let id = match self.resolve_telegram_session(&name) {
+            Ok(id) => id,
+            Err(e) => {
+                self.telegram_send(chat_id, &e);
+                return;
+            }
+        };
+        match self.manager.inject_write(id, b"\x03") {
+            Ok(()) => self.telegram_send(chat_id, &format!("interrupted {name}")),
+            Err(e) => self.telegram_send(chat_id, &format!("cannot interrupt {name}: {e}")),
+        }
+    }
+
+    /// `/clear <session>`: drop its queued (undelivered) injections and
+    /// report the count. Delivered work is untouched.
+    fn telegram_clear(&mut self, chat_id: i64, rest: &str) {
+        let name = rest.split_whitespace().next().unwrap_or("").to_string();
+        if name.is_empty() {
+            self.telegram_send(chat_id, "usage: /clear <session>");
+            return;
+        }
+        let id = match self.resolve_telegram_session(&name) {
+            Ok(id) => id,
+            Err(e) => {
+                self.telegram_send(chat_id, &e);
+                return;
+            }
+        };
+        let dropped = self.broker.clear_queue(id);
+        self.telegram_send(chat_id, &format!("cleared {dropped} queued for {name}"));
+    }
+
+    /// Input-free minutes before the operator counts as away.
+    const AWAY_AFTER: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+    /// Away notice, injected into every live session on the flip.
+    const AWAY_NOTICE: &'static str =
+        "user is away at the moment, use message_user to message them if need be";
+    /// Back notice, injected into every live session on return.
+    const BACK_NOTICE: &'static str =
+        "user is back, don't use message_user - communicate normally";
+
+    /// Settle operator presence for one main-loop pass. Any input
+    /// stamps the clock and, when coming back, announces the return;
+    /// twenty input-free minutes announce the departure. Both notices
+    /// go to every live session with room, exactly once per flip —
+    /// exited panes and full queues are skipped, never grown.
+    pub fn settle_presence(&mut self, input_this_tick: bool, now: std::time::Instant) {
+        if input_this_tick {
+            self.last_input = now;
+            if self.away {
+                self.away = false;
+                self.broadcast_presence(Self::BACK_NOTICE);
+            }
+            return;
+        }
+        if !self.away && now.duration_since(self.last_input) > Self::AWAY_AFTER {
+            self.away = true;
+            self.broadcast_presence(Self::AWAY_NOTICE);
+        }
+    }
+
+    /// Queue `text` as an operator-from-forge injection on every live
+    /// session with queue room. Best-effort by design: skipped sessions
+    /// simply miss the notice.
+    fn broadcast_presence(&mut self, text: &str) {
+        let mut pushed = false;
+        for &id in self.manager.order() {
+            let live = self
+                .manager
+                .get(id)
+                .is_some_and(|rec| rec.state.is_live());
+            if !live || self.broker.queued(id) >= crate::comms::QUEUE_CAP {
+                continue;
+            }
+            self.telegram_seq += 1;
+            self.broker.push(
+                id,
+                crate::comms::Injection {
+                    conv: format!("presence-{}", self.telegram_seq),
+                    kind: crate::comms::InjectKind::Command,
+                    from: "forge".to_string(),
+                    text: text.to_string(),
+                },
+            );
+            pushed = true;
+        }
+        if pushed {
+            self.dirty = true;
+        }
+    }
+
+    /// Whether the main loop should start the poller thread: enabled
+    /// but not yet running. One-shot by construction — the loop flips
+    /// the flag at spawn, so the thread starts exactly once.
+    pub fn telegram_poller_wanted(&self) -> bool {
+        !self.telegram_poller
+            && self
+                .telegram_config
+                .lock()
+                .map(|cfg| cfg.enabled)
+                .unwrap_or(false)
+    }
+
+    /// Open the Telegram settings form prefilled from the live section.
+    pub fn open_telegram_dialog(&mut self) {
+        let cfg = self
+            .telegram_config
+            .lock()
+            .map(|cfg| cfg.clone())
+            .unwrap_or_default();
+        self.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(&cfg));
+        self.dirty = true;
+    }
+
+    /// Apply a validated settings submit: optional token-file write
+    /// (atomic `0600`), section save to `config.toml`, live-config
+    /// swap for the poller thread, then close. Errors leave the dialog
+    /// open for the caller to surface.
+    pub fn apply_telegram_form(
+        &mut self,
+        loaded: &mut crate::config::LoadedConfig,
+        home: &std::path::Path,
+        form: crate::telegram_dialog::TelegramForm,
+    ) -> Result<(), String> {
+        if !form.token.is_empty() {
+            let path =
+                crate::telegram_dialog::expand_token_path(&form.config.token_file, home);
+            crate::fs_atomic::write_private(std::path::Path::new(&path), form.token.as_bytes())
+                .map_err(|e| format!("cannot write token file: {e}"))?;
+        }
+        loaded.config.telegram = form.config.clone();
+        loaded
+            .save_home(home)
+            .map_err(|e| format!("cannot save config: {e}"))?;
+        if let Ok(mut live) = self.telegram_config.lock() {
+            *live = form.config;
+        }
+        self.telegram_dialog = None;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Start a connection test for the open dialog. A dialog-provided
+    /// token wins; otherwise the file reads now and reports inline.
+    /// Network runs on a worker thread; the verdict returns as
+    /// [`crate::event::AppEvent::TelegramTested`].
+    pub fn start_telegram_test(&mut self, token: String, token_file: String) {
+        let Some(dialog) = self.telegram_dialog.as_mut() else {
+            return;
+        };
+        let token = if token.is_empty() {
+            match crate::telegram::read_token(&token_file) {
+                Ok(token) => token,
+                Err(e) => {
+                    dialog.set_test_result(false, e);
+                    self.dirty = true;
+                    return;
+                }
+            }
+        } else {
+            token
+        };
+        dialog.set_testing(true);
+        self.dirty = true;
+        let tx = self.telegram_test_tx.clone();
+        if std::thread::Builder::new()
+            .name("telegram-test".to_string())
+            .spawn(move || {
+                let tested = match crate::telegram::fetch_me(&token) {
+                    Ok(detail) => crate::telegram::TelegramTested { ok: true, detail },
+                    Err(_) => crate::telegram::TelegramTested {
+                        ok: false,
+                        detail: "request failed".to_string(),
+                    },
+                };
+                let _ = tx.send(tested);
+            })
+            .is_err()
+        {
+            if let Some(dialog) = self.telegram_dialog.as_mut() {
+                dialog.set_test_result(false, "cannot spawn test worker".to_string());
+            }
+        }
     }
 
     /// Snapshot the grid: one view per session in manager order.
@@ -2244,6 +2781,9 @@ impl AppState {
     pub fn settle_comms(&mut self) {
         use crate::session::Activity;
         let now = std::time::Instant::now();
+        // Operator texts route first so fresh injections can deliver on
+        // this same tick when their target is idle.
+        self.drain_telegram();
         // Second-scale sweep on a 16ms loop: skip inside the window.
         // Everything below (debounce gates, queue delivery, staged
         // Enters) stays per-tick, so injections never wait on this.
@@ -2454,10 +2994,32 @@ impl AppState {
                 }
             })
         });
+        let telegram_on = self
+            .telegram_config
+            .lock()
+            .map(|cfg| cfg.enabled)
+            .unwrap_or(false);
+        // A failing last poll shows as retrying: without it a stalled
+        // poller (e.g. long backoff after early failures) looks exactly
+        // like a quiet healthy one.
+        let telegram_state = if telegram_on && self.telegram_last_poll_failed {
+            "on · retrying"
+        } else if telegram_on {
+            "on"
+        } else {
+            "off"
+        };
+        let telegram_badge = self.last_telegram_badged.and_then(|id| {
+            let name = self.manager.get(id)?.name.clone();
+            let text = self.message_user_badges.get(&id)?.clone();
+            Some((name, text))
+        });
         crate::ui::SidebarInfo {
             session,
             pending: self.pending_hooks.len(),
             mode: self.permission_mode.as_str(),
+            telegram: telegram_state,
+            telegram_badge,
         }
     }
 
@@ -2616,6 +3178,24 @@ impl AppState {
                 };
                 let _ = req.reply.send(line);
                 self.dirty = true;
+            }
+            AppEvent::TelegramPoll(report) => {
+                // Inbound texts queue for routing; failures only flip
+                // the flag Phase 5 surfaces. The inbox is bounded: past
+                // the cap newcomers drop and count, never grow the owner.
+                self.telegram_last_poll_failed = report.failed;
+                let mut queued = false;
+                for msg in report.messages {
+                    if self.telegram_inbox.len() >= crate::telegram::INBOX_CAP {
+                        self.telegram_dropped += 1;
+                    } else {
+                        self.telegram_inbox.push_back(msg);
+                        queued = true;
+                    }
+                }
+                if queued || report.failed {
+                    self.dirty = true;
+                }
             }
             AppEvent::Resize(rows, cols) => {
                 self.term_size = (rows, cols);
@@ -4631,6 +5211,45 @@ mod tests {
         assert!(state.manager.remove(state.manager.order()[0]));
     }
 
+    #[test]
+    fn telegram_poll_queues_inbound_and_flags_failure() {
+        let mut s = AppState::new();
+        s.apply(AppEvent::TelegramPoll(crate::telegram::PollReport {
+            messages: vec![crate::telegram::InboundMessage {
+                user_id: 11,
+                chat_id: 11,
+                text: "hi".to_string(),
+            }],
+            failed: false,
+        }));
+        assert_eq!(s.telegram_inbox.len(), 1);
+        assert!(!s.telegram_last_poll_failed);
+        s.apply(AppEvent::TelegramPoll(crate::telegram::PollReport {
+            messages: Vec::new(),
+            failed: true,
+        }));
+        assert!(s.telegram_last_poll_failed);
+        assert_eq!(s.telegram_inbox.len(), 1, "failures queue nothing");
+    }
+
+    #[test]
+    fn telegram_inbox_is_bounded_and_counts_drops() {
+        let mut s = AppState::new();
+        for i in 0..(crate::telegram::INBOX_CAP as i64 + 5) {
+            s.apply(AppEvent::TelegramPoll(crate::telegram::PollReport {
+                messages: vec![crate::telegram::InboundMessage {
+                    user_id: i,
+                    chat_id: i,
+                    text: "m".to_string(),
+                }],
+                failed: false,
+            }));
+        }
+        assert_eq!(s.telegram_inbox.len(), crate::telegram::INBOX_CAP);
+        assert_eq!(s.telegram_dropped, 5);
+        assert_eq!(s.telegram_inbox[0].user_id, 0, "oldest kept: FIFO drain");
+    }
+
     #[cfg(feature = "visual")]
     fn spawn_visual_agent(state: &mut AppState, name: &str) -> (crate::session::SessionId, String) {
         let id = state.manager.spawn_agent(
@@ -6034,6 +6653,8 @@ mod tests {
             detail: None,
             pending: 0,
             mode: "off",
+            telegram: "off",
+            telegram_badge: None,
             grid: false,
             pills: true,
         };
@@ -6271,6 +6892,519 @@ mod tests {
         let cleared = comms_reply(&mut state, &live_run, "clear_session_status", "{}");
         assert!(cleared.contains(r#""status_cleared":true"#), "cleared: {cleared}");
         assert!(state.manager.get(id).unwrap().status.is_none());
+        assert!(state.manager.remove(id));
+    }
+
+    fn message_user_agent() -> (AppState, crate::session::SessionId, String) {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let id = state
+            .manager
+            .spawn_agent(
+                "agent",
+                &std::env::temp_dir(),
+                "exec cat",
+                crate::ids::RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        (state, id, live_run)
+    }
+
+    #[test]
+    fn message_user_badges_without_forward_when_disabled() {
+        let (mut state, id, live_run) = message_user_agent();
+        let ok = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"hello operator"}"#);
+        assert!(ok.contains(r#""ok":true"#), "ok: {ok}");
+        assert!(ok.contains("conversation_id"), "ok: {ok}");
+        assert!(ok.contains(r#""forwarded":false"#), "disabled never forwards: {ok}");
+        assert_eq!(
+            state.message_user_badges.get(&id).map(String::as_str),
+            Some("hello operator")
+        );
+        let stale = comms_reply(&mut state, "bogus-run", "message_user", r#"{"message":"x"}"#);
+        assert!(stale.contains("unknown or stale run ID"), "stale: {stale}");
+        let empty = comms_reply(&mut state, &live_run, "message_user", "{}");
+        assert!(empty.contains("message_user needs a message"), "empty: {empty}");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn message_user_rate_limits_at_three_per_minute() {
+        let (mut state, _id, live_run) = message_user_agent();
+        for i in 0..3 {
+            let ok = comms_reply(
+                &mut state,
+                &live_run,
+                "message_user",
+                &format!(r#"{{"message":"note {i}"}}"#),
+            );
+            assert!(ok.contains(r#""ok":true"#), "send {i}: {ok}");
+        }
+        let fourth = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"note 3"}"#);
+        assert!(fourth.contains("rate limited"), "fourth: {fourth}");
+    }
+
+    fn tg_agent(name: &str) -> (AppState, crate::session::SessionId, String) {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let id = state
+            .manager
+            .spawn_agent(
+                name,
+                &std::env::temp_dir(),
+                "exec cat",
+                crate::ids::RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        (state, id, live_run)
+    }
+
+    fn tg_inbox(state: &mut AppState, chat: i64, texts: &[&str]) {
+        for text in texts {
+            state.telegram_inbox.push_back(crate::telegram::InboundMessage {
+                user_id: 11,
+                chat_id: chat,
+                text: text.to_string(),
+            });
+        }
+    }
+
+    fn tg_outbox(state: &AppState) -> Vec<crate::telegram::OutboundMessage> {
+        let mut guard = state.telegram_outbox.lock().expect("outbox unlocks");
+        let mut out = Vec::new();
+        while let Some(m) = guard.pop_front() {
+            out.push(m);
+        }
+        out
+    }
+
+    #[test]
+    fn telegram_sessions_command_lists_live_sessions() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["/sessions"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("agent"), "list: {}", replies[0].text);
+        assert_eq!(replies[0].chat_id, 11);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_help_names_commands() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["/help"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        for cmd in ["/sessions", "/help", "/int", "/clear"] {
+            assert!(replies[0].text.contains(cmd), "help: {}", replies[0].text);
+        }
+        assert!(replies[0].text.contains("[name]"), "address form: {}", replies[0].text);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_unknown_command_errors() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["/bogus"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("unknown command"), "reply: {}", replies[0].text);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_bare_text_without_badge_guides() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["hello?"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("/sessions"), "guides to discovery: {}", replies[0].text);
+        assert_eq!(state.broker.queued(id), 0, "nothing routed blind");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_prefixed_text_routes_to_session() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["[agent] do the thing"]);
+        state.drain_telegram();
+        assert_eq!(state.broker.queued(id), 1);
+        let head = state.broker.peek_due(id).expect("queued");
+        assert_eq!(head.kind, crate::comms::InjectKind::Command);
+        assert_eq!(head.from, "operator");
+        assert!(head.text.contains("do the thing"), "body: {}", head.text);
+        assert!(head.text.contains("message_user"), "reply guidance: {}", head.text);
+        let replies = tg_outbox(&state);
+        assert!(replies.is_empty(), "routed text stays silent: {replies:?}");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_bare_text_follows_last_badge() {
+        let (mut state, id, live_run) = tg_agent("agent");
+        let ok = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"ping"}"#);
+        assert!(ok.contains(r#""ok":true"#), "badge: {ok}");
+        tg_inbox(&mut state, 11, &["pong"]);
+        state.drain_telegram();
+        assert_eq!(state.broker.queued(id), 1, "operator answers the badge");
+        // A colon in free text is not an address: unresolvable heads
+        // still follow the badge.
+        tg_inbox(&mut state, 11, &["note: buy milk"]);
+        state.drain_telegram();
+        assert_eq!(state.broker.queued(id), 2, "free text follows the badge");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_old_colon_form_hints_at_brackets() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["agent: hi"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("[agent]"), "hint: {}", replies[0].text);
+        assert_eq!(state.broker.queued(id), 0, "old form never routes");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_unknown_session_errors_without_queueing() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["[ghost] hi"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("no live session"), "reply: {}", replies[0].text);
+        assert_eq!(state.broker.queued(id), 0);
+        assert!(state.manager.remove(id));
+        // Replying after exit names the same dead end, never a live pane.
+        tg_inbox(&mut state, 11, &["[agent] hi"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("no live session"), "reply: {}", replies[0].text);
+    }
+
+    #[test]
+    fn telegram_refuses_when_session_queue_full() {
+        let (mut state, id, _run) = tg_agent("agent");
+        for _ in 0..crate::comms::QUEUE_CAP {
+            state.broker.push(
+                id,
+                crate::comms::Injection {
+                    conv: "pad".to_string(),
+                    kind: crate::comms::InjectKind::Command,
+                    from: "pad".to_string(),
+                    text: "pad".to_string(),
+                },
+            );
+        }
+        tg_inbox(&mut state, 11, &["[agent] one more"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("queue full"), "reply: {}", replies[0].text);
+        assert_eq!(state.broker.queued(id), crate::comms::QUEUE_CAP, "never past the cap");
+        // Drain the padding so the session record can leave cleanly.
+        state.broker.take_due(id, crate::comms::QUEUE_CAP + 1);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_int_interrupts_live_session() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["/int agent"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("interrupted"), "reply: {}", replies[0].text);
+        tg_inbox(&mut state, 11, &["/int ghost"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert!(replies[0].text.contains("no live session"), "reply: {}", replies[0].text);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_clear_drops_queued_injections() {
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["[agent] one", "[agent] two"]);
+        state.drain_telegram();
+        assert_eq!(state.broker.queued(id), 2);
+        assert!(tg_outbox(&state).is_empty(), "routes stay silent");
+        tg_inbox(&mut state, 11, &["/clear agent"]);
+        state.drain_telegram();
+        let replies = tg_outbox(&state);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].text.contains("cleared 2"), "reply: {}", replies[0].text);
+        assert_eq!(state.broker.queued(id), 0);
+        assert!(state.manager.remove(id));
+    }
+
+    fn tg_home() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-tg-form-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(crate::branding::config_dir(&dir)).unwrap();
+        dir
+    }
+
+    #[test]
+    fn telegram_form_save_writes_token_and_lives() {
+        let home = tg_home();
+        let path = crate::branding::config_file(&home);
+        let mut loaded = crate::config::LoadedConfig::load(&path).expect("defaults load");
+        let token_path = home.join("tg.token");
+        let mut state = AppState::new();
+        state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
+            &crate::config::TelegramConfig::default(),
+        ));
+        let form = crate::telegram_dialog::TelegramForm {
+            config: crate::config::TelegramConfig {
+                enabled: true,
+                token_file: token_path.to_string_lossy().into_owned(),
+                allowed_user_ids: vec![11],
+                notify_chat_id: 11,
+                poll_seconds: 20,
+                backoff_min_seconds: 60,
+                backoff_max_seconds: 900,
+            },
+            token: "0123456789abcdef0123456789abcdef".to_string(),
+        };
+        state.apply_telegram_form(&mut loaded, &home, form).expect("save applies");
+        assert_eq!(
+            std::fs::read_to_string(&token_path).expect("token written"),
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert!(loaded.config.telegram.enabled);
+        assert_eq!(loaded.config.telegram.allowed_user_ids, vec![11]);
+        let live = state.telegram_config.lock().expect("live config");
+        assert!(live.enabled, "poll thread sees the save at once");
+        assert!(state.telegram_dialog.is_none(), "save closes the dialog");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&token_path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "token file is owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn telegram_tested_lands_in_open_dialog() {
+        let mut state = AppState::new();
+        state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
+            &crate::config::TelegramConfig::default(),
+        ));
+        state
+            .telegram_test_tx
+            .send(crate::telegram::TelegramTested {
+                ok: true,
+                detail: "@forkbot".to_string(),
+            })
+            .expect("test channel accepts");
+        state.drain_telegram_test();
+        let dialog = state.telegram_dialog.as_ref().expect("dialog stays open");
+        assert_eq!(
+            dialog.test_result(),
+            Some((true, "@forkbot".to_string())),
+            "result surfaces in the form"
+        );
+        // No dialog: the result drops without panic.
+        state.telegram_dialog = None;
+        state
+            .telegram_test_tx
+            .send(crate::telegram::TelegramTested {
+                ok: false,
+                detail: "request failed".to_string(),
+            })
+            .expect("test channel accepts");
+        state.drain_telegram_test();
+    }
+
+    #[test]
+    fn telegram_test_with_unreadable_token_reports_inline() {
+        let mut state = AppState::new();
+        state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
+            &crate::config::TelegramConfig::default(),
+        ));
+        state.start_telegram_test(String::new(), "/nonexistent-forge-tg.token".to_string());
+        let dialog = state.telegram_dialog.as_ref().expect("dialog stays open");
+        assert!(
+            dialog.test_result().is_some_and(|(ok, detail)| !ok && detail.contains("unreadable")),
+            "inline failure, no thread: {:?}",
+            dialog.test_result()
+        );
+    }
+
+    #[test]
+    fn sidebar_info_marks_failing_telegram_poll() {
+        let mut state = AppState::new();
+        state.telegram_config.lock().expect("lock").enabled = true;
+        state.telegram_last_poll_failed = true;
+        assert_eq!(state.sidebar_info().telegram, "on · retrying");
+        state.telegram_last_poll_failed = false;
+        assert_eq!(state.sidebar_info().telegram, "on");
+        state.telegram_config.lock().expect("lock").enabled = false;
+        assert_eq!(state.sidebar_info().telegram, "off");
+    }
+
+    #[test]
+    fn message_user_forward_marks_session_keeps_badge_raw() {
+        let (mut state, id, live_run) = message_user_agent();
+        let dir = std::env::temp_dir().join(format!("forge-tg-fwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token_path = dir.join("tg.token");
+        std::fs::write(&token_path, "0123456789abcdef0123456789abcdef").unwrap();
+        {
+            let mut cfg = state.telegram_config.lock().expect("lock");
+            cfg.enabled = true;
+            cfg.token_file = token_path.to_string_lossy().into_owned();
+            cfg.notify_chat_id = 11;
+        }
+        let ok = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"hello"}"#);
+        assert!(ok.contains(r#""forwarded":true"#), "worker attempted: {ok}");
+        assert_eq!(
+            state.message_user_badges.get(&id).map(String::as_str),
+            Some("hello"),
+            "badge stays raw; only the Telegram text carries [name]"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn presence_goes_away_after_twenty_idle_minutes() {
+        let (mut state, id, _run) = tg_agent("agent");
+        let t0 = std::time::Instant::now();
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(19 * 60));
+        assert!(!state.away, "nineteen minutes is still here");
+        assert_eq!(state.broker.queued(id), 0);
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(21 * 60));
+        assert!(state.away, "twenty minutes idle is away");
+        assert_eq!(state.broker.queued(id), 1);
+        let head = state.broker.peek_due(id).expect("away notice queued");
+        assert_eq!(head.kind, crate::comms::InjectKind::Command);
+        assert!(head.text.contains("user is away"), "body: {}", head.text);
+        assert!(head.text.contains("message_user"), "guidance: {}", head.text);
+        // Further idle settles never duplicate the notice.
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(40 * 60));
+        assert_eq!(state.broker.queued(id), 1, "away announced once");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn presence_back_clears_on_input() {
+        let (mut state, id, _run) = tg_agent("agent");
+        let t0 = std::time::Instant::now();
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(21 * 60));
+        assert!(state.away);
+        state.settle_presence(true, t0 + std::time::Duration::from_secs(22 * 60));
+        assert!(!state.away, "any input ends away");
+        assert_eq!(state.broker.queued(id), 2);
+        state.broker.take_due(id, 1);
+        let head = state.broker.peek_due(id).expect("back notice queued");
+        assert!(head.text.contains("user is back"), "body: {}", head.text);
+        assert!(head.text.contains("don't use message_user"), "stand-down: {}", head.text);
+        // Further input is just presence, never another notice.
+        state.settle_presence(true, t0 + std::time::Duration::from_secs(23 * 60));
+        assert_eq!(state.broker.queued(id), 1, "back announced once");
+        state.broker.take_due(id, 1);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn presence_skips_exited_and_full_sessions() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let live = state
+            .manager
+            .spawn_agent(
+                "agent",
+                &std::env::temp_dir(),
+                "exec cat",
+                crate::ids::RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        let gone = state
+            .manager
+            .spawn_agent(
+                "gone",
+                &std::env::temp_dir(),
+                "exec cat",
+                crate::ids::RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        std::env::remove_var("CODEX_BIN");
+        state.manager.get_mut(gone).expect("gone").state = crate::session::SessionState::Exited(None);
+        // Fill the live session to its queue cap.
+        for _ in 0..crate::comms::QUEUE_CAP {
+            state.broker.push(
+                live,
+                crate::comms::Injection {
+                    conv: "pad".to_string(),
+                    kind: crate::comms::InjectKind::Command,
+                    from: "pad".to_string(),
+                    text: "pad".to_string(),
+                },
+            );
+        }
+        let t0 = std::time::Instant::now();
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(21 * 60));
+        assert!(state.away, "away still flips");
+        assert_eq!(
+            state.broker.queued(live),
+            crate::comms::QUEUE_CAP,
+            "full queues are skipped, never grown"
+        );
+        assert_eq!(state.broker.queued(gone), 0, "exited panes get nothing");
+        state.broker.take_due(live, crate::comms::QUEUE_CAP + 1);
+        assert!(state.manager.remove(live));
+        assert!(state.manager.remove(gone));
+    }
+
+    #[test]
+    fn telegram_poller_starts_once_when_enabled() {
+        let mut state = AppState::new();
+        assert!(!state.telegram_poller_wanted(), "disabled wants nothing");
+        state.telegram_config.lock().expect("lock").enabled = true;
+        assert!(state.telegram_poller_wanted(), "enabling wants a start");
+        state.telegram_poller = true;
+        assert!(!state.telegram_poller_wanted(), "started never restarts");
+    }
+
+    #[test]
+    fn message_user_replays_idempotent_retries() {
+        let (mut state, id, live_run) = message_user_agent();
+        let args = r#"{"message":"same","idempotency_key":"k1"}"#;
+        let first = comms_reply(&mut state, &live_run, "message_user", args);
+        let second = comms_reply(&mut state, &live_run, "message_user", args);
+        assert!(first.contains(r#""ok":true"#), "first: {first}");
+        assert_eq!(first, second, "retry replays the same verdict");
+        let clash = comms_reply(
+            &mut state,
+            &live_run,
+            "message_user",
+            r#"{"message":"different","idempotency_key":"k1"}"#,
+        );
+        assert!(clash.contains("conflict"), "clash: {clash}");
         assert!(state.manager.remove(id));
     }
 

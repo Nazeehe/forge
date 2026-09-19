@@ -716,11 +716,10 @@ impl Walkthrough {
     /// encoding, Markdown through the theme-skinned renderer.
     pub fn view(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         use ratatui::layout::Rect;
-        use ratatui::style::Modifier;
         use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+        use ratatui::widgets::{Clear, Paragraph};
         use crate::safe_text::encode_for_display;
-        use crate::theme::{focus_row, style, Role};
+        use crate::theme::{style, Role};
         frame.render_widget(Clear, area);
         let (x, y, w, h) = (area.x, area.y, area.width, area.height);
         if w < 10 || h < 2 {
@@ -775,7 +774,6 @@ impl Walkthrough {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::Paragraph;
         use crate::safe_text::encode_for_display;
-        use crate::theme::{style, Role};
         if area.height == 0 {
             return;
         }

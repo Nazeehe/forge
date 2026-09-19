@@ -27,6 +27,10 @@ pub enum AppEvent {
     /// and the handler relays the one-line verdict with a typed error
     /// object on failure.
     BotRequest(crate::listener::BotRequest),
+    /// Telegram long-poll results. The poller thread sends only when
+    /// there is something to act on (fresh inbound text or a poll
+    /// failure); quiet polls stay silent so the loop never wakes.
+    TelegramPoll(crate::telegram::PollReport),
     Shutdown,
 }
 
@@ -66,6 +70,25 @@ mod tests {
             AppEvent::SessionExited { id: got, code } => {
                 assert_eq!(got, id);
                 assert_eq!(code, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn telegram_poll_carries_messages_and_failure() {
+        let poll = AppEvent::TelegramPoll(crate::telegram::PollReport {
+            messages: vec![crate::telegram::InboundMessage {
+                user_id: 11,
+                chat_id: 11,
+                text: "hi".to_string(),
+            }],
+            failed: false,
+        });
+        match poll {
+            AppEvent::TelegramPoll(report) => {
+                assert_eq!(report.messages.len(), 1);
+                assert!(!report.failed);
             }
             _ => panic!("wrong variant"),
         }

@@ -119,6 +119,9 @@ pub fn run(
     install_panic_hook();
     state.permission_mode = loaded.config.permission.mode.clone();
     state.pill_tabs = loaded.config.pills_enabled;
+    if let Ok(mut tg) = state.telegram_config.lock() {
+        *tg = loaded.config.telegram.clone();
+    }
     let mut policy = match crate::policy::Policy::new(
         loaded.config.permission.mode.clone(),
         &loaded.config.permission.allow,
@@ -138,7 +141,7 @@ pub fn run(
     // The IPC listener is fail-soft: without it, hook relays simply find
     // no endpoint and exit zero. Children inherit the endpoint by env;
     // harnesses that scrub hook environments (muse) use the endpoint file.
-    let _ipc = match crate::listener::spawn_all(ipc_tx) {
+    let _ipc = match crate::listener::spawn_all(ipc_tx.clone()) {
         Ok(spawned) => {
             std::env::set_var("FORGE_IPC_ENDPOINT", &spawned.sock_path);
             if let Err(e) = crate::relay::write_endpoint_file(
@@ -155,6 +158,11 @@ pub fn run(
             None
         }
     };
+    // The Telegram poller starts inside the loop on the first pass
+    // that sees the section enabled, so enabling from the settings
+    // modal needs no restart. The thread only ever emits bounded
+    // AppEvents; a dead owner ends it, anything else waits out backoff
+    // and retries.
     let mut terminal = match Terminal::new(CrosstermBackend::new(io::stdout())) {
         Ok(t) => t,
         Err(e) => {
@@ -175,6 +183,7 @@ pub fn run(
         state,
         &mut terminal,
         ipc_rx,
+        &ipc_tx,
         &mut policy,
         &audit_path,
         loaded,
@@ -297,6 +306,7 @@ fn loop_until_quit(
     state: &mut AppState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ipc: std::sync::mpsc::Receiver<AppEvent>,
+    ipc_tx: &std::sync::mpsc::SyncSender<AppEvent>,
     policy: &mut crate::policy::Policy,
     audit_path: &std::path::Path,
     loaded: &mut crate::config::LoadedConfig,
@@ -357,6 +367,8 @@ fn loop_until_quit(
                         handle_dialog_key(state, key);
                     } else if state.group_dialog.is_some() {
                         handle_group_key(state, key);
+                    } else if state.telegram_dialog.is_some() {
+                        handle_telegram_key(state, loaded, home, key);
                     } else if state.quit_confirm.is_some() {
                         handle_quit_key(state, key);
                     } else {
@@ -369,7 +381,12 @@ fn loop_until_quit(
                 }
                 event::Event::Paste(text) => {
                     input_this_tick = true;
-                    if state.restore_picker.is_none()
+                    if let Some(dialog) = state.telegram_dialog.as_mut() {
+                        // The settings form takes the paste like typing;
+                        // every other modal still swallows pastes.
+                        dialog.paste(&text);
+                        state.dirty = true;
+                    } else if state.restore_picker.is_none()
                         && state.create_dialog.is_none()
                         && state.group_dialog.is_none()
                         && state.quit_confirm.is_none()
@@ -410,6 +427,21 @@ fn loop_until_quit(
         state.settle_hooks(policy, audit_path);
         state.settle_comms();
         state.drain_visual();
+        state.drain_telegram_test();
+        // Presence rides the loop's own input flag (keys, mouse,
+        // paste): twenty silent minutes announce away to every live
+        // session, the next input announces the return.
+        state.settle_presence(input_this_tick, Instant::now());
+        // Lazy poller start: the first pass that sees Telegram enabled
+        // launches the thread exactly once, so the settings modal can
+        // enable delivery without a restart.
+        if state.telegram_poller_wanted() {
+            state.telegram_poller = true;
+            let tg_cfg = state.telegram_config.clone();
+            let tg_tx = ipc_tx.clone();
+            let tg_outbox = state.telegram_outbox.clone();
+            std::thread::spawn(move || crate::telegram::poll_forever(tg_cfg, tg_tx, tg_outbox));
+        }
         // Streaming pane output paces to BACKGROUND_FRAME_MS; input
         // paints at once. A skipped tick keeps dirty set, so no frame
         // is lost, only delayed past the budget.
@@ -426,6 +458,12 @@ fn loop_until_quit(
                 detail: info.session,
                 pending: state.pending_hooks.len(),
                 mode: policy.mode().as_str(),
+                telegram: state
+                    .telegram_config
+                    .lock()
+                    .map(|cfg| if cfg.enabled { "on" } else { "off" })
+                    .unwrap_or("off"),
+                telegram_badge: info.telegram_badge,
                 grid: state.grid_mode,
                 pills: state.pill_tabs,
             };
@@ -442,6 +480,9 @@ fn loop_until_quit(
                     if let Some(dialog) = state.group_dialog.as_ref() {
                         dialog.view(f, garea, &ctx);
                     }
+                }
+                if let Some(dialog) = state.telegram_dialog.as_mut() {
+                    dialog.view(f, crate::telegram_dialog::telegram_area(area));
                 }
                 if let Some(dialog) = state.quit_confirm.as_ref() {
                     dialog.view(f, crate::quit::quit_area(area));
@@ -673,6 +714,9 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
                     fit_active_pane(state);
                 }
             }
+            UserCommand::TelegramSettings => {
+                state.open_telegram_dialog();
+            }
         },
         RoutedKey::PrefixPending | RoutedKey::Cancelled => {
             state.dirty = true;
@@ -726,6 +770,37 @@ fn handle_group_key(state: &mut AppState, key: event::KeyEvent) {
             state.apply_group(other);
         }
         None => {}
+    }
+}
+
+/// One Telegram-settings key: submit saves and closes, test requests
+/// stay open, cancel closes, edits redraw.
+fn handle_telegram_key(
+    state: &mut AppState,
+    loaded: &mut crate::config::LoadedConfig,
+    home: &std::path::Path,
+    key: event::KeyEvent,
+) {
+    let outcome = state.telegram_dialog.as_mut().map(|d| d.key(&key));
+    match outcome {
+        Some(crate::telegram_dialog::TelegramOutcome::Submitted(form)) => {
+            if let Err(e) = state.apply_telegram_form(loaded, home, form) {
+                if let Some(dialog) = state.telegram_dialog.as_mut() {
+                    dialog.set_error(e);
+                }
+            }
+            state.dirty = true;
+        }
+        Some(crate::telegram_dialog::TelegramOutcome::Test { token, token_file }) => {
+            state.start_telegram_test(token, token_file);
+        }
+        Some(crate::telegram_dialog::TelegramOutcome::Cancelled) => {
+            state.telegram_dialog = None;
+            state.dirty = true;
+        }
+        _ => {
+            state.dirty = true;
+        }
     }
 }
 
@@ -2050,6 +2125,18 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
         );
         assert!(state.create_dialog.is_some());
+    }
+
+    #[test]
+    fn prefix_m_opens_telegram_dialog() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let prefix = || KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key(&mut state, &mut router, prefix());
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('m'), none));
+        assert!(state.telegram_dialog.is_some(), "Ctrl-b m opens Telegram settings");
     }
 
     #[test]

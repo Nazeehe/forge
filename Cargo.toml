@@ -17,6 +17,9 @@ portable-pty = "0.8"
 ratatui = "0.30"
 regex = "1"
 serde_json = "1"
+# Telegram Bot API transport: blocking HTTPS long-poll plus sendMessage.
+# Default TLS (rustls) plus the `json` body helper; nothing async.
+ureq = { version = "3", features = ["json"] }
 toml = "1"
 tui-realm-stdlib = "4.1.0"
 tuirealm = "4.1.0"

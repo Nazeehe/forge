@@ -1105,20 +1105,20 @@ mod tests {
         let buf = terminal.backend().buffer();
         // Padded content starts at (11, 4): header above, cursor member
         // one row down from the unpadded layout.
-        let mark = buf.get(11, 5);
+        let mark = &buf[(11, 5)];
         assert_eq!(mark.symbol(), ">");
         assert_eq!(mark.fg, Color::Cyan, "focus is cyan, not yellow");
         assert!(mark.modifier.contains(Modifier::REVERSED));
         // Member row: marker, 4-space indent, dot, name.
-        let name = buf.get(19, 5);
+        let name = &buf[(19, 5)];
         assert_eq!(name.symbol(), "a");
         assert!(name.modifier.contains(Modifier::REVERSED), "cursor row reverses");
         // The group dot keeps its identity color under focus.
-        assert_eq!(buf.get(17, 5).symbol(), "●");
-        assert_eq!(buf.get(17, 5).fg, crate::ui::group_palette(0));
+        assert_eq!(buf[(17, 5)].symbol(), "●");
+        assert_eq!(buf[(17, 5)].fg, crate::ui::group_palette(0));
         // The header row above stays plain white text.
-        assert_eq!(buf.get(11, 4).symbol(), " ");
-        assert_eq!(buf.get(13, 4).fg, Color::White);
+        assert_eq!(buf[(11, 4)].symbol(), " ");
+        assert_eq!(buf[(13, 4)].fg, Color::White);
     }
 
     #[test]
@@ -1137,10 +1137,10 @@ mod tests {
             .map(|cell| cell.symbol()).collect::<String>();
         assert!(text.contains("Group name: [ab▌]"), "boxed input: {text:?}");
         // Padded input row one down and two in.
-        let mark = buf.get(11, 4);
+        let mark = &buf[(11, 4)];
         assert_eq!(mark.symbol(), ">");
         assert_eq!(mark.fg, Color::Cyan);
-        let open = buf.get(11 + 2 + 12, 4);
+        let open = &buf[(11 + 2 + 12, 4)];
         assert_eq!(open.symbol(), "[");
         assert!(open.modifier.contains(Modifier::REVERSED), "field reverses");
     }

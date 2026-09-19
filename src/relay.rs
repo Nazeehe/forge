@@ -232,7 +232,6 @@ pub fn run(
             }
         }
         if reply.ends_with(b"\n") {
-            use std::io::Write;
             let _ = stdout.write_all(&reply);
         }
     }

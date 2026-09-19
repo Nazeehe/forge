@@ -583,7 +583,7 @@ mod tests {
     }
 
     /// Drain events until the pane exits; return (bytes seen, exit code).
-    fn run_until_exit(pane: &mut PtyPane, rx: &std::sync::mpsc::Receiver<(SessionId, PtyEvent)>) -> (Vec<u8>, Option<i32>) {
+    fn run_until_exit(_pane: &mut PtyPane, rx: &std::sync::mpsc::Receiver<(SessionId, PtyEvent)>) -> (Vec<u8>, Option<i32>) {
         let mut out = Vec::new();
         let deadline = Instant::now() + TIMEOUT;
         loop {

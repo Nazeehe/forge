@@ -544,6 +544,13 @@ impl Broker {
         self.queue.entry(id).or_default().push_back(inj);
     }
 
+    /// Drop every queued injection for `id`, returning the count. The
+    /// operator `/clear` unsticks a session; delivered asks and
+    /// completions are untouched.
+    pub(crate) fn clear_queue(&mut self, id: SessionId) -> usize {
+        self.queue.remove(&id).map(|q| q.len()).unwrap_or(0)
+    }
+
     /// Resolve the caller by current run ID: bound, live, and matching the
     /// record (a rebound ID never resolves to its previous holder).
     fn resolve_caller(

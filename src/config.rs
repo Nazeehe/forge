@@ -70,12 +70,43 @@ pub struct BotRegistration {
     pub grants: Vec<String>,
 }
 
+/// Telegram mobile transport (`[telegram]`): disabled and empty by
+/// default. The bot token itself never lives in this document; `token_file`
+/// points at a `0600` file the poller reads, mirroring `[[bots]]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramConfig {
+    pub enabled: bool,
+    pub token_file: String,
+    pub allowed_user_ids: Vec<i64>,
+    /// Telegram chat receiving `message_user` forwards. `0` (the default)
+    /// disables forwarding while the in-app badge still records.
+    pub notify_chat_id: i64,
+    pub poll_seconds: u64,
+    pub backoff_min_seconds: u64,
+    pub backoff_max_seconds: u64,
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        TelegramConfig {
+            enabled: false,
+            token_file: String::new(),
+            allowed_user_ids: Vec::new(),
+            notify_chat_id: 0,
+            poll_seconds: 20,
+            backoff_min_seconds: 60,
+            backoff_max_seconds: 900,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub theme: String,
     pub prefix: String,
     pub permission: PermissionConfig,
     pub ai: AiConfig,
+    pub telegram: TelegramConfig,
     pub claudling_enabled: bool,
     pub telemetry_enabled: bool,
     pub clikan_enabled: bool,
@@ -103,6 +134,7 @@ impl Default for Config {
                 auto_refresh: true,
                 key_env: "APE_API_KEY".to_string(),
             },
+            telegram: TelegramConfig::default(),
             claudling_enabled: false,
             telemetry_enabled: true,
             clikan_enabled: false,
@@ -239,6 +271,21 @@ fn float_val(raw: &toml::Table, key: &str, default: f64) -> Result<f64, ConfigEr
     }
 }
 
+fn i64_list(raw: &toml::Table, key: &str, section: &str) -> Result<Vec<i64>, ConfigError> {
+    match raw.get(key) {
+        None => Ok(Vec::new()),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(|| ConfigError::BadValue(format!("[{section}.{key}] must be an integer list")))?
+            .iter()
+            .map(|e| {
+                e.as_integer()
+                    .ok_or_else(|| ConfigError::BadValue(format!("[{section}.{key}] must be an integer list")))
+            })
+            .collect(),
+    }
+}
+
 fn str_list(raw: &toml::Table, key: &str, section: &str) -> Result<Vec<String>, ConfigError> {
     match raw.get(key) {
         None => Ok(Vec::new()),
@@ -272,6 +319,58 @@ fn extract(raw: &toml::Table) -> Result<Config, ConfigError> {
     let clikan = subtable(raw, "clikan");
     let pills = subtable(raw, "pills");
     let messaging = subtable(raw, "messaging");
+    let telegram = subtable(raw, "telegram");
+    let telegram_cfg = TelegramConfig {
+        enabled: telegram.map(|t| bool_val(t, "enabled", false)).unwrap_or(false),
+        token_file: telegram
+            .map(|t| str_val(t, "token_file", ""))
+            .unwrap_or_default(),
+        allowed_user_ids: telegram
+            .map(|t| i64_list(t, "allowed_user_ids", "telegram"))
+            .transpose()?
+            .unwrap_or_default(),
+        notify_chat_id: match telegram.and_then(|t| t.get("notify_chat_id")) {
+            None => 0,
+            Some(v) => v.as_integer().ok_or_else(|| {
+                ConfigError::BadValue("[telegram.notify_chat_id] must be an integer".to_string())
+            })?,
+        },
+        poll_seconds: telegram
+            .map(|t| u64_val(t, "poll_seconds", 20))
+            .transpose()
+            .map_err(|_| {
+                ConfigError::BadValue("[telegram.poll_seconds] must be a non-negative integer".to_string())
+            })?
+            .unwrap_or(20),
+        backoff_min_seconds: telegram
+            .map(|t| u64_val(t, "backoff_min_seconds", 60))
+            .transpose()
+            .map_err(|_| {
+                ConfigError::BadValue(
+                    "[telegram.backoff_min_seconds] must be a non-negative integer".to_string(),
+                )
+            })?
+            .unwrap_or(60),
+        backoff_max_seconds: telegram
+            .map(|t| u64_val(t, "backoff_max_seconds", 900))
+            .transpose()
+            .map_err(|_| {
+                ConfigError::BadValue(
+                    "[telegram.backoff_max_seconds] must be a non-negative integer".to_string(),
+                )
+            })?
+            .unwrap_or(900),
+    };
+    if telegram_cfg.poll_seconds == 0 {
+        return Err(ConfigError::BadValue(
+            "[telegram.poll_seconds] must be at least 1".to_string(),
+        ));
+    }
+    if telegram_cfg.backoff_min_seconds > telegram_cfg.backoff_max_seconds {
+        return Err(ConfigError::BadValue(
+            "[telegram.backoff_min_seconds] must not exceed [telegram.backoff_max_seconds]".to_string(),
+        ));
+    }
     Ok(Config {
         theme: str_val(raw, "theme", "default"),
         prefix: str_val(raw, "prefix", "ctrl-b"),
@@ -289,6 +388,7 @@ fn extract(raw: &toml::Table) -> Result<Config, ConfigError> {
             auto_refresh: bool_val(ai, "auto_refresh", true),
             key_env: str_val(ai, "key_env", "APE_API_KEY"),
         },
+        telegram: telegram_cfg,
         claudling_enabled: claudling.map(|t| bool_val(t, "enabled", false)).unwrap_or(false),
         telemetry_enabled: telemetry.map(|t| bool_val(t, "enabled", true)).unwrap_or(true),
         clikan_enabled: clikan.map(|t| bool_val(t, "enabled", false)).unwrap_or(false),
@@ -389,6 +489,43 @@ fn merge(raw: &mut toml::Table, config: &Config) {
         toml::Value::Integer(config.messaging_idle_minutes as i64),
     );
     raw.insert("messaging".to_string(), toml::Value::Table(messaging));
+    let mut telegram = toml::Table::new();
+    telegram.insert(
+        "enabled".to_string(),
+        toml::Value::Boolean(config.telegram.enabled),
+    );
+    telegram.insert(
+        "token_file".to_string(),
+        toml::Value::String(config.telegram.token_file.clone()),
+    );
+    telegram.insert(
+        "allowed_user_ids".to_string(),
+        toml::Value::Array(
+            config
+                .telegram
+                .allowed_user_ids
+                .iter()
+                .map(|id| toml::Value::Integer(*id))
+                .collect(),
+        ),
+    );
+    telegram.insert(
+        "notify_chat_id".to_string(),
+        toml::Value::Integer(config.telegram.notify_chat_id),
+    );
+    telegram.insert(
+        "poll_seconds".to_string(),
+        toml::Value::Integer(config.telegram.poll_seconds as i64),
+    );
+    telegram.insert(
+        "backoff_min_seconds".to_string(),
+        toml::Value::Integer(config.telegram.backoff_min_seconds as i64),
+    );
+    telegram.insert(
+        "backoff_max_seconds".to_string(),
+        toml::Value::Integer(config.telegram.backoff_max_seconds as i64),
+    );
+    raw.insert("telegram".to_string(), toml::Value::Table(telegram));
 }
 
 #[cfg(test)]
@@ -569,6 +706,74 @@ mod tests {
         // Neither -> absent.
         let home = scratch_home();
         assert_eq!(migrate_legacy(&home).unwrap(), Migration::LegacyAbsent);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn telegram_defaults_disabled_empty() {
+        let c = Config::default();
+        assert!(!c.telegram.enabled);
+        assert!(c.telegram.token_file.is_empty());
+        assert!(c.telegram.allowed_user_ids.is_empty());
+        assert_eq!(c.telegram.poll_seconds, 20);
+        assert_eq!(c.telegram.backoff_min_seconds, 60);
+        assert_eq!(c.telegram.backoff_max_seconds, 900);
+    }
+
+    #[test]
+    fn telegram_section_parses_and_round_trips() {
+        let home = scratch_home();
+        let path = branding::config_file(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[telegram]\nenabled = true\ntoken_file = \"/run/tg.token\"\nallowed_user_ids = [11, 22]\n",
+        )
+        .unwrap();
+        let loaded = LoadedConfig::load(&path).unwrap();
+        assert!(loaded.config.telegram.enabled);
+        assert_eq!(loaded.config.telegram.token_file, "/run/tg.token");
+        assert_eq!(loaded.config.telegram.allowed_user_ids, vec![11, 22]);
+        assert_eq!(loaded.config.telegram.poll_seconds, 20);
+        loaded.save(&path).unwrap();
+        let again = LoadedConfig::load(&path).unwrap();
+        assert_eq!(again.config.telegram, loaded.config.telegram);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn telegram_notify_chat_defaults_unset() {
+        assert_eq!(Config::default().telegram.notify_chat_id, 0);
+    }
+
+    #[test]
+    fn telegram_notify_chat_parses_and_round_trips() {
+        let home = scratch_home();
+        let path = branding::config_file(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[telegram]\nnotify_chat_id = 42\n").unwrap();
+        let loaded = LoadedConfig::load(&path).unwrap();
+        assert_eq!(loaded.config.telegram.notify_chat_id, 42);
+        loaded.save(&path).unwrap();
+        let again = LoadedConfig::load(&path).unwrap();
+        assert_eq!(again.config.telegram.notify_chat_id, 42);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn telegram_rejects_inverted_backoff() {
+        let home = scratch_home();
+        let path = branding::config_file(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[telegram]\nbackoff_min_seconds = 900\nbackoff_max_seconds = 60\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            LoadedConfig::load(&path),
+            Err(ConfigError::BadValue(_))
+        ));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

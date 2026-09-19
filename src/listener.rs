@@ -408,7 +408,6 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
         }
     };
     {
-        use std::io::Write;
         let mut bytes = decision.into_bytes();
         if !bytes.ends_with(b"\n") {
             bytes.push(b'\n');
@@ -450,7 +449,6 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
         return;
     }
     if let Ok(verdict) = reply_rx.recv_timeout(REPLY_WAIT) {
-        use std::io::Write;
         let mut bytes = verdict.into_bytes();
         if !bytes.ends_with(b"\n") {
             bytes.push(b'\n');
@@ -532,7 +530,6 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
         return;
     }
     if let Ok(verdict) = reply_rx.recv_timeout(REPLY_WAIT) {
-        use std::io::Write;
         let mut bytes = verdict.into_bytes();
         if !bytes.ends_with(b"\n") {
             bytes.push(b'\n');

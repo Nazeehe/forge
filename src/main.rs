@@ -1,3 +1,9 @@
+// Temporary bring-up cover: most modules carry scaffold APIs that future
+// phases wire up (PTY spawn, path jail, hooks, walkthrough, ...). Silence
+// their dead-code noise so NEW warnings stay visible; remove this line as
+// phases land and re-address whatever it unhides.
+#![allow(dead_code)]
+
 mod agents;
 mod app;
 mod audit;
@@ -23,6 +29,8 @@ mod pty;
 mod quit;
 mod relay;
 mod safe_text;
+mod telegram;
+mod telegram_dialog;
 #[cfg(all(target_os = "linux", feature = "visual"))]
 mod screenshot;
 mod session;

@@ -828,6 +828,12 @@ pub struct SidebarInfo {
     pub pending: usize,
     /// "off" or "yolo": drives which settings button highlights.
     pub mode: &'static str,
+    /// "on" or "off": Telegram mobile transport state.
+    pub telegram: &'static str,
+    /// Latest `message_user` badge as `(session, text)`, if any. The
+    /// badge row renders only when present, last in the panel where no
+    /// interactive row can shift.
+    pub telegram_badge: Option<(String, String)>,
 }
 
 /// Compact uptime: 45s, 3m, 2h, 1d 4h.
@@ -971,6 +977,10 @@ fn sidebar_lines_at(
     });
     lines.push(Line::from(""));
     lines.push(Line::from(format!(" Pending: {}", info.pending)));
+    lines.push(telegram_line(info.telegram));
+    if let Some(badge) = telegram_badge_line(&info.telegram_badge) {
+        lines.push(badge);
+    }
     (lines, btn)
 }
 
@@ -1047,7 +1057,30 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
     lines.push(Line::from(" Autopilot"));
     lines.push(Line::from("")); // button widgets own this row
     lines.push(Line::from(Span::styled(" Ctrl-b shortcuts", theme::style(theme::Role::KeyHint))));
+    lines.push(telegram_line(info.telegram));
+    if let Some(badge) = telegram_badge_line(&info.telegram_badge) {
+        lines.push(badge);
+    }
     lines
+}
+
+/// Telegram transport row: state plus the settings key. Appended after
+/// the pinned rows so it never shifts mode buttons or shortcuts.
+fn telegram_line(state: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" Telegram {state}"), theme::style(theme::Role::Text)),
+        Span::styled(" · Ctrl-b m", theme::style(theme::Role::KeyHint)),
+    ])
+}
+
+/// Latest operator badge row, if any: session plus escaped text capped
+/// at 48 chars. Raw input stays the policy input; only the display is
+/// encoded (see [`safe_text::encode_for_display`]).
+fn telegram_badge_line(badge: &Option<(String, String)>) -> Option<Line<'static>> {
+    let (session, text) = badge.as_ref()?;
+    let raw = format!("{session}: {text}");
+    let cut: String = raw.chars().take(48).collect();
+    Some(Line::from(format!(" {}", safe_text::encode_for_display(&cut))))
 }
 
 /// Divider rule sharing the stat-value measure: one indent cell, then
@@ -1192,6 +1225,10 @@ pub struct Chrome {
     pub detail: Option<SessionDetail>,
     pub pending: usize,
     pub mode: &'static str,
+    /// "on" or "off": Telegram mobile transport state for the sidebar row.
+    pub telegram: &'static str,
+    /// Latest `message_user` badge as `(session, text)`, if any.
+    pub telegram_badge: Option<(String, String)>,
     /// Grid mode: the main area shows every session in framed cells and
     /// the sidebar hides for full-width tiles.
     pub grid: bool,
@@ -1427,6 +1464,8 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
             session: chrome.detail.clone(),
             pending: chrome.pending,
             mode: chrome.mode,
+            telegram: chrome.telegram,
+            telegram_badge: chrome.telegram_badge.clone(),
         };
         let rich =
             areas.sidebar.width >= 40 && areas.sidebar.height >= 30;
@@ -1716,7 +1755,7 @@ mod tests {
 
     #[test]
     fn pill_cancel_rects_widen_and_keep_edge() {
-        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off" };
+        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         let areas = chrome_areas(Rect::new(0, 0, 180, 40));
         let rects = timer_cancel_rects(areas.sidebar, &info, true);
         assert_eq!(rects.len(), 2);
@@ -2136,6 +2175,8 @@ mod tests {
             }),
             pending: 3,
             mode: "off",
+            telegram: "off",
+            telegram_badge: None,
             grid: false,
             pills: true,
         }
@@ -2175,7 +2216,7 @@ mod tests {
     #[cfg(test)]
     fn sidebar_chrome_info() -> SidebarInfo {
         let c = sidebar_chrome();
-        SidebarInfo { session: c.detail.clone(), pending: c.pending, mode: c.mode }
+        SidebarInfo { session: c.detail.clone(), pending: c.pending, mode: c.mode, telegram: "off", telegram_badge: None }
     }
 
     #[test]
@@ -2212,6 +2253,8 @@ mod tests {
             }),
             pending: 3,
             mode: "off",
+            telegram: "off",
+            telegram_badge: None,
         };
         let lines = sidebar_lines(&info);
         assert!(has(&lines, "shell-1"), "name: {lines:?}");
@@ -2236,12 +2279,38 @@ mod tests {
         assert!(has(&timed_lines, "◷ in 9:55"), "countdown: {timed_lines:?}");
         assert!(!has(&lines, "Scheduled"), "hidden when empty: {lines:?}");
         // Yolo highlights instead when active.
-        let yolo = SidebarInfo { session: info.session.clone(), pending: 0, mode: "yolo" };
+        let yolo = SidebarInfo { session: info.session.clone(), pending: 0, mode: "yolo", telegram: "off", telegram_badge: None };
         let yolo_lines = sidebar_lines(&yolo);
         assert!(has(&yolo_lines, "[Yolo]"), "yolo highlighted: {yolo_lines:?}");
         // Never blank: empty state still guides.
-        let empty = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off" });
+        let empty = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
         assert!(has(&empty, "Ctrl-b c"), "guides: {empty:?}");
+    }
+
+    #[test]
+    fn sidebar_badge_escapes_hostile_text() {
+        let info = SidebarInfo {
+            session: None,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: Some(("agent".to_string(), "hi\u{202E}bye".to_string())),
+        };
+        let lines = sidebar_lines(&info);
+        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect();
+        assert!(!text.contains("\u{202E}"), "bidi exposed, never raw: {text:?}");
+        assert!(text.contains("agent"), "session named: {text:?}");
+        let bare = SidebarInfo { session: None, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        assert_eq!(sidebar_lines(&bare).len(), sidebar_lines(&info).len() - 1, "badge adds exactly one row");
+    }
+
+    #[test]
+    fn sidebar_shows_telegram_state() {
+        let off = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
+        assert!(has(&off, "Telegram off"), "off state: {off:?}");
+        assert!(has(&off, "Ctrl-b m"), "settings key: {off:?}");
+        let on = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off", telegram: "on", telegram_badge: None });
+        assert!(has(&on, "Telegram on"), "on state: {on:?}");
     }
 
     #[test]
@@ -2285,7 +2354,7 @@ mod tests {
 
     #[test]
     fn scheduled_section_breathes_after_approvals() {
-        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off" };
+        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         let lines = rich_sidebar_lines(&info, 30, 45);
         let header = lines
             .iter()
@@ -2309,7 +2378,7 @@ mod tests {
 
     #[test]
     fn timer_cancel_rects_match_painted_rows() {
-        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off" };
+        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         let areas = chrome_areas(Rect::new(0, 0, 180, 40));
         let rects = timer_cancel_rects(areas.sidebar, &info, false);
         assert_eq!(rects.len(), 2);
@@ -2336,7 +2405,7 @@ mod tests {
         let mut impostor = timed_detail();
         impostor.name = "Scheduled".to_string();
         impostor.timers.clear();
-        let bare = SidebarInfo { session: Some(impostor), pending: 0, mode: "off" };
+        let bare = SidebarInfo { session: Some(impostor), pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         assert!(timer_cancel_rects(areas.sidebar, &bare, false).is_empty());
     }
 
@@ -2386,6 +2455,8 @@ mod tests {
             detail: None,
             pending: 0,
             mode: "off",
+            telegram: "off",
+            telegram_badge: None,
             grid: false,
             pills: false,
         }
@@ -2507,13 +2578,13 @@ mod tests {
         assert!(!text.contains("Terminal"), "tab strip hidden in grid");
         let buf = terminal.backend().buffer();
         // Titles sit inside the top borders on row 0: `● a`, `● b`.
-        assert_eq!(buf.get(3, 0).symbol(), "a");
-        assert_eq!(buf.get(43, 0).symbol(), "b");
+        assert_eq!(buf[(3, 0)].symbol(), "a");
+        assert_eq!(buf[(43, 0)].symbol(), "b");
         // The focused name reverses; the other frame stays plain.
-        assert!(buf.get(1, 0).modifier.contains(Modifier::REVERSED), "focused name");
-        assert!(!buf.get(41, 0).modifier.contains(Modifier::REVERSED), "plain name");
+        assert!(buf[(1, 0)].modifier.contains(Modifier::REVERSED), "focused name");
+        assert!(!buf[(41, 0)].modifier.contains(Modifier::REVERSED), "plain name");
         // Full-width tiles: the second frame opens mid-screen.
-        assert_eq!(buf.get(40, 0).symbol(), "┌");
+        assert_eq!(buf[(40, 0)].symbol(), "┌");
     }
 
     #[test]

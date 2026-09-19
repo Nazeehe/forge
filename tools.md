@@ -3,19 +3,19 @@
 Source: `error_logs.md` §11. Tick the box (`[ ]` → `[x]`) next to every
 tool to build next. DONE tools are already in `src/mcp.rs`.
 
-## Communication and control (11/15 done)
+## Communication and control (12/15 done)
 
 DONE: `ask_session`, `send_response`, `tell_session`, `ack_message`,
 `list_sessions`, `compact_session`, `schedule_prompt`,
 `cancel_scheduled_prompt`, `start_session`, `set_session_status`,
-`clear_session_status`
+`clear_session_status`, `message_user`
 
 - [ ] #6 `send_file` — offer one bounded relative file
 - [ ] #7 `accept_file` — atomic private non-overwriting receive
 - [x] #8 `compact_session` — queue `/compact` through idle injection
 - [x] #9 `schedule_prompt` — future self-injection timer
 - [x] #10 `cancel_scheduled_prompt` — cancel the timer
-- [ ] #11 `message_user` — badge the TUI, optional remote forward
+- [x] #11 `message_user` — badge the TUI, forward to Telegram when configured (`[telegram]`, `Ctrl-b m`)
 - [ ] #12 `screenshot` — macOS window match to PNG image block
 - [x] #13 `start_session` — create validated session, return ID/name
 - [x] #14 `set_session_status` — replace caller sticky status

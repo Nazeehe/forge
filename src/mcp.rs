@@ -433,6 +433,11 @@ fn tool_defs() -> Vec<ToolDef> {
             schema: r#"{"type":"object","properties":{}}"#,
         },
         ToolDef {
+            name: "message_user",
+            description: "Use this, not your CLI's own messaging, to message the operator: badges the TUI in-app and forwards to Telegram when configured. Returns a conversation ID at once; at most three sends per session per 60 seconds. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            schema: r#"{"type":"object","properties":{"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["message"]}"#,
+        },
+        ToolDef {
             name: "walkthrough_start",
             description: "Open a file tour for the operator: steps is one start:end:explanation header per step, file resolves against the session cwd. The overlay opens on the tour at once. Explanations render as Markdown and may span lines: indent continuation lines with one space (it is stripped, so Markdown nesting survives) and use blank lines for paragraph breaks. Write each explanation like a coworker walking through their code out loud: context, what these lines do, and why it matters — never a bare label.",
             schema: r#"{"type":"object","properties":{"file":{"type":"string"},"steps":{"type":"string"},"title":{"type":"string"}},"required":["file","steps"]}"#,
@@ -802,6 +807,26 @@ mod tests {
                 "{tool} advertises idempotency_key: {window}"
             );
         }
+    }
+
+    #[test]
+    fn message_user_listed_with_retry_key() {
+        let res = handle_line(
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("tools/list answers");
+        let marker = r#""name":"message_user""#;
+        let at = res.find(marker).expect("message_user listed");
+        let rest = &res[at + marker.len()..];
+        let end = rest.find(r#""name":""#).unwrap_or(rest.len());
+        let window = &rest[..end];
+        assert!(window.contains("Telegram"), "forward target named: {window}");
+        assert!(window.contains("conversation"), "returns an ID: {window}");
+        assert!(window.contains("idempotency_key"), "retries replay: {window}");
+        assert!(window.contains(r#""required":["message"]"#), "schema: {window}");
     }
 
     #[test]
