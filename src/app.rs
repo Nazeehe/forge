@@ -2464,8 +2464,26 @@ impl AppState {
             .map(|&id| {
                 let rec = self.manager.get(id).expect("ordered session exists");
                 let live = rec.state.is_live();
+                let focused = Some(id) == active;
+                // Only the focused pane (or every pane in grid mode) ever
+                // reaches the screen: `render_focused` draws just the one
+                // `focused` view, `render_grid` draws them all. Materializing
+                // styled rows for a session nobody is looking at means every
+                // background session's paint cost rides along on each frame,
+                // so input latency degrades as more sessions are opened even
+                // though only one is ever on screen. Skip the conversion
+                // entirely for anything neither focused nor grid-visible.
+                if !self.grid_mode && !focused {
+                    return crate::ui::PaneView {
+                        title: rec.name.clone(),
+                        lines: Vec::new(),
+                        live,
+                        focused,
+                        cursor: None,
+                    };
+                }
                 if let Some((view_id, index)) = self.overlay_view {
-                    if Some(id) == active && view_id == id {
+                    if focused && view_id == id {
                         let label = ["", "", "", "Visual", "Walkthrough"]
                             .get(index).copied().unwrap_or("View");
                         if label == "Walkthrough" {
@@ -2511,7 +2529,7 @@ impl AppState {
                     title: rec.name.clone(),
                     lines,
                     live,
-                    focused: Some(id) == active,
+                    focused,
                     cursor: self.manager.cursor(id),
                 }
             })
@@ -5044,6 +5062,76 @@ mod tests {
         assert_eq!(s.manager.active(), Some(a));
         s.step_session(-1);
         assert_eq!(s.manager.active(), Some(b));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn views_skip_line_materialization_for_background_sessions() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("one", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn(
+                "two",
+                &std::env::temp_dir(),
+                "echo BACKGROUND-MARKER; exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        assert_eq!(s.manager.active(), Some(a), "first spawn stays focused");
+        // Wait for the background session to actually paint its marker
+        // into the vt100 screen, so there is a real non-empty screen to
+        // skip below (an empty screen would pass trivially).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for _ in s.manager.drain_pty_max(100) {}
+            if s
+                .manager
+                .screen_text(b)
+                .is_some_and(|text| text.contains("BACKGROUND-MARKER"))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background session never painted its marker"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Focused (non-grid) mode: only the focused pane's lines get
+        // materialized. The background session behind it must not pay
+        // for a screen it never draws (app.rs `views()`).
+        let focused_mode = s.views();
+        let bg_view = focused_mode.iter().find(|v| v.title == "two").unwrap();
+        assert!(
+            bg_view.lines.is_empty(),
+            "background pane must skip line materialization outside grid mode"
+        );
+        let fg_view = focused_mode.iter().find(|v| v.title == "one").unwrap();
+        assert!(!fg_view.lines.is_empty(), "the focused pane still renders");
+
+        // Grid mode draws every pane, so every session still needs real
+        // lines there.
+        s.grid_mode = true;
+        let grid_mode = s.views();
+        let bg_view = grid_mode.iter().find(|v| v.title == "two").unwrap();
+        let rendered: String = bg_view
+            .lines
+            .iter()
+            .flatten()
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(
+            rendered.contains("BACKGROUND-MARKER"),
+            "grid mode must still materialize every pane, got: {rendered:?}"
+        );
+
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
     }
