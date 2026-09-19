@@ -7,7 +7,7 @@
 
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -208,7 +208,7 @@ impl PtyPane {
         cwd: &Path,
         rows: u16,
         cols: u16,
-        tx: Sender<(SessionId, PtyEvent)>,
+        tx: SyncSender<(SessionId, PtyEvent)>,
     ) -> io::Result<Self> {
         Self::spawn_with_env(id, shell_cmd, cwd, rows, cols, tx, &[])
     }
@@ -221,7 +221,7 @@ impl PtyPane {
         cwd: &Path,
         rows: u16,
         cols: u16,
-        tx: Sender<(SessionId, PtyEvent)>,
+        tx: SyncSender<(SessionId, PtyEvent)>,
         extra_env: &[(&str, &str)],
     ) -> io::Result<Self> {
         let system = native_pty_system();
@@ -491,7 +491,7 @@ impl PtyPane {
         mut reader: Box<dyn Read + Send>,
         child: ChildCell,
         screen: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
-        tx: Sender<(SessionId, PtyEvent)>,
+        tx: SyncSender<(SessionId, PtyEvent)>,
         writer: WriterCell,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
@@ -573,7 +573,7 @@ impl Drop for PtyPane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
+    use std::sync::mpsc::sync_channel;
     use std::time::{Duration, Instant};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn echo_and_clean_exit() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(id, "printf hello-pty", &workdir(), 24, 80, tx).unwrap();
         let (out, code) = run_until_exit(&mut pane, &rx);
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn exit_code_propagates() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(id, "exit 42", &workdir(), 24, 80, tx).unwrap();
         let (_, code) = run_until_exit(&mut pane, &rx);
@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn write_reaches_child() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(id, "exec cat", &workdir(), 24, 80, tx).unwrap();
         pane.write_all(b"ping-pty\n").unwrap();
@@ -641,8 +641,48 @@ mod tests {
     }
 
     #[test]
+    fn event_channel_is_bounded_and_backpressures_without_dropping_output() {
+        // AGENTS.md: "all... queues... bounded". A capacity-1 channel is
+        // the extreme case — the reader thread must block on `send`
+        // (backpressure) rather than the channel growing without limit or
+        // silently dropping chunks once the consumer falls behind.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let id = SessionId::fresh();
+        let mut pane = PtyPane::spawn(
+            id,
+            "i=0; while [ $i -lt 500 ]; do echo line-$i; i=$((i+1)); done",
+            &workdir(),
+            24,
+            80,
+            tx,
+        )
+        .unwrap();
+        // Drain deliberately slowly at first so the reader thread piles up
+        // against the capacity-1 buffer and has to block, proving
+        // backpressure rather than an unbounded backlog.
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok((_, PtyEvent::Output(b))) => seen.extend_from_slice(&b),
+                Ok((_, PtyEvent::Exited(_))) => break,
+                Err(_) => panic!("timed out draining a backpressured pane"),
+            }
+        }
+        let text = String::from_utf8_lossy(&seen);
+        for i in 0..500 {
+            assert!(
+                text.contains(&format!("line-{i}")),
+                "line-{i} missing: backpressure must never drop output"
+            );
+        }
+        pane.close();
+    }
+
+    #[test]
     fn cursor_position_query_is_answered() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         // Raw mode: the reply must arrive as input bytes, not line-buffered.
         // Cursor starts at the origin, so the report is exactly 6 bytes.
@@ -707,7 +747,7 @@ mod tests {
 
     #[test]
     fn terminate_gracefully_delivers_sigterm_for_clean_child_exit() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         // Builtin-only loop: no forked child can swallow the signal, so
         // the trap runs the moment SIGTERM lands. READY is printed after
@@ -732,7 +772,7 @@ mod tests {
 
     #[test]
     fn terminate_gracefully_times_out_when_child_ignores_sigterm() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -760,7 +800,7 @@ mod tests {
 
     #[test]
     fn screen_shows_output() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(id, "printf hello-screen", &workdir(), 24, 80, tx).unwrap();
         let deadline = Instant::now() + TIMEOUT;
@@ -802,7 +842,7 @@ mod tests {
         // Drive the parser from child stdout: stdin writes would only echo
         // back through the line discipline (ECHOCTL mangles ESC to `^[`),
         // so they can never faithfully carry escape sequences.
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -825,7 +865,7 @@ mod tests {
 
     #[test]
     fn styled_rows_carry_sgr_colors() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -863,7 +903,7 @@ mod tests {
         // Ghost/prediction text arrives as SGR 2 (faint). Dropping it
         // renders predictions full-bright white; the dim bit must survive
         // the parser so the view layer can faint it.
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -900,7 +940,7 @@ mod tests {
         // Single-attribute transitions must surface through the row
         // cache: if cell comparison missed a mode bit, the stale row
         // would keep the old format forever.
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -938,7 +978,7 @@ mod tests {
     fn styled_rows_refresh_wide_then_narrow() {
         // Overwriting a wide glyph with a narrow one flips the lead
         // and continuation width bits; the converted row must follow.
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -970,7 +1010,7 @@ mod tests {
     fn styled_rows_resize_drops_stale_rows() {
         // A smaller grid must not keep serving rows converted at the
         // old size.
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -1013,7 +1053,7 @@ mod tests {
 
     #[test]
     fn app_cursor_tracks_decckm() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -1061,7 +1101,7 @@ mod tests {
 
     #[test]
     fn alternate_screen_is_visible_and_isolated() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -1110,7 +1150,7 @@ mod tests {
         // Mouse-less panes (mode None) drop wheel events at the router;
         // the viewport below is what the router drives instead, so every
         // session scrolls whether or not its app reports mouse.
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -1175,7 +1215,7 @@ mod tests {
 
     #[test]
     fn mouse_mode_tracks_private_modes() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(
             id,
@@ -1209,7 +1249,7 @@ mod tests {
 
     #[test]
     fn resize_and_close() {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(64);
         let id = SessionId::fresh();
         let mut pane = PtyPane::spawn(id, "exec sleep 30", &workdir(), 24, 80, tx).unwrap();
         pane.resize(40, 120).unwrap();

@@ -162,16 +162,23 @@ pub struct SessionManager {
     sessions: std::collections::HashMap<SessionId, SessionRecord>,
     active: Option<SessionId>,
     run_index: std::collections::HashMap<String, SessionId>,
-    pty_tx: std::sync::mpsc::Sender<(SessionId, crate::pty::PtyEvent)>,
+    pty_tx: std::sync::mpsc::SyncSender<(SessionId, crate::pty::PtyEvent)>,
     pty_rx: std::sync::mpsc::Receiver<(SessionId, crate::pty::PtyEvent)>,
-    aux_tx: std::sync::mpsc::Sender<(SessionId, crate::pty::PtyEvent)>,
+    aux_tx: std::sync::mpsc::SyncSender<(SessionId, crate::pty::PtyEvent)>,
     aux_rx: std::sync::mpsc::Receiver<(SessionId, crate::pty::PtyEvent)>,
 }
 
+/// Bound on each pane-event channel (AGENTS.md: "all... queues... bounded").
+/// `drain_pty_max` only ever pulls `MAX_DRAIN` (100) events per tick, so
+/// this gives several ticks of burst headroom before a flooding session's
+/// reader thread has to block on `send` (backpressure), rather than the
+/// channel — and its memory — growing without limit.
+pub const PTY_CHANNEL_CAPACITY: usize = 1024;
+
 impl SessionManager {
     pub fn new() -> Self {
-        let (pty_tx, pty_rx) = std::sync::mpsc::channel();
-        let (aux_tx, aux_rx) = std::sync::mpsc::channel();
+        let (pty_tx, pty_rx) = std::sync::mpsc::sync_channel(PTY_CHANNEL_CAPACITY);
+        let (aux_tx, aux_rx) = std::sync::mpsc::sync_channel(PTY_CHANNEL_CAPACITY);
         SessionManager {
             order: Vec::new(),
             sessions: std::collections::HashMap::new(),
