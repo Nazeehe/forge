@@ -13,7 +13,12 @@ pub enum AppEvent {
     Tick,
     Input(TermEvent),
     Resize(u16, u16),
-    SessionOutput { id: SessionId, data: Vec<u8> },
+    /// A pane produced output. Carries no bytes: the vt100 screen is
+    /// already updated by the reader thread before this fires (see
+    /// `pty::PtyPane::spawn_reader`), and `AppState::apply` only ever uses
+    /// this to flip `dirty` — forwarding the chunk here would just be an
+    /// allocation nobody reads.
+    SessionOutput { id: SessionId },
     SessionExited { id: SessionId, code: Option<i32> },
     /// A synchronous hook record from the IPC listener. Policy sends the
     /// one-line decision through `reply`; dropping it leaves the relay to
@@ -42,7 +47,7 @@ pub enum AppEvent {
 impl AppEvent {
     pub fn from_pty(id: SessionId, ev: crate::pty::PtyEvent) -> Self {
         match ev {
-            crate::pty::PtyEvent::Output(data) => AppEvent::SessionOutput { id, data },
+            crate::pty::PtyEvent::Output(_) => AppEvent::SessionOutput { id },
             crate::pty::PtyEvent::Exited(code) => AppEvent::SessionExited { id, code },
         }
     }
@@ -65,9 +70,8 @@ mod tests {
         use crate::pty::PtyEvent;
         let id = SessionId::fresh();
         match AppEvent::from_pty(id, PtyEvent::Output(vec![9])) {
-            AppEvent::SessionOutput { id: got, data } => {
+            AppEvent::SessionOutput { id: got } => {
                 assert_eq!(got, id);
-                assert_eq!(data, vec![9]);
             }
             _ => panic!("wrong variant"),
         }
@@ -102,15 +106,9 @@ mod tests {
     #[test]
     fn variants_carry_their_payload() {
         let id = SessionId::fresh();
-        let out = AppEvent::SessionOutput {
-            id,
-            data: vec![1, 2],
-        };
+        let out = AppEvent::SessionOutput { id };
         match out {
-            AppEvent::SessionOutput { id: got, data } => {
-                assert_eq!(got, id);
-                assert_eq!(data, vec![1, 2]);
-            }
+            AppEvent::SessionOutput { id: got } => assert_eq!(got, id),
             _ => panic!("wrong variant"),
         }
         let exited = AppEvent::SessionExited { id, code: Some(3) };

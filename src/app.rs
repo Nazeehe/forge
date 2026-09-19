@@ -5008,7 +5008,7 @@ mod tests {
         let mut s = AppState::new();
         s.dirty = false;
         let id = SessionId::fresh();
-        s.apply(AppEvent::SessionOutput { id, data: vec![1] });
+        s.apply(AppEvent::SessionOutput { id });
         assert!(s.dirty);
         s.dirty = false;
         s.apply(AppEvent::SessionExited { id, code: Some(0) });
