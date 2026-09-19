@@ -2157,9 +2157,12 @@ impl AppState {
         }
     }
 
-    /// Operator reply guidance appended to every routed injection, so
-    /// the agent knows how to answer.
-    const TELEGRAM_REPLY_HINT: &'static str = "Reply to the operator with message_user.";
+    /// Operator reply guidance appended to every routed injection. The
+    /// operator is on their phone, not watching the pane, so a request
+    /// that will take more than a moment gets a quick message_user ack
+    /// first — otherwise there is no signal it even landed until the
+    /// (possibly much later) real reply.
+    const TELEGRAM_REPLY_HINT: &'static str = "Reply to the operator with message_user. If this will take more than a moment, first send a brief message_user acknowledging the ask before you start working on it.";
 
     /// Route one allowlisted operator text: `/` commands and errors
     /// answer directly, while `<name>:` prefixes and bare text (to the
@@ -7334,6 +7337,26 @@ mod tests {
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].text, "queued for agent");
         assert_eq!(state.broker.queued(id), 1);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn telegram_routed_text_asks_for_an_immediate_ack() {
+        // A Telegram operator is on their phone, not watching the pane:
+        // if the ask will take a moment, the agent should send a quick
+        // message_user acknowledging it before diving in, not leave the
+        // operator wondering whether it landed.
+        let (mut state, id, _run) = tg_agent("agent");
+        tg_inbox(&mut state, 11, &["[agent] do the thing"]);
+        state.drain_telegram();
+        let inj = state.broker.peek_due(id).expect("injection queued");
+        assert_eq!(inj.kind, crate::comms::InjectKind::Command);
+        let body = String::from_utf8(inj.render_body()).unwrap();
+        assert!(body.contains("do the thing"), "body: {body}");
+        assert!(
+            body.contains("acknowledg") && body.contains("message_user"),
+            "guidance must ask for an immediate ack: {body}"
+        );
         assert!(state.manager.remove(id));
     }
 
