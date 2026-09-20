@@ -146,13 +146,8 @@ pub struct SessionRecord {
     /// Caller sticky status (blueprint #14/#15): one replaceable
     /// `kind: message` pair, shown in the sidebar.
     pub status: Option<crate::session_status::SessionStatus>,
-    /// Sidebar stats: spawn instant plus hook/settlement counters. A tool
-    /// hook (Pre/PostToolUse, PermissionRequest, Before/AfterTool) counts
-    /// one call; every Allow/Deny verdict counts once.
+    /// Spawn instant for the bootstrap attribution window.
     pub spawned_at: std::time::Instant,
-    pub tool_calls: u32,
-    pub approvals: u32,
-    pub denials: u32,
 }
 
 /// Ordering, active selection, run-ID index, and pane-event channels: the
@@ -259,9 +254,6 @@ impl SessionManager {
                 exit_code: None,
                 status: None,
                 spawned_at: std::time::Instant::now(),
-                tool_calls: 0,
-                approvals: 0,
-                denials: 0,
             },
         );
     }
@@ -431,37 +423,6 @@ impl SessionManager {
             None => false,
             Some(rec) => {
                 rec.activity = activity;
-                true
-            }
-        }
-    }
-
-    /// Count one tool call for the sidebar stats. False when unknown.
-    pub fn note_tool_call(&mut self, id: SessionId) -> bool {
-        match self.sessions.get_mut(&id) {
-            None => false,
-            Some(rec) => {
-                rec.tool_calls = rec.tool_calls.saturating_add(1);
-                true
-            }
-        }
-    }
-
-    /// Count one policy verdict for the sidebar stats. Ask leaves both
-    /// counters alone. False when unknown.
-    pub fn note_verdict(&mut self, id: SessionId, decision: crate::policy::Decision) -> bool {
-        match self.sessions.get_mut(&id) {
-            None => false,
-            Some(rec) => {
-                match decision {
-                    crate::policy::Decision::Allow => {
-                        rec.approvals = rec.approvals.saturating_add(1)
-                    }
-                    crate::policy::Decision::Deny => {
-                        rec.denials = rec.denials.saturating_add(1)
-                    }
-                    crate::policy::Decision::Ask => {}
-                }
                 true
             }
         }

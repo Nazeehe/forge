@@ -517,6 +517,11 @@ fn loop_until_quit(
                 tabs: state.tabs(),
                 topbar: state.topbar(),
                 detail: info.session,
+                sessions: info.sessions,
+                active: info.active,
+                fleet_cursor: info.fleet_cursor,
+                fleet_scroll: info.fleet_scroll,
+                other_timers: info.other_timers,
                 pending: state.pending_hooks.len(),
                 mode: policy.mode().as_str(),
                 telegram: state
@@ -735,6 +740,18 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             }
             UserCommand::SelectSession(index) => {
                 if state.select_session(index) {
+                    fit_active_pane(state);
+                }
+                state.dirty = true;
+            }
+            UserCommand::FleetStep(dir) => {
+                if !state.grid_mode {
+                    state.fleet_step(dir);
+                }
+                state.dirty = true;
+            }
+            UserCommand::FleetActivate => {
+                if !state.grid_mode && state.fleet_activate() {
                     fit_active_pane(state);
                 }
                 state.dirty = true;
@@ -1127,6 +1144,37 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row >= areas.sidebar.y
         && mev.row < areas.sidebar.y + areas.sidebar.height
     {
+        // Fleet router: wheel scrolls the slot, left-click switches to
+        // the row. Same rects and window the render paints, recomputed
+        // live, so a repaint can never desync them.
+        let rich = areas.sidebar.width >= 40 && areas.sidebar.height >= 30;
+        match mev.kind {
+            event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
+                let len = state.sidebar_info().sessions.len();
+                let max_start = len.saturating_sub(ui::fleet_visible(rich));
+                if matches!(mev.kind, event::MouseEventKind::ScrollUp) {
+                    state.fleet_scroll = state.fleet_scroll.saturating_sub(1);
+                } else {
+                    state.fleet_scroll = (state.fleet_scroll + 1).min(max_start);
+                }
+                state.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+            let info = state.sidebar_info();
+            for (id, area) in ui::sidebar_session_rects(areas.sidebar, &info, rich) {
+                if ui::ChromeButton::new("[fleet]", ratatui::style::Style::default())
+                    .click(mev.column, mev.row, area)
+                {
+                    if state.focus_session(id) {
+                        fit_active_pane(state);
+                    }
+                    return;
+                }
+            }
+        }
         // Armed-timer Cancel buttons: same rects the render paints,
         // recomputed live, so a repaint can never desync them.
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
@@ -1144,7 +1192,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             // Same rich/compact split the render uses: compact buttons
             // follow the content-built row.
-            let buttons = if areas.sidebar.width >= 40 && areas.sidebar.height >= 30 {
+            let buttons = if rich {
                 ui::mode_button_areas(areas.sidebar, state.pill_tabs)
             } else {
                 ui::compact_mode_buttons(areas.sidebar, &state.sidebar_info(), state.pill_tabs)
@@ -1466,6 +1514,69 @@ mod tests {
         assert_eq!(state.manager.pane_size(order[1]), Some((20, 62)));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
+    }
+
+    #[test]
+    fn fleet_click_switches_to_row_session() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let order = state.manager.order().to_vec();
+        assert_eq!(state.manager.active(), Some(order[0]));
+        // Rich sidebar at x=135: brand owns rows 1-3, fleet header is
+        // row 4, so the second fleet row paints row 6. Drive the click
+        // from the painted rect, never hand-computed geometry.
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let info = state.sidebar_info();
+        let rects = ui::sidebar_session_rects(areas.sidebar, &info, true);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].1.y + 1, rects[1].1.y, "stacked rows");
+        let (_, area) = &rects[1];
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x + 1,
+                row: area.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.manager.active(), Some(order[1]), "row click focuses");
+        assert!(state.manager.remove(order[0]));
+        assert!(state.manager.remove(order[1]));
+    }
+
+    #[test]
+    fn fleet_wheel_scrolls_past_the_cap() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        for _ in 0..6 {
+            spawn_shell_cmd(&mut state, "exec sleep 30");
+        }
+        // Compact sidebar caps the slot at five rows of six.
+        assert_eq!(state.fleet_scroll, 0);
+        let wheel = |down: bool| MouseEvent {
+            kind: if down {
+                MouseEventKind::ScrollDown
+            } else {
+                MouseEventKind::ScrollUp
+            },
+            column: 70,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        forward_mouse(&mut state, wheel(true));
+        assert_eq!(state.fleet_scroll, 1, "wheel down scrolls");
+        forward_mouse(&mut state, wheel(true));
+        assert_eq!(state.fleet_scroll, 1, "scroll saturates at the tail");
+        forward_mouse(&mut state, wheel(false));
+        assert_eq!(state.fleet_scroll, 0, "wheel up scrolls back");
+        for id in state.manager.order().to_vec() {
+            assert!(state.manager.remove(id));
+        }
     }
 
     #[test]

@@ -838,17 +838,90 @@ pub struct SessionDetail {
     pub state: String,
     /// Caller sticky status text (`kind: message`), if one is set.
     pub status: Option<String>,
+    /// Kind behind `status`, for the signal emoji. `None` matches `status`.
+    pub status_kind: Option<crate::session_status::StatusKind>,
     /// Armed timers of the focused session only; empty hides the section.
     pub timers: Vec<TimerView>,
-    pub uptime_secs: u64,
-    pub tool_calls: u32,
-    pub approvals: u32,
-    pub denials: u32,
+}
+
+/// Fleet attention tier. Sorts Attention first, then Working, then
+/// Idle; the mark carries meaning alone, color only reinforces it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FleetTier {
+    Attention,
+    Working,
+    Idle,
+}
+
+impl FleetTier {
+    pub fn mark(self) -> &'static str {
+        match self {
+            FleetTier::Attention => "!",
+            FleetTier::Working => "~",
+            FleetTier::Idle => " ",
+        }
+    }
+}
+
+/// One router row: every session, attention-first. The reason is the
+/// attention/sticky text verbatim (already display-encoded).
+#[derive(Clone, Debug)]
+pub struct FleetRow {
+    pub id: crate::session::SessionId,
+    pub name: String,
+    pub tier: FleetTier,
+    pub state: String,
+    pub reason: String,
+    /// Signal emoji (`🔔` for pings, the sticky kind glyph otherwise,
+    /// empty when there is nothing to signal). Marks still carry the
+    /// meaning alone; this rides beside them.
+    pub emoji: &'static str,
+}
+
+/// Signal emoji per sticky kind. Bare glyphs only: no variation
+/// selectors, no ZWJ sequences (same rule as the topbar icons), so
+/// `Line::width` measures them exactly.
+pub fn status_emoji(kind: crate::session_status::StatusKind) -> &'static str {
+    match kind {
+        crate::session_status::StatusKind::Info => "ℹ",
+        crate::session_status::StatusKind::Progress => "🔄",
+        crate::session_status::StatusKind::Success => "✔",
+        crate::session_status::StatusKind::Warning => "⚠",
+        crate::session_status::StatusKind::Blocked => "🛑",
+        crate::session_status::StatusKind::Question => "💬",
+    }
+}
+
+/// Cut a string to at most `max_cells` display cells without splitting
+/// a character. Short strings pass through untouched.
+pub fn cut_cells(s: &str, max_cells: usize) -> String {
+    if Line::from(s).width() <= max_cells {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for ch in s.chars() {
+        let trial = format!("{out}{ch}");
+        if Line::from(trial.as_str()).width() > max_cells {
+            break;
+        }
+        out = trial;
+    }
+    out
 }
 
 #[derive(Clone, Debug)]
 pub struct SidebarInfo {
     pub session: Option<SessionDetail>,
+    /// Every session, attention-first; the fleet slot scrolls past the cap.
+    pub sessions: Vec<FleetRow>,
+    /// Focused session for the `*` mark.
+    pub active: Option<crate::session::SessionId>,
+    /// Fleet cursor for `>` plus keyboard activation.
+    pub fleet_cursor: Option<crate::session::SessionId>,
+    /// Clamped scroll offset into `sessions`.
+    pub fleet_scroll: usize,
+    /// Armed timers on non-focused sessions, collapsed to a count.
+    pub other_timers: usize,
     pub pending: usize,
     /// "off" or "yolo": drives which settings button highlights.
     pub mode: &'static str,
@@ -860,20 +933,95 @@ pub struct SidebarInfo {
     pub telegram_badge: Option<(String, String)>,
 }
 
-/// Compact uptime: 45s, 3m, 2h, 1d 4h.
-pub fn format_uptime(secs: u64) -> String {
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    if secs < MINUTE {
-        format!("{secs}s")
-    } else if secs < HOUR {
-        format!("{}m", secs / MINUTE)
-    } else if secs < DAY {
-        format!("{}h", secs / HOUR)
-    } else {
-        format!("{}d {}h", secs / DAY, (secs % DAY) / HOUR)
+/// Fleet slot caps: the slot keeps header plus this many rows; the rest
+/// scrolls. Fixed caps keep surrounding content from shoving.
+pub const FLEET_VISIBLE_RICH: usize = 8;
+pub const FLEET_VISIBLE_COMPACT: usize = 5;
+
+pub fn fleet_visible(rich: bool) -> usize {
+    if rich { FLEET_VISIBLE_RICH } else { FLEET_VISIBLE_COMPACT }
+}
+
+/// First fleet line inside the sidebar content: the rich brand header
+/// owns lines 0-2, compact starts with the fleet at once.
+pub fn fleet_first_row(rich: bool) -> usize {
+    if rich { 3 } else { 0 }
+}
+
+/// Visible window over `len` rows with cap `visible`: scroll saturates
+/// at the tail instead of running past it.
+pub fn fleet_viewport(scroll: usize, len: usize, visible: usize) -> (usize, usize) {
+    if len == 0 || visible == 0 {
+        return (0, 0);
     }
+    let start = scroll.min(len.saturating_sub(visible));
+    let end = (start + visible).min(len);
+    (start, end)
+}
+
+/// Fleet slot lines: header plus the visible window. `>` marks the
+/// cursor, `*` the focused session, otherwise the tier mark. Rich rows
+/// carry the reason; compact rows stay name-only.
+fn fleet_block_lines(info: &SidebarInfo, rich: bool) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(format!(" Fleet ({})", info.sessions.len())));
+    if info.sessions.is_empty() {
+        lines.push(Line::from("  none yet"));
+        lines.push(Line::from("  Ctrl-b c creates one"));
+        return lines;
+    }
+    let visible = fleet_visible(rich);
+    let (start, end) = fleet_viewport(info.fleet_scroll, info.sessions.len(), visible);
+    for row in &info.sessions[start..end] {
+        let sel = if info.fleet_cursor == Some(row.id) {
+            ">"
+        } else if info.active == Some(row.id) {
+            "*"
+        } else {
+            " "
+        };
+        let name = safe_text::encode_for_display(&row.name);
+        if rich {
+            let reason = safe_text::encode_for_display(&row.reason);
+            lines.push(Line::from(format!(
+                " {}{}{} {} · {}",
+                sel,
+                row.tier.mark(),
+                row.emoji,
+                name,
+                reason
+            )));
+        } else {
+            lines.push(Line::from(format!(
+                " {}{}{} {}",
+                sel,
+                row.tier.mark(),
+                row.emoji,
+                name
+            )));
+        }
+    }
+    lines
+}
+
+/// Click areas for fleet rows: full-width rows over the same window the
+/// render paints, so clicks can never desync from what is on screen.
+pub fn sidebar_session_rects(
+    sidebar: Rect,
+    info: &SidebarInfo,
+    rich: bool,
+) -> Vec<(crate::session::SessionId, Rect)> {
+    let visible = fleet_visible(rich);
+    let (start, end) = fleet_viewport(info.fleet_scroll, info.sessions.len(), visible);
+    info.sessions[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let y = sidebar.y + 1 + (fleet_first_row(rich) + 1 + i) as u16;
+            let w = sidebar.width.saturating_sub(2);
+            (row.id, Rect::new(sidebar.x + 1, y, w, 1))
+        })
+        .collect()
 }
 
 /// Compact sidebar mode-button row. Taller sidebars pin it to the bottom.
@@ -901,12 +1049,11 @@ fn sidebar_lines_at(
     mode_row: usize,
     pills: bool,
 ) -> (Vec<Line<'static>>, usize) {
-    let mut lines = Vec::new();
+    let mut lines = fleet_block_lines(info, false);
+    lines.push(Line::from(""));
     match &info.session {
         None => {
-            lines.push(Line::from(" Sessions"));
-            lines.push(Line::from("  none yet"));
-            lines.push(Line::from("  Ctrl-b c creates one"));
+            lines.push(Line::from(" No session selected"));
         }
         Some(detail) => {
             lines.push(Line::from(" Session"));
@@ -924,28 +1071,24 @@ fn sidebar_lines_at(
                 safe_text::encode_for_display(&detail.cwd)
             )));
             if let Some(status) = detail.status.as_deref() {
+                let glyph = detail
+                    .status_kind
+                    .map(|k| format!("{} ", status_emoji(k)))
+                    .unwrap_or_default();
                 lines.push(Line::from(format!(
-                    "  {}",
+                    "  {glyph}{}",
                     safe_text::encode_for_display(status)
                 )));
             }
-            lines.push(Line::from(""));
-            lines.push(Line::from(" Stats"));
-            lines.push(Line::from(format!(
-                "  Uptime {}",
-                format_uptime(detail.uptime_secs)
-            )));
-            lines.push(Line::from(format!("  Tools {}", detail.tool_calls)));
-            lines.push(Line::from(format!(
-                "  ✓ {} × {}",
-                detail.approvals, detail.denials
-            )));
             if !detail.timers.is_empty() {
                 lines.push(Line::from(""));
                 lines.push(Line::from(" Scheduled"));
                 for timer in &detail.timers {
                     lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
                 }
+            }
+            if info.other_timers > 0 {
+                lines.push(Line::from(format!("  ◷ +{} elsewhere", info.other_timers)));
             }
         }
     }
@@ -1022,14 +1165,16 @@ pub fn compact_mode_buttons(sidebar: Rect, info: &SidebarInfo, pills: bool) -> M
 }
 
 fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Line<'static>> {
-    // Text keeps one indent cell off the border; rules and stat values
-    // share the narrower measure so the right edge stays aligned.
+    // Text keeps one indent cell off the border; rules share the
+    // narrower measure so the right edge stays aligned.
     let mut lines = vec![
         Line::from(Span::styled(" Forge", theme::style(theme::Role::Brand))),
         Line::from(Span::styled(" Session Control Plane", theme::style(theme::Role::Muted))),
         Line::from(""),
-        Line::from(Span::styled(" Session", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))),
     ];
+    lines.extend(fleet_block_lines(info, true));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(" Session", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))));
     match &info.session {
         Some(detail) => {
             lines.push(Line::from(Span::styled(
@@ -1037,7 +1182,14 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
             lines.push(Line::from(format!(" {}", safe_text::encode_for_display(&detail.cli_tool))));
             lines.push(Line::from(format!(" {}", safe_text::encode_for_display(&detail.cwd))));
             if let Some(status) = detail.status.as_deref() {
-                lines.push(Line::from(format!(" {}", safe_text::encode_for_display(status))));
+                let glyph = detail
+                    .status_kind
+                    .map(|k| format!("{} ", status_emoji(k)))
+                    .unwrap_or_default();
+                lines.push(Line::from(format!(
+                    " {glyph}{}",
+                    safe_text::encode_for_display(status)
+                )));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
@@ -1047,18 +1199,6 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
             ]));
             lines.push(Line::from(format!(" Pending hooks: {}", info.pending)));
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(" Stats", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))));
-            lines.push(stat_line("◷ Uptime", &format_uptime(detail.uptime_secs), width));
-            lines.push(rule_line(width));
-            lines.push(stat_line("Tool calls", &detail.tool_calls.to_string(), width));
-            lines.push(rule_line(width));
-            lines.push(Line::from(" Tool Approvals"));
-            lines.push(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(format!("✓ {}", detail.approvals), theme::style(theme::Role::Success)),
-                Span::raw("   "),
-                Span::styled(format!("× {}", detail.denials), theme::style(theme::Role::Danger)),
-            ]));
             if !detail.timers.is_empty() {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
@@ -1069,11 +1209,13 @@ fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Li
                     lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
                 }
             }
+            if info.other_timers > 0 {
+                lines.push(Line::from(format!("  ◷ +{} elsewhere", info.other_timers)));
+            }
             lines.push(rule_line(width));
         }
         None => {
             lines.push(Line::from(" No session selected"));
-            lines.push(Line::from(" Ctrl-b c creates one"));
         }
     }
     while lines.len() < mode_row.saturating_sub(2) { lines.push(Line::from("")); }
@@ -1103,22 +1245,13 @@ fn telegram_line(state: &str) -> Line<'static> {
 fn telegram_badge_line(badge: &Option<(String, String)>) -> Option<Line<'static>> {
     let (session, text) = badge.as_ref()?;
     let raw = format!("{session}: {text}");
-    let cut: String = raw.chars().take(48).collect();
+    let cut = cut_cells(&raw, 48);
     Some(Line::from(format!(" {}", safe_text::encode_for_display(&cut))))
 }
 
-/// Divider rule sharing the stat-value measure: one indent cell, then
-/// dashes to the common right edge.
+/// Divider rule: one indent cell, then dashes to the common right edge.
 fn rule_line(width: u16) -> Line<'static> {
     Line::from(format!(" {}", "─".repeat(width.saturating_sub(6) as usize)))
-}
-
-fn stat_line(label: &str, value: &str, width: u16) -> Line<'static> {
-    // Values end exactly at the divider edge below them: one indent
-    // cell plus a width-6 span, so nothing overshoots the rules.
-    let available = width.saturating_sub(6) as usize;
-    let spaces = available.saturating_sub(label.chars().count() + value.chars().count());
-    Line::from(format!(" {label}{}{value}", " ".repeat(spaces.max(1))))
 }
 
 /// Click areas for the mode buttons, relative to the sidebar rect. Row is
@@ -1247,6 +1380,12 @@ pub struct Chrome {
     pub tabs: Vec<SessionTab>,
     pub topbar: TopBar,
     pub detail: Option<SessionDetail>,
+    /// Fleet router rows plus cursor/scroll/active for the sidebar slot.
+    pub sessions: Vec<FleetRow>,
+    pub active: Option<crate::session::SessionId>,
+    pub fleet_cursor: Option<crate::session::SessionId>,
+    pub fleet_scroll: usize,
+    pub other_timers: usize,
     pub pending: usize,
     pub mode: &'static str,
     /// "on" or "off": Telegram mobile transport state for the sidebar row.
@@ -1490,6 +1629,11 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
     if areas.sidebar.width > 0 && areas.sidebar.height > 0 {
         let info = SidebarInfo {
             session: chrome.detail.clone(),
+            sessions: chrome.sessions.clone(),
+            active: chrome.active,
+            fleet_cursor: chrome.fleet_cursor,
+            fleet_scroll: chrome.fleet_scroll,
+            other_timers: chrome.other_timers,
             pending: chrome.pending,
             mode: chrome.mode,
             telegram: chrome.telegram,
@@ -1839,7 +1983,7 @@ mod tests {
 
     #[test]
     fn pill_cancel_rects_widen_and_keep_edge() {
-        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         let areas = chrome_areas(Rect::new(0, 0, 180, 40));
         let rects = timer_cancel_rects(areas.sidebar, &info, true);
         assert_eq!(rects.len(), 2);
@@ -1857,16 +2001,17 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &c)).unwrap();
         let rows = buffer_rows(&terminal);
-        // Timed content pushes the button row down to 15; pills still
-        // replace the brackets there, and the fixed row stays blank.
+        // Fleet slot plus timed content pushes the button row down to
+        // 14; pills still replace the brackets there, and the fixed
+        // row stays blank.
         assert!(!rows[11].contains("Off"), "no ghost row: {:?}", rows[11]);
-        assert!(rows[15].contains("Off"), "off pill: {:?}", rows[15]);
-        assert!(!rows[15].contains("[Off]"), "no legacy brackets");
+        assert!(rows[14].contains("Off"), "off pill: {:?}", rows[14]);
+        assert!(!rows[14].contains("[Off]"), "no legacy brackets");
         let cancel_y = rows.iter().position(|r| r.contains("Cancel")).expect("cancel pill");
         assert!(rows[cancel_y].contains("\u{e0b6}"));
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(66, 15)].fg, Color::Yellow, "active off cap");
-        assert_eq!(buf[(67, 15)].bg, Color::Yellow, "active off fill");
+        assert_eq!(buf[(66, 14)].fg, Color::Yellow, "active off cap");
+        assert_eq!(buf[(67, 14)].bg, Color::Yellow, "active off fill");
         let cap_byte = rows[cancel_y].find("\u{e0b6}").expect("left cap");
         let cap_x = rows[cancel_y][..cap_byte].chars().count() as u16;
         assert_eq!(buf[(cap_x, cancel_y as u16)].fg, Color::Red, "destructive caps");
@@ -1947,8 +2092,7 @@ mod tests {
         c.detail = Some(SessionDetail {
             name: "jarvis_senior".into(), cli_tool: "Codex".into(),
             cwd: "/work/jarvis".into(), state: "PROGRESS".into(),
-            status: None, timers: Vec::new(),
-            uptime_secs: 3600, tool_calls: 489, approvals: 345, denials: 8,
+            status: None, status_kind: None, timers: Vec::new(),
         });
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
         terminal.draw(|f| render(f, Rect::new(0, 0, 180, 40), &[], &c)).unwrap();
@@ -1958,7 +2102,7 @@ mod tests {
         assert!(sidebar_text.contains("Session Control Plane"));
         assert!(sidebar_text.contains("jarvis_senior"));
         assert!(sidebar_text.contains("Status"));
-        assert!(sidebar_text.contains("Tool Approvals"));
+        assert!(!sidebar_text.contains("Tool Approvals"), "stats removed: {sidebar_text:?}");
         assert!(sidebar_text.contains("Global Settings"));
         assert!(sidebar_text.contains("[Off] [Yolo]"));
     }
@@ -2251,12 +2395,14 @@ mod tests {
                 cwd: "/tmp/proj".to_string(),
                 state: "running".to_string(),
                 status: Some("blocked: waiting on review".to_string()),
+                status_kind: Some(crate::session_status::StatusKind::Blocked),
                 timers: vec![TimerView { id: "t1".to_string(), remaining: "9:55".to_string() }],
-                uptime_secs: 65,
-                tool_calls: 4,
-                approvals: 3,
-                denials: 1,
             }),
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
             pending: 3,
             mode: "off",
             telegram: "off",
@@ -2282,9 +2428,10 @@ mod tests {
                 .collect::<String>()
         };
         // The old fixed overlay row stays blank content; the buttons
-        // follow the flow instead of doubling.
+        // follow the flow instead of doubling. The fleet slot sits
+        // four rows above the focused detail.
         assert!(!row_text(11).contains(PILL_LEFT), "no ghost row: {:?}", row_text(11));
-        assert!(row_text(14).contains("Settings"), "header visible: {:?}", row_text(14));
+        assert!(row_text(13).contains("Settings"), "header visible: {:?}", row_text(13));
         let pill_rows: Vec<u16> = (0..30)
             .filter(|y| row_text(*y).contains(PILL_LEFT))
             .collect();
@@ -2300,18 +2447,19 @@ mod tests {
     #[cfg(test)]
     fn sidebar_chrome_info() -> SidebarInfo {
         let c = sidebar_chrome();
-        SidebarInfo { session: c.detail.clone(), pending: c.pending, mode: c.mode, telegram: "off", telegram_badge: None }
+        SidebarInfo { session: c.detail.clone(), sessions: c.sessions.clone(), active: c.active, fleet_cursor: c.fleet_cursor, fleet_scroll: c.fleet_scroll, other_timers: c.other_timers, pending: c.pending, mode: c.mode, telegram: "off", telegram_badge: None }
     }
 
     #[test]
     fn sidebar_content_keeps_border_padding() {
         use ratatui::{backend::TestBackend, Terminal};
-        // Compact headers sit one cell inside the border...
+        // Compact headers sit one cell inside the border: the fleet
+        // owns the first content row now, ahead of the focused detail.
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| render(f, f.area(), &[], &sidebar_chrome())).unwrap();
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(97, 1)].symbol(), " ", "border gap");
-        assert_eq!(buf[(98, 1)].symbol(), "S", "Session header");
+        assert_eq!(buf[(98, 1)].symbol(), "F", "Fleet header");
         // ...and so do rich ones.
         let mut wide = Terminal::new(TestBackend::new(180, 40)).unwrap();
         wide.draw(|f| render(f, f.area(), &[], &sidebar_chrome())).unwrap();
@@ -2329,12 +2477,14 @@ mod tests {
                 cwd: "/tmp/proj".to_string(),
                 state: "running · Thinking".to_string(),
                 status: Some("blocked: waiting on review".to_string()),
+                status_kind: Some(crate::session_status::StatusKind::Blocked),
                 timers: Vec::new(),
-                uptime_secs: 65,
-                tool_calls: 4,
-                approvals: 3,
-                denials: 1,
             }),
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
             pending: 3,
             mode: "off",
             telegram: "off",
@@ -2346,8 +2496,6 @@ mod tests {
         assert!(has(&lines, "/tmp/proj"), "cwd: {lines:?}");
         assert!(has(&lines, "blocked: waiting on review"), "status: {lines:?}");
         assert!(has(&lines, "running"), "state: {lines:?}");
-        assert!(has(&lines, "1m"), "uptime: {lines:?}");
-        assert!(has(&lines, "4"), "calls: {lines:?}");
         assert!(has(&lines, "Pending: 3"), "pending: {lines:?}");
         assert!(has(&lines, "[Off]"), "off highlighted: {lines:?}");
         assert!(has(&lines, "Yolo"), "yolo offered: {lines:?}");
@@ -2363,11 +2511,11 @@ mod tests {
         assert!(has(&timed_lines, "◷ in 9:55"), "countdown: {timed_lines:?}");
         assert!(!has(&lines, "Scheduled"), "hidden when empty: {lines:?}");
         // Yolo highlights instead when active.
-        let yolo = SidebarInfo { session: info.session.clone(), pending: 0, mode: "yolo", telegram: "off", telegram_badge: None };
+        let yolo = SidebarInfo { session: info.session.clone(), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "yolo", telegram: "off", telegram_badge: None };
         let yolo_lines = sidebar_lines(&yolo);
         assert!(has(&yolo_lines, "[Yolo]"), "yolo highlighted: {yolo_lines:?}");
         // Never blank: empty state still guides.
-        let empty = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
+        let empty = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
         assert!(has(&empty, "Ctrl-b c"), "guides: {empty:?}");
     }
 
@@ -2382,12 +2530,14 @@ mod tests {
                 cwd: "/tmp/proj".to_string(),
                 state: "running".to_string(),
                 status: Some("progress: compiling".to_string()),
+                status_kind: Some(crate::session_status::StatusKind::Progress),
                 timers: vec![TimerView { id: "t1".to_string(), remaining: "9:55".to_string() }],
-                uptime_secs: 65,
-                tool_calls: 4,
-                approvals: 3,
-                denials: 1,
             }),
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
             pending: 0,
             mode: "off",
             telegram: "off",
@@ -2410,6 +2560,11 @@ mod tests {
     fn sidebar_badge_escapes_hostile_text() {
         let info = SidebarInfo {
             session: None,
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
             pending: 0,
             mode: "off",
             telegram: "off",
@@ -2419,33 +2574,107 @@ mod tests {
         let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect();
         assert!(!text.contains("\u{202E}"), "bidi exposed, never raw: {text:?}");
         assert!(text.contains("agent"), "session named: {text:?}");
-        let bare = SidebarInfo { session: None, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let bare = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         assert_eq!(sidebar_lines(&bare).len(), sidebar_lines(&info).len() - 1, "badge adds exactly one row");
     }
 
     #[test]
     fn sidebar_shows_telegram_state() {
-        let off = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
+        let off = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
         assert!(has(&off, "Telegram off"), "off state: {off:?}");
         assert!(has(&off, "Ctrl-b m"), "settings key: {off:?}");
-        let on = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off", telegram: "on", telegram_badge: None });
+        let on = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "on", telegram_badge: None });
         assert!(has(&on, "Telegram on"), "on state: {on:?}");
     }
 
     #[test]
-    fn stat_values_end_at_divider_edge() {
-        // One indent cell plus a width-6 span: values must end on the
-        // same column as the rules, never overshoot them the way the
-        // screenshot showed.
+    fn fleet_viewport_clamps_to_content() {
+        // (start, end) over len with a visible cap; scroll saturates.
+        assert_eq!(fleet_viewport(0, 3, 8), (0, 3));
+        assert_eq!(fleet_viewport(0, 20, 8), (0, 8));
+        assert_eq!(fleet_viewport(5, 20, 8), (5, 13));
+        assert_eq!(fleet_viewport(999, 20, 8), (12, 20));
+        assert_eq!(fleet_viewport(0, 0, 8), (0, 0));
+    }
+
+    #[test]
+    fn status_emoji_has_no_joiners_or_selectors() {
+        use crate::session_status::StatusKind;
+        // Bare glyphs only: no VS16, no ZWJ, like the topbar icons.
+        for kind in [
+            StatusKind::Info,
+            StatusKind::Progress,
+            StatusKind::Success,
+            StatusKind::Warning,
+            StatusKind::Blocked,
+            StatusKind::Question,
+        ] {
+            let e = status_emoji(kind);
+            assert!(!e.contains('\u{FE0F}'), "no VS16: {e:?}");
+            assert!(!e.contains('\u{200D}'), "no ZWJ: {e:?}");
+            assert!(Line::from(e).width() >= 1, "paints something: {e:?}");
+        }
+        assert_eq!(status_emoji(StatusKind::Blocked), "🛑");
+    }
+
+    #[test]
+    fn cut_cells_respects_display_width() {
+        assert_eq!(cut_cells("abcdef", 4), "abcd");
+        assert_eq!(cut_cells("short", 99), "short");
+        assert_eq!(cut_cells("🛑🛑🛑", 4), "🛑🛑");
+        assert_eq!(cut_cells("a🛑b", 3), "a🛑");
+        assert_eq!(cut_cells("a🛑b", 0), "");
+    }
+
+    #[test]
+    fn fleet_rows_and_status_carry_emoji_beside_marks() {
+        use crate::session_status::StatusKind;
+        let id = crate::session::SessionId::fresh();
+        let info = SidebarInfo {
+            session: Some(SessionDetail {
+                name: "muse".to_string(),
+                cli_tool: "muse".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                state: "running · Waiting".to_string(),
+                status: Some("blocked: need the API key".to_string()),
+                status_kind: Some(StatusKind::Blocked),
+                timers: Vec::new(),
+            }),
+            sessions: vec![FleetRow {
+                id,
+                name: "muse".to_string(),
+                tier: FleetTier::Attention,
+                state: "running · Waiting".to_string(),
+                reason: "need the API key".to_string(),
+                emoji: "🔔",
+            }],
+            active: Some(id),
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        // Marks still carry meaning; emoji ride beside them.
+        let compact = sidebar_lines(&info);
+        assert!(has(&compact, "!"), "tier mark: {compact:?}");
+        assert!(has(&compact, "🔔"), "attention emoji: {compact:?}");
+        assert!(has(&compact, "🛑"), "status emoji: {compact:?}");
+        let rich = rich_sidebar_lines(&info, 30, 45);
+        assert!(has(&rich, "*"), "active mark: {rich:?}");
+        assert!(has(&rich, "need the API key"), "reason: {rich:?}");
+    }
+
+    #[test]
+    fn rule_line_spans_sidebar_width() {
+        // One indent cell plus a width-6 span of dashes.
         for width in [30u16, 45, 60] {
-            let line = stat_line("◷ Uptime", "41s", width);
-            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(text.chars().count(), (width - 5) as usize, "width {width}");
-            assert!(text.starts_with(' '), "indent");
-            assert!(text.ends_with("41s"));
             let rule = rule_line(width);
             let rule_text: String = rule.spans.iter().map(|s| s.content.as_ref()).collect();
             assert_eq!(rule_text.chars().count(), (width - 5) as usize, "rule {width}");
+            assert!(rule_text.starts_with(' '), "indent");
         }
     }
 
@@ -2462,18 +2691,17 @@ mod tests {
         SessionDetail {
             name: "agent".into(), cli_tool: "Codex".into(),
             cwd: "/work".into(), state: "running".into(),
-            status: None,
+            status: None, status_kind: None,
             timers: vec![
                 TimerView { id: "t1".into(), remaining: "9:55".into() },
                 TimerView { id: "t2".into(), remaining: "1:00:05".into() },
             ],
-            uptime_secs: 60, tool_calls: 1, approvals: 0, denials: 0,
         }
     }
 
     #[test]
-    fn scheduled_section_breathes_after_approvals() {
-        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+    fn scheduled_section_keeps_breathing_room() {
+        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         let lines = rich_sidebar_lines(&info, 30, 45);
         let header = lines
             .iter()
@@ -2497,7 +2725,7 @@ mod tests {
 
     #[test]
     fn timer_cancel_rects_match_painted_rows() {
-        let info = SidebarInfo { session: Some(timed_detail()), pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         let areas = chrome_areas(Rect::new(0, 0, 180, 40));
         let rects = timer_cancel_rects(areas.sidebar, &info, false);
         assert_eq!(rects.len(), 2);
@@ -2524,7 +2752,7 @@ mod tests {
         let mut impostor = timed_detail();
         impostor.name = "Scheduled".to_string();
         impostor.timers.clear();
-        let bare = SidebarInfo { session: Some(impostor), pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let bare = SidebarInfo { session: Some(impostor), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
         assert!(timer_cancel_rects(areas.sidebar, &bare, false).is_empty());
     }
 
@@ -2572,6 +2800,11 @@ mod tests {
                 ],
             },
             detail: None,
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
             pending: 0,
             mode: "off",
             telegram: "off",

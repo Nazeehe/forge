@@ -387,8 +387,10 @@ fn instructions(srv: &ServerCtx) -> String {
         (Hyprland; hidden windows need focus:true). Use walkthrough_start to tour the operator through a file, \
         walkthrough_answer for their waiting tour questions, walkthrough_end to \
         close the tour. Use compact_session to compact context, schedule_prompt \
-        for delayed self-injection, start_session to spawn local agent sessions, \
-        and set/clear_session_status for your sticky sidebar status.";
+        for delayed self-injection, start_session to spawn local agent sessions. \
+        Keep set_session_status current as your phase changes and clear it when \
+        it stops describing reality. Use request_attention only when you are \
+        blocked waiting on the operator, never to report completion.";
     if srv.instructions_extra.is_empty() {
         base.to_string()
     } else {
@@ -485,13 +487,18 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "set_session_status",
-            description: "Replace your sticky sidebar status; kind is info, progress, success, warning, blocked, or question, message at most 80 characters with no newlines.",
+            description: "Keep your sticky sidebar status current: the operator is usually tabbed away and the session router shows this text. Call with kind=progress when you start work and whenever the phase changes, kind=blocked or kind=question the moment you are stuck (put what you need in the message), kind=success with the result when you finish. Kind is info, progress, success, warning, blocked, or question; message at most 80 characters with no newlines.",
             schema: r#"{"type":"object","properties":{"kind":{"type":"string"},"message":{"type":"string"}},"required":["kind","message"]}"#,
         },
         ToolDef {
             name: "clear_session_status",
-            description: "Clear your sticky sidebar status.",
+            description: "Clear your sticky sidebar status the moment it stops describing reality: new task, resolved blocker, answered question. A stale status misleads the operator; when work continues under a new phase, set a fresh status instead of leaving the old one up.",
             schema: r#"{"type":"object","properties":{}}"#,
+        },
+        ToolDef {
+            name: "request_attention",
+            description: "Raise a blocked-only attention flag for the operator: call ONLY when you are stopped waiting on them (need input, an approval, a secret, a decision) and cannot proceed. NEVER call it to report completion: finishing is set_session_status with kind=success, then stop. The flag pins your session to the top of the router until the operator looks at it. Reason at most 80 characters with no newlines.",
+            schema: r#"{"type":"object","properties":{"reason":{"type":"string"}},"required":["reason"]}"#,
         },
         ToolDef {
             name: "walkthrough_add_step",
@@ -776,6 +783,7 @@ mod tests {
             "start_session",
             "set_session_status",
             "clear_session_status",
+            "request_attention",
             "walkthrough_add_step",
             "walkthrough_update",
             #[cfg(feature = "visual")]
@@ -807,6 +815,26 @@ mod tests {
                 "{tool} advertises idempotency_key: {window}"
             );
         }
+    }
+
+    #[test]
+    fn request_attention_listed_with_blocked_only_contract() {
+        let res = handle_line(
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("tools/list answers");
+        let marker = r#""name":"request_attention""#;
+        let at = res.find(marker).expect("request_attention listed");
+        let rest = &res[at + marker.len()..];
+        let end = rest.find(r#""name":""#).unwrap_or(rest.len());
+        let window = &rest[..end];
+        assert!(window.contains("blocked"), "blocked-only use named: {window}");
+        assert!(window.contains("NEVER"), "completion misuse forbidden: {window}");
+        assert!(window.contains("completion"), "completion misuse named: {window}");
+        assert!(window.contains(r#""required":["reason"]"#), "schema: {window}");
     }
 
     #[test]

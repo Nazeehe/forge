@@ -50,6 +50,17 @@ pub struct AppState {
     /// Latest in-app `message_user` badge text per session. Always
     /// records, even when forwarding is off.
     pub message_user_badges: std::collections::HashMap<crate::session::SessionId, String>,
+    /// Blocked-only attention flags from `request_attention`: reason plus
+    /// raise time, one entry per session at most. Focusing the session
+    /// acknowledges it; removal and exit drop it like the other maps.
+    pub attention_flags: std::collections::HashMap<
+        crate::session::SessionId,
+        (String, std::time::Instant),
+    >,
+    /// Fleet router cursor (session id, stable across resorting) and
+    /// scroll offset into the sorted fleet rows.
+    pub fleet_cursor: Option<crate::session::SessionId>,
+    pub fleet_scroll: usize,
     /// Replies for the dedicated Telegram sender, shared by handle.
     /// Bounded by [`crate::telegram::OUTBOX_CAP`]; overflow counts in
     /// `telegram_outbox_dropped` instead of growing the owner.
@@ -293,6 +304,9 @@ impl AppState {
             telegram_test_rx,
             message_user_windows: std::collections::HashMap::new(),
             message_user_badges: std::collections::HashMap::new(),
+            attention_flags: std::collections::HashMap::new(),
+            fleet_cursor: None,
+            fleet_scroll: 0,
             message_user_idem: crate::bot::IdemCache::new(),
             telegram_outbox: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
@@ -1703,7 +1717,7 @@ impl AppState {
         args: &str,
     ) -> Option<Result<String, String>> {
         match tool {
-            "start_session" | "set_session_status" | "clear_session_status" | "message_user" => {}
+            "start_session" | "set_session_status" | "clear_session_status" | "message_user" | "request_attention" => {}
             #[cfg(feature = "visual")]
             "visual_show" => {}
             _ => return None,
@@ -1716,6 +1730,7 @@ impl AppState {
             "start_session" => Some(self.start_session_tool(id, args)),
             "set_session_status" => Some(self.set_session_status(id, args)),
             "message_user" => Some(self.message_user_tool(id, args)),
+            "request_attention" => Some(self.request_attention_tool(id, args)),
             #[cfg(feature = "visual")]
             "visual_show" => Some(self.visual_show_tool(id, args)),
             _ => Some(self.clear_session_status(id)),
@@ -2021,6 +2036,28 @@ impl AppState {
         rec.status = None;
         self.dirty = true;
         Ok(r#"{"status_cleared":true}"#.to_string())
+    }
+
+    /// Raise the caller's blocked-only attention flag: validated reason,
+    /// one entry per session, plus Waiting activity so the router sorts
+    /// it top. Re-raising replaces the reason; focusing clears it.
+    fn request_attention_tool(
+        &mut self,
+        caller: crate::session::SessionId,
+        args: &str,
+    ) -> Result<String, String> {
+        let reason = Self::tool_arg(args, "reason")
+            .ok_or_else(|| "request_attention needs a reason".to_string())?;
+        let reason = crate::session_status::validate(&reason)?;
+        if self.manager.get(caller).is_none() {
+            return Err("unknown or stale run ID".to_string());
+        }
+        self.attention_flags
+            .insert(caller, (reason, std::time::Instant::now()));
+        self.manager
+            .set_activity(caller, crate::session::Activity::Waiting);
+        self.dirty = true;
+        Ok(r#"{"attention_raised":true}"#.to_string())
     }
 
     /// Badge the operator in-app and optionally forward to Telegram.
@@ -3060,14 +3097,131 @@ impl AppState {
     /// when out of range, leaving focus untouched.
     pub fn select_session(&mut self, index: usize) -> bool {
         match self.manager.order().to_vec().get(index) {
-            Some(&id) => {
-                self.manager.switch(id);
-                self.overlay_view = None;
-                // Picking a number always returns to the focused view.
-                self.grid_mode = false;
-                self.dirty = true;
-                true
+            Some(&id) => self.focus_session(id),
+            None => false,
+        }
+    }
+
+    /// Focus a session by id: switch, clear its unread pings (attention
+    /// flag and badge entry; the badged id stays for reply routing),
+    /// and return to the focused view. False when unknown.
+    pub fn focus_session(&mut self, id: crate::session::SessionId) -> bool {
+        if !self.manager.order().contains(&id) {
+            return false;
+        }
+        self.manager.switch(id);
+        self.overlay_view = None;
+        self.attention_flags.remove(&id);
+        self.message_user_badges.remove(&id);
+        self.grid_mode = false;
+        self.dirty = true;
+        true
+    }
+
+    /// Fleet rows in router order: attention first, ties by hook
+    /// recency (unstamped sessions last), then spawn order. Shared by
+    /// the sidebar, cursor movement, and activation so all three agree.
+    fn sorted_fleet_ids(&self) -> Vec<crate::session::SessionId> {
+        let active = self.manager.active();
+        let mut rows: Vec<(u8, Option<std::time::Instant>, usize, crate::session::SessionId)> =
+            Vec::new();
+        for (idx, id) in self.manager.order().to_vec().iter().enumerate() {
+            let Some(rec) = self.manager.get(*id) else {
+                continue;
+            };
+            let tier = self.fleet_tier(*id, rec, active);
+            rows.push((
+                tier,
+                self.last_hook_activity.get(id).copied(),
+                idx,
+                *id,
+            ));
+        }
+        rows.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| match (a.1, b.1) {
+                    (Some(x), Some(y)) => y.cmp(&x),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                })
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        rows.into_iter().map(|(_, _, _, id)| id).collect()
+    }
+
+    /// Attention tier for one session: explicit pings and waiting beat
+    /// working, which beats idle. Lower sorts first.
+    fn fleet_tier(
+        &self,
+        id: crate::session::SessionId,
+        rec: &crate::session::SessionRecord,
+        active: Option<crate::session::SessionId>,
+    ) -> u8 {
+        if self.attention_flags.contains_key(&id) {
+            return 0;
+        }
+        if active != Some(id) && self.message_user_badges.contains_key(&id) {
+            return 0;
+        }
+        match rec.activity {
+            crate::session::Activity::Waiting => 0,
+            crate::session::Activity::ToolUse | crate::session::Activity::Thinking => 1,
+            _ => match &rec.status {
+                Some(s)
+                    if matches!(
+                        s.kind,
+                        crate::session_status::StatusKind::Blocked
+                            | crate::session_status::StatusKind::Question
+                    ) =>
+                {
+                    0
+                }
+                _ => 2,
+            },
+        }
+    }
+
+    /// Move the fleet cursor, pulling the scroll offset so the cursor
+    /// stays visible under the live sidebar breakpoint.
+    pub fn fleet_step(&mut self, dir: i32) {
+        let ids = self.sorted_fleet_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let cur = self
+            .fleet_cursor
+            .and_then(|c| ids.iter().position(|id| *id == c));
+        let next = match cur {
+            Some(i) => (i as i32 + dir).clamp(0, ids.len() as i32 - 1) as usize,
+            None => {
+                if dir >= 0 {
+                    0
+                } else {
+                    ids.len() - 1
+                }
             }
+        };
+        self.fleet_cursor = Some(ids[next]);
+        let (rows, cols) = self.term_size;
+        let sidebar = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows)).sidebar;
+        let rich = sidebar.width >= 40 && sidebar.height >= 30;
+        let visible = crate::ui::fleet_visible(rich);
+        let max_start = ids.len().saturating_sub(visible);
+        if next < self.fleet_scroll {
+            self.fleet_scroll = next;
+        } else if next >= self.fleet_scroll + visible {
+            self.fleet_scroll = (next + 1).saturating_sub(visible).min(max_start);
+        }
+        self.fleet_scroll = self.fleet_scroll.min(max_start);
+        self.dirty = true;
+    }
+
+    /// Activate the fleet cursor (or the focused session when unset).
+    pub fn fleet_activate(&mut self) -> bool {
+        let target = self.fleet_cursor.or_else(|| self.manager.active());
+        match target {
+            Some(id) => self.focus_session(id),
             None => false,
         }
     }
@@ -3086,6 +3240,7 @@ impl AppState {
         // the session, or the maps grow with every termination.
         self.last_human_input.remove(&id);
         self.last_hook_activity.remove(&id);
+        self.attention_flags.remove(&id);
         self.overlay_view = None;
         self.dirty = true;
         true
@@ -3118,29 +3273,36 @@ impl AppState {
 
     /// Sidebar content: the focused session's detail plus pending hooks
     /// and the live permission mode.
+    /// One-line lifecycle label shared by the focused detail and the
+    /// fleet rows, so both always agree on what a session is doing.
+    fn session_state_label(rec: &crate::session::SessionRecord) -> String {
+        if rec.state.is_live() {
+            match rec.activity {
+                crate::session::Activity::Idle => "running".to_string(),
+                activity => format!("running · {activity:?}"),
+            }
+        } else {
+            match rec.exit_code {
+                Some(code) => format!("exited({code})"),
+                None => "exited".to_string(),
+            }
+        }
+    }
+
     pub fn sidebar_info(&self) -> crate::ui::SidebarInfo {
         let now = std::time::Instant::now();
-        let session = self.manager.active().and_then(|id| {
+        let active = self.manager.active();
+        let session = active.and_then(|id| {
             self.manager.get(id).map(|rec| {
-                let state = if rec.state.is_live() {
-                    match rec.activity {
-                        crate::session::Activity::Idle => "running".to_string(),
-                        activity => format!("running · {activity:?}"),
-                    }
-                } else {
-                    match rec.exit_code {
-                        Some(code) => format!("exited({code})"),
-                        None => "exited".to_string(),
-                    }
-                };
                 crate::ui::SessionDetail {
                     name: rec.name.clone(),
                     cli_tool: rec.cli_tool.clone(),
                     cwd: rec.cwd.to_string_lossy().into_owned(),
-                    state,
+                    state: Self::session_state_label(rec),
                     status: rec.status.as_ref().map(|s| s.display()),
+                    status_kind: rec.status.as_ref().map(|s| s.kind),
                     // Armed timers show for the focused session only;
-                    // other sessions keep their own countdowns hidden.
+                    // other sessions collapse to a count below.
                     timers: self
                         .broker
                         .timers_for(id)
@@ -3152,13 +3314,55 @@ impl AppState {
                             ),
                         })
                         .collect(),
-                    uptime_secs: rec.spawned_at.elapsed().as_secs(),
-                    tool_calls: rec.tool_calls,
-                    approvals: rec.approvals,
-                    denials: rec.denials,
                 }
             })
         });
+        // Fleet rows in router order with reasons; non-focused armed
+        // timers collapse to one count for the focused block.
+        let mut sessions = Vec::new();
+        let mut other_timers = 0;
+        for id in self.sorted_fleet_ids() {
+            let Some(rec) = self.manager.get(id) else {
+                continue;
+            };
+            let tier_n = self.fleet_tier(id, rec, active);
+            let tier = match tier_n {
+                0 => crate::ui::FleetTier::Attention,
+                1 => crate::ui::FleetTier::Working,
+                _ => crate::ui::FleetTier::Idle,
+            };
+            // Reason prefers the explicit ping, then the sticky
+            // status; the emoji mirrors the same source.
+            let (reason, emoji) = if let Some((r, _)) = self.attention_flags.get(&id) {
+                (r.clone(), "🔔")
+            } else if active != Some(id) {
+                if let Some(badge) = self.message_user_badges.get(&id) {
+                    (badge.clone(), "🔔")
+                } else if let Some(st) = rec.status.as_ref() {
+                    (st.display(), crate::ui::status_emoji(st.kind))
+                } else {
+                    (Self::session_state_label(rec), "")
+                }
+            } else if let Some(st) = rec.status.as_ref() {
+                (st.display(), crate::ui::status_emoji(st.kind))
+            } else {
+                (Self::session_state_label(rec), "")
+            };
+            if Some(id) != active {
+                other_timers += self.broker.timers_for(id).len();
+            }
+            sessions.push(crate::ui::FleetRow {
+                id,
+                name: rec.name.clone(),
+                tier,
+                state: Self::session_state_label(rec),
+                reason,
+                emoji,
+            });
+        }
+        let fleet_scroll = self
+            .fleet_scroll
+            .min(sessions.len().saturating_sub(1));
         let telegram_on = self
             .telegram_config
             .lock()
@@ -3183,6 +3387,11 @@ impl AppState {
         });
         crate::ui::SidebarInfo {
             session,
+            sessions,
+            active,
+            fleet_cursor: self.fleet_cursor,
+            fleet_scroll,
+            other_timers,
             pending: self.pending_hooks.len(),
             mode: self.permission_mode.as_str(),
             telegram: telegram_state,
@@ -3231,14 +3440,10 @@ impl AppState {
                 self.last_hook_activity
                     .insert(id, std::time::Instant::now());
             }
-            // Attribute the verdict to the sender's sidebar counters.
-            if let Some(id) = attributed {
-                self.manager.note_verdict(id, decision);
-            }
             self.audit_hook(audit_path, &req.hook, &req.body, decision, reason);
-            // A verdict changes sidebar counters and audit state, so only
-            // a fired hook repaints; an empty queue leaves the frame clean
-            // and the idle loop skips the 60Hz full redraw.
+            // A verdict changes audit state, so only a fired hook
+            // repaints; an empty queue leaves the frame clean and the idle
+            // loop skips the 60Hz full redraw.
             self.dirty = true;
         }
     }
@@ -3277,6 +3482,7 @@ impl AppState {
                 self.broker.target_exited(&self.manager, id);
                 self.last_human_input.remove(&id);
                 self.last_hook_activity.remove(&id);
+                self.attention_flags.remove(&id);
                 self.dirty = true;
             }
             AppEvent::CommsRequest(req) => {
@@ -3406,7 +3612,7 @@ impl AppState {
                 // Attribute hook activity before queuing: the sender's run
                 // ID resolves to its session; records without one resolve
                 // by the harness session ID instead. Unknown runs stay
-                // untouched. Tool-gated hooks also count one sidebar call.
+                // untouched.
                 let fallback_id = if self.manager.lookup_run(&req.run_id).is_none() {
                     crate::session::session_id_from_hook_body(&req.body)
                         .and_then(|h| self.manager.lookup_harness_session(&h))
@@ -3417,9 +3623,6 @@ impl AppState {
                 if let Some(activity) = crate::session::activity_for_hook(&req.hook) {
                     if let Some(id) = attributed {
                         self.manager.set_activity(id, activity);
-                        if activity == crate::session::Activity::ToolUse {
-                            self.manager.note_tool_call(id);
-                        }
                     }
                 }
                 // SessionStart carries the harness-side conversation ID the
@@ -5445,16 +5648,171 @@ mod tests {
     }
 
     #[test]
-    fn hook_attribution_feeds_sidebar_counters() {
+    fn fleet_lists_attention_first() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn(
+                "aaa",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        let b = s
+            .manager
+            .spawn(
+                "bbb",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        // Idle order follows spawn order.
+        let ids: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![a, b], "spawn order: {ids:?}");
+        // Background attention jumps to the top.
+        let run_b = s.manager.get(b).unwrap().run_id.as_str().to_string();
+        let raised = comms_reply(
+            &mut s,
+            &run_b,
+            "request_attention",
+            r#"{"reason":"need a decision"}"#,
+        );
+        assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
+        let ids: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
+        assert_eq!(ids[0], b, "attention first: {ids:?}");
+        assert!(
+            s.sidebar_info().sessions[0].reason.contains("need a decision"),
+            "reason rides along"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn focusing_clears_badge_entry_keeps_reply_target() {
+        let (mut state, id, live_run) = message_user_agent();
+        let ok = comms_reply(
+            &mut state,
+            &live_run,
+            "message_user",
+            r#"{"message":"hello operator"}"#,
+        );
+        assert!(ok.contains(r#""ok":true"#), "ok: {ok}");
+        assert!(state.message_user_badges.contains_key(&id));
+        let order = state.manager.order().to_vec();
+        let idx = order.iter().position(|s| *s == id).unwrap();
+        assert!(state.select_session(idx), "focus it");
+        assert!(
+            !state.message_user_badges.contains_key(&id),
+            "seen badge clears"
+        );
+        assert_eq!(
+            state.last_telegram_badged,
+            Some(id),
+            "bare-text replies still route"
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn sidebar_collapses_background_timers() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let a = state
+            .manager
+            .spawn_agent(
+                "a",
+                &std::env::temp_dir(),
+                "exec cat",
+                RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        let b = state
+            .manager
+            .spawn_agent(
+                "b",
+                &std::env::temp_dir(),
+                "exec cat",
+                RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let run_a = state.manager.get(a).unwrap().run_id.as_str().to_string();
+        let out = comms_reply(
+            &mut state,
+            &run_a,
+            "schedule_prompt",
+            r#"{"prompt":"later","delay_seconds":600}"#,
+        );
+        assert!(out.contains("timer_id"), "armed: {out}");
+        state.manager.switch(b);
+        let info = state.sidebar_info();
+        assert!(
+            info.session.expect("detail renders").timers.is_empty(),
+            "focused shows only its own"
+        );
+        assert_eq!(info.other_timers, 1, "background collapses to a count");
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
+    }
+
+    #[test]
+    fn fleet_cursor_survives_resort_and_activates() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn(
+                "aaa",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        let b = s
+            .manager
+            .spawn(
+                "bbb",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        s.fleet_step(1);
+        s.fleet_step(1);
+        assert_eq!(s.fleet_cursor, Some(b), "two steps reach b");
+        // Resorting under the cursor keeps it by id, not position.
+        let run_a = s.manager.get(a).unwrap().run_id.as_str().to_string();
+        let raised = comms_reply(
+            &mut s,
+            &run_a,
+            "request_attention",
+            r#"{"reason":"need a decision"}"#,
+        );
+        assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
+        assert_eq!(s.fleet_cursor, Some(b), "cursor stable across resort");
+        assert!(s.fleet_activate(), "activate focuses cursor");
+        assert_eq!(s.manager.active(), Some(b));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn hook_attribution_marks_activity_and_settles() {
         let mut s = AppState::new();
         let run = RunId::generate();
         let id = s
             .manager
             .spawn("h", &std::env::temp_dir(), "exec sleep 30", run.clone(), "shell")
             .unwrap();
-        let rec = s.manager.get(id).unwrap();
-        assert_eq!((rec.tool_calls, rec.approvals, rec.denials), (0, 0, 0));
-        // Tool-gated hook: activity + one tool call.
+        // Tool-gated hook: activity flips to ToolUse, hook queued.
         let (reply_tx, _) = std::sync::mpsc::channel();
         s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
             hook: "PreToolUse".to_string(),
@@ -5464,18 +5822,22 @@ mod tests {
             reply: reply_tx,
             timed_out: Default::default(),
         }));
-        assert_eq!(s.manager.get(id).unwrap().tool_calls, 1);
-        // Yolo settle: one approval, no denial.
+        assert_eq!(
+            s.manager.get(id).unwrap().activity,
+            crate::session::Activity::ToolUse
+        );
+        assert_eq!(s.pending_hooks.len(), 1);
+        // Yolo settle drains the queue and stamps hook activity.
         let audit = std::env::temp_dir().join(format!(
-            "forge-counters-test-{}",
+            "forge-attribution-test-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&audit);
         let mut yolo =
             crate::policy::Policy::new(crate::config::PermissionMode::Yolo, &[], &[]).unwrap();
         s.settle_hooks(&mut yolo, &audit);
-        let rec = s.manager.get(id).unwrap();
-        assert_eq!((rec.approvals, rec.denials), (1, 0));
+        assert!(s.pending_hooks.is_empty(), "queue drains");
+        assert!(s.last_hook_activity.contains_key(&id), "verdict stamps activity");
         let _ = std::fs::remove_file(&audit);
         assert!(s.manager.remove(id));
     }
@@ -7147,6 +7509,11 @@ mod tests {
             }],
             topbar: crate::ui::TopBar { tabs: Vec::new() },
             detail: None,
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
             pending: 0,
             mode: "off",
             telegram: "off",
@@ -7389,6 +7756,66 @@ mod tests {
         assert!(cleared.contains(r#""status_cleared":true"#), "cleared: {cleared}");
         assert!(state.manager.get(id).unwrap().status.is_none());
         assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn request_attention_raises_flag_and_clears_on_focus() {
+        let mut state = AppState::new();
+        let a = state
+            .manager
+            .spawn(
+                "a",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        let b = state
+            .manager
+            .spawn(
+                "b",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        // Operator looks at a; b raises attention while in the background.
+        let order = state.manager.order().to_vec();
+        let (ia, ib) = (
+            order.iter().position(|id| *id == a).unwrap(),
+            order.iter().position(|id| *id == b).unwrap(),
+        );
+        assert!(state.select_session(ia), "focus a");
+        let run_b = state.manager.get(b).unwrap().run_id.as_str().to_string();
+        let raised = comms_reply(
+            &mut state,
+            &run_b,
+            "request_attention",
+            r#"{"reason":"need the production API key"}"#,
+        );
+        assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
+        assert!(
+            state.attention_flags.contains_key(&b),
+            "background session flagged"
+        );
+        // Focusing the flagged session acknowledges it.
+        assert!(state.select_session(ib), "focus b");
+        assert!(
+            !state.attention_flags.contains_key(&b),
+            "focus clears attention"
+        );
+        // Bad reasons are rejected like status text.
+        let long = comms_reply(
+            &mut state,
+            &run_b,
+            "request_attention",
+            &format!(r#"{{"reason":"{}"}}"#, "x".repeat(81)),
+        );
+        assert!(long.contains("over 80"), "long: {long}");
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
     }
 
     fn message_user_agent() -> (AppState, crate::session::SessionId, String) {

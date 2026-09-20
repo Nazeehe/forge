@@ -15,6 +15,10 @@ pub enum UserCommand {
     CreateSession,
     /// Focus session by zero-based order index (`Ctrl-b 1` is index 0).
     SelectSession(usize),
+    /// Move the sidebar fleet cursor (`Ctrl-b j` down, `Ctrl-b k` up).
+    FleetStep(i32),
+    /// Activate the sidebar fleet cursor (`Ctrl-b Enter`).
+    FleetActivate,
     /// Toggle the active session in/out of the shared `peers` group (4c).
     /// Full group management lives in the group dialog; this covers the
     /// manual ask/tell gate with one key.
@@ -316,6 +320,9 @@ impl InputRouter {
                     KeyCode::Char('t') => RoutedKey::Command(UserCommand::SwitchTab),
                     KeyCode::Char('y') => RoutedKey::Command(UserCommand::TogglePermissionMode),
                     KeyCode::Char('x') => RoutedKey::Command(UserCommand::TerminateSession),
+                    KeyCode::Char('j') => RoutedKey::Command(UserCommand::FleetStep(1)),
+                    KeyCode::Char('k') => RoutedKey::Command(UserCommand::FleetStep(-1)),
+                    KeyCode::Enter => RoutedKey::Command(UserCommand::FleetActivate),
                     KeyCode::Char('w') => RoutedKey::Command(UserCommand::ToggleGrid),
                     KeyCode::Char('m') => RoutedKey::Command(UserCommand::TelegramSettings),
                     KeyCode::Char('e') => RoutedKey::Command(UserCommand::ThemePicker),
@@ -362,6 +369,26 @@ mod tests {
         let mut r = InputRouter::new();
         assert_eq!(r.feed(key(KeyCode::Char('a'))), RoutedKey::Forward(key(KeyCode::Char('a'))));
         assert_eq!(r.feed(key(KeyCode::Enter)), RoutedKey::Forward(key(KeyCode::Enter)));
+    }
+
+    #[test]
+    fn prefix_fleet_keys_step_and_activate() {
+        let mut r = InputRouter::new();
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('j'))),
+            RoutedKey::Command(UserCommand::FleetStep(1))
+        );
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('k'))),
+            RoutedKey::Command(UserCommand::FleetStep(-1))
+        );
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Enter)),
+            RoutedKey::Command(UserCommand::FleetActivate)
+        );
     }
 
     #[test]
