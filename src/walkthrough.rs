@@ -844,6 +844,7 @@ impl Walkthrough {
         );
         let block = Block::default()
             .borders(Borders::ALL)
+                .border_type(crate::theme::border_type())
             .border_style(style(Role::BorderModal))
             .title(Line::from(Span::styled(" Q&A ", style(Role::Muted))));
         let inner = block.inner(ratatui::layout::Rect::new(

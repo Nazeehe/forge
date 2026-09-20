@@ -131,6 +131,22 @@ pub fn run(
     install_panic_hook();
     state.permission_mode = loaded.config.permission.mode.clone();
     state.pill_tabs = loaded.config.pills_enabled;
+    state.themes_dir = Some(crate::branding::themes_dir(home));
+    // Saved theme applies at startup; a missing or broken file warns
+    // and keeps the builtin look instead of blocking boot.
+    if loaded.config.theme != "default" {
+        let themes = state.available_themes();
+        if themes.iter().any(|t| t.name == loaded.config.theme) {
+            let name = loaded.config.theme.clone();
+            state.apply_theme_name(&name, &themes);
+            state.dirty = true;
+        } else {
+            eprintln!(
+                "warning: unknown theme {:?}; keeping default",
+                loaded.config.theme
+            );
+        }
+    }
     if let Ok(mut tg) = state.telegram_config.lock() {
         *tg = loaded.config.telegram.clone();
     }
@@ -379,6 +395,8 @@ fn loop_until_quit(
                         handle_group_key(state, key);
                     } else if state.telegram_dialog.is_some() {
                         handle_telegram_key(state, loaded, home, key);
+                    } else if state.theme_dialog.is_some() {
+                        handle_theme_key(state, loaded, home, key);
                     } else if state.quit_confirm.is_some() {
                         handle_quit_key(state, key);
                     } else {
@@ -392,6 +410,8 @@ fn loop_until_quit(
                         // other modal: clicks inside hit rows/buttons,
                         // everything else dies here.
                         handle_telegram_mouse(state, loaded, home, mev);
+                    } else if state.theme_dialog.is_some() {
+                        handle_theme_mouse(state, loaded, home, mev);
                     } else {
                         forward_mouse(state, mev);
                     }
@@ -406,6 +426,7 @@ fn loop_until_quit(
                     } else if state.restore_picker.is_none()
                         && state.create_dialog.is_none()
                         && state.group_dialog.is_none()
+                        && state.theme_dialog.is_none()
                         && state.quit_confirm.is_none()
                     {
                         // A tour draft takes the paste single-line, like
@@ -523,6 +544,9 @@ fn loop_until_quit(
                 }
                 if let Some(dialog) = state.telegram_dialog.as_mut() {
                     dialog.view(f, crate::telegram_dialog::telegram_area(area));
+                }
+                if let Some(dialog) = state.theme_dialog.as_ref() {
+                    dialog.view(f, crate::theme_dialog::theme_area(area));
                 }
                 if let Some(dialog) = state.quit_confirm.as_ref() {
                     dialog.view(f, crate::quit::quit_area(area));
@@ -757,6 +781,10 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
             UserCommand::TelegramSettings => {
                 state.open_telegram_dialog();
             }
+            UserCommand::ThemePicker => {
+                let themes = state.available_themes();
+                state.open_theme_dialog(themes);
+            }
         },
         RoutedKey::PrefixPending | RoutedKey::Cancelled => {
             state.dirty = true;
@@ -877,6 +905,68 @@ fn handle_telegram_mouse(
     }
 }
 
+/// Apply one theme-picker outcome: applying swaps the live theme
+/// and persists `theme` in the config, cancel/close just redraws.
+fn settle_theme_outcome(
+    state: &mut AppState,
+    loaded: &mut crate::config::LoadedConfig,
+    home: &std::path::Path,
+    outcome: Option<crate::theme_dialog::ThemeOutcome>,
+) {
+    match outcome {
+        Some(crate::theme_dialog::ThemeOutcome::Applied(name)) => {
+            let themes = state.available_themes();
+            if state.apply_theme_name(&name, &themes) {
+                loaded.config.theme = name;
+                if let Err(e) = loaded.save_home(home) {
+                    eprintln!("warning: cannot persist theme: {e}");
+                }
+            }
+            state.dirty = true;
+        }
+        Some(crate::theme_dialog::ThemeOutcome::Cancelled) => {
+            state.theme_dialog = None;
+            state.dirty = true;
+        }
+        _ => {
+            state.dirty = true;
+        }
+    }
+}
+
+/// One theme-picker key: arrows move, Enter applies, Esc closes.
+fn handle_theme_key(
+    state: &mut AppState,
+    loaded: &mut crate::config::LoadedConfig,
+    home: &std::path::Path,
+    key: event::KeyEvent,
+) {
+    let outcome = state.theme_dialog.as_mut().map(|d| d.key(&key));
+    settle_theme_outcome(state, loaded, home, outcome);
+}
+
+/// One theme-picker click: rows take focus, Apply/Cancel fire.
+/// Clicks outside the modal die here so nothing behind it moves.
+fn handle_theme_mouse(
+    state: &mut AppState,
+    loaded: &mut crate::config::LoadedConfig,
+    home: &std::path::Path,
+    mev: event::MouseEvent,
+) {
+    if !matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+        return;
+    }
+    let (rows, cols) = state.term_size;
+    let area = crate::theme_dialog::theme_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let outcome = state
+        .theme_dialog
+        .as_mut()
+        .and_then(|d| d.click(mev.column, mev.row, area));
+    if outcome.is_some() {
+        settle_theme_outcome(state, loaded, home, outcome);
+    }
+}
+
 /// One restore-picker key: a pick recreates the whole entry and fits
 /// the panes, Esc starts fresh. Either way the picker closes.
 fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
@@ -986,6 +1076,11 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         return;
     }
     if state.create_dialog.is_some() {
+        return;
+    }
+    // The theme picker owns its mouse via handle_theme_mouse (like
+    // Telegram settings); anything reaching here dies.
+    if state.theme_dialog.is_some() {
         return;
     }
     if state.quit_confirm.is_some() {
@@ -2299,6 +2394,52 @@ mod tests {
         handle_key(&mut state, &mut router, prefix());
         handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('m'), none));
         assert!(state.telegram_dialog.is_some(), "Ctrl-b m opens Telegram settings");
+    }
+
+    #[test]
+    fn prefix_e_opens_theme_picker_and_enter_applies() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let home = std::env::temp_dir().join(format!(
+            "forge-theme-e2e-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = crate::branding::themes_dir(&home);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("square.json"),
+            r##"{"name": "square", "buttons": {"left": "[", "right": "]"}}"##,
+        )
+        .unwrap();
+        let mut state = AppState::new();
+        state.themes_dir = Some(dir.clone());
+        let mut router = InputRouter::new();
+        let prefix = || KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key(&mut state, &mut router, prefix());
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('e'), none));
+        assert!(state.theme_dialog.is_some(), "Ctrl-b e opens theme picker");
+        // Move to square and apply; the config persists the choice.
+        handle_theme_key(
+            &mut state,
+            &mut crate::config::LoadedConfig::load(&crate::branding::config_file(&home)).unwrap(),
+            &home,
+            KeyEvent::new(KeyCode::Down, none),
+        );
+        let mut loaded =
+            crate::config::LoadedConfig::load(&crate::branding::config_file(&home)).unwrap();
+        handle_theme_key(
+            &mut state,
+            &mut loaded,
+            &home,
+            KeyEvent::new(KeyCode::Enter, none),
+        );
+        assert!(state.theme_dialog.is_none(), "apply closes");
+        assert_eq!(crate::theme::active_theme_name(), "square");
+        assert_eq!(crate::theme::pill_left(), '[');
+        crate::theme::clear_external_theme();
+        assert_eq!(loaded.config.theme, "square", "choice persists");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

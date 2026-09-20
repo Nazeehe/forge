@@ -275,6 +275,7 @@ impl RestorePicker {
         use ratatui::widgets::{Block, Borders, Paragraph};
         let block = Block::default()
             .borders(Borders::ALL)
+                .border_type(crate::theme::border_type())
             .title(" Restore session ")
             .style(crate::theme::style(crate::theme::Role::BorderFocused));
         let inner = block.inner(area);

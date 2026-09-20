@@ -31,6 +31,7 @@ mod relay;
 mod safe_text;
 mod telegram;
 mod telegram_dialog;
+mod theme_dialog;
 #[cfg(all(target_os = "linux", feature = "visual"))]
 mod screenshot;
 mod session;
@@ -46,6 +47,38 @@ const VERSION: &str = "1.0.0";
 
 /// Packaged `AGENTS.md`, dropped into `~/.forge` when missing.
 const DEFAULT_AGENTS_MD: &str = include_str!("../assets/AGENTS.md");
+
+/// Packaged example themes, seeded into `~/.forge/themes/` on first
+/// launch when that directory holds no themes yet.
+const EXAMPLE_THEMES: &[(&str, &str)] = &[
+    ("square.json", include_str!("../assets/themes/square.json")),
+    ("round.json", include_str!("../assets/themes/round.json")),
+    (
+        "tokyo-night.json",
+        include_str!("../assets/themes/tokyo-night.json"),
+    ),
+    ("triangle.json", include_str!("../assets/themes/triangle.json")),
+    ("wedge.json", include_str!("../assets/themes/wedge.json")),
+];
+
+/// Create `~/.forge/themes/` and top up any missing packaged
+/// examples, so new examples arrive on upgrade. Present files are
+/// never overwritten, so user edits survive. Failures warn instead of
+/// blocking startup — themes are cosmetic, unlike `agents.json`.
+fn seed_example_themes(home: &std::path::Path) {
+    let dir = branding::themes_dir(home);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    for (name, contents) in EXAMPLE_THEMES {
+        let path = dir.join(name);
+        if !path.exists() {
+            if let Err(e) = std::fs::write(&path, contents) {
+                eprintln!("warning: cannot seed example theme {name}: {e}");
+            }
+        }
+    }
+}
 
 fn print_help() {
     println!("Usage: {} [--version|--help|hook-relay [endpoint]|mcp-serve [--endpoint PATH]|install-*|uninstall-*]", branding::binary_name());
@@ -150,6 +183,10 @@ fn startup() -> i32 {
         eprintln!("error: {e}");
         return 1;
     }
+    // Example themes: seeded into `~/.forge/themes/` when the directory
+    // is missing or holds no themes, so the picker (`Ctrl-b e`) shows
+    // something on first launch. Existing files are never overwritten.
+    seed_example_themes(&home);
     // Configuration guide for AI agents: docs only, so a failed drop
     // warns instead of blocking startup — and an existing file is never
     // overwritten, since local edits must survive upgrades.
@@ -279,6 +316,31 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_adds_missing_examples_without_touching_user_files() {
+        let home = std::env::temp_dir().join(format!("forge-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = branding::themes_dir(&home);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A user file plus a customized packaged file: both must survive.
+        std::fs::write(dir.join("mine.json"), r##"{"name": "mine"}"##).unwrap();
+        std::fs::write(dir.join("square.json"), r##"{"name": "custom-square"}"##).unwrap();
+        seed_example_themes(&home);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("mine.json")).unwrap(),
+            r##"{"name": "mine"}"##
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("square.json")).unwrap(),
+            r##"{"name": "custom-square"}"##,
+            "never overwrite"
+        );
+        for name in ["round.json", "tokyo-night.json", "triangle.json", "wedge.json"] {
+            assert!(dir.join(name).is_file(), "missing example seeded: {name}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn packaged_guide_tracks_the_live_schema() {

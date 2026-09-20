@@ -437,36 +437,39 @@ fn pill_actions(
     };
     let pad = |s: Style| Span::styled(" ".to_string(), s);
     let create_chosen = focused && choice == 0;
-    let create_style = style(Role::TabActive);
+    // Create is the default action: always emphasized. Cancel follows
+    // the selection. Both honor the theme highlight behavior.
+    let (create_style, create_left, create_right) = crate::theme::button_chrome(
+        true,
+        style(Role::TabActive),
+        style(Role::TabInactive),
+        Color::Yellow,
+    );
     let cancel_chosen = focused && choice == 1;
-    let cancel_style = if cancel_chosen {
-        style(Role::TabActive)
-    } else {
-        style(Role::TabInactive)
-    };
-    let cancel_cap = if cancel_chosen {
-        Color::Yellow
-    } else {
-        Color::DarkGray
-    };
+    let (cancel_style, cancel_left, cancel_right) = crate::theme::button_chrome(
+        cancel_chosen,
+        style(Role::TabActive),
+        style(Role::TabInactive),
+        Color::DarkGray,
+    );
     let mut spans = Vec::new();
     if create_chosen {
         spans.push(Span::styled(">", focus_row()));
     }
-    spans.push(frame(crate::ui::PILL_LEFT, Color::Yellow));
+    spans.push(frame(crate::theme::pill_left(), create_left));
     spans.push(pad(create_style));
     spans.push(Span::styled("Create*".to_string(), create_style));
     spans.push(pad(create_style));
-    spans.push(frame(crate::ui::PILL_RIGHT, Color::Yellow));
+    spans.push(frame(crate::theme::pill_right(), create_right));
     spans.push(Span::styled("  ".to_string(), text));
     if cancel_chosen {
         spans.push(Span::styled(">", focus_row()));
     }
-    spans.push(frame(crate::ui::PILL_LEFT, cancel_cap));
+    spans.push(frame(crate::theme::pill_left(), cancel_left));
     spans.push(pad(cancel_style));
     spans.push(Span::styled("Cancel".to_string(), cancel_style));
     spans.push(pad(cancel_style));
-    spans.push(frame(crate::ui::PILL_RIGHT, cancel_cap));
+    spans.push(frame(crate::theme::pill_right(), cancel_right));
     spans
 }
 
@@ -518,6 +521,7 @@ impl CreateDialog {
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
+                .border_type(crate::theme::border_type())
             .title(" New Session ")
             .style(crate::theme::modal_fill())
             .border_style(style(Role::BorderModal));

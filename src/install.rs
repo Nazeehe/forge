@@ -233,6 +233,12 @@ pub fn install_one_hooks(
             // UserPromptSubmit entry fires its command with the hook JSON
             // on stdin. Commands run WITHOUT a shell, so no metacharacters.
             // Event names are PascalCase; `matcher: ""` matches everything.
+            // PermissionRequest is the approval gate (official hooks docs):
+            // it fires when Codex is about to ask approval, allow skips the
+            // prompt, deny blocks, and silence defers to the normal flow.
+            // It is the only verdict that can auto-approve a Codex call, so
+            // forge YOLO rides on it; PreToolUse stays the deny-only block
+            // layer (bare allow/ask are rejected there).
             let path = codex_home(home).join("hooks.json");
             let mut v = match read_json(&path) {
                 Ok(v) => v,
@@ -253,7 +259,13 @@ pub fn install_one_hooks(
             // prompted session still looks Stopped while it generates, so
             // injections land mid-turn where Enter is eaten and the text
             // sits as an unsubmitted draft.
-            for event in ["SessionStart", "PreToolUse", "Stop", "UserPromptSubmit"] {
+            for event in [
+                "SessionStart",
+                "PreToolUse",
+                "PermissionRequest",
+                "Stop",
+                "UserPromptSubmit",
+            ] {
                 let slot = v["hooks"]
                     .as_object_mut()
                     .expect("hooks just normalized to object")
@@ -959,7 +971,16 @@ mod tests {
         // PascalCase event, matcher groups, typed command handlers.
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(v["hooks"].is_object(), "3-level map: {text}");
-        for event in ["SessionStart", "PreToolUse", "Stop", "UserPromptSubmit"] {
+        // PermissionRequest joins the set: it is Codex's approval gate and
+        // the only verdict that can auto-approve a call, so forge YOLO
+        // needs it registered (PreToolUse alone can only deny there).
+        for event in [
+            "SessionStart",
+            "PreToolUse",
+            "PermissionRequest",
+            "Stop",
+            "UserPromptSubmit",
+        ] {
             let groups = v["hooks"][event]
                 .as_array()
                 .unwrap_or_else(|| panic!("{event} groups: {text}"));

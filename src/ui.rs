@@ -241,28 +241,33 @@ pub fn visual_button_spans(pills: bool, chat_open: bool) -> Vec<SpanView> {
         // every toggle reads as one solid pill. The open chat pill
         // uses the active container: a bare focus style has no
         // background and paints terminal-black in the middle.
-        let gray_cap = Style::default().fg(Color::DarkGray);
-        let yellow_cap = Style::default().fg(Color::Yellow);
+        let gray = || Style::default().fg(Color::DarkGray);
         let label = theme::style(theme::Role::TabInactive);
-        let (chat, chat_cap) = if chat_open {
-            (theme::style(theme::Role::TabActive), yellow_cap)
-        } else {
-            (theme::style(theme::Role::TabInactive), gray_cap)
-        };
+        let (chat_fill, chat_left, chat_right) = theme::button_chrome(
+            chat_open,
+            theme::style(theme::Role::TabActive),
+            theme::style(theme::Role::TabInactive),
+            Color::DarkGray,
+        );
         let mut spans = Vec::new();
-        for (text, style, cap) in [
-            (VISUAL_ZOOM_IN_TEXT, label, gray_cap),
-            (VISUAL_ZOOM_OUT_TEXT, label, gray_cap),
-            (VISUAL_CHAT_TEXT, chat, chat_cap),
+        for (text, style, cap_left, cap_right) in [
+            (VISUAL_ZOOM_IN_TEXT, label, gray(), gray()),
+            (VISUAL_ZOOM_OUT_TEXT, label, gray(), gray()),
+            (
+                VISUAL_CHAT_TEXT,
+                chat_fill,
+                Style::default().fg(chat_left),
+                Style::default().fg(chat_right),
+            ),
         ] {
             if !spans.is_empty() {
                 spans.push(SpanView { text: "  ".to_string(), style: Style::default() });
             }
-            spans.push(SpanView { text: PILL_LEFT.to_string(), style: cap });
+            spans.push(SpanView { text: crate::theme::pill_left().to_string(), style: cap_left });
             spans.push(SpanView { text: " ".to_string(), style });
             spans.push(SpanView { text: text.to_string(), style });
             spans.push(SpanView { text: " ".to_string(), style });
-            spans.push(SpanView { text: PILL_RIGHT.to_string(), style: cap });
+            spans.push(SpanView { text: crate::theme::pill_right().to_string(), style: cap_right });
         }
         spans
     } else {
@@ -575,12 +580,14 @@ pub fn layout_topbar(bar: Rect, tabs: &[TopTab], pills: bool) -> Vec<TopButton> 
 }
 
 /// Pill container for a topbar tab: selected yellow, the rest dim gray.
-fn topbar_pill(tab: &TopTab) -> (Style, Color) {
-    if tab.active {
-        (theme::style(theme::Role::TabActive), Color::Yellow)
-    } else {
-        (theme::style(theme::Role::TabInactive), Color::DarkGray)
-    }
+fn topbar_pill(tab: &TopTab) -> (Style, Color, Color) {
+    let (fill, left, right) = theme::button_chrome(
+        tab.active,
+        theme::style(theme::Role::TabActive),
+        theme::style(theme::Role::TabInactive),
+        Color::DarkGray,
+    );
+    (fill, left, right)
 }
 
 /// Button index under an area-relative column, if any.
@@ -621,8 +628,8 @@ pub fn group_palette(index: usize) -> Color {
 /// Nerd Font half circles framing a pill tab: `label`. Single-cell
 /// each; a Nerd Font is required, otherwise they show as gaps (see the
 /// `pills` config flag).
-pub const PILL_LEFT: char = '\u{e0b6}';
-pub const PILL_RIGHT: char = '\u{e0b4}';
+pub const PILL_LEFT: char = crate::theme::BUILTIN_PILL_LEFT;
+pub const PILL_RIGHT: char = crate::theme::BUILTIN_PILL_RIGHT;
 
 /// One rendered chunk of the sessions bar: literal text, its style, and the
 /// tab it selects when clicked (`None` for group headers, which never
@@ -636,34 +643,51 @@ pub struct BarSegment {
     pub cap: Option<Color>,
 }
 
-/// Pill container color for a tab: the group color when grouped (matching
-/// the label background), accent yellow for the focused loner, dim gray
-/// for the rest.
-/// Pill container color: the group color for grouped tabs, the default
-/// selected yellow for the focused tab (group ignored), dim gray rest.
-fn pill_cap(tab: &SessionTab) -> Color {
-    if tab.focused {
-        Color::Yellow
-    } else if let Some(color) = tab.group_color {
-        group_palette(color)
-    } else {
-        Color::DarkGray
-    }
+/// Rest cap color for a tab: the group color when grouped (matching
+/// the label background), dim gray otherwise. Selection never changes
+/// it — the highlight behavior decides which caps light up.
+fn pill_rest_cap(tab: &SessionTab) -> Color {
+    tab.group_color.map(group_palette).unwrap_or(Color::DarkGray)
 }
 
-/// Label style for a pill tab: the selected tab always takes the default
-/// selected container; grouped tabs fill with their group color and dark
-/// text; ungrouped rest sits in a dim container.
-fn pill_style(tab: &SessionTab) -> Style {
-    if tab.focused {
-        theme::style(theme::Role::TabActive)
-    } else if let Some(color) = tab.group_color {
+/// Rest fill for a tab: grouped tabs fill with their group color and
+/// dark text; ungrouped rest sits in a dim container.
+fn pill_rest_style(tab: &SessionTab) -> Style {
+    if let Some(color) = tab.group_color {
         Style::default()
             .fg(Color::Black)
             .bg(group_palette(color))
     } else {
         theme::style(theme::Role::TabInactive)
     }
+}
+
+/// Fill plus cap colors for a session tab under the active highlight
+/// behavior. Focused tabs emphasize; grouped rest keeps its group
+/// container so the group still reads at a glance.
+fn pill_chrome(tab: &SessionTab) -> (Style, Color, Color) {
+    let rest = pill_rest_style(tab);
+    let accent = if tab.focused {
+        theme::style(theme::Role::TabActive)
+    } else {
+        rest
+    };
+    theme::button_chrome(tab.focused, accent, rest, pill_rest_cap(tab))
+}
+
+/// Left bookend color for a tab: accent yellow when focused under the
+/// Full behavior, the rest cap otherwise. `BarSegment.cap` carries
+/// this; the render loop derives the right cap from the same tab.
+fn pill_cap(tab: &SessionTab) -> Color {
+    pill_chrome(tab).1
+}
+
+/// Label style for a pill tab: the selected tab takes the accent
+/// container under the Full behavior (group ignored); under `Left`
+/// highlight a focused grouped tab keeps its group container and only
+/// the left bookend lights up.
+fn pill_style(tab: &SessionTab) -> Style {
+    pill_chrome(tab).0
 }
 
 /// Build bar segments in manager order so `N` numbering (and `Ctrl-b N`)
@@ -959,13 +983,13 @@ fn sidebar_lines_at(
         };
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(PILL_LEFT.to_string(), Style::default().fg(off_cap)),
+            Span::styled(crate::theme::pill_left().to_string(), Style::default().fg(off_cap)),
             Span::styled(" Off ", off_style),
-            Span::styled(PILL_RIGHT.to_string(), Style::default().fg(off_cap)),
+            Span::styled(crate::theme::pill_right().to_string(), Style::default().fg(off_cap)),
             Span::raw(" "),
-            Span::styled(PILL_LEFT.to_string(), Style::default().fg(yolo_cap)),
+            Span::styled(crate::theme::pill_left().to_string(), Style::default().fg(yolo_cap)),
             Span::styled(" Yolo ", yolo_style),
-            Span::styled(PILL_RIGHT.to_string(), Style::default().fg(yolo_cap)),
+            Span::styled(crate::theme::pill_right().to_string(), Style::default().fg(yolo_cap)),
         ])
     } else {
         Line::from(vec![
@@ -1304,8 +1328,8 @@ fn render_topbar(frame: &mut Frame, bar: Rect, tabs: &[TopTab], pills: bool) {
         let tab = &tabs[button.index];
         let area = Rect::new(button.start, bar.y, button.end - button.start, 1);
         if pills {
-            let (style, cap) = topbar_pill(tab);
-            render_pill(frame, area, &safe_text::encode_for_display(&tab.label), style, cap);
+            let (style, left, right) = topbar_pill(tab);
+            render_pill(frame, area, &safe_text::encode_for_display(&tab.label), style, left, right);
         } else {
             let style = if tab.active {
                 theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
@@ -1348,6 +1372,7 @@ fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], _chrome: &Chro
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
+                            .border_type(crate::theme::border_type())
                         .border_style(theme::style(theme::Role::BorderUnfocused))
                         .title(" forge "),
                 );
@@ -1371,6 +1396,7 @@ fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], _chrome: &Chro
         };
         let block = Block::default()
             .borders(Borders::ALL)
+                .border_type(crate::theme::border_type())
             .border_style(border)
             .title(Span::styled(title, name_style));
         let inner = block.inner(*cell);
@@ -1432,6 +1458,7 @@ fn render_focused(frame: &mut Frame, areas: &ChromeAreas, panes: &[PaneView]) {
             let title = format!("{} {} ", glyph, safe_text::encode_for_display(&view.title));
             let block = Block::default()
                 .borders(Borders::ALL)
+                    .border_type(crate::theme::border_type())
                 .border_style(theme::style(theme::Role::BorderFocused))
                 .title(title);
             let mut text = pane_text(view);
@@ -1449,6 +1476,7 @@ fn render_focused(frame: &mut Frame, areas: &ChromeAreas, panes: &[PaneView]) {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
+                                .border_type(crate::theme::border_type())
                             .border_style(theme::style(theme::Role::BorderUnfocused))
                             .title(" forge "),
                     );
@@ -1493,6 +1521,7 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
         let side = Paragraph::new(Text::from(lines)).block(
             Block::default()
                 .borders(Borders::ALL)
+                    .border_type(crate::theme::border_type())
                 .border_style(theme::style(theme::Role::BorderUnfocused))
                 .title(" status "),
         );
@@ -1503,18 +1532,13 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
         ] {
             if area.width > 0 && area.right() <= areas.sidebar.right().saturating_sub(1) {
                 if chrome.pills {
-                    let (style, cap) = if active {
-                        (
-                            theme::style(theme::Role::TabActive),
-                            Color::Yellow,
-                        )
-                    } else {
-                        (
-                            theme::style(theme::Role::TabInactive),
-                            Color::DarkGray,
-                        )
-                    };
-                    render_pill(frame, area, label, style, cap);
+                    let (style, left, right) = theme::button_chrome(
+                        active,
+                        theme::style(theme::Role::TabActive),
+                        theme::style(theme::Role::TabInactive),
+                        Color::DarkGray,
+                    );
+                    render_pill(frame, area, label, style, left, right);
                 } else {
                     let style = if active {
                         theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
@@ -1535,6 +1559,7 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
                     "Cancel",
                     Style::default().fg(Color::Black).bg(Color::Red),
                     Color::Red,
+                    Color::Red,
                 );
             } else {
                 ChromeButton::new(
@@ -1548,17 +1573,31 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
 }
 
 /// Numbered session bar, kept in grid mode: digits exit grid and focus.
-/// One pill button: container-colored half circles around the label, with
+/// One pill button: container-colored bookends around the label, with
 /// symmetric inner padding so the text sits centered in the container.
 /// The padding inherits the label style, keeping filled pills solid.
-fn render_pill(frame: &mut Frame, area: Rect, text: &str, style: Style, cap: Color) {
-    let cap_style = Style::default().fg(cap);
+/// Left and right bookends take separate colors so `Left`-highlight
+/// themes can light only the leading edge.
+fn render_pill(
+    frame: &mut Frame,
+    area: Rect,
+    text: &str,
+    style: Style,
+    left_cap: Color,
+    right_cap: Color,
+) {
     let line = Line::from(vec![
-        Span::styled(PILL_LEFT.to_string(), cap_style),
+        Span::styled(
+            crate::theme::pill_left().to_string(),
+            Style::default().fg(left_cap),
+        ),
         Span::styled(" ".to_string(), style),
         Span::styled(text.to_string(), style),
         Span::styled(" ".to_string(), style),
-        Span::styled(PILL_RIGHT.to_string(), cap_style),
+        Span::styled(
+            crate::theme::pill_right().to_string(),
+            Style::default().fg(right_cap),
+        ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -1570,8 +1609,16 @@ fn render_session_bar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
         for (button, segment) in buttons.iter().zip(segments.iter()) {
             let area = Rect::new(button.start, areas.session_bar.y, button.end - button.start, 1);
             if button.index.is_some() {
-                if let Some(cap) = segment.cap {
-                    render_pill(frame, area, &segment.text, segment.style, cap);
+                if let Some(left) = segment.cap {
+                    // The right bookend follows the same tab: Full keeps
+                    // both caps lit, Left drops the trailing edge back
+                    // to the rest color.
+                    let right = segment
+                        .index
+                        .and_then(|n| chrome.tabs.get(n))
+                        .map(|tab| pill_chrome(tab).2)
+                        .unwrap_or(left);
+                    render_pill(frame, area, &segment.text, segment.style, left, right);
                 } else {
                     ChromeButton::new(&button.label, segment.style).view(frame, area);
                 }
@@ -1638,6 +1685,43 @@ mod tests {
         let tiny = chrome_areas(Rect::new(0, 0, 80, 2));
         assert_eq!(tiny.main.height, 2);
         assert_eq!(tiny.session_bar.height, 0);
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn button_caps_follow_the_active_theme() {
+        let text = crate::theme::parse_external_theme(
+            r##"{"name": "sq", "buttons": {"left": "[", "right": "]"}}"##,
+        )
+        .expect("square theme parses");
+        let _guard = crate::theme::hold_external_theme(text);
+        assert_eq!(crate::theme::pill_left(), '[');
+        assert_eq!(crate::theme::pill_right(), ']');
+        let strip: String = visual_button_spans(true, false)
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(strip.contains('[') && strip.contains(']'), "square caps: {strip:?}");
+        assert!(!strip.contains(PILL_LEFT), "no builtin caps: {strip:?}");
+    }
+
+    #[test]
+    fn left_highlight_keeps_group_fill_with_split_caps() {
+        let theme = crate::theme::parse_external_theme(
+            r##"{"name": "t", "highlight": "left"}"##,
+        )
+        .expect("left theme parses");
+        let _guard = crate::theme::hold_external_theme(theme);
+        let g = group_palette(2);
+        // Focused grouped tab: group fill stays, left edge lights.
+        let (fill, left, right) = pill_chrome(&grouped("a", true, "team", 2));
+        assert_eq!(fill.bg, Some(g), "button keeps its group color");
+        assert_eq!(left, Color::Yellow, "left edge is the highlight");
+        assert_eq!(right, g, "trailing edge rests");
+        // Segments carry the same fill through the bar plumbing.
+        let segs = session_bar_segments(&[grouped("a", true, "team", 2)], true);
+        assert_eq!(segs[0].cap, Some(Color::Yellow));
+        assert_eq!(segs[0].style.bg, Some(g));
     }
 
     fn tab(title: &str, focused: bool) -> SessionTab {
@@ -2285,6 +2369,41 @@ mod tests {
         // Never blank: empty state still guides.
         let empty = sidebar_lines(&SidebarInfo { session: None, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
         assert!(has(&empty, "Ctrl-b c"), "guides: {empty:?}");
+    }
+
+    #[test]
+    fn sidebar_has_no_stats_section() {
+        // Uptime, tool calls, and approval counts were dropped: the
+        // sidebar shows status and schedule, never Stats.
+        let info = SidebarInfo {
+            session: Some(SessionDetail {
+                name: "shell-1".to_string(),
+                cli_tool: "shell".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                state: "running".to_string(),
+                status: Some("progress: compiling".to_string()),
+                timers: vec![TimerView { id: "t1".to_string(), remaining: "9:55".to_string() }],
+                uptime_secs: 65,
+                tool_calls: 4,
+                approvals: 3,
+                denials: 1,
+            }),
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        let lines = sidebar_lines(&info);
+        for needle in ["Stats", "Uptime", "Tool calls", "✓", "×"] {
+            assert!(!has(&lines, needle), "compact leaks {needle}: {lines:?}");
+        }
+        let rich = rich_sidebar_lines(&info, 30, 45);
+        for needle in ["Stats", "Uptime", "Tool calls", "✓", "×"] {
+            assert!(!has(&rich, needle), "rich leaks {needle}: {rich:?}");
+        }
+        // Status and schedule survive the removal.
+        assert!(has(&lines, "progress: compiling"), "status kept: {lines:?}");
+        assert!(has(&lines, "Scheduled"), "schedule kept: {lines:?}");
     }
 
     #[test]

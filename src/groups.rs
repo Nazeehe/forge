@@ -502,6 +502,7 @@ impl GroupDialog {
         };
         let block = Block::default()
             .borders(Borders::ALL)
+                .border_type(crate::theme::border_type())
             .title(hint)
             .style(crate::theme::modal_fill())
             .border_style(style(Role::BorderModal));

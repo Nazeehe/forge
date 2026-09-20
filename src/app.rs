@@ -101,6 +101,13 @@ pub struct AppState {
     /// Quit-confirmation modal, if the quit chord is pending an answer.
     /// Captures all input while present; No is the default.
     pub quit_confirm: Option<crate::quit::QuitConfirm>,
+    /// Open theme picker (`Ctrl-b e`), if any. Captures all input
+    /// while present like every other modal.
+    pub theme_dialog: Option<crate::theme_dialog::ThemeDialog>,
+    /// Directory scanned for `theme.json` files when the picker opens.
+    /// `None` means builtin only (tests); production sets this from
+    /// `~/.forge/themes` at startup.
+    pub themes_dir: Option<std::path::PathBuf>,
     /// Live permission mode. The TUI loop rebuilds policy and persists the
     /// config whenever this diverges from the loaded one.
     pub permission_mode: crate::config::PermissionMode,
@@ -305,6 +312,8 @@ impl AppState {
             group_dialog: None,
             restore_picker: None,
             quit_confirm: None,
+            theme_dialog: None,
+            themes_dir: None,
             permission_mode: crate::config::PermissionMode::Yolo,
             broker: crate::comms::Broker::new(),
             last_human_input: std::collections::HashMap::new(),
@@ -2671,6 +2680,45 @@ impl AppState {
         self.dirty = true;
     }
 
+    /// Every theme the picker can offer: builtin `default` first,
+    /// then each valid file under [`Self::themes_dir`]. Invalid files
+    /// never hide the rest.
+    pub fn available_themes(&self) -> Vec<crate::theme::ExternalTheme> {
+        match &self.themes_dir {
+            Some(dir) => crate::theme::list_external_themes(dir),
+            None => vec![crate::theme::ExternalTheme::builtin()],
+        }
+    }
+
+    /// Open the theme picker over `themes` (builtin `default` first),
+    /// preselected on the currently applied theme.
+    pub fn open_theme_dialog(&mut self, themes: Vec<crate::theme::ExternalTheme>) {
+        let current = crate::theme::active_theme_name();
+        self.theme_dialog =
+            Some(crate::theme_dialog::ThemeDialog::new(themes, &current, self.pill_tabs));
+        self.dirty = true;
+    }
+
+    /// Apply the named theme from `themes` at runtime. `default` (or an
+    /// unknown name) restores the builtin look. True when the screen
+    /// must repaint.
+    pub fn apply_theme_name(
+        &mut self,
+        name: &str,
+        themes: &[crate::theme::ExternalTheme],
+    ) -> bool {
+        if name == "default" {
+            crate::theme::clear_external_theme();
+        } else if let Some(theme) = themes.iter().find(|t| t.name == name) {
+            crate::theme::apply_external_theme(theme.clone());
+        } else {
+            return false;
+        }
+        self.theme_dialog = None;
+        self.dirty = true;
+        true
+    }
+
     /// Fresh snapshot for the group dialog: groups with live member
     /// counts, sessions in bar order, and the selected group's current
     /// members for the checkbox pre-check.
@@ -3529,6 +3577,65 @@ mod tests {
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
         assert!(s.manager.remove(c));
+    }
+
+    #[test]
+    fn codex_permission_request_allow_skips_prompt_ask_defers() {
+        use crate::config::PermissionMode;
+        let audit = std::env::temp_dir().join(format!(
+            "forge-codex-preq-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut s = AppState::new();
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent(
+                "cx",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                run.clone(),
+                "codex",
+            )
+            .unwrap();
+        // YOLO allow must arrive as the behavior envelope Codex accepts.
+        let mut yolo =
+            crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+        let (allow_tx, allow_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PermissionRequest".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
+            run_id: run.to_string(),
+            sync: true,
+            reply: allow_tx,
+            timed_out: Default::default(),
+        }));
+        s.settle_hooks(&mut yolo, &audit);
+        let line = allow_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(line.trim()).expect("reply is JSON");
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        // Off ask declines to decide so the native prompt continues.
+        let mut off = crate::policy::Policy::new(PermissionMode::Off, &[], &[]).unwrap();
+        let (ask_tx, ask_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            hook: "PermissionRequest".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
+            run_id: run.to_string(),
+            sync: true,
+            reply: ask_tx,
+            timed_out: Default::default(),
+        }));
+        s.settle_hooks(&mut off, &audit);
+        let line = ask_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.is_empty(), "ask defers silently: {line:?}");
+        assert!(s.manager.remove(id));
+        let _ = std::fs::remove_file(&audit);
     }
 
     #[test]

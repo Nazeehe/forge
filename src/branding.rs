@@ -63,6 +63,12 @@ pub fn sessions_file(home: &Path) -> PathBuf {
     config_dir(home).join("sessions")
 }
 
+/// `~/.forge/themes`: external `theme.json` files (one `*.json` per
+/// theme, or `*/theme.json` per theme directory).
+pub fn themes_dir(home: &Path) -> PathBuf {
+    config_dir(home).join("themes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +95,15 @@ mod tests {
         assert_eq!(
             guide_file(home),
             PathBuf::from("/home/tester/.forge/AGENTS.md")
+        );
+    }
+
+    #[test]
+    fn themes_dir_joins_home() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            themes_dir(home),
+            PathBuf::from("/home/tester/.forge/themes")
         );
     }
 

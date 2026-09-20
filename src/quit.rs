@@ -67,6 +67,7 @@ impl QuitConfirm {
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
+                .border_type(crate::theme::border_type())
             .title(" Quit ")
             .style(modal_fill())
             .border_style(style(Role::BorderModal));
@@ -110,18 +111,23 @@ impl QuitConfirm {
             let chosen = index == self.choice;
             if self.pills {
                 use ratatui::style::{Color, Style};
-                let cap = if chosen { Color::Yellow } else { Color::DarkGray };
-                let fill = if chosen {
-                    style(Role::TabActive)
-                } else {
-                    style(Role::TabInactive)
-                };
-                let cap_style = Style::default().fg(cap);
-                spans.push(Span::styled(crate::ui::PILL_LEFT.to_string(), cap_style));
+                let (fill, left_cap, right_cap) = crate::theme::button_chrome(
+                    chosen,
+                    style(Role::TabActive),
+                    style(Role::TabInactive),
+                    Color::DarkGray,
+                );
+                spans.push(Span::styled(
+                    crate::theme::pill_left().to_string(),
+                    Style::default().fg(left_cap),
+                ));
                 spans.push(Span::styled(" ".to_string(), fill));
                 spans.push(Span::styled(label.to_string(), fill));
                 spans.push(Span::styled(" ".to_string(), fill));
-                spans.push(Span::styled(crate::ui::PILL_RIGHT.to_string(), cap_style));
+                spans.push(Span::styled(
+                    crate::theme::pill_right().to_string(),
+                    Style::default().fg(right_cap),
+                ));
             } else if chosen {
                 spans.push(Span::styled(">".to_string(), focus_row()));
                 spans.push(Span::styled(format!("[{label}]"), focus_row()));
@@ -170,6 +176,27 @@ mod tests {
         assert_eq!(q.key(&key(KeyCode::Left)), QuitOutcome::Pending);
         assert_eq!(q.choice(), 1, "back to No");
         assert_eq!(q.key(&key(KeyCode::Enter)), QuitOutcome::Dismissed);
+    }
+
+    #[test]
+    fn left_highlight_lights_only_the_left_bookend() {
+        let theme = crate::theme::parse_external_theme(
+            r##"{"name": "tri", "highlight": "left", "buttons": {"left": "[", "right": "]"}}"##,
+        )
+        .expect("left theme parses");
+        let _guard = crate::theme::hold_external_theme(theme);
+        let q = QuitConfirm::new(true);
+        assert_eq!(q.choice(), 1, "No is default");
+        let spans = q.buttons();
+        // Yes group (5 spans) + gap + No group: No's left cap, fill, right cap.
+        assert_eq!(spans[8].content, "No");
+        assert_eq!(
+            spans[8].style,
+            crate::theme::style(crate::theme::Role::TabInactive),
+            "chosen button keeps its rest color"
+        );
+        assert_eq!(spans[6].style.fg, Some(ratatui::style::Color::Yellow));
+        assert_eq!(spans[10].style.fg, Some(ratatui::style::Color::DarkGray));
     }
 
     #[test]

@@ -1,0 +1,27 @@
+{
+  "name": "wedge",
+  "colors": {
+    "brand": "#9ece6a",
+    "focus": {
+      "fg": "#9ece6a",
+      "modifiers": [
+        "bold"
+      ]
+    },
+    "tab_active": {
+      "fg": "black",
+      "bg": "#9ece6a",
+      "modifiers": [
+        "bold"
+      ]
+    },
+    "border_focused": "#9ece6a",
+    "border_modal": "#9ece6a",
+    "key_hint": "#9ece6a"
+  },
+  "buttons": {
+    "left": "◥",
+    "right": "◣"
+  },
+  "borders": "plain"
+}

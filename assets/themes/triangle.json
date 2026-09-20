@@ -1,0 +1,28 @@
+{
+  "name": "triangle",
+  "colors": {
+    "brand": "#e0af68",
+    "focus": {
+      "fg": "#e0af68",
+      "modifiers": [
+        "bold"
+      ]
+    },
+    "tab_active": {
+      "fg": "black",
+      "bg": "#e0af68",
+      "modifiers": [
+        "bold"
+      ]
+    },
+    "border_focused": "#e0af68",
+    "border_modal": "#e0af68",
+    "key_hint": "#e0af68"
+  },
+  "buttons": {
+    "left": "█",
+    "right": ""
+  },
+  "borders": "plain",
+  "highlight": "left"
+}

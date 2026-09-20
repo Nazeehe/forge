@@ -150,14 +150,50 @@ pub fn command_of(body: &str) -> String {
 /// silent; unattributed senders keep the long-standing explicit shape so
 /// existing behavior (and its tests) is unchanged. Deny keeps the explicit
 /// deny shape all harnesses accept.
+///
+/// Codex approvals gate on a second event, `PermissionRequest`: allow there
+/// skips the approval prompt, deny blocks, and silence declines to decide
+/// (the normal approval flow continues). That envelope is the only verdict
+/// that can auto-approve a Codex call, so forge YOLO rides on it; other
+/// harnesses keep the legacy shape they already accept there.
 pub fn decision_line_for(cli_tool: &str, hook: &str, decision: Decision, reason: &str) -> String {
-    if hook == "PreToolUse"
-        && matches!(decision, Decision::Allow | Decision::Ask)
-        && cli_tool.eq_ignore_ascii_case("codex")
-    {
-        return String::new();
+    if cli_tool.eq_ignore_ascii_case("codex") {
+        if hook == "PreToolUse" && matches!(decision, Decision::Allow | Decision::Ask) {
+            return String::new();
+        }
+        if hook == "PermissionRequest" {
+            return match decision {
+                Decision::Allow => "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}\n"
+                    .to_string(),
+                Decision::Deny => {
+                    let message = escape_reason(reason);
+                    let message = if message.is_empty() { "denied".to_string() } else { message };
+                    format!(
+                        "{{\"hookSpecificOutput\":{{\"hookEventName\":\"PermissionRequest\",\"decision\":{{\"behavior\":\"deny\",\"message\":\"{message}\"}}}}}}\n"
+                    )
+                }
+                Decision::Ask => String::new(),
+            };
+        }
     }
     decision_line(hook, decision, reason)
+}
+
+/// Escape one reason string for embedding in a JSON double-quoted value:
+/// quotes/backslashes gain a backslash, controls become spaces.
+fn escape_reason(reason: &str) -> String {
+    let mut safe = String::with_capacity(reason.len());
+    for c in reason.chars() {
+        match c {
+            '"' | '\\' => {
+                safe.push('\\');
+                safe.push(c);
+            }
+            c if c.is_control() => safe.push(' '),
+            c => safe.push(c),
+        }
+    }
+    safe
 }
 
 /// Canonical one-line decision for the relay to print to the harness.
@@ -393,6 +429,32 @@ mod tests {
         assert!(claude_allow.contains(r#""permissionDecision":"allow""#), "claude allow: {claude_allow:?}");
         let claude_ask = super::decision_line_for("claude", "PreToolUse", Decision::Ask, "off: harness asks");
         assert!(claude_ask.contains(r#""permissionDecision":"ask""#), "claude ask: {claude_ask:?}");
+    }
+
+    #[test]
+    fn codex_permission_request_uses_behavior_envelope() {
+        // Official Codex hooks docs: PermissionRequest fires when Codex is
+        // about to ask approval. allow skips the prompt, deny blocks, and
+        // no decision defers to the normal approval flow. This is the only
+        // hook verdict that can approve a Codex call (bare PreToolUse allow
+        // is rejected), so forge YOLO rides on it.
+        let allow = super::decision_line_for("codex", "PermissionRequest", Decision::Allow, "yolo mode");
+        let v: serde_json::Value = serde_json::from_str(allow.trim()).expect("allow is JSON");
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        assert!(v.get("decision").is_none(), "no legacy field: {allow:?}");
+        let deny = super::decision_line_for("codex", "PermissionRequest", Decision::Deny, "block pattern");
+        let v: serde_json::Value = serde_json::from_str(deny.trim()).expect("deny is JSON");
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert!(
+            v["hookSpecificOutput"]["decision"]["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "deny carries a message: {deny:?}"
+        );
+        let ask = super::decision_line_for("codex", "PermissionRequest", Decision::Ask, "off: harness asks");
+        assert!(ask.is_empty(), "ask declines to decide: {ask:?}");
+        // Other harnesses keep the legacy shape they already accept.
+        let claude = super::decision_line_for("claude", "PermissionRequest", Decision::Allow, "yolo mode");
+        assert!(claude.contains(r#""decision":"allow""#), "claude unchanged: {claude:?}");
     }
 
     #[test]

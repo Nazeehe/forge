@@ -384,14 +384,18 @@ impl TelegramDialog {
             if chosen {
                 spans.push(Span::styled(">", focus_row()));
             }
-            let fill = if hot { style(Role::TabActive) } else { style(Role::TabInactive) };
-            let cap = if hot { Color::Yellow } else { Color::DarkGray };
+            let (fill, left_cap, right_cap) = crate::theme::button_chrome(
+                hot,
+                style(Role::TabActive),
+                style(Role::TabInactive),
+                Color::DarkGray,
+            );
             let tag = if default { format!("{label}*") } else { label.to_string() };
-            spans.push(frame(crate::ui::PILL_LEFT, cap));
+            spans.push(frame(crate::theme::pill_left(), left_cap));
             spans.push(Span::styled(" ", fill));
             spans.push(Span::styled(tag, fill));
             spans.push(Span::styled(" ", fill));
-            spans.push(frame(crate::ui::PILL_RIGHT, cap));
+            spans.push(frame(crate::theme::pill_right(), right_cap));
         }
         spans
     }
@@ -405,7 +409,10 @@ impl TelegramDialog {
         if col < area.x || col >= area.right() || row < area.y || row >= area.bottom() {
             return None;
         }
-        let inner = Block::default().borders(Borders::ALL).inner(area);
+        let inner = Block::default()
+            .borders(Borders::ALL)
+            .border_type(crate::theme::border_type())
+            .inner(area);
         if inner.height < 14 || inner.width < 44 {
             return None;
         }
@@ -463,6 +470,7 @@ impl TelegramDialog {
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
+                .border_type(crate::theme::border_type())
             .title(" Telegram ")
             .style(crate::theme::modal_fill())
             .border_style(style(Role::BorderModal));
@@ -903,7 +911,7 @@ mod tests {
         let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         terminal.draw(|f| d.view(f, area)).unwrap();
         let (_, text) = action_row_text(terminal.backend().buffer(), area);
-        assert!(text.contains(crate::ui::PILL_LEFT), "pill caps: {text:?}");
+        assert!(text.contains(crate::theme::pill_left()), "pill caps: {text:?}");
         assert!(text.contains("Save"), "save button: {text:?}");
     }
 

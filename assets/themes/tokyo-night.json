@@ -1,0 +1,39 @@
+{
+  "name": "tokyo-night",
+  "colors": {
+    "text": "#c0caf5",
+    "muted": "#565f89",
+    "success": "#9ece6a",
+    "running": "#9ece6a",
+    "starting": "#e0af68",
+    "exited": "#f7768e",
+    "warning": "#e0af68",
+    "danger": "#f7768e",
+    "info": "#7dcfff",
+    "brand": "#bb9af7",
+    "command": "#e0af68",
+    "focus": {
+      "fg": "#bb9af7",
+      "modifiers": [
+        "bold"
+      ]
+    },
+    "tab_active": {
+      "fg": "#1a1b26",
+      "bg": "#bb9af7",
+      "modifiers": [
+        "bold"
+      ]
+    },
+    "tab_inactive": {
+      "fg": "#c0caf5",
+      "bg": "#414868"
+    },
+    "border_focused": "#bb9af7",
+    "border_unfocused": "#3b4261",
+    "border_modal": "#7dcfff",
+    "key_hint": "#7dcfff",
+    "key_desc": "#c0caf5"
+  },
+  "borders": "rounded"
+}

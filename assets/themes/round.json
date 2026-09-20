@@ -1,0 +1,28 @@
+{
+  "name": "round",
+  "colors": {
+    "brand": "#7dcfff",
+    "info": "#7dcfff",
+    "focus": {
+      "fg": "#7dcfff",
+      "modifiers": [
+        "bold"
+      ]
+    },
+    "tab_active": {
+      "fg": "black",
+      "bg": "#7dcfff",
+      "modifiers": [
+        "bold"
+      ]
+    },
+    "border_focused": "#7dcfff",
+    "border_modal": "#7dcfff",
+    "key_hint": "#7dcfff"
+  },
+  "buttons": {
+    "left": "(",
+    "right": ")"
+  },
+  "borders": "rounded"
+}

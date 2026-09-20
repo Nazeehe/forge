@@ -35,6 +35,8 @@ pub enum UserCommand {
     ToggleGrid,
     /// Open the Telegram mobile-transport settings dialog.
     TelegramSettings,
+    /// Open the theme picker (`theme.json` files under `~/.forge/themes`).
+    ThemePicker,
 }
 
 /// Encode a forwarded key as PTY input bytes (xterm-style). `app_cursor`
@@ -316,6 +318,7 @@ impl InputRouter {
                     KeyCode::Char('x') => RoutedKey::Command(UserCommand::TerminateSession),
                     KeyCode::Char('w') => RoutedKey::Command(UserCommand::ToggleGrid),
                     KeyCode::Char('m') => RoutedKey::Command(UserCommand::TelegramSettings),
+                    KeyCode::Char('e') => RoutedKey::Command(UserCommand::ThemePicker),
                     KeyCode::Char(d @ '1'..='9') => {
                         RoutedKey::Command(UserCommand::SelectSession(d as usize - '1' as usize))
                     }
@@ -439,6 +442,12 @@ mod tests {
         assert_eq!(
             r.feed(key(KeyCode::Char('m'))),
             RoutedKey::Command(UserCommand::TelegramSettings)
+        );
+
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('e'))),
+            RoutedKey::Command(UserCommand::ThemePicker)
         );
     }
 
