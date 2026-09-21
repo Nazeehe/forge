@@ -25,8 +25,9 @@ const BYPASS_DENYLIST: [&str; 2] = ["yolo", "dangerously"];
 pub enum Attribution {
     /// The hook environment names the session (normal case).
     HookEnv,
-    /// The CLI scrubs the hook environment: match a recently spawned,
-    /// still-unbound session in the same cwd instead.
+    /// The CLI scrubs the hook environment: use the hook process's inherited
+    /// PTY session, falling back to a recent unbound session in the same cwd
+    /// for records from an older relay.
     CwdWindow,
 }
 

@@ -67,8 +67,8 @@ impl Harness {
         self.def().supports_hooks
     }
 
-    /// Whether hook SessionStart reports need the cwd+bootstrap-window
-    /// fallback (the CLI scrubs the hook environment).
+    /// Whether hook reports need scrubbed-environment attribution: PTY
+    /// process-session ID first, cwd+bootstrap-window for old relay records.
     pub fn cwd_window_attribution(self) -> bool {
         self.def().attribution == Attribution::CwdWindow
     }

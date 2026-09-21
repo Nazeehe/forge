@@ -13,8 +13,9 @@ pub const DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Home-relative path of the live-endpoint file the TUI maintains. Some
 /// harnesses (muse) scrub hook-child environments, so neither
 /// `FORGE_IPC_ENDPOINT` nor `FORGE_RUN_ID` arrives; the file lets the relay
-/// still reach a running TUI. Records sent this way carry no run ID and the
-/// loop attributes them by harness session ID (see session.rs).
+/// still reach a running TUI. Records sent this way carry no run ID; the loop
+/// attributes them by their inherited PTY process-session ID, with the
+/// harness session ID/cwd path retained for old relay records (see session.rs).
 pub fn endpoint_file_path(home: &std::path::Path) -> std::path::PathBuf {
     home.join(".forge/endpoint.json")
 }
@@ -150,9 +151,12 @@ fn unescape_json_string(s: &str) -> String {
 
 /// Build the single newline record: a tiny envelope carrying the route, the
 /// sender's run ID (empty when unset), the endpoint-file owner pid (zero
-/// for explicit channels), plus the raw stdin body. Literal CR/LF bytes
-/// cannot occur inside valid JSON strings, so stripping them keeps the body
-/// intact while guaranteeing one line on the wire.
+/// for explicit channels), the relay's Unix process-session ID, plus the raw
+/// stdin body. PTY children are session leaders, so the latter remains a
+/// deterministic attribution key even when a harness scrubs its hook-child
+/// environment. Literal CR/LF bytes cannot occur inside valid JSON strings,
+/// so stripping them keeps the body intact while guaranteeing one line on
+/// the wire.
 pub fn record_line(input: &[u8], hook: Option<&str>, run_id: &str, forge_pid: u32) -> Vec<u8> {
     let body: Vec<u8> = input
         .iter()
@@ -167,6 +171,10 @@ pub fn record_line(input: &[u8], hook: Option<&str>, run_id: &str, forge_pid: u3
     line.extend_from_slice(run_id.replace('\\', "\\\\").replace('"', "\\\"").as_bytes());
     line.extend_from_slice(b"\",\"forge_pid\":");
     line.extend_from_slice(forge_pid.to_string().as_bytes());
+    // SAFETY: getsid with pid zero only queries the calling process.
+    let source_sid = unsafe { libc::getsid(0) };
+    line.extend_from_slice(b",\"source_sid\":");
+    line.extend_from_slice(source_sid.max(0).to_string().as_bytes());
     line.extend_from_slice(b",\"body\":");
     if body.is_empty() {
         line.extend_from_slice(b"null");
@@ -310,6 +318,12 @@ mod tests {
         assert!(text.contains(r#""hook":"Stop""#), "route inside: {text:?}");
         assert!(text.contains(r#""run_id":"run-1""#), "attribution inside: {text:?}");
         assert!(text.contains(r#""forge_pid":0"#), "explicit channel untagged: {text:?}");
+        let source_sid = unsafe { libc::getsid(0) };
+        assert!(source_sid > 0, "test process has a Unix session");
+        assert!(
+            text.contains(&format!(r#""source_sid":{source_sid}"#)),
+            "PTY process-session attribution rides along: {text:?}"
+        );
         assert!(text.contains(r#"hook_event_name"#), "body inside");
         let tagged = record_line(b"{}", Some("Stop"), "", 4242);
         let tagged_text = String::from_utf8(tagged).unwrap();

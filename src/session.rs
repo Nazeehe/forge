@@ -450,6 +450,60 @@ impl SessionManager {
         }
     }
 
+    /// Unix process-session ID of an agent's primary PTY. Portable-pty makes
+    /// that child a session leader before exec, and hook descendants inherit
+    /// the same value even when a harness clears their environment.
+    pub fn process_session_id(&self, id: SessionId) -> Option<u32> {
+        let rec = self.sessions.get(&id)?;
+        rec.tabs.first()?.pane.as_ref()?.process_session_id()
+    }
+
+    /// Resolve a hook relay's Unix process-session ID to its live Forge
+    /// session. Unlike cwd matching, this remains unambiguous when several
+    /// Muse panes run in the same project.
+    pub fn lookup_process_session(&self, source_sid: u32) -> Option<SessionId> {
+        if source_sid == 0 {
+            return None;
+        }
+        self.sessions.iter().find_map(|(id, rec)| {
+            (rec.state.is_live()
+                && rec
+                    .tabs
+                    .first()
+                    .and_then(|tab| tab.pane.as_ref())
+                    .and_then(crate::pty::PtyPane::process_session_id)
+                    == Some(source_sid))
+            .then_some(*id)
+        })
+    }
+
+    /// Bind an ID from a scrubbed-environment harness hook to the exact PTY
+    /// process session that emitted it. Existing bindings are never replaced,
+    /// and an ID already owned by another live session is rejected.
+    pub fn bind_harness_session_to_process(&mut self, harness: &str, source_sid: u32) -> bool {
+        if harness.is_empty() {
+            return false;
+        }
+        let Some(id) = self.lookup_process_session(source_sid) else {
+            return false;
+        };
+        if let Some(owner) = self.lookup_harness_session(harness) {
+            return owner == id;
+        }
+        let Some(rec) = self.sessions.get(&id) else {
+            return false;
+        };
+        if !crate::harness::Harness::from_name(&rec.cli_tool)
+            .is_some_and(|h| h.cwd_window_attribution())
+        {
+            return false;
+        }
+        match rec.harness_session_id.as_deref() {
+            Some(existing) => existing == harness,
+            None => self.set_harness_session(id, harness.to_string()),
+        }
+    }
+
     /// Resolve a harness-side session ID to its live session, if any. This
     /// is the steady-state route for records whose relay could not send a
     /// run ID (muse scrubs hook-child environments).
@@ -1390,5 +1444,27 @@ mod tests {
         assert!(!m.bind_harness_session("sid-y", "/no/such/dir"));
         assert!(!m.bind_harness_session("", &cwd_str));
         assert!(m.remove(c));
+    }
+
+    #[test]
+    fn pty_process_session_identifies_one_of_two_same_cwd_muse_sessions() {
+        let mut m = SessionManager::new();
+        let cwd = workdir();
+        let a = m
+            .spawn_agent("a", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let b = m
+            .spawn_agent("b", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+
+        let a_sid = m.process_session_id(a).expect("first PTY process session");
+        let b_sid = m.process_session_id(b).expect("second PTY process session");
+        assert_ne!(a_sid, b_sid, "each PTY owns a distinct Unix session");
+        assert_eq!(m.lookup_process_session(a_sid), Some(a));
+        assert_eq!(m.lookup_process_session(b_sid), Some(b));
+        assert_eq!(m.lookup_process_session(0), None);
+
+        assert!(m.remove(a));
+        assert!(m.remove(b));
     }
 }

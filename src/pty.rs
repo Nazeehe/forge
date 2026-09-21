@@ -281,6 +281,13 @@ impl PtyPane {
         self.id
     }
 
+    /// PID of the command at the root of this PTY. On Unix portable-pty
+    /// calls `setsid()` before exec, so this is also the process-session ID
+    /// inherited by every hook command the harness launches.
+    pub fn process_session_id(&self) -> Option<u32> {
+        lock_child(&self.child).process_id()
+    }
+
     pub fn size(&self) -> (u16, u16) {
         (self.rows, self.cols)
     }

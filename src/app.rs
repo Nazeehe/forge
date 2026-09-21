@@ -3624,30 +3624,44 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::HookRequest(req) => {
-                // Unattributed main-session edges bind by working directory
-                // when unambiguous (muse scrubs hook-child environments, so
-                // its relays send no run ID). SessionStart alone is not
-                // enough: a resumed muse session fires no SessionStart,
-                // only UserPromptSubmit and Stop. Subagent tool hooks carry
-                // the child's session ID, so only edges a subagent cannot
-                // produce may claim a session. The bind runs first so the
-                // record below attributes like any other edge.
+                // Portable-pty makes every pane child a Unix session leader.
+                // Hook descendants retain that process-session ID even when
+                // muse scrubs their environment, so it identifies the exact
+                // pane when several muse sessions share a cwd. Old relays do
+                // not send it; retain the conservative cwd/window fallback.
+                let source_sid = crate::mcp::top_raw(&req.body, "source_sid")
+                    .and_then(|raw| raw.parse::<u32>().ok())
+                    .filter(|sid| *sid != 0);
+                let source_session =
+                    source_sid.and_then(|sid| self.manager.lookup_process_session(sid));
+                // SessionStart alone is not enough: an explicitly resumed
+                // muse session fires no SessionStart, only UserPromptSubmit
+                // and Stop. Subagent tool hooks carry the child's session ID,
+                // so only edges a subagent cannot produce may claim a session.
+                // The bind runs first so the record below attributes normally.
                 if matches!(req.hook.as_str(), "SessionStart" | "UserPromptSubmit" | "Stop")
                     && self.manager.lookup_run(&req.run_id).is_none()
                 {
                     if let Some(harness) = crate::session::session_id_from_hook_body(&req.body) {
-                        if let Some(cwd) = crate::session::cwd_from_hook_body(&req.body) {
+                        if source_session.is_some() {
+                            self.manager.bind_harness_session_to_process(
+                                &harness,
+                                source_sid.expect("resolved process source has an ID"),
+                            );
+                        } else if let Some(cwd) = crate::session::cwd_from_hook_body(&req.body) {
                             self.manager.bind_harness_session(&harness, &cwd);
                         }
                     }
                 }
                 // Attribute hook activity before queuing: the sender's run
-                // ID resolves to its session; records without one resolve
-                // by the harness session ID instead. Unknown runs stay
-                // untouched.
+                // ID resolves to its session; records without one resolve by
+                // PTY process-session ID, then by an established harness ID.
+                // Unknown sources stay untouched.
                 let fallback_id = if self.manager.lookup_run(&req.run_id).is_none() {
-                    crate::session::session_id_from_hook_body(&req.body)
-                        .and_then(|h| self.manager.lookup_harness_session(&h))
+                    source_session.or_else(|| {
+                        crate::session::session_id_from_hook_body(&req.body)
+                            .and_then(|h| self.manager.lookup_harness_session(&h))
+                    })
                 } else {
                     None
                 };
@@ -3972,6 +3986,82 @@ mod tests {
         );
         assert_eq!(s.manager.get(id).unwrap().activity, Activity::Thinking);
         assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn resumed_same_cwd_muse_hooks_bind_by_pty_process_session_after_window() {
+        let mut s = AppState::new();
+        let cwd = std::env::temp_dir();
+        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let a = s
+            .manager
+            .spawn_agent("a", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn_agent("b", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let old = std::time::Instant::now()
+            - crate::session::BOOTSTRAP_WINDOW
+            - std::time::Duration::from_secs(1);
+        s.manager.get_mut(a).unwrap().spawned_at = old;
+        s.manager.get_mut(b).unwrap().spawned_at = old;
+        let b_sid = s
+            .manager
+            .process_session_id(b)
+            .expect("second PTY process session");
+        let prompt = format!(
+            "{{\"v\":1,\"hook\":\"UserPromptSubmit\",\"run_id\":\"\",\"forge_pid\":0,\"source_sid\":{b_sid},\"body\":{{\"session_id\":\"muse-b\",\"cwd\":{cwd_json}}}}}"
+        );
+
+        s.apply(hook_request("UserPromptSubmit", "", &prompt));
+
+        assert_eq!(s.manager.get(a).unwrap().harness_session_id, None);
+        assert_eq!(
+            s.manager.get(b).unwrap().harness_session_id.as_deref(),
+            Some("muse-b"),
+            "source PTY identifies the resumed session despite shared cwd and elapsed window"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn process_attributed_hook_conflict_never_spills_to_same_cwd_session() {
+        let mut s = AppState::new();
+        let cwd = std::env::temp_dir();
+        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let a = s
+            .manager
+            .spawn_agent("a", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn_agent("b", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        s.manager.set_harness_session(b, "muse-b".to_string());
+        let b_sid = s
+            .manager
+            .process_session_id(b)
+            .expect("second PTY process session");
+        let stop = format!(
+            "{{\"v\":1,\"hook\":\"Stop\",\"run_id\":\"\",\"forge_pid\":0,\"source_sid\":{b_sid},\"body\":{{\"session_id\":\"conflict\",\"cwd\":{cwd_json}}}}}"
+        );
+
+        s.apply(hook_request("Stop", "", &stop));
+
+        assert_eq!(
+            s.manager.get(a).unwrap().harness_session_id,
+            None,
+            "a rejected claim from b must not fall through to cwd attribution"
+        );
+        assert_eq!(
+            s.manager.get(b).unwrap().harness_session_id.as_deref(),
+            Some("muse-b"),
+            "an established process binding is never overwritten"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
     }
 
     #[test]
