@@ -42,6 +42,7 @@ mod ui;
 #[cfg(feature = "visual")]
 mod visual;
 mod walkthrough;
+mod whichkey;
 
 const VERSION: &str = "1.0.0";
 

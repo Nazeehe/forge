@@ -163,6 +163,10 @@ pub struct AppState {
     /// Grid mode (`Ctrl-b w`): the main area tiles every session in
     /// framed cells instead of showing only the focused one.
     pub grid_mode: bool,
+    /// Which-key hotkey HUD (`Ctrl-b` pause shows it, `Ctrl-b ?` pins
+    /// it). Pure display state: dispatch authority stays in the input
+    /// router, timing ticks in the TUI loop.
+    pub whichkey: crate::whichkey::WhichKeyHud,
     /// Monotonic visual generation: every accepted `visual_show` takes
     /// the next number so stale renders never win. U3 scopes this per
     /// session with the raster state; the global counter stays as the
@@ -337,6 +341,7 @@ impl AppState {
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
             grid_mode: false,
+            whichkey: crate::whichkey::WhichKeyHud::new(),
             visual_seq: 0,
             pill_tabs: true,
             #[cfg(feature = "visual")]

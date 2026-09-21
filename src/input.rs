@@ -6,6 +6,77 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+/// How one `Ctrl-b <key>` row resolves. Exact characters fire a
+/// command; the three structural rows cover the digit range, the
+/// Enter key, and explicit help.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrefixInvoke {
+    /// One exact character with no modifiers held.
+    Command(char, UserCommand),
+    /// `1`–`9` with no modifiers: the digit picks the session index.
+    Digit,
+    /// Bare Enter: activate the fleet cursor.
+    FleetEnter,
+    /// `?`, with or without Shift: pin the which-key HUD.
+    Help,
+}
+
+impl PrefixInvoke {
+    fn matches(&self, key: &KeyEvent) -> bool {
+        match self {
+            PrefixInvoke::Command(c, _) => {
+                key.code == KeyCode::Char(*c) && key.modifiers.is_empty()
+            }
+            PrefixInvoke::Digit => {
+                matches!(key.code, KeyCode::Char('1'..='9')) && key.modifiers.is_empty()
+            }
+            PrefixInvoke::FleetEnter => {
+                key.code == KeyCode::Enter && key.modifiers.is_empty()
+            }
+            PrefixInvoke::Help => {
+                key.code == KeyCode::Char('?')
+                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            }
+        }
+    }
+}
+
+/// One `Ctrl-b <key>` binding: the whole contract in one row.
+///
+/// Adding a shortcut means adding a row here, in display order: the
+/// router fires it and the which-key HUD lists it, so neither can
+/// drift. The `hud_covers_everything_the_router_accepts` test probes
+/// the live router against the HUD and fails on any mismatch.
+pub struct PrefixBinding {
+    /// HUD display label: the key itself, or `"1–9"` / `"Enter"`.
+    pub label: &'static str,
+    /// Short human label, e.g. `"Next session"`.
+    pub desc: &'static str,
+    /// HUD section, e.g. `"Session"`.
+    pub group: &'static str,
+    pub(crate) invokes: PrefixInvoke,
+}
+
+/// Every prefix binding, in HUD display order.
+pub static PREFIX_BINDINGS: &[PrefixBinding] = &[
+    PrefixBinding { label: "c", desc: "New session", group: "Session", invokes: PrefixInvoke::Command('c', UserCommand::CreateSession) },
+    PrefixBinding { label: "n", desc: "Next session", group: "Session", invokes: PrefixInvoke::Command('n', UserCommand::NextSession) },
+    PrefixBinding { label: "p", desc: "Previous session", group: "Session", invokes: PrefixInvoke::Command('p', UserCommand::PrevSession) },
+    PrefixBinding { label: "1–9", desc: "Go to session 1–9", group: "Session", invokes: PrefixInvoke::Digit },
+    PrefixBinding { label: "j", desc: "Fleet cursor down", group: "Session", invokes: PrefixInvoke::Command('j', UserCommand::FleetStep(1)) },
+    PrefixBinding { label: "k", desc: "Fleet cursor up", group: "Session", invokes: PrefixInvoke::Command('k', UserCommand::FleetStep(-1)) },
+    PrefixBinding { label: "Enter", desc: "Activate fleet cursor", group: "Session", invokes: PrefixInvoke::FleetEnter },
+    PrefixBinding { label: "x", desc: "Terminate session", group: "Session", invokes: PrefixInvoke::Command('x', UserCommand::TerminateSession) },
+    PrefixBinding { label: "g", desc: "Manage groups", group: "Groups", invokes: PrefixInvoke::Command('g', UserCommand::ManageGroups) },
+    PrefixBinding { label: "t", desc: "Switch tab", group: "View", invokes: PrefixInvoke::Command('t', UserCommand::SwitchTab) },
+    PrefixBinding { label: "w", desc: "Toggle grid", group: "View", invokes: PrefixInvoke::Command('w', UserCommand::ToggleGrid) },
+    PrefixBinding { label: "y", desc: "Toggle permission mode", group: "Safety", invokes: PrefixInvoke::Command('y', UserCommand::TogglePermissionMode) },
+    PrefixBinding { label: "m", desc: "Telegram settings", group: "Settings", invokes: PrefixInvoke::Command('m', UserCommand::TelegramSettings) },
+    PrefixBinding { label: "e", desc: "Theme picker", group: "Settings", invokes: PrefixInvoke::Command('e', UserCommand::ThemePicker) },
+    PrefixBinding { label: "q", desc: "Quit", group: "App", invokes: PrefixInvoke::Command('q', UserCommand::Quit) },
+    PrefixBinding { label: "?", desc: "All keys", group: "App", invokes: PrefixInvoke::Help },
+];
+
 /// Commands reachable from the prefix layer (v1 map; extended later).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserCommand {
@@ -19,10 +90,6 @@ pub enum UserCommand {
     FleetStep(i32),
     /// Activate the sidebar fleet cursor (`Ctrl-b Enter`).
     FleetActivate,
-    /// Toggle the active session in/out of the shared `peers` group (4c).
-    /// Full group management lives in the group dialog; this covers the
-    /// manual ask/tell gate with one key.
-    TogglePeerGroup,
     /// Open the keyboard-first group management dialog (new, members,
     /// rename, delete).
     ManageGroups,
@@ -273,6 +340,9 @@ pub enum RoutedKey {
     PrefixPending,
     /// A prefix command fired.
     Command(UserCommand),
+    /// Explicit hotkey help (`Ctrl-b ?`): pin the which-key HUD open
+    /// for browsing instead of firing a command.
+    Help,
     /// Prefix cancelled, back to normal.
     Cancelled,
 }
@@ -292,6 +362,11 @@ impl InputRouter {
         InputRouter { mode: Mode::Normal }
     }
 
+    /// True while the prefix key is waiting for its second key.
+    pub fn is_pending(&self) -> bool {
+        matches!(self.mode, Mode::Prefix)
+    }
+
     pub fn feed(&mut self, key: KeyEvent) -> RoutedKey {
         match self.mode {
             Mode::Normal => {
@@ -307,35 +382,29 @@ impl InputRouter {
                 if key.code == KeyCode::Esc {
                     return RoutedKey::Cancelled;
                 }
-                if !key.modifiers.is_empty() {
-                    return RoutedKey::Forward(key);
-                }
-                match key.code {
-                    KeyCode::Char('q') => RoutedKey::Command(UserCommand::Quit),
-                    KeyCode::Char('n') => RoutedKey::Command(UserCommand::NextSession),
-                    KeyCode::Char('p') => RoutedKey::Command(UserCommand::PrevSession),
-                    KeyCode::Char('c') => RoutedKey::Command(UserCommand::CreateSession),
-                    KeyCode::Char('g') => RoutedKey::Command(UserCommand::ManageGroups),
-                    KeyCode::Char('o') => RoutedKey::Command(UserCommand::TogglePeerGroup),
-                    KeyCode::Char('t') => RoutedKey::Command(UserCommand::SwitchTab),
-                    KeyCode::Char('y') => RoutedKey::Command(UserCommand::TogglePermissionMode),
-                    KeyCode::Char('x') => RoutedKey::Command(UserCommand::TerminateSession),
-                    KeyCode::Char('j') => RoutedKey::Command(UserCommand::FleetStep(1)),
-                    KeyCode::Char('k') => RoutedKey::Command(UserCommand::FleetStep(-1)),
-                    KeyCode::Enter => RoutedKey::Command(UserCommand::FleetActivate),
-                    KeyCode::Char('w') => RoutedKey::Command(UserCommand::ToggleGrid),
-                    KeyCode::Char('m') => RoutedKey::Command(UserCommand::TelegramSettings),
-                    KeyCode::Char('e') => RoutedKey::Command(UserCommand::ThemePicker),
-                    KeyCode::Char(d @ '1'..='9') => {
-                        RoutedKey::Command(UserCommand::SelectSession(d as usize - '1' as usize))
-                    }
-                    _ => RoutedKey::Forward(key),
+                // Table-driven: the first matching row wins, so adding
+                // a shortcut is adding a row (see [`PREFIX_BINDINGS`]).
+                match PREFIX_BINDINGS.iter().find(|b| b.invokes.matches(&key)) {
+                    Some(binding) => match binding.invokes {
+                        PrefixInvoke::Command(_, cmd) => RoutedKey::Command(cmd),
+                        PrefixInvoke::Digit => match key.code {
+                            KeyCode::Char(d @ '1'..='9') => RoutedKey::Command(
+                                UserCommand::SelectSession(d as usize - '1' as usize),
+                            ),
+                            _ => RoutedKey::Forward(key),
+                        },
+                        PrefixInvoke::FleetEnter => {
+                            RoutedKey::Command(UserCommand::FleetActivate)
+                        }
+                        PrefixInvoke::Help => RoutedKey::Help,
+                    },
+                    None => RoutedKey::Forward(key),
                 }
             }
         }
     }
 
-    fn is_prefix(key: &KeyEvent) -> bool {
+    pub(crate) fn is_prefix(key: &KeyEvent) -> bool {
         // Compare code + modifiers only: real terminals vary kind/state
         // (press vs repeat) for the same physical chord.
         key.code == KeyCode::Char('b') && key.modifiers == KeyModifiers::CONTROL
@@ -437,12 +506,6 @@ mod tests {
 
         assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
         assert_eq!(
-            r.feed(key(KeyCode::Char('o'))),
-            RoutedKey::Command(UserCommand::TogglePeerGroup)
-        );
-
-        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
-        assert_eq!(
             r.feed(key(KeyCode::Char('t'))),
             RoutedKey::Command(UserCommand::SwitchTab)
         );
@@ -495,6 +558,81 @@ mod tests {
     #[test]
     fn default_prefix_is_ctrl_b() {
         assert_eq!(prefix_key(), ctrl(KeyCode::Char('b')));
+    }
+
+    #[test]
+    fn retired_o_shortcut_falls_through_to_the_pane() {
+        // The `Ctrl-b o` peers toggle is gone: `o` behaves like any
+        // other unbound key after the prefix.
+        let mut r = InputRouter::new();
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('o'))),
+            RoutedKey::Forward(key(KeyCode::Char('o')))
+        );
+        assert!(!r.is_pending());
+    }
+
+    #[test]
+    fn prefix_table_has_no_ambiguous_rows() {
+        let mut chars = std::collections::HashSet::new();
+        let mut structural = 0;
+        for binding in PREFIX_BINDINGS {
+            match binding.invokes {
+                PrefixInvoke::Command(c, _) => {
+                    assert!(chars.insert(c), "duplicate prefix key {c:?}")
+                }
+                PrefixInvoke::Digit | PrefixInvoke::FleetEnter | PrefixInvoke::Help => {
+                    structural += 1
+                }
+            }
+        }
+        assert_eq!(structural, 3, "the Digit, Enter, and Help rows");
+    }
+
+    #[test]
+    fn prefix_question_opens_explicit_help() {
+        let mut r = InputRouter::new();
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert!(r.is_pending(), "prefix waits for its second key");
+        assert_eq!(r.feed(key(KeyCode::Char('?'))), RoutedKey::Help);
+        assert!(!r.is_pending(), "help resolves the prefix like a command");
+    }
+
+    #[test]
+    fn prefix_shifted_question_opens_explicit_help() {
+        // Real terminals report `?` with SHIFT held; it must still help.
+        let mut r = InputRouter::new();
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        let shifted = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert_eq!(r.feed(shifted), RoutedKey::Help);
+    }
+
+    #[test]
+    fn router_reports_prefix_pending() {
+        let mut r = InputRouter::new();
+        assert!(!r.is_pending());
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert!(r.is_pending());
+        assert_eq!(
+            r.feed(key(KeyCode::Char('n'))),
+            RoutedKey::Command(UserCommand::NextSession)
+        );
+        assert!(!r.is_pending(), "a fired command leaves prefix mode");
+    }
+
+    #[test]
+    fn pending_clears_on_cancel_and_fallthrough() {
+        let mut r = InputRouter::new();
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(r.feed(key(KeyCode::Esc)), RoutedKey::Cancelled);
+        assert!(!r.is_pending());
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('z'))),
+            RoutedKey::Forward(key(KeyCode::Char('z')))
+        );
+        assert!(!r.is_pending(), "fallthrough leaves prefix mode");
     }
 
     #[test]

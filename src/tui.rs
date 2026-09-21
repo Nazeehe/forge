@@ -400,7 +400,7 @@ fn loop_until_quit(
                     } else if state.quit_confirm.is_some() {
                         handle_quit_key(state, key);
                     } else {
-                        handle_key(state, &mut router, key);
+                        handle_key_at(state, &mut router, key, Instant::now());
                     }
                 }
                 event::Event::Mouse(mev) => {
@@ -466,6 +466,9 @@ fn loop_until_quit(
         state.settle_comms();
         state.drain_visual();
         state.drain_telegram_test();
+        // Which-key clock: a prefix held past the delay earns its HUD;
+        // a sequence finished fast never paints.
+        state.dirty |= state.whichkey.poll(router.is_pending(), Instant::now());
         // Presence rides the loop's own input flag (keys, mouse,
         // paste): twenty silent minutes announce away to every live
         // session, the next input announces the return.
@@ -537,6 +540,13 @@ fn loop_until_quit(
             terminal.draw(|f| {
                 let area = f.area();
                 ui::render(f, area, &views, &chrome);
+                // The which-key HUD floats above the chrome but below
+                // every modal: it only ever opens off the prefix path,
+                // which modals bypass, so both can never want input.
+                if state.whichkey.visible() {
+                    let hud = crate::whichkey::whichkey_area(area);
+                    crate::whichkey::render_whichkey(f, area, hud);
+                }
                 if let Some(dialog) = state.create_dialog.as_mut() {
                     dialog.view(f, crate::create::create_area(area));
                 }
@@ -696,6 +706,15 @@ fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> bool {
 }
 
 fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEvent) {
+    handle_key_at(state, router, key, Instant::now());
+}
+
+fn handle_key_at(
+    state: &mut AppState,
+    router: &mut InputRouter,
+    key: event::KeyEvent,
+    now: Instant,
+) {
     // An open tour captures every key, including prefix chords: the
     // overlay owns input while open and Esc leaves it.
     if state.walkthrough_overlay_active() {
@@ -708,105 +727,174 @@ fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEve
     if state.visual_tab_focused() && handle_visual_key(state, key) {
         return;
     }
+    // A pinned which-key HUD owns its keys the same way: browse the
+    // map instead of typing into the pane.
+    if state.whichkey.pinned() {
+        handle_pinned_key(state, router, key);
+        return;
+    }
     match router.feed(key) {
         RoutedKey::Forward(k) => {
-            if state.overlay_active() { return; }
-            if let Some(active) = state.manager.active() {
-                let app_cursor = state.manager.app_cursor(active);
-                if let Some(bytes) = input::encode_key(&k, app_cursor) {
-                    if state.manager.pane_write(active, &bytes).is_ok() {
-                        state.note_human_input(active);
-                    }
-                }
-            }
+            state.whichkey.note_resolved();
+            forward_to_pane(state, k);
         }
-        RoutedKey::Command(cmd) => match cmd {
-            UserCommand::Quit => state.open_quit_confirm(),
-            UserCommand::NextSession => {
-                state.step_session(1);
-                fit_active_pane(state);
-                state.dirty = true;
-            }
-            UserCommand::PrevSession => {
-                state.step_session(-1);
-                fit_active_pane(state);
-                state.dirty = true;
-            }
-            UserCommand::CreateSession => {
-                state.open_create_dialog();
-            }
-            UserCommand::ManageGroups => {
-                state.open_group_dialog();
-            }
-            UserCommand::SelectSession(index) => {
-                if state.select_session(index) {
-                    fit_active_pane(state);
-                }
-                state.dirty = true;
-            }
-            UserCommand::FleetStep(dir) => {
-                if !state.grid_mode {
-                    state.fleet_step(dir);
-                }
-                state.dirty = true;
-            }
-            UserCommand::FleetActivate => {
-                if !state.grid_mode && state.fleet_activate() {
-                    fit_active_pane(state);
-                }
-                state.dirty = true;
-            }
-            UserCommand::TogglePeerGroup => {
-                if let Some(active) = state.manager.active() {
-                    if state.broker.is_member(active, "peers") {
-                        state.broker.leave(active, "peers");
-                    } else {
-                        let _ = state.broker.join(&state.manager, active, "peers");
-                    }
-                    state.dirty = true;
-                }
-            }
-            UserCommand::SwitchTab => {
-                if let Some(active) = state.manager.active() {
-                    state.overlay_view = None;
-                    if state.manager.switch_tab(active) {
-                        // A lazily spawned terminal tab takes the main
-                        // area at once instead of keeping 24x80.
-                        fit_active_pane(state);
-                    }
-                    state.dirty = true;
-                }
-            }
-            UserCommand::TogglePermissionMode => {
-                state.toggle_permission_mode();
-            }
-            UserCommand::TerminateSession => {
-                if let Some(active) = state.manager.active() {
-                    state.terminate_session(active);
-                    fit_active_pane(state);
-                }
-                state.dirty = true;
-            }
-            UserCommand::ToggleGrid => {
-                state.toggle_grid();
-                // Leaving grid restores the focused pane to full size;
-                // entering syncs every pane on the next dirty frame.
-                if !state.grid_mode {
-                    fit_active_pane(state);
-                }
-            }
-            UserCommand::TelegramSettings => {
-                state.open_telegram_dialog();
-            }
-            UserCommand::ThemePicker => {
-                let themes = state.available_themes();
-                state.open_theme_dialog(themes);
-            }
-        },
-        RoutedKey::PrefixPending | RoutedKey::Cancelled => {
+        RoutedKey::Help => {
+            state.whichkey.show_pinned();
+            state.dirty = true;
+        }
+        RoutedKey::Command(cmd) => {
+            state.whichkey.note_resolved();
+            fire_command(state, cmd);
+        }
+        RoutedKey::PrefixPending => {
+            state.whichkey.note_pending(now);
+            state.dirty = true;
+        }
+        RoutedKey::Cancelled => {
+            state.whichkey.note_resolved();
             state.dirty = true;
         }
     }
+}
+
+/// One key while the which-key HUD is pinned open for browsing: Esc
+/// closes, the prefix key keeps the map up, and every other key
+/// dispatches as the second half of the prefix — the same keystrokes
+/// experts type blind. Unknown keys close the HUD and fall through
+/// to the pane, exactly like an unpinned prefix.
+fn handle_pinned_key(
+    state: &mut AppState,
+    router: &mut InputRouter,
+    key: event::KeyEvent,
+) {
+    use crossterm::event::KeyCode;
+    if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+        state.whichkey.hide();
+        state.dirty = true;
+        return;
+    }
+    if InputRouter::is_prefix(&key) {
+        // Still browsing: the prefix alone changes nothing.
+        state.dirty = true;
+        return;
+    }
+    if !router.is_pending() {
+        let _ = router.feed(input::prefix_key());
+    }
+    match router.feed(key) {
+        RoutedKey::Command(cmd) => {
+            state.whichkey.hide();
+            fire_command(state, cmd);
+        }
+        RoutedKey::Help => {
+            // `?` while browsing: still browsing.
+            state.dirty = true;
+        }
+        RoutedKey::Cancelled => {
+            state.whichkey.hide();
+            state.dirty = true;
+        }
+        RoutedKey::Forward(k) => {
+            state.whichkey.hide();
+            forward_to_pane(state, k);
+        }
+        RoutedKey::PrefixPending => {
+            state.dirty = true;
+        }
+    }
+}
+
+/// Forward one key to the active pane, exactly as unprefixed input.
+fn forward_to_pane(state: &mut AppState, key: event::KeyEvent) {
+    if state.overlay_active() {
+        return;
+    }
+    if let Some(active) = state.manager.active() {
+        let app_cursor = state.manager.app_cursor(active);
+        if let Some(bytes) = input::encode_key(&key, app_cursor) {
+            if state.manager.pane_write(active, &bytes).is_ok() {
+                state.note_human_input(active);
+            }
+        }
+    }
+}
+
+/// Fire one prefix command. Shared by the prefix path and the pinned
+/// which-key browser so both stay on the same dispatch table.
+fn fire_command(state: &mut AppState, cmd: UserCommand) {
+    match cmd {
+        UserCommand::Quit => state.open_quit_confirm(),
+        UserCommand::NextSession => {
+            state.step_session(1);
+            fit_active_pane(state);
+            state.dirty = true;
+        }
+        UserCommand::PrevSession => {
+            state.step_session(-1);
+            fit_active_pane(state);
+            state.dirty = true;
+        }
+        UserCommand::CreateSession => {
+            state.open_create_dialog();
+        }
+        UserCommand::ManageGroups => {
+            state.open_group_dialog();
+        }
+        UserCommand::SelectSession(index) => {
+            if state.select_session(index) {
+                fit_active_pane(state);
+            }
+            state.dirty = true;
+        }
+        UserCommand::FleetStep(dir) => {
+            if !state.grid_mode {
+                state.fleet_step(dir);
+            }
+            state.dirty = true;
+        }
+        UserCommand::FleetActivate => {
+            if !state.grid_mode && state.fleet_activate() {
+                fit_active_pane(state);
+            }
+            state.dirty = true;
+        }
+        UserCommand::SwitchTab => {
+            if let Some(active) = state.manager.active() {
+                state.overlay_view = None;
+                if state.manager.switch_tab(active) {
+                    // A lazily spawned terminal tab takes the main
+                    // area at once instead of keeping 24x80.
+                    fit_active_pane(state);
+                }
+                state.dirty = true;
+            }
+        }
+        UserCommand::TogglePermissionMode => {
+            state.toggle_permission_mode();
+        }
+        UserCommand::TerminateSession => {
+            if let Some(active) = state.manager.active() {
+                state.terminate_session(active);
+                fit_active_pane(state);
+            }
+            state.dirty = true;
+        }
+        UserCommand::ToggleGrid => {
+            state.toggle_grid();
+            // Leaving grid restores the focused pane to full size;
+            // entering syncs every pane on the next dirty frame.
+            if !state.grid_mode {
+                fit_active_pane(state);
+            }
+        }
+        UserCommand::TelegramSettings => {
+            state.open_telegram_dialog();
+        }
+        UserCommand::ThemePicker => {
+            let themes = state.available_themes();
+            state.open_theme_dialog(themes);
+        }
+        }
 }
 
 /// One key inside an open tour: step/scroll chords repaint, a
@@ -2375,6 +2463,129 @@ mod tests {
             },
         );
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+    }
+
+    #[test]
+    fn prefix_pause_shows_hud_only_after_delay() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::time::{Duration, Instant};
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let t0 = Instant::now();
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key_at(&mut state, &mut router, prefix, t0);
+        assert!(router.is_pending(), "prefix waits for its second key");
+        assert!(!state.whichkey.visible(), "no instant flash");
+        assert!(
+            !state.whichkey.poll(true, t0 + Duration::from_millis(50)),
+            "fast typists stay clean"
+        );
+        assert!(!state.whichkey.visible());
+        assert!(
+            state.whichkey.poll(
+                true,
+                t0 + Duration::from_millis(crate::whichkey::WHICHKEY_DELAY_MS)
+            ),
+            "the pause earns its HUD"
+        );
+        assert!(state.whichkey.visible());
+    }
+
+    #[test]
+    fn fast_prefix_sequence_never_paints_hud() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::time::{Duration, Instant};
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let t0 = Instant::now();
+        let none = KeyModifiers::NONE;
+        handle_key_at(
+            &mut state,
+            &mut router,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            t0,
+        );
+        handle_key_at(
+            &mut state,
+            &mut router,
+            KeyEvent::new(KeyCode::Char('w'), none),
+            t0 + Duration::from_millis(50),
+        );
+        assert!(!state.whichkey.visible(), "experts never see the overlay");
+        assert!(!router.is_pending());
+        assert!(state.grid_mode, "the command still fired");
+    }
+
+    #[test]
+    fn explicit_help_pins_and_command_key_fires_and_closes() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::time::Instant;
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let t0 = Instant::now();
+        let none = KeyModifiers::NONE;
+        let prefix = || KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key_at(&mut state, &mut router, prefix(), t0);
+        handle_key_at(&mut state, &mut router, KeyEvent::new(KeyCode::Char('?'), none), t0);
+        assert!(state.whichkey.pinned() && state.whichkey.visible(), "help pins open");
+        // Browsing survives ticks with no pending prefix.
+        assert!(!state.whichkey.poll(false, t0));
+        assert!(state.whichkey.visible());
+        // A known key fires from the browser and closes it.
+        handle_key_at(&mut state, &mut router, KeyEvent::new(KeyCode::Char('w'), none), t0);
+        assert!(!state.whichkey.visible() && !state.whichkey.pinned(), "fired closes");
+        assert!(state.grid_mode, "ToggleGrid fired from the browser");
+    }
+
+    #[test]
+    fn pinned_help_question_stays_and_escape_closes() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::time::Instant;
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let t0 = Instant::now();
+        let none = KeyModifiers::NONE;
+        let prefix = || KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key_at(&mut state, &mut router, prefix(), t0);
+        handle_key_at(&mut state, &mut router, KeyEvent::new(KeyCode::Char('?'), none), t0);
+        handle_key_at(&mut state, &mut router, KeyEvent::new(KeyCode::Char('?'), none), t0);
+        assert!(state.whichkey.pinned(), "`?` while browsing keeps browsing");
+        handle_key_at(&mut state, &mut router, prefix(), t0);
+        assert!(state.whichkey.pinned(), "a bare prefix keeps the map up");
+        handle_key_at(&mut state, &mut router, KeyEvent::new(KeyCode::Esc, none), t0);
+        assert!(!state.whichkey.visible() && !state.whichkey.pinned(), "Esc closes");
+        assert!(!router.is_pending());
+    }
+
+    #[test]
+    fn unknown_key_after_prefix_closes_hud_gracefully() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use std::time::{Duration, Instant};
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let t0 = Instant::now();
+        let none = KeyModifiers::NONE;
+        handle_key_at(
+            &mut state,
+            &mut router,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            t0,
+        );
+        assert!(state.whichkey.poll(
+            true,
+            t0 + Duration::from_millis(crate::whichkey::WHICHKEY_DELAY_MS)
+        ));
+        assert!(state.whichkey.visible());
+        // No live session in a fresh state: the fallthrough is a silent
+        // no-op, never a stuck prefix mode.
+        handle_key_at(
+            &mut state,
+            &mut router,
+            KeyEvent::new(KeyCode::Char('z'), none),
+            t0 + Duration::from_millis(crate::whichkey::WHICHKEY_DELAY_MS + 10),
+        );
+        assert!(!state.whichkey.visible(), "invalid key dismisses the HUD");
+        assert!(!router.is_pending(), "prefix mode always resolves");
     }
 
     #[test]
