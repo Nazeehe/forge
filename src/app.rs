@@ -3672,9 +3672,12 @@ impl AppState {
                     }
                 }
                 // SessionStart carries the harness-side conversation ID the
-                // restore path resumes with. Bodies without one (or from
-                // unknown runs) leave any earlier value alone.
-                if req.hook == "SessionStart" {
+                // restore path resumes with, and every UserPromptSubmit
+                // carries the live one: muse fires no SessionStart on
+                // boot or resume, so the prompt is the true resume ID.
+                // Bodies without one (or from unknown runs) leave any
+                // earlier value alone.
+                if req.hook == "SessionStart" || req.hook == "UserPromptSubmit" {
                     if let Some(harness) = crate::session::session_id_from_hook_body(&req.body) {
                         if let Some(id) = attributed {
                             self.manager.set_harness_session(id, harness);
@@ -3985,6 +3988,61 @@ mod tests {
             "resumed-session edge captured the resume ID"
         );
         assert_eq!(s.manager.get(id).unwrap().activity, Activity::Thinking);
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn user_prompt_submit_captures_harness_id_when_session_start_missed() {
+        // Grounded: a harness that booted while Forge was down (fail-open
+        // relay) is never seen starting, yet every later UserPromptSubmit
+        // body still carries the true conversation ID.
+        let mut s = AppState::new();
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent("c", &std::env::temp_dir(), "exec sleep 30", run.clone(), "claude")
+            .unwrap();
+        assert_eq!(s.manager.get(id).unwrap().harness_session_id, None);
+        s.apply(hook_request(
+            "UserPromptSubmit",
+            run.as_str(),
+            r#"{"v":1,"hook":"UserPromptSubmit","run_id":"r","body":{"session_id":"harness-7","cwd":"/tmp"}}"#,
+        ));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("harness-7"),
+            "prompt is the true resume ID when SessionStart was missed"
+        );
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn user_prompt_submit_refreshes_rotated_harness_id() {
+        // A manual in-pane resume swaps the harness conversation with no
+        // SessionStart; the next prompt carries the ID the pane actually
+        // runs now, so the record must follow it.
+        let mut s = AppState::new();
+        let cwd = std::env::temp_dir();
+        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent("m", &cwd, "exec sleep 30", run.clone(), "muse")
+            .unwrap();
+        s.manager.set_harness_session(id, "muse-old".to_string());
+        let sid = s
+            .manager
+            .process_session_id(id)
+            .expect("pty process session");
+        let prompt = format!(
+            "{{\"v\":1,\"hook\":\"UserPromptSubmit\",\"run_id\":\"\",\"forge_pid\":0,\"source_sid\":{sid},\"body\":{{\"session_id\":\"muse-new\",\"cwd\":{cwd_json}}}}}"
+        );
+        s.apply(hook_request("UserPromptSubmit", "", &prompt));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("muse-new"),
+            "prompt always carries the live conversation ID"
+        );
         assert!(s.manager.remove(id));
     }
 

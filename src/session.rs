@@ -135,8 +135,9 @@ pub struct SessionRecord {
     pub state: SessionState,
     pub activity: Activity,
     pub run_id: crate::ids::RunId,
-    /// Harness-side conversation ID from the SessionStart hook body, when
-    /// the harness reports one. This is what resume argv needs on restore.
+    /// Harness-side conversation ID from the SessionStart/UserPromptSubmit
+    /// hook body, when the harness reports one. This is what resume argv
+    /// needs on restore.
     pub harness_session_id: Option<String>,
     /// Agent CLI behind the agent tab (`shell`, `claude`, `codex`, `muse`).
     pub cli_tool: String,
