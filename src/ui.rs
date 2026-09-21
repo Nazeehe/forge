@@ -136,7 +136,13 @@ pub fn chrome_areas(area: Rect) -> ChromeAreas {
     let bar_h = if area.height >= 3 { 1 } else { 0 };
     let content_h = area.height.saturating_sub(bar_h);
     let topbar_h = if content_h > 4 { 1 } else { 0 };
-    let main_w = if area.width >= 160 { area.width * 3 / 4 } else { area.width * 4 / 5 };
+    let raw_main = if area.width >= 160 { area.width * 3 / 4 } else { area.width * 4 / 5 };
+    // Wide terminals stop donating a full percentage to the sidebar:
+    // it caps around 36 columns and the main pane keeps the rest, so
+    // 159→160 no longer steals seven columns from the main pane.
+    let raw_side = area.width.saturating_sub(raw_main);
+    let sidebar_w = raw_side.min(36);
+    let main_w = area.width.saturating_sub(sidebar_w);
     let inset_tabs = area.width >= 160 && topbar_h > 0;
     ChromeAreas {
         main: if inset_tabs {
@@ -909,6 +915,68 @@ pub fn cut_cells(s: &str, max_cells: usize) -> String {
     out
 }
 
+/// Cell width of a string as the renderer measures it.
+fn cells(s: &str) -> usize {
+    Line::from(s).width()
+}
+
+/// Wrap a string to lines of at most `max_cells` display cells,
+/// splitting on spaces and hard-splitting words longer than the
+/// budget. Never returns an empty vec.
+pub fn wrap_cells(s: &str, max_cells: usize) -> Vec<String> {
+    let max_cells = max_cells.max(1);
+    if s.split(' ').all(|w| w.is_empty()) {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0;
+    let push_word = |word: &str, rows: &mut Vec<String>, cur: &mut String, cur_w: &mut usize| {
+        let w = cells(word);
+        if w > max_cells {
+            // Hard-split the long word across rows.
+            let mut chunk = String::new();
+            let mut chunk_w = 0;
+            for ch in word.chars() {
+                let cw = cells(&ch.to_string());
+                if chunk_w + cw > max_cells {
+                    rows.push(std::mem::take(&mut chunk));
+                    chunk_w = 0;
+                }
+                chunk.push(ch);
+                chunk_w += cw;
+            }
+            if *cur_w > 0 {
+                rows.push(std::mem::take(cur));
+                *cur_w = 0;
+            }
+            *cur = chunk;
+            *cur_w = cells(cur);
+            return;
+        }
+        let sep = if *cur_w > 0 { 1 } else { 0 };
+        if *cur_w + sep + w > max_cells {
+            rows.push(std::mem::take(cur));
+            *cur_w = 0;
+        } else if sep > 0 {
+            cur.push(' ');
+            *cur_w += 1;
+        }
+        cur.push_str(word);
+        *cur_w += w;
+    };
+    for word in s.split(' ') {
+        if word.is_empty() {
+            continue;
+        }
+        push_word(word, &mut rows, &mut cur, &mut cur_w);
+    }
+    if !cur.is_empty() {
+        rows.push(cur);
+    }
+    rows
+}
+
 #[derive(Clone, Debug)]
 pub struct SidebarInfo {
     pub session: Option<SessionDetail>,
@@ -933,95 +1001,326 @@ pub struct SidebarInfo {
     pub telegram_badge: Option<(String, String)>,
 }
 
-/// Fleet slot caps: the slot keeps header plus this many rows; the rest
-/// scrolls. Fixed caps keep surrounding content from shoving.
-pub const FLEET_VISIBLE_RICH: usize = 8;
-pub const FLEET_VISIBLE_COMPACT: usize = 5;
-
-pub fn fleet_visible(rich: bool) -> usize {
-    if rich { FLEET_VISIBLE_RICH } else { FLEET_VISIBLE_COMPACT }
+/// Explicit sidebar regions: the list scrolls, the footer never
+/// moves. Render, mouse, and keys share this split so a repaint can
+/// never desync controls from the paint.
+pub struct SidebarLayout {
+    pub list: Rect,
+    pub footer: Rect,
 }
 
-/// First fleet line inside the sidebar content: the rich brand header
-/// owns lines 0-2, compact starts with the fleet at once.
-pub fn fleet_first_row(rich: bool) -> usize {
-    if rich { 3 } else { 0 }
+/// Rich layout gate: wide and tall enough for the brand header,
+/// status rows, and settings explainers. Calibrated to the 36-column
+/// clamp — a plain `>= 40` would make rich unreachable.
+pub fn sidebar_is_rich(sidebar: Rect) -> bool {
+    sidebar.width >= 30 && sidebar.height >= 30
 }
 
-/// Visible window over `len` rows with cap `visible`: scroll saturates
-/// at the tail instead of running past it.
-pub fn fleet_viewport(scroll: usize, len: usize, visible: usize) -> (usize, usize) {
-    if len == 0 || visible == 0 {
+/// Pinned footer height: settings rows, plus the badge row when
+/// present. Compact also spends a pending row, hidden when there is
+/// nothing pending (rich pending lives in the focused block instead).
+pub fn sidebar_footer_height(info: &SidebarInfo, rich: bool) -> u16 {
+    let base = if rich { 6 } else { 5 };
+    base + u16::from(info.telegram_badge.is_some())
+        - u16::from(!rich && info.pending == 0)
+}
+
+pub fn sidebar_layout(sidebar: Rect, footer_h: u16) -> SidebarLayout {
+    let footer_h = footer_h.min(sidebar.height);
+    SidebarLayout {
+        footer: Rect::new(
+            sidebar.x,
+            sidebar.y + sidebar.height - footer_h,
+            sidebar.width,
+            footer_h,
+        ),
+        list: Rect::new(sidebar.x, sidebar.y, sidebar.width, sidebar.height - footer_h),
+    }
+}
+
+/// Whole blocks that fit the cell budget starting at `scroll`:
+/// scroll saturates at the tail, and the first block always shows even
+/// when it alone overflows the budget.
+pub fn fleet_cell_window(scroll: usize, heights: &[u16], budget: u16) -> (usize, usize) {
+    if heights.is_empty() {
         return (0, 0);
     }
-    let start = scroll.min(len.saturating_sub(visible));
-    let end = (start + visible).min(len);
+    let start = scroll.min(heights.len() - 1);
+    let mut used = 0u16;
+    let mut end = start;
+    while end < heights.len() {
+        let h = heights[end].max(1);
+        if end > start && used + h > budget {
+            break;
+        }
+        used += h;
+        end += 1;
+    }
     (start, end)
 }
 
-/// Fleet slot lines: header plus the visible window. `>` marks the
-/// cursor, `*` the focused session, otherwise the tier mark. Rich rows
-/// carry the reason; compact rows stay name-only.
-fn fleet_block_lines(info: &SidebarInfo, rich: bool) -> Vec<Line<'static>> {
+/// Painted height per fleet block in row order: name, wrapped reason,
+/// breathing room. Render, hit-testing, and cursor-following share
+/// this, so variable heights can never desync them.
+pub fn fleet_block_heights(info: &SidebarInfo, width: u16) -> Vec<u16> {
+    info.sessions
+        .iter()
+        .map(|row| {
+            1 + wrap_cells(
+                &safe_text::encode_for_display(&row.reason),
+                fleet_wrap_width(width),
+            )
+            .len() as u16
+                + 1
+        })
+        .collect()
+}
+
+/// One rendered fleet item: a zone header or a session block by row
+/// index. Headers travel with their blocks through the same budgeted
+/// window, so a header can never strand without its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FleetItem {
+    AttnHeader,
+    SessionsHeader,
+    Block(usize),
+}
+
+/// Grouped window over the fleet: attention blocks under their header,
+/// the rest under theirs, whole items while they fit the cell budget.
+/// A trailing stranded header is dropped; an empty window means the
+/// list region is too small for even one header.
+pub fn fleet_window_items(
+    info: &SidebarInfo,
+    width: u16,
+    items_budget: u16,
+) -> Vec<FleetItem> {
+    let n = info.sessions.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let start = info.fleet_scroll.min(n - 1);
+    let heights = fleet_block_heights(info, width);
+    let mut items = Vec::new();
+    let attn: Vec<usize> = (0..n)
+        .filter(|&i| i >= start && info.sessions[i].tier == FleetTier::Attention)
+        .collect();
+    let rest: Vec<usize> = (0..n)
+        .filter(|&i| i >= start && info.sessions[i].tier != FleetTier::Attention)
+        .collect();
+    if !attn.is_empty() {
+        items.push(FleetItem::AttnHeader);
+        items.extend(attn.into_iter().map(FleetItem::Block));
+    }
+    if !rest.is_empty() {
+        items.push(FleetItem::SessionsHeader);
+        items.extend(rest.into_iter().map(FleetItem::Block));
+    }
+    let height_of = |item: &FleetItem| -> u16 {
+        match item {
+            FleetItem::AttnHeader | FleetItem::SessionsHeader => 1,
+            FleetItem::Block(i) => heights[*i].max(1),
+        }
+    };
+    let mut used = 0u16;
+    let mut end = 0;
+    for (k, item) in items.iter().enumerate() {
+        if k > 0 && used + height_of(item) > items_budget {
+            break;
+        }
+        used += height_of(item);
+        end = k + 1;
+    }
+    while end > 0 && matches!(items[end - 1], FleetItem::AttnHeader | FleetItem::SessionsHeader) {
+        end -= 1;
+    }
+    items.truncate(end);
+    items
+}
+
+/// Fleet items budget inside the list region: list height minus the
+/// brand, focused block, gap row, and title row above the items.
+pub fn fleet_items_budget(info: &SidebarInfo, rich: bool, width: u16, list_h: u16) -> u16 {
+    let top = (if rich { 3 } else { 0 }) + focused_block_lines(info, rich, width).len() + 1;
+    list_h.saturating_sub(top as u16 + 1)
+}
+
+/// Reason wrap width: two indent cells plus a margin off the edge.
+fn fleet_wrap_width(width: u16) -> usize {
+    (width as usize).saturating_sub(4).max(8)
+}
+
+/// Name budget on the block headline: selector, mark, emoji, gaps.
+fn fleet_name_budget(width: u16, emoji: &str) -> usize {
+    (width as usize).saturating_sub(6 + cells(emoji)).max(4)
+}
+
+/// Fleet slot lines: header plus the visible window, one airy block
+/// per session — name headline, wrapped reason, breathing room.
+/// `>` marks the cursor, `*` the focused session, otherwise the tier
+/// mark; emoji ride beside the marks, never alone.
+/// Fleet slot lines from a grouped window: zoned title, attention
+/// zone with a Danger accent, then the sessions zone. `>` marks the
+/// cursor, `*` the focused session, otherwise the tier mark; emoji
+/// ride beside the marks, never alone. The cursor row takes full-row
+/// Focus reverse; idle rows sink to Muted; the active name is Brand.
+fn fleet_block_lines(info: &SidebarInfo, width: u16, items: &[FleetItem]) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    lines.push(Line::from(format!(" Fleet ({})", info.sessions.len())));
-    if info.sessions.is_empty() {
+    let total = info.sessions.len();
+    if total == 0 {
+        lines.push(Line::from(Span::styled(
+            " sessions · 0",
+            theme::style(theme::Role::Brand),
+        )));
         lines.push(Line::from("  none yet"));
         lines.push(Line::from("  Ctrl-b c creates one"));
         return lines;
     }
-    let visible = fleet_visible(rich);
-    let (start, end) = fleet_viewport(info.fleet_scroll, info.sessions.len(), visible);
-    for row in &info.sessions[start..end] {
-        let sel = if info.fleet_cursor == Some(row.id) {
-            ">"
-        } else if info.active == Some(row.id) {
-            "*"
-        } else {
-            " "
-        };
-        let name = safe_text::encode_for_display(&row.name);
-        if rich {
-            let reason = safe_text::encode_for_display(&row.reason);
-            lines.push(Line::from(format!(
-                " {}{}{} {} · {}",
-                sel,
-                row.tier.mark(),
-                row.emoji,
-                name,
-                reason
-            )));
-        } else {
-            lines.push(Line::from(format!(
-                " {}{}{} {}",
-                sel,
-                row.tier.mark(),
-                row.emoji,
-                name
-            )));
+    let shown: Vec<usize> = items
+        .iter()
+        .filter_map(|it| match it {
+            FleetItem::Block(i) => Some(*i),
+            FleetItem::AttnHeader | FleetItem::SessionsHeader => None,
+        })
+        .collect();
+    // Window position over the sorted fleet: min–max, since grouping
+    // can interleave the shown blocks out of index order.
+    let title = match (shown.iter().min(), shown.iter().max()) {
+        (Some(first), Some(last)) if shown.len() < total => {
+            format!(" Fleet ({total}) · {}–{}", first + 1, last + 1)
+        }
+        _ => format!(" Fleet ({total})"),
+    };
+    lines.push(Line::from(Span::styled(title, theme::style(theme::Role::Brand))));
+    for item in items {
+        match item {
+            FleetItem::AttnHeader => {
+                let k = items
+                    .iter()
+                    .filter(|it| matches!(it, FleetItem::Block(i) if info.sessions[*i].tier == FleetTier::Attention))
+                    .count();
+                lines.push(Line::from(Span::styled(
+                    format!(" NEEDS ATTENTION {k}"),
+                    theme::style(theme::Role::Brand),
+                )));
+            }
+            FleetItem::SessionsHeader => {
+                lines.push(Line::from(Span::styled(
+                    " SESSIONS".to_string(),
+                    theme::style(theme::Role::Brand),
+                )));
+            }
+            FleetItem::Block(i) => {
+                let row = &info.sessions[*i];
+                let cursor = info.fleet_cursor == Some(row.id);
+                let sel = if cursor {
+                    ">"
+                } else if info.active == Some(row.id) {
+                    "*"
+                } else {
+                    " "
+                };
+                let raw_name = safe_text::encode_for_display(&row.name);
+                let name = cut_cells(&raw_name, fleet_name_budget(width, row.emoji));
+                let headline = format!("{}{}{} {}", sel, row.tier.mark(), row.emoji, name);
+                if cursor {
+                    let style = theme::style(theme::Role::Focus)
+                        .add_modifier(Modifier::REVERSED);
+                    lines.push(Line::from(vec![
+                        Span::styled(format!(" {headline}"), style),
+                    ]));
+                    for wrapped in wrap_cells(
+                        &safe_text::encode_for_display(&row.reason),
+                        fleet_wrap_width(width),
+                    ) {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("  {wrapped}"), style),
+                        ]));
+                    }
+                } else {
+                    let name_style = if info.active == Some(row.id) {
+                        theme::style(theme::Role::Brand)
+                    } else if row.tier == FleetTier::Idle {
+                        theme::style(theme::Role::Muted)
+                    } else {
+                        theme::style(theme::Role::Text)
+                    };
+                    if row.tier == FleetTier::Attention {
+                        lines.push(Line::from(vec![
+                            Span::styled("┃", theme::style(theme::Role::Danger)),
+                            Span::styled(headline, name_style),
+                        ]));
+                        for wrapped in wrap_cells(
+                            &safe_text::encode_for_display(&row.reason),
+                            fleet_wrap_width(width),
+                        ) {
+                            lines.push(Line::from(vec![
+                                Span::styled("┃", theme::style(theme::Role::Danger)),
+                                Span::styled(format!(" {wrapped}"), name_style),
+                            ]));
+                        }
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::raw(" "),
+                            Span::styled(headline, name_style),
+                        ]));
+                        for wrapped in wrap_cells(
+                            &safe_text::encode_for_display(&row.reason),
+                            fleet_wrap_width(width),
+                        ) {
+                            lines.push(Line::from(vec![
+                                Span::styled(format!("  {wrapped}"), name_style),
+                            ]));
+                        }
+                    }
+                }
+                lines.push(Line::from(""));
+            }
         }
     }
     lines
 }
 
-/// Click areas for fleet rows: full-width rows over the same window the
-/// render paints, so clicks can never desync from what is on screen.
+/// Click areas for fleet blocks: name plus reason rows over the same
+/// window the render paints, so clicks can never desync from what is
+/// on screen. Gap rows stay dead.
 pub fn sidebar_session_rects(
     sidebar: Rect,
     info: &SidebarInfo,
     rich: bool,
 ) -> Vec<(crate::session::SessionId, Rect)> {
-    let visible = fleet_visible(rich);
-    let (start, end) = fleet_viewport(info.fleet_scroll, info.sessions.len(), visible);
-    info.sessions[start..end]
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let y = sidebar.y + 1 + (fleet_first_row(rich) + 1 + i) as u16;
-            let w = sidebar.width.saturating_sub(2);
-            (row.id, Rect::new(sidebar.x + 1, y, w, 1))
-        })
-        .collect()
+    let width = sidebar.width;
+    let layout = sidebar_layout(sidebar, sidebar_footer_height(info, rich));
+    let items = fleet_window_items(
+        info,
+        width,
+        fleet_items_budget(info, rich, width, layout.list.height),
+    );
+    let heights = fleet_block_heights(info, width);
+    // Title row sits after the brand, focused block, and gap row.
+    let title_idx =
+        (if rich { 3 } else { 0 }) + focused_block_lines(info, rich, width).len() + 1;
+    let mut y = layout.list.y + 1 + title_idx as u16 + 1;
+    let mut out = Vec::new();
+    for item in &items {
+        match item {
+            FleetItem::AttnHeader | FleetItem::SessionsHeader => {
+                y += 1;
+            }
+            FleetItem::Block(i) => {
+                let h = heights[*i];
+                // The click area covers name plus reason rows; the gap
+                // and headers stay dead.
+                let w = width.saturating_sub(2);
+                out.push((
+                    info.sessions[*i].id,
+                    Rect::new(sidebar.x + 1, y, w, h.saturating_sub(1).max(1)),
+                ));
+                y += h;
+            }
+        }
+    }
+    out
 }
 
 /// Compact sidebar mode-button row. Taller sidebars pin it to the bottom.
@@ -1039,67 +1338,121 @@ pub fn format_countdown(remaining: std::time::Duration) -> String {
 }
 
 /// Sidebar lines. Never blank: with no sessions it still guides. The
-/// active mode button renders highlighted.
+/// active mode button renders highlighted. Width 24 stands in for the
+/// narrowest compact sidebar.
 pub fn sidebar_lines(info: &SidebarInfo) -> Vec<Line<'static>> {
-    sidebar_lines_at(info, SETTINGS_ROW.saturating_sub(1) as usize, false).0
+    sidebar_lines_at(info, false, 24, 30).0
 }
 
-fn sidebar_lines_at(
-    info: &SidebarInfo,
-    mode_row: usize,
-    pills: bool,
-) -> (Vec<Line<'static>>, usize) {
-    let mut lines = fleet_block_lines(info, false);
-    lines.push(Line::from(""));
-    match &info.session {
-        None => {
-            lines.push(Line::from(" No session selected"));
-        }
-        Some(detail) => {
-            lines.push(Line::from(" Session"));
-            lines.push(Line::from(format!(
-                "  {}",
-                safe_text::encode_for_display(&detail.name)
-            )));
-            lines.push(Line::from(format!(
-                "  {} {}",
-                safe_text::encode_for_display(&detail.cli_tool),
-                safe_text::encode_for_display(&detail.state)
-            )));
-            lines.push(Line::from(format!(
-                "  {}",
-                safe_text::encode_for_display(&detail.cwd)
-            )));
-            if let Some(status) = detail.status.as_deref() {
-                let glyph = detail
-                    .status_kind
-                    .map(|k| format!("{} ", status_emoji(k)))
-                    .unwrap_or_default();
-                lines.push(Line::from(format!(
-                    "  {glyph}{}",
-                    safe_text::encode_for_display(status)
-                )));
-            }
-            if !detail.timers.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(" Scheduled"));
-                for timer in &detail.timers {
-                    lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
-                }
-            }
-            if info.other_timers > 0 {
-                lines.push(Line::from(format!("  ◷ +{} elsewhere", info.other_timers)));
-            }
-        }
+/// Focused-session block for the compact layout: detail first, fleet
+/// below. Shared by the render and the fleet-offset math so clicks
+/// track the paint.
+fn compact_focused_lines(info: &SidebarInfo, _width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(" Session")];
+    let Some(detail) = info.session.as_ref() else {
+        lines.push(Line::from(" No session selected"));
+        return lines;
+    };
+    lines.push(Line::from(format!(
+        "  {}",
+        safe_text::encode_for_display(&detail.name)
+    )));
+    lines.push(Line::from(format!(
+        "  {} {}",
+        safe_text::encode_for_display(&detail.cli_tool),
+        safe_text::encode_for_display(&detail.state)
+    )));
+    lines.push(Line::from(format!(
+        "  {}",
+        safe_text::encode_for_display(&detail.cwd)
+    )));
+    if let Some(status) = detail.status.as_deref() {
+        let glyph = detail
+            .status_kind
+            .map(|k| format!("{} ", status_emoji(k)))
+            .unwrap_or_default();
+        lines.push(Line::from(format!(
+            "  {glyph}{}",
+            safe_text::encode_for_display(status)
+        )));
     }
-    // Short content pads up to the familiar fixed zone; long content
-    // flows past it. The button row follows the flow (returned below)
-    // instead of doubling against a fixed overlay row.
-    while lines.len() < mode_row.saturating_sub(1) {
+    if !detail.timers.is_empty() {
         lines.push(Line::from(""));
+        lines.push(Line::from(" Scheduled"));
+        for timer in &detail.timers {
+            lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
+        }
     }
-    lines.push(Line::from(" Settings"));
-    let btn = lines.len();
+    if info.other_timers > 0 {
+        lines.push(Line::from(format!("  ◷ +{} elsewhere", info.other_timers)));
+    }
+    lines
+}
+
+/// Painted sidebar: exactly `height` rows. The list part (brand,
+/// focused block, budgeted fleet window) is clipped to the list
+/// region; the footer is always appended whole, so long content clips
+/// the list and never the controls. Render, hit-testing, and buttons
+/// share this one builder.
+pub struct SidebarPaint {
+    pub lines: Vec<Line<'static>>,
+    /// Content row of the mode-button widgets (footer-relative).
+    pub btn_row: usize,
+}
+
+pub fn sidebar_paint(
+    info: &SidebarInfo,
+    rich: bool,
+    width: u16,
+    height: u16,
+    pills: bool,
+) -> SidebarPaint {
+    let footer_h = sidebar_footer_height(info, rich) as usize;
+    let height = height as usize;
+    let list_h = height.saturating_sub(footer_h);
+    let mut list = Vec::new();
+    if rich {
+        list.push(Line::from(Span::styled(" Forge", theme::style(theme::Role::Brand))));
+        list.push(Line::from(Span::styled(
+            " Session Control Plane",
+            theme::style(theme::Role::Muted),
+        )));
+        list.push(Line::from(""));
+    }
+    list.extend(focused_block_lines(info, rich, width));
+    list.push(Line::from(""));
+    let items = fleet_window_items(
+        info,
+        width,
+        fleet_items_budget(info, rich, width, list_h as u16),
+    );
+    list.extend(fleet_block_lines(info, width, &items));
+    list.truncate(list_h);
+    while list.len() < list_h {
+        list.push(Line::from(""));
+    }
+    let btn_row = list_h + if rich { 3 } else { 1 };
+    let mut lines = list;
+    lines.extend(footer_lines(info, rich, pills));
+    SidebarPaint { lines, btn_row }
+}
+
+/// Pinned footer rows, exactly `sidebar_footer_height` long: settings,
+/// mode buttons, shortcuts, transport, badge. The button line carries
+/// the same text the overlay widgets paint, so content readers agree
+/// with the buffer.
+fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if rich {
+        lines.push(Line::from(Span::styled(
+            " Global Settings",
+            theme::style(theme::Role::Brand),
+        )));
+        lines.push(Line::from(" Autopilot"));
+        lines.push(Line::from(""));
+    } else {
+        lines.push(Line::from(" Settings"));
+    }
     let (off_style, yolo_style) = if info.mode == "yolo" {
         (Style::default(), Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED))
     } else {
@@ -1142,92 +1495,120 @@ fn sidebar_lines_at(
             Span::styled("[Yolo]", yolo_style),
         ])
     });
-    lines.push(Line::from(""));
-    lines.push(Line::from(format!(" Pending: {}", info.pending)));
-    lines.push(telegram_line(info.telegram));
-    if let Some(badge) = telegram_badge_line(&info.telegram_badge) {
-        lines.push(badge);
-    }
-    (lines, btn)
-}
-
-/// Compact mode-button hit areas, following the content-built button
-/// row: status and timers push it down, and the render blanks and
-/// paints that same row. One builder serves both sides, so clicks
-/// never desync from what is on screen.
-pub fn compact_mode_buttons(sidebar: Rect, info: &SidebarInfo, pills: bool) -> ModeButtons {
-    let min_row = mode_button_areas(sidebar, pills)
-        .off
-        .y
-        .saturating_sub(sidebar.y + 1) as usize;
-    let (_, btn) = sidebar_lines_at(info, min_row, pills);
-    mode_button_areas_at(sidebar, pills, sidebar.y.saturating_add(1).saturating_add(btn as u16))
-}
-
-fn rich_sidebar_lines(info: &SidebarInfo, mode_row: usize, width: u16) -> Vec<Line<'static>> {
-    // Text keeps one indent cell off the border; rules share the
-    // narrower measure so the right edge stays aligned.
-    let mut lines = vec![
-        Line::from(Span::styled(" Forge", theme::style(theme::Role::Brand))),
-        Line::from(Span::styled(" Session Control Plane", theme::style(theme::Role::Muted))),
-        Line::from(""),
-    ];
-    lines.extend(fleet_block_lines(info, true));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(" Session", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))));
-    match &info.session {
-        Some(detail) => {
-            lines.push(Line::from(Span::styled(
-                format!(" {}", safe_text::encode_for_display(&detail.name)), theme::style(theme::Role::Focus))));
-            lines.push(Line::from(format!(" {}", safe_text::encode_for_display(&detail.cli_tool))));
-            lines.push(Line::from(format!(" {}", safe_text::encode_for_display(&detail.cwd))));
-            if let Some(status) = detail.status.as_deref() {
-                let glyph = detail
-                    .status_kind
-                    .map(|k| format!("{} ", status_emoji(k)))
-                    .unwrap_or_default();
-                lines.push(Line::from(format!(
-                    " {glyph}{}",
-                    safe_text::encode_for_display(status)
-                )));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::raw(" Status  "),
-                Span::styled(format!("● {}", safe_text::encode_for_display(&detail.state)),
-                    theme::style(theme::Role::Running)),
-            ]));
-            lines.push(Line::from(format!(" Pending hooks: {}", info.pending)));
-            lines.push(Line::from(""));
-            if !detail.timers.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    " Scheduled",
-                    theme::style(theme::Role::Text).add_modifier(Modifier::BOLD),
-                )));
-                for timer in &detail.timers {
-                    lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
-                }
-            }
-            if info.other_timers > 0 {
-                lines.push(Line::from(format!("  ◷ +{} elsewhere", info.other_timers)));
-            }
-            lines.push(rule_line(width));
-        }
-        None => {
-            lines.push(Line::from(" No session selected"));
+    if rich {
+        lines.push(Line::from(Span::styled(
+            " Ctrl-b shortcuts",
+            theme::style(theme::Role::KeyHint),
+        )));
+    } else {
+        lines.push(Line::from(""));
+        // Zero pending hides: the footer only spends a row when there
+        // is something to show.
+        if info.pending > 0 {
+            lines.push(Line::from(format!(" Pending: {}", info.pending)));
         }
     }
-    while lines.len() < mode_row.saturating_sub(2) { lines.push(Line::from("")); }
-    lines.push(Line::from(Span::styled(" Global Settings", theme::style(theme::Role::Brand))));
-    lines.push(Line::from(" Autopilot"));
-    lines.push(Line::from("")); // button widgets own this row
-    lines.push(Line::from(Span::styled(" Ctrl-b shortcuts", theme::style(theme::Role::KeyHint))));
     lines.push(telegram_line(info.telegram));
     if let Some(badge) = telegram_badge_line(&info.telegram_badge) {
         lines.push(badge);
     }
     lines
+}
+
+fn sidebar_lines_at(
+    info: &SidebarInfo,
+    pills: bool,
+    width: u16,
+    height: u16,
+) -> (Vec<Line<'static>>, usize) {
+    let paint = sidebar_paint(info, false, width, height, pills);
+    (paint.lines, paint.btn_row)
+}
+
+/// Mode-button hit areas on the pinned footer row: the paint puts the
+/// buttons at the same footer-relative row, so clicks never desync
+/// from what is on screen no matter how long the list above gets.
+pub fn footer_mode_buttons(
+    sidebar: Rect,
+    info: &SidebarInfo,
+    rich: bool,
+    pills: bool,
+) -> ModeButtons {
+    let layout = sidebar_layout(sidebar, sidebar_footer_height(info, rich));
+    // Content row i paints at screen y+1+i (border consumes the first
+    // row), so the footer-relative button row shifts one down.
+    mode_button_areas_at(
+        sidebar,
+        pills,
+        layout.footer.y + 1 + if rich { 3 } else { 1 },
+    )
+}
+
+/// Focused-session block for the rich layout, shared by the render
+/// and the fleet-offset math so clicks track the paint.
+fn rich_focused_lines(info: &SidebarInfo, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(" Session", theme::style(theme::Role::Text).add_modifier(Modifier::BOLD))),
+    ];
+    let Some(detail) = info.session.as_ref() else {
+        lines.push(Line::from(" No session selected"));
+        return lines;
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" {}", safe_text::encode_for_display(&detail.name)), theme::style(theme::Role::Focus))));
+    lines.push(Line::from(format!(" {}", safe_text::encode_for_display(&detail.cli_tool))));
+    lines.push(Line::from(format!(" {}", safe_text::encode_for_display(&detail.cwd))));
+    if let Some(status) = detail.status.as_deref() {
+        let glyph = detail
+            .status_kind
+            .map(|k| format!("{} ", status_emoji(k)))
+            .unwrap_or_default();
+        lines.push(Line::from(format!(
+            " {glyph}{}",
+            safe_text::encode_for_display(status)
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw(" Status  "),
+        Span::styled(format!("● {}", safe_text::encode_for_display(&detail.state)),
+            theme::style(theme::Role::Running)),
+    ]));
+    if info.pending > 0 {
+        lines.push(Line::from(format!(" Pending hooks: {}", info.pending)));
+    }
+    lines.push(Line::from(""));
+    if !detail.timers.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Scheduled",
+            theme::style(theme::Role::Text).add_modifier(Modifier::BOLD),
+        )));
+        for timer in &detail.timers {
+            lines.push(Line::from(format!("  ◷ in {}", timer.remaining)));
+        }
+    }
+    if info.other_timers > 0 {
+        lines.push(Line::from(format!("  ◷ +{} elsewhere", info.other_timers)));
+    }
+    lines.push(rule_line(width));
+    lines
+}
+
+/// Focused block dispatcher for the fleet offset: same branch the
+/// render takes, so the header index always matches the paint.
+fn focused_block_lines(info: &SidebarInfo, rich: bool, width: u16) -> Vec<Line<'static>> {
+    if rich {
+        rich_focused_lines(info, width)
+    } else {
+        compact_focused_lines(info, width)
+    }
+}
+
+fn rich_sidebar_lines(info: &SidebarInfo, width: u16, height: u16) -> Vec<Line<'static>> {
+    // Text keeps one indent cell off the border; rules share the
+    // narrower measure so the right edge stays aligned.
+    sidebar_paint(info, true, width, height, false).lines
 }
 
 /// Telegram transport row: state plus the settings key. Appended after
@@ -1278,13 +1659,8 @@ pub(crate) fn timer_cancel_rects(
         return Vec::new();
     }
     // Row math only needs the y, which pills never move.
-    let mode_areas = mode_button_areas(sidebar, false);
-    let mode_row = mode_areas.off.y.saturating_sub(sidebar.y + 1) as usize;
-    let lines = if sidebar.width >= 40 && sidebar.height >= 30 {
-        rich_sidebar_lines(info, mode_row, sidebar.width)
-    } else {
-        sidebar_lines_at(info, mode_row, false).0
-    };
+    let rich = sidebar_is_rich(sidebar);
+    let lines = sidebar_paint(info, rich, sidebar.width, sidebar.height, false).lines;
     let mut header = None;
     for (idx, line) in lines.iter().enumerate() {
         // Headers carry one indent cell now; the timer-row lookahead
@@ -1306,7 +1682,7 @@ pub(crate) fn timer_cancel_rects(
     // "[Cancel]" is 8 cells, the pill 10. Rich sidebars right-align it
     // to the divider edge (4 shy of the rect); compact ones have no
     // rules, so the button hugs the border instead.
-    let edge = if sidebar.width >= 40 && sidebar.height >= 30 {
+    let edge = if sidebar_is_rich(sidebar) {
         sidebar.right().saturating_sub(3)
     } else {
         sidebar.right().saturating_sub(1)
@@ -1575,7 +1951,7 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
     if chrome.grid {
         render_grid(frame, area, panes, chrome);
     } else {
-        render_focused(frame, &areas, panes);
+        render_focused(frame, &areas, panes, chrome.detail.as_ref());
         if areas.topbar.height > 0 {
             render_topbar(frame, areas.topbar, &chrome.topbar.tabs, chrome.pills);
         }
@@ -1584,8 +1960,15 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
     render_session_bar(frame, &areas, chrome);
 }
 
-/// Focused-session view: one framed pane plus sidebar.
-fn render_focused(frame: &mut Frame, areas: &ChromeAreas, panes: &[PaneView]) {
+/// Focused-session view: one framed pane plus sidebar. The border
+/// title carries the context line — name, live state, sticky status —
+/// mirroring the fleet block's reason without spending a pane row.
+fn render_focused(
+    frame: &mut Frame,
+    areas: &ChromeAreas,
+    panes: &[PaneView],
+    detail: Option<&SessionDetail>,
+) {
     let focused = panes.iter().find(|p| p.focused).or(panes.first());
     match focused {
         Some(view) => {
@@ -1594,7 +1977,25 @@ fn render_focused(frame: &mut Frame, areas: &ChromeAreas, panes: &[PaneView]) {
             } else {
                 theme::status_glyph_exited()
             };
-            let title = format!("{} {} ", glyph, safe_text::encode_for_display(&view.title));
+            let title = match detail {
+                Some(d) => {
+                    let mut t = format!(
+                        "{} {} · {}",
+                        glyph,
+                        safe_text::encode_for_display(&d.name),
+                        safe_text::encode_for_display(&d.state)
+                    );
+                    if let Some(status) = d.status.as_deref() {
+                        t.push_str(&format!(
+                            " · {}",
+                            safe_text::encode_for_display(status)
+                        ));
+                    }
+                    t.push(' ');
+                    t
+                }
+                None => format!("{} {} ", glyph, safe_text::encode_for_display(&view.title)),
+            };
             let block = Block::default()
                 .borders(Borders::ALL)
                     .border_type(crate::theme::border_type())
@@ -1639,25 +2040,20 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
             telegram: chrome.telegram,
             telegram_badge: chrome.telegram_badge.clone(),
         };
-        let rich =
-            areas.sidebar.width >= 40 && areas.sidebar.height >= 30;
-        let mode_areas = mode_button_areas(areas.sidebar, chrome.pills);
-        let mode_row = mode_areas.off.y.saturating_sub(areas.sidebar.y + 1) as usize;
-        let mut lines;
-        // Compact buttons follow the content-built row (same builder
-        // the mouse path uses); rich ones stay pinned near the bottom.
-        let btn_areas = if rich {
-            lines = rich_sidebar_lines(&info, mode_row, areas.sidebar.width);
-            mode_areas
-        } else {
-            let (content, btn) = sidebar_lines_at(&info, mode_row, chrome.pills);
-            lines = content;
-            mode_button_areas_at(
-                areas.sidebar,
-                chrome.pills,
-                areas.sidebar.y.saturating_add(1).saturating_add(btn as u16),
-            )
-        };
+        let rich = sidebar_is_rich(areas.sidebar);
+        // One shared paint: list clipped above, footer pinned below,
+        // buttons overlaid on the footer row. The mouse path rebuilds
+        // the same paint, so controls track it exactly.
+        let paint = sidebar_paint(
+            &info,
+            rich,
+            areas.sidebar.width,
+            areas.sidebar.height,
+            chrome.pills,
+        );
+        let mut lines = paint.lines;
+        let btn_areas =
+            footer_mode_buttons(areas.sidebar, &info, rich, chrome.pills);
         let btn_row = btn_areas.off.y.saturating_sub(areas.sidebar.y + 1) as usize;
         if let Some(line) = lines.get_mut(btn_row) {
             *line = Line::from(""); // the controls below own this row
@@ -2001,17 +2397,16 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &c)).unwrap();
         let rows = buffer_rows(&terminal);
-        // Fleet slot plus timed content pushes the button row down to
-        // 14; pills still replace the brackets there, and the fixed
-        // row stays blank.
+        // The pinned footer puts the button row at 20; pills still
+        // replace the brackets there, and the fixed row stays blank.
         assert!(!rows[11].contains("Off"), "no ghost row: {:?}", rows[11]);
-        assert!(rows[14].contains("Off"), "off pill: {:?}", rows[14]);
-        assert!(!rows[14].contains("[Off]"), "no legacy brackets");
+        assert!(rows[21].contains("Off"), "off pill: {:?}", rows[21]);
+        assert!(!rows[21].contains("[Off]"), "no legacy brackets");
         let cancel_y = rows.iter().position(|r| r.contains("Cancel")).expect("cancel pill");
         assert!(rows[cancel_y].contains("\u{e0b6}"));
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(66, 14)].fg, Color::Yellow, "active off cap");
-        assert_eq!(buf[(67, 14)].bg, Color::Yellow, "active off fill");
+        assert_eq!(buf[(66, 21)].fg, Color::Yellow, "active off cap");
+        assert_eq!(buf[(67, 21)].bg, Color::Yellow, "active off fill");
         let cap_byte = rows[cancel_y].find("\u{e0b6}").expect("left cap");
         let cap_x = rows[cancel_y][..cap_byte].chars().count() as u16;
         assert_eq!(buf[(cap_x, cancel_y as u16)].fg, Color::Red, "destructive caps");
@@ -2064,13 +2459,13 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &chrome())).unwrap();
         let rows = buffer_rows(&terminal);
-        assert_eq!(rows[11].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
+        assert_eq!(rows[21].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
         assert!(!rows[12].contains("[Off]"));
 
         let mut tall = Terminal::new(TestBackend::new(120, 40)).unwrap();
         tall.draw(|f| render(f, Rect::new(0, 0, 120, 40), &[], &chrome())).unwrap();
         let tall_rows = buffer_rows(&tall);
-        assert!(tall_rows[35].contains("[Off] [Yolo]"));
+        assert!(tall_rows[37].contains("[Off] [Yolo]"));
         assert!(!tall_rows[11].contains("[Off]"));
     }
 
@@ -2087,7 +2482,8 @@ mod tests {
     #[test]
     fn wide_sidebar_matches_control_plane_sections() {
         let areas = chrome_areas(Rect::new(0, 0, 180, 40));
-        assert_eq!(areas.sidebar.width, 45);
+        assert_eq!(areas.sidebar.width, 36);
+        assert_eq!(areas.main.width, 144, "main keeps the clamped remainder");
         let mut c = chrome();
         c.detail = Some(SessionDetail {
             name: "jarvis_senior".into(), cli_tool: "Codex".into(),
@@ -2427,18 +2823,17 @@ mod tests {
                 .map(|x| buf[(x, y)].symbol().to_string())
                 .collect::<String>()
         };
-        // The old fixed overlay row stays blank content; the buttons
-        // follow the flow instead of doubling. The fleet slot sits
-        // four rows above the focused detail.
+        // The pinned footer owns the buttons now: Settings heads it
+        // at row 25 whatever the list above holds.
         assert!(!row_text(11).contains(PILL_LEFT), "no ghost row: {:?}", row_text(11));
-        assert!(row_text(13).contains("Settings"), "header visible: {:?}", row_text(13));
+        assert!(row_text(25).contains("Settings"), "header visible: {:?}", row_text(25));
         let pill_rows: Vec<u16> = (0..30)
             .filter(|y| row_text(*y).contains(PILL_LEFT))
             .collect();
         // Mode pills plus the timer Cancel: exactly two pill rows.
         assert_eq!(pill_rows.len(), 2, "one button row, one cancel: {pill_rows:?}");
         assert!(mode_at(
-            &compact_mode_buttons(areas.sidebar, &sidebar_chrome_info(), true),
+            &footer_mode_buttons(areas.sidebar, &sidebar_chrome_info(), false, true),
             areas.sidebar.x + 3,
             pill_rows[1],
         ).is_some(), "mouse follows the visible buttons");
@@ -2453,19 +2848,19 @@ mod tests {
     #[test]
     fn sidebar_content_keeps_border_padding() {
         use ratatui::{backend::TestBackend, Terminal};
-        // Compact headers sit one cell inside the border: the fleet
-        // owns the first content row now, ahead of the focused detail.
+        // Compact headers sit one cell inside the border: the focused
+        // session owns the first content row, the fleet follows it.
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| render(f, f.area(), &[], &sidebar_chrome())).unwrap();
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(97, 1)].symbol(), " ", "border gap");
-        assert_eq!(buf[(98, 1)].symbol(), "F", "Fleet header");
-        // ...and so do rich ones.
+        assert_eq!(buf[(98, 1)].symbol(), "S", "Session header");
+        // ...and so do rich ones (sidebar now opens at x=144).
         let mut wide = Terminal::new(TestBackend::new(180, 40)).unwrap();
         wide.draw(|f| render(f, f.area(), &[], &sidebar_chrome())).unwrap();
         let buf = wide.backend().buffer();
-        assert_eq!(buf[(136, 1)].symbol(), " ");
-        assert_eq!(buf[(137, 1)].symbol(), "F", "Forge header");
+        assert_eq!(buf[(145, 1)].symbol(), " ");
+        assert_eq!(buf[(146, 1)].symbol(), "F", "Forge header");
     }
 
     #[test]
@@ -2575,7 +2970,13 @@ mod tests {
         assert!(!text.contains("\u{202E}"), "bidi exposed, never raw: {text:?}");
         assert!(text.contains("agent"), "session named: {text:?}");
         let bare = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
-        assert_eq!(sidebar_lines(&bare).len(), sidebar_lines(&info).len() - 1, "badge adds exactly one row");
+        // The paint always fills the panel; the badge grows the pinned
+        // footer by exactly one row instead.
+        assert_eq!(
+            sidebar_footer_height(&bare, false) + 1,
+            sidebar_footer_height(&info, false),
+            "badge grows the footer"
+        );
     }
 
     #[test]
@@ -2588,13 +2989,107 @@ mod tests {
     }
 
     #[test]
-    fn fleet_viewport_clamps_to_content() {
-        // (start, end) over len with a visible cap; scroll saturates.
-        assert_eq!(fleet_viewport(0, 3, 8), (0, 3));
-        assert_eq!(fleet_viewport(0, 20, 8), (0, 8));
-        assert_eq!(fleet_viewport(5, 20, 8), (5, 13));
-        assert_eq!(fleet_viewport(999, 20, 8), (12, 20));
-        assert_eq!(fleet_viewport(0, 0, 8), (0, 0));
+    fn sidebar_width_clamps_around_thirty_six() {
+        // Wide terminals stop donating a full percentage to the panel:
+        // 159→160 must not steal seven columns from the main pane.
+        for (cols, want) in [
+            (80u16, 16u16),
+            (120, 24),
+            (159, 32),
+            (160, 36),
+            (180, 36),
+        ] {
+            let areas = chrome_areas(Rect::new(0, 0, cols, 40));
+            assert_eq!(areas.sidebar.width, want, "cols {cols}");
+            assert_eq!(
+                areas.main.width + areas.sidebar.width,
+                cols,
+                "no gap: cols {cols}"
+            );
+        }
+    }
+
+    /// Six fleet rows with staggered reasons for overflow pressure.
+    fn for_h_fleet(info: &mut SidebarInfo) {
+        for (i, reason) in [
+            "need the production API key from the vault",
+            "running",
+            "review the migration plan before Friday deploy",
+            "running",
+            "which region should the new bucket live in",
+            "running",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = crate::session::SessionId::fresh();
+            info.sessions.push(FleetRow {
+                id,
+                name: format!("agent-{i}"),
+                tier: if i == 0 {
+                    FleetTier::Attention
+                } else {
+                    FleetTier::Idle
+                },
+                state: "running".to_string(),
+                reason: reason.to_string(),
+                emoji: if i == 0 { "🔔" } else { "" },
+            });
+        }
+    }
+
+    #[test]
+    fn sidebar_layout_pins_a_footer() {
+        let bar = Rect::new(144, 0, 36, 39);
+        let layout = sidebar_layout(bar, 7);
+        assert_eq!(layout.footer.height, 7);
+        assert_eq!(layout.footer.y + layout.footer.height, bar.y + bar.height);
+        assert_eq!(layout.list.y, bar.y);
+        assert_eq!(
+            layout.list.height + layout.footer.height,
+            bar.height,
+            "list plus footer fill the panel"
+        );
+    }
+
+    #[test]
+    fn fleet_cell_window_budgets_variable_blocks() {
+        // Whole blocks that fit the cell budget; the first always shows.
+        assert_eq!(fleet_cell_window(0, &[3, 3, 5, 3], 6), (0, 2));
+        assert_eq!(fleet_cell_window(2, &[3, 3, 5, 3], 6), (2, 3));
+        assert_eq!(fleet_cell_window(999, &[3, 3], 100), (1, 2));
+        assert_eq!(fleet_cell_window(0, &[], 10), (0, 0));
+        assert_eq!(fleet_cell_window(0, &[9], 2), (0, 1));
+    }
+
+    #[test]
+    fn sidebar_content_pins_footer_to_the_bottom() {
+        // Tall content must clip the list, never the footer: the last
+        // footer rows stay visible at any height.
+        let mut info = SidebarInfo {
+            session: None,
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "on",
+            telegram_badge: Some(("agent".to_string(), "hi".to_string())),
+        };
+        for_h_fleet(&mut info);
+        let lines = rich_sidebar_lines(&info, 45, 20);
+        assert_eq!(lines.len(), 20, "content fills exactly");
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(
+            text[19].contains("agent: hi"),
+            "badge pinned last: {text:?}"
+        );
+        assert!(text[18].contains("Telegram on"), "footer intact: {text:?}");
     }
 
     #[test]
@@ -2665,6 +3160,339 @@ mod tests {
         let rich = rich_sidebar_lines(&info, 30, 45);
         assert!(has(&rich, "*"), "active mark: {rich:?}");
         assert!(has(&rich, "need the API key"), "reason: {rich:?}");
+    }
+
+    #[test]
+    fn wrap_cells_splits_on_words_and_cells() {
+        assert_eq!(wrap_cells("aaa bbb ccc", 5), vec!["aaa", "bbb", "ccc"]);
+        assert_eq!(wrap_cells("abcdef", 4), vec!["abcd", "ef"]);
+        assert_eq!(wrap_cells("🛑🛑 x", 4), vec!["🛑🛑", "x"]);
+        assert_eq!(wrap_cells("", 4), Vec::<String>::new());
+    }
+
+    #[test]
+    fn session_block_precedes_fleet() {
+        let id = crate::session::SessionId::fresh();
+        let other = crate::session::SessionId::fresh();
+        let info = SidebarInfo {
+            session: Some(SessionDetail {
+                name: "muse".to_string(),
+                cli_tool: "muse".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                state: "running".to_string(),
+                status: None,
+                status_kind: None,
+                timers: Vec::new(),
+            }),
+            sessions: vec![
+                FleetRow { id, name: "muse".to_string(), tier: FleetTier::Idle, state: "running".to_string(), reason: "running".to_string(), emoji: "" },
+                FleetRow { id: other, name: "codex".to_string(), tier: FleetTier::Idle, state: "running".to_string(), reason: "running".to_string(), emoji: "" },
+            ],
+            active: Some(id),
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        let text_of = |l: &Line| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let compact = sidebar_lines(&info);
+        let session_at = compact.iter().position(|l| text_of(l).trim() == "Session").expect("session header");
+        let fleet_at = compact.iter().position(|l| text_of(l).starts_with(" Fleet (")).expect("fleet header");
+        assert!(session_at < fleet_at, "session above fleet");
+        let rich = rich_sidebar_lines(&info, 30, 45);
+        let session_at = rich.iter().position(|l| text_of(l).trim() == "Session").expect("session header");
+        let fleet_at = rich.iter().position(|l| text_of(l).starts_with(" Fleet (")).expect("fleet header");
+        assert!(session_at < fleet_at, "session above fleet");
+    }
+
+    #[test]
+    fn fleet_blocks_breathe_with_gaps_and_wrapped_reasons() {
+        let id = crate::session::SessionId::fresh();
+        let other = crate::session::SessionId::fresh();
+        let long = "need the production API key from the vault under the stairs";
+        let info = SidebarInfo {
+            session: None,
+            sessions: vec![
+                FleetRow { id, name: "muse".to_string(), tier: FleetTier::Attention, state: "running · Waiting".to_string(), reason: long.to_string(), emoji: "🔔" },
+                FleetRow { id: other, name: "codex".to_string(), tier: FleetTier::Idle, state: "running".to_string(), reason: "running".to_string(), emoji: "" },
+            ],
+            active: Some(id),
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        // Width 24: the long reason must wrap, never clip mid-word off-panel.
+        let lines = sidebar_lines_at(&info, false, 24, 60).0;
+        let text: Vec<String> = lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect();
+        let name_at = text.iter().position(|l| l.contains("muse")).expect("name line");
+        assert!(text[name_at].contains("!"), "tier mark on the name line");
+        // Reason lines run until the gap; the whole reason survives.
+        let mut end = name_at + 1;
+        assert!(text[end].contains("need the production"), "reason starts its own line");
+        while !text[end].trim().is_empty() {
+            end += 1;
+        }
+        let joined = text[name_at + 1..end].join(" ");
+        assert!(joined.contains("API key"), "reason wraps instead of clipping: {joined:?}");
+        assert!(joined.contains("stairs"), "nothing lost: {joined:?}");
+        // Zoned fleet: the gap yields to the sessions zone header, and
+        // the next block follows inside its zone.
+        assert!(text[end + 1].contains("SESSIONS"), "zone follows the gap");
+        assert!(text[end + 2].contains("codex"), "next block inside its zone");
+        for (i, l) in lines.iter().enumerate() {
+            assert!(l.width() <= 24, "line {i} fits: {:?}", text[i]);
+        }
+    }
+
+    #[test]
+    fn pending_zero_hides_its_row() {
+        let mut info = SidebarInfo {
+            session: None,
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        for line in sidebar_lines(&info) {
+            assert!(!text_of(&line).contains("Pending"), "zero hides: {line:?}");
+        }
+        for line in rich_sidebar_lines(&info, 45, 30) {
+            assert!(!text_of(&line).contains("Pending"), "zero hides: {line:?}");
+        }
+        info.pending = 2;
+        assert!(has(&sidebar_lines(&info), "Pending: 2"));
+        info.session = Some(timed_detail());
+        assert!(has(&rich_sidebar_lines(&info, 45, 30), "Pending hooks: 2"));
+    }
+
+    #[test]
+    fn fleet_header_shows_window_position() {
+        let mut info = SidebarInfo {
+            session: None,
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        for_h_fleet(&mut info);
+        let clipped = sidebar_paint(&info, false, 24, 20, false).lines;
+        let header = clipped
+            .iter()
+            .map(text_of)
+            .find(|l| l.starts_with(" Fleet ("))
+            .expect("fleet header");
+        assert!(header.contains("· 1–2"), "partial window shows position: {header:?}");
+        let full = sidebar_paint(&info, false, 24, 60, false).lines;
+        let header = full
+            .iter()
+            .map(text_of)
+            .find(|l| l.starts_with(" Fleet ("))
+            .expect("fleet header");
+        assert_eq!(header, " Fleet (6)", "full window stays clean: {header:?}");
+    }
+
+    #[test]
+    fn fleet_window_items_group_attention_first() {
+        let a = crate::session::SessionId::fresh();
+        let b = crate::session::SessionId::fresh();
+        let c = crate::session::SessionId::fresh();
+        let info = SidebarInfo {
+            session: None,
+            sessions: vec![
+                FleetRow { id: a, name: "aaa".into(), tier: FleetTier::Idle, state: "running".into(), reason: "running".into(), emoji: "" },
+                FleetRow { id: b, name: "bbb".into(), tier: FleetTier::Attention, state: "running · Waiting".into(), reason: "need a key".into(), emoji: "🔔" },
+                FleetRow { id: c, name: "ccc".into(), tier: FleetTier::Idle, state: "running".into(), reason: "running".into(), emoji: "" },
+            ],
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        // Room for everything: attention group leads, spawn order inside.
+        let full = fleet_window_items(&info, 24, 100);
+        assert_eq!(
+            full,
+            vec![
+                FleetItem::AttnHeader,
+                FleetItem::Block(1),
+                FleetItem::SessionsHeader,
+                FleetItem::Block(0),
+                FleetItem::Block(2),
+            ],
+            "grouped: {full:?}"
+        );
+        // Tight budget: the sessions group drops whole, never stranded.
+        let tight = fleet_window_items(&info, 24, 5);
+        assert_eq!(
+            tight,
+            vec![FleetItem::AttnHeader, FleetItem::Block(1)],
+            "budgeted: {tight:?}"
+        );
+        // Starved budget strands no lonely header.
+        let starved = fleet_window_items(&info, 24, 1);
+        assert!(starved.is_empty(), "nothing rather than a stray header: {starved:?}");
+    }
+
+    #[test]
+    fn attention_zone_carries_danger_accent() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let id = crate::session::SessionId::fresh();
+        let info = SidebarInfo {
+            session: None,
+            sessions: vec![
+                FleetRow { id, name: "muse".into(), tier: FleetTier::Attention, state: "running · Waiting".into(), reason: "need a key".into(), emoji: "🔔" },
+            ],
+            active: Some(id),
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        let lines = sidebar_paint(&info, false, 24, 30, false).lines;
+        let text: Vec<String> = lines.iter().map(text_of).collect();
+        assert!(text.iter().any(|l| l.contains("┃")), "accent paints: {text:?}");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| {
+                let paint = sidebar_paint(&info, false, 16, 23, false);
+                let side = Paragraph::new(Text::from(paint.lines)).block(
+                    Block::default().borders(Borders::ALL),
+                );
+                f.render_widget(side, f.area());
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let accent = buf
+            .content
+            .iter()
+            .find(|c| c.symbol() == "┃")
+            .expect("accent cell paints");
+        assert_eq!(accent.fg, Color::Red, "danger accent");
+    }
+
+    #[test]
+    fn cursor_row_takes_focus_reverse() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let id = crate::session::SessionId::fresh();
+        let other = crate::session::SessionId::fresh();
+        let info = SidebarInfo {
+            session: None,
+            sessions: vec![
+                FleetRow { id, name: "muse".into(), tier: FleetTier::Idle, state: "running".into(), reason: "running".into(), emoji: "" },
+                FleetRow { id: other, name: "codex".into(), tier: FleetTier::Idle, state: "running".into(), reason: "running".into(), emoji: "" },
+            ],
+            active: None,
+            fleet_cursor: Some(other),
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| {
+                let paint = sidebar_paint(&info, false, 16, 23, false);
+                let side = Paragraph::new(Text::from(paint.lines)).block(
+                    Block::default().borders(Borders::ALL),
+                );
+                f.render_widget(side, f.area());
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        // Drive off the real paint: scan for the block name rows,
+        // never hand-computed geometry.
+        let row_text = |y: u16| {
+            (0..80)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let mut cursor_y = None;
+        let mut idle_y = None;
+        for y in 0..24 {
+            let row = row_text(y);
+            if row.contains("codex") {
+                cursor_y = Some(y);
+            }
+            if row.contains("muse") {
+                idle_y = Some(y);
+            }
+        }
+        let cy = cursor_y.expect("cursor block paints");
+        let iy = idle_y.expect("idle block paints");
+        assert!(
+            buf[(2, cy)].modifier.contains(Modifier::REVERSED),
+            "cursor reverses"
+        );
+        assert!(
+            !buf[(2, iy)].modifier.contains(Modifier::REVERSED),
+            "neighbors stay flat"
+        );
+    }
+
+    #[test]
+    fn main_pane_title_carries_session_context() {
+        use ratatui::{backend::TestBackend, Terminal};
+        // The focused PTY border names the session plus its live state
+        // and sticky status; without detail it stays the legacy title.
+        let title_of = |chrome: &Chrome| -> String {
+            let view = PaneView {
+                title: "shell-1".to_string(),
+                lines: Vec::new(),
+                live: true,
+                focused: true,
+                cursor: None,
+            };
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|f| render(f, f.area(), &[view], chrome))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let areas = chrome_areas(Rect::new(0, 0, 80, 24));
+            (areas.main.x..areas.main.right())
+                .map(|x| buf[(x, areas.main.y)].symbol().to_string())
+                .collect()
+        };
+        let with_detail = title_of(&sidebar_chrome());
+        assert!(with_detail.contains("shell-1"), "name: {with_detail:?}");
+        assert!(with_detail.contains("running"), "state: {with_detail:?}");
+        assert!(
+            with_detail.contains("waiting on review"),
+            "status: {with_detail:?}"
+        );
+        let mut bare = sidebar_chrome();
+        bare.detail = None;
+        let legacy = title_of(&bare);
+        assert!(legacy.contains("shell-1"), "legacy name: {legacy:?}");
+        assert!(
+            !legacy.contains("waiting on review"),
+            "no status without detail: {legacy:?}"
+        );
     }
 
     #[test]

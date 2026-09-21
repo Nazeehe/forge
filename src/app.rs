@@ -2890,6 +2890,15 @@ impl AppState {
             let run = crate::ids::RunId::generate();
             match self.manager.spawn_agent(&saved.name, &cwd, &cmd, run, &saved.cli_tool) {
                 Ok(id) => {
+                    // The save file knows the resume ID the argv above
+                    // just reused: stamp it onto the fresh record. A
+                    // resumed muse session fires no SessionStart, so
+                    // without this it would re-save as null forever.
+                    if let Some(harness) =
+                        saved.harness_session_id.as_deref().filter(|s| !s.is_empty())
+                    {
+                        self.manager.set_harness_session(id, harness.to_string());
+                    }
                     for group in &saved.groups {
                         let _ = self.broker.join(&self.manager, id, group);
                         let clustered = self.broker.group_members(group);
@@ -3123,36 +3132,23 @@ impl AppState {
         true
     }
 
-    /// Fleet rows in router order: attention first, ties by hook
-    /// recency (unstamped sessions last), then spawn order. Shared by
-    /// the sidebar, cursor movement, and activation so all three agree.
+    /// Fleet rows in router order: attention first, then spawn order
+    /// within each tier. Hook activity never reshuffles peers — marks
+    /// update in place so spatial memory survives busy sessions.
+    /// Shared by the sidebar, cursor movement, and activation so all
+    /// three agree.
     fn sorted_fleet_ids(&self) -> Vec<crate::session::SessionId> {
         let active = self.manager.active();
-        let mut rows: Vec<(u8, Option<std::time::Instant>, usize, crate::session::SessionId)> =
-            Vec::new();
+        let mut rows: Vec<(u8, usize, crate::session::SessionId)> = Vec::new();
         for (idx, id) in self.manager.order().to_vec().iter().enumerate() {
             let Some(rec) = self.manager.get(*id) else {
                 continue;
             };
             let tier = self.fleet_tier(*id, rec, active);
-            rows.push((
-                tier,
-                self.last_hook_activity.get(id).copied(),
-                idx,
-                *id,
-            ));
+            rows.push((tier, idx, *id));
         }
-        rows.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| match (a.1, b.1) {
-                    (Some(x), Some(y)) => y.cmp(&x),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                })
-                .then_with(|| a.2.cmp(&b.2))
-        });
-        rows.into_iter().map(|(_, _, _, id)| id).collect()
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        rows.into_iter().map(|(_, _, id)| id).collect()
     }
 
     /// Attention tier for one session: explicit pings and waiting beat
@@ -3208,17 +3204,43 @@ impl AppState {
             }
         };
         self.fleet_cursor = Some(ids[next]);
+        // Pull the scroll offset until the cursor sits inside the live
+        // grouped window, sharing the paint's exact math.
         let (rows, cols) = self.term_size;
-        let sidebar = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows)).sidebar;
-        let rich = sidebar.width >= 40 && sidebar.height >= 30;
-        let visible = crate::ui::fleet_visible(rich);
-        let max_start = ids.len().saturating_sub(visible);
-        if next < self.fleet_scroll {
-            self.fleet_scroll = next;
-        } else if next >= self.fleet_scroll + visible {
-            self.fleet_scroll = (next + 1).saturating_sub(visible).min(max_start);
+        let sidebar =
+            crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows)).sidebar;
+        let rich = crate::ui::sidebar_is_rich(sidebar);
+        for _ in 0..=ids.len() {
+            let info = self.sidebar_info();
+            let layout = crate::ui::sidebar_layout(
+                sidebar,
+                crate::ui::sidebar_footer_height(&info, rich),
+            );
+            let budget = crate::ui::fleet_items_budget(
+                &info,
+                rich,
+                sidebar.width,
+                layout.list.height,
+            );
+            let window = crate::ui::fleet_window_items(&info, sidebar.width, budget);
+            let cursor_block = self.fleet_cursor.and_then(|c| {
+                info.sessions
+                    .iter()
+                    .position(|row| row.id == c)
+                    .map(crate::ui::FleetItem::Block)
+            });
+            match cursor_block {
+                Some(block) if window.contains(&block) => break,
+                Some(crate::ui::FleetItem::Block(p)) if p < self.fleet_scroll => {
+                    self.fleet_scroll = p;
+                }
+                Some(_) => {
+                    self.fleet_scroll =
+                        (self.fleet_scroll + 1).min(ids.len().saturating_sub(1));
+                }
+                None => break,
+            }
         }
-        self.fleet_scroll = self.fleet_scroll.min(max_start);
         self.dirty = true;
     }
 
@@ -3602,11 +3624,16 @@ impl AppState {
                 self.dirty = true;
             }
             AppEvent::HookRequest(req) => {
-                // Unattributed SessionStarts bind by working directory when
-                // unambiguous (muse scrubs hook-child environments, so its
-                // relays send no run ID). The bind runs first so the record
-                // below attributes like any other SessionStart.
-                if req.hook == "SessionStart" && self.manager.lookup_run(&req.run_id).is_none()
+                // Unattributed main-session edges bind by working directory
+                // when unambiguous (muse scrubs hook-child environments, so
+                // its relays send no run ID). SessionStart alone is not
+                // enough: a resumed muse session fires no SessionStart,
+                // only UserPromptSubmit and Stop. Subagent tool hooks carry
+                // the child's session ID, so only edges a subagent cannot
+                // produce may claim a session. The bind runs first so the
+                // record below attributes like any other edge.
+                if matches!(req.hook.as_str(), "SessionStart" | "UserPromptSubmit" | "Stop")
+                    && self.manager.lookup_run(&req.run_id).is_none()
                 {
                     if let Some(harness) = crate::session::session_id_from_hook_body(&req.body) {
                         if let Some(cwd) = crate::session::cwd_from_hook_body(&req.body) {
@@ -3915,6 +3942,95 @@ mod tests {
         );
         s.apply(hook_request("Stop", "", &strange));
         assert_eq!(s.manager.get(id).unwrap().activity, Activity::Stopped);
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn resumed_muse_hooks_bind_without_session_start() {
+        // Grounded externally: `muse resume <id>` fires no SessionStart,
+        // only UserPromptSubmit and Stop. A restored session that never
+        // saw SessionStart must still learn its resume ID from those
+        // edges, or every re-save writes null again.
+        use crate::session::Activity;
+        let mut s = AppState::new();
+        let cwd = std::env::temp_dir();
+        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent("m", &cwd, "exec sleep 30", run.clone(), "muse")
+            .unwrap();
+        assert_eq!(s.manager.get(id).unwrap().harness_session_id, None);
+        let prompt = format!(
+            "{{\"v\":1,\"hook\":\"UserPromptSubmit\",\"run_id\":\"\",\"forge_pid\":0,\"body\":{{\"session_id\":\"muse-r\",\"cwd\":{cwd_json}}}}}"
+        );
+        s.apply(hook_request("UserPromptSubmit", "", &prompt));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("muse-r"),
+            "resumed-session edge captured the resume ID"
+        );
+        assert_eq!(s.manager.get(id).unwrap().activity, Activity::Thinking);
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn subagent_tool_hooks_never_bind_a_session() {
+        // Subagent PreToolUse hooks carry the child's session ID; binding
+        // one would point the session at a transcript it cannot resume.
+        // Only main-session edges (SessionStart, UserPromptSubmit, Stop)
+        // may claim an unbound session.
+        let mut s = AppState::new();
+        let cwd = std::env::temp_dir();
+        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent("m", &cwd, "exec sleep 30", run.clone(), "muse")
+            .unwrap();
+        let tool = format!(
+            "{{\"v\":1,\"hook\":\"PreToolUse\",\"run_id\":\"\",\"forge_pid\":0,\"body\":{{\"session_id\":\"child-1\",\"cwd\":{cwd_json},\"tool\":\"Bash\"}}}}"
+        );
+        s.apply(hook_request("PreToolUse", "", &tool));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id,
+            None,
+            "child tool hook binds nothing"
+        );
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn restore_stamps_the_saved_harness_id() {
+        // The save file already knows the resume ID and the resume argv
+        // uses it — but the fresh record dropped it, so a resumed muse
+        // session (which fires no SessionStart) re-saved as null.
+        let saved = std::env::var("METAMATE_BIN").ok();
+        std::env::set_var("METAMATE_BIN", "/bin/true");
+        let mut s = AppState::new();
+        let entry = crate::checkpoint::SavedEntry {
+            label: "m".to_string(),
+            saved_at_unix: 1_700_000_000,
+            sessions: vec![crate::checkpoint::SavedSession {
+                name: "m".to_string(),
+                cli_tool: "muse".to_string(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                groups: vec![],
+                harness_session_id: Some("muse-saved".to_string()),
+            }],
+        };
+        let report = s.restore_entry(&entry);
+        assert_eq!(report.spawned, 1, "report: {:?}", report.skipped);
+        let id = s.manager.order().to_vec().pop().unwrap();
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("muse-saved"),
+            "restored record keeps its resume ID"
+        );
+        match saved {
+            Some(v) => std::env::set_var("METAMATE_BIN", v),
+            None => std::env::remove_var("METAMATE_BIN"),
+        }
         assert!(s.manager.remove(id));
     }
 
@@ -5765,6 +5881,34 @@ mod tests {
         assert_eq!(info.other_timers, 1, "background collapses to a count");
         assert!(state.manager.remove(a));
         assert!(state.manager.remove(b));
+    }
+
+    #[test]
+    fn fleet_order_ignores_hook_recency() {
+        let mut s = AppState::new();
+        let mut ids = Vec::new();
+        for name in ["aaa", "bbb", "ccc"] {
+            ids.push(
+                s.manager
+                    .spawn(
+                        name,
+                        &std::env::temp_dir(),
+                        "exec sleep 30",
+                        RunId::generate(),
+                        "shell",
+                    )
+                    .unwrap(),
+            );
+        }
+        // Late hook activity on the last session must not reshuffle
+        // idle peers: spatial memory beats recency.
+        s.last_hook_activity
+            .insert(ids[2], std::time::Instant::now());
+        let order: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
+        assert_eq!(order, ids, "spawn order holds");
+        for id in ids {
+            assert!(s.manager.remove(id));
+        }
     }
 
     #[test]

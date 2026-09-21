@@ -1235,11 +1235,23 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         // Fleet router: wheel scrolls the slot, left-click switches to
         // the row. Same rects and window the render paints, recomputed
         // live, so a repaint can never desync them.
-        let rich = areas.sidebar.width >= 40 && areas.sidebar.height >= 30;
+        let rich = ui::sidebar_is_rich(areas.sidebar);
         match mev.kind {
             event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
-                let len = state.sidebar_info().sessions.len();
-                let max_start = len.saturating_sub(ui::fleet_visible(rich));
+                // Wheel scrolls the fleet only over the list region;
+                // footer rows (settings and below) stay inert.
+                let info = state.sidebar_info();
+                let layout =
+                    ui::sidebar_layout(areas.sidebar, ui::sidebar_footer_height(&info, rich));
+                let in_list = mev.column >= layout.list.x
+                    && mev.column < layout.list.x + layout.list.width
+                    && mev.row >= layout.list.y
+                    && mev.row < layout.list.y + layout.list.height;
+                if !in_list {
+                    return;
+                }
+                let len = info.sessions.len();
+                let max_start = len.saturating_sub(1);
                 if matches!(mev.kind, event::MouseEventKind::ScrollUp) {
                     state.fleet_scroll = state.fleet_scroll.saturating_sub(1);
                 } else {
@@ -1278,13 +1290,13 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
             }
         }
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
-            // Same rich/compact split the render uses: compact buttons
-            // follow the content-built row.
-            let buttons = if rich {
-                ui::mode_button_areas(areas.sidebar, state.pill_tabs)
-            } else {
-                ui::compact_mode_buttons(areas.sidebar, &state.sidebar_info(), state.pill_tabs)
-            };
+            // Pinned footer row, same builder the render uses.
+            let buttons = ui::footer_mode_buttons(
+                areas.sidebar,
+                &state.sidebar_info(),
+                rich,
+                state.pill_tabs,
+            );
             match ui::mode_at(&buttons, mev.column, mev.row) {
                 Some("yolo") => {
                     if ui::ChromeButton::new("[Yolo]", ratatui::style::Style::default())
@@ -1613,14 +1625,18 @@ mod tests {
         spawn_shell_cmd(&mut state, "exec sleep 30");
         let order = state.manager.order().to_vec();
         assert_eq!(state.manager.active(), Some(order[0]));
-        // Rich sidebar at x=135: brand owns rows 1-3, fleet header is
-        // row 4, so the second fleet row paints row 6. Drive the click
-        // from the painted rect, never hand-computed geometry.
+        // Blocks breathe: name plus reason rows, then a dead gap row.
+        // Drive the click from the painted rect, never hand-computed
+        // geometry.
         let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
         let info = state.sidebar_info();
         let rects = ui::sidebar_session_rects(areas.sidebar, &info, true);
         assert_eq!(rects.len(), 2);
-        assert_eq!(rects[0].1.y + 1, rects[1].1.y, "stacked rows");
+        assert_eq!(
+            rects[0].1.y + rects[0].1.height + 1,
+            rects[1].1.y,
+            "gap between blocks"
+        );
         let (_, area) = &rects[1];
         forward_mouse(
             &mut state,
@@ -1637,6 +1653,30 @@ mod tests {
     }
 
     #[test]
+    fn prefix_jk_moves_cursor_and_enter_activates() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::input::{prefix_key, InputRouter};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let order = state.manager.order().to_vec();
+        let mut router = InputRouter::new();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        handle_key(&mut state, &mut router, prefix_key());
+        handle_key(&mut state, &mut router, key(KeyCode::Char('j')));
+        handle_key(&mut state, &mut router, prefix_key());
+        handle_key(&mut state, &mut router, key(KeyCode::Char('j')));
+        assert_eq!(state.fleet_cursor, Some(order[1]), "two steps reach b");
+        handle_key(&mut state, &mut router, prefix_key());
+        handle_key(&mut state, &mut router, key(KeyCode::Enter));
+        assert_eq!(state.manager.active(), Some(order[1]), "enter activates");
+        for id in order {
+            assert!(state.manager.remove(id));
+        }
+    }
+
+    #[test]
     fn fleet_wheel_scrolls_past_the_cap() {
         use crossterm::event::{MouseEvent, MouseEventKind};
         let mut state = AppState::new();
@@ -1644,7 +1684,7 @@ mod tests {
         for _ in 0..6 {
             spawn_shell_cmd(&mut state, "exec sleep 30");
         }
-        // Compact sidebar caps the slot at five rows of six.
+        // Compact sidebar caps the slot at two blocks of six.
         assert_eq!(state.fleet_scroll, 0);
         let wheel = |down: bool| MouseEvent {
             kind: if down {
@@ -1658,10 +1698,48 @@ mod tests {
         };
         forward_mouse(&mut state, wheel(true));
         assert_eq!(state.fleet_scroll, 1, "wheel down scrolls");
-        forward_mouse(&mut state, wheel(true));
-        assert_eq!(state.fleet_scroll, 1, "scroll saturates at the tail");
+        for _ in 0..9 {
+            forward_mouse(&mut state, wheel(true));
+        }
+        assert_eq!(state.fleet_scroll, 5, "scroll saturates at the tail");
         forward_mouse(&mut state, wheel(false));
-        assert_eq!(state.fleet_scroll, 0, "wheel up scrolls back");
+        assert_eq!(state.fleet_scroll, 4, "wheel up scrolls back");
+        for id in state.manager.order().to_vec() {
+            assert!(state.manager.remove(id));
+        }
+    }
+
+    #[test]
+    fn fleet_wheel_over_footer_is_inert() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        for _ in 0..6 {
+            spawn_shell_cmd(&mut state, "exec sleep 30");
+        }
+        // Scroll once from the list, then wheel the pinned footer row:
+        // settings must never scroll the fleet.
+        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: areas.sidebar.x + 2,
+                row: areas.sidebar.y + 2,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.fleet_scroll, 1, "list wheel scrolls");
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: areas.sidebar.x + 2,
+                row: areas.sidebar.bottom() - 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.fleet_scroll, 1, "footer wheel is inert");
         for id in state.manager.order().to_vec() {
             assert!(state.manager.remove(id));
         }
@@ -2271,7 +2349,8 @@ mod tests {
             },
         );
         assert_eq!(state.manager.active_tab_kind(id), Some(crate::session::TabKind::Scm));
-        assert_eq!(state.manager.pane_size(id), Some((36, 133)));
+        // Sidebar clamps at 36, so the main pane keeps the remainder.
+        assert_eq!(state.manager.pane_size(id), Some((36, 142)));
         assert!(state.manager.remove(id));
     }
 
@@ -2427,14 +2506,15 @@ mod tests {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
-        // Sidebar is x=64..80; settings row is y=11, Off at x=66..71.
+        // Sidebar is x=64..80; with nothing pending the footer
+        // shrinks and buttons sit at y=21, Off at x=66..71.
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
         forward_mouse(
             &mut state,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 67,
-                row: 11,
+                row: 21,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
@@ -2446,19 +2526,19 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Moved,
                 column: 73,
-                row: 11,
+                row: 21,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
         assert!(!state.dirty, "hover leaves no work");
-        // Click Yolo to return (pill starts at x=74).
+        // Click Yolo to return (pill starts at x=74, footer row 20).
         forward_mouse(
             &mut state,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 75,
-                row: 11,
+                row: 21,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
