@@ -2,3 +2,9 @@
 # Cargo registry metadata accidentally copied with vendor/vt100.
 vendor/vt100/.cargo-ok
 vendor/vt100/.cargo_vcs_info.json
+
+# Local working notes, untracked by policy.
+error_logs.md
+review.md
+tools.md
+ui_guidance.md

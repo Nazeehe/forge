@@ -28,8 +28,6 @@ Rules:
   the same violation.
 - Keep tests colocated (`#[cfg(test)]` in the module) so behavior and proof live
   together. Throwaway probes go in `/tmp`, never in the repo.
-- `error_logs.md` is the read-only blueprint reference. Do not delete or
-  overwrite it. It is context; the code is the source of truth.
 
 ## 2. Toolchain
 
