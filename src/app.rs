@@ -109,9 +109,9 @@ pub struct AppState {
     /// Startup restore picker, if a sessions file offered entries. First
     /// input goes here until it resolves to a pick or a fresh start.
     pub restore_picker: Option<crate::checkpoint::RestorePicker>,
-    /// Quit-confirmation modal, if the quit chord is pending an answer.
+    /// Generic Yes/No confirmation modal (quit forge, kill a session).
     /// Captures all input while present; No is the default.
-    pub quit_confirm: Option<crate::quit::QuitConfirm>,
+    pub confirm: Option<crate::quit::Confirm>,
     /// "Saving sessions..." modal, shown after Yes while the quit
     /// snapshot persists. The loop saves, then exits.
     pub quit_saving: bool,
@@ -332,7 +332,7 @@ impl AppState {
             create_dialog: None,
             group_dialog: None,
             restore_picker: None,
-            quit_confirm: None,
+            confirm: None,
             quit_saving: false,
             theme_dialog: None,
             themes_dir: None,
@@ -2722,8 +2722,24 @@ impl AppState {
     }
 
     pub fn open_quit_confirm(&mut self) {
-        self.quit_confirm = Some(crate::quit::QuitConfirm::new(self.pill_tabs));
+        self.confirm = Some(crate::quit::Confirm::new(
+            crate::quit::ConfirmKind::QuitForge,
+            self.pill_tabs,
+        ));
         self.dirty = true;
+    }
+
+    /// Ask before killing the active session (`Ctrl-b x`). Nothing
+    /// opens when no session is live; Yes terminates the session that
+    /// was active here.
+    pub fn open_kill_confirm(&mut self) {
+        if let Some(active) = self.manager.active() {
+            self.confirm = Some(crate::quit::Confirm::new(
+                crate::quit::ConfirmKind::KillSession(active),
+                self.pill_tabs,
+            ));
+            self.dirty = true;
+        }
     }
 
     /// Every theme the picker can offer: builtin `default` first,

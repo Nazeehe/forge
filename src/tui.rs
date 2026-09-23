@@ -397,8 +397,8 @@ fn loop_until_quit(
                         handle_telegram_key(state, loaded, home, key);
                     } else if state.theme_dialog.is_some() {
                         handle_theme_key(state, loaded, home, key);
-                    } else if state.quit_confirm.is_some() {
-                        handle_quit_key(state, key);
+                    } else if state.confirm.is_some() {
+                        handle_confirm_key(state, key);
                     } else {
                         handle_key_at(state, &mut router, key, Instant::now());
                     }
@@ -427,7 +427,7 @@ fn loop_until_quit(
                         && state.create_dialog.is_none()
                         && state.group_dialog.is_none()
                         && state.theme_dialog.is_none()
-                        && state.quit_confirm.is_none()
+                        && state.confirm.is_none()
                     {
                         // A tour draft takes the paste single-line, like
                         // typed input; the pane path below stays untouched.
@@ -563,8 +563,8 @@ fn loop_until_quit(
                 if let Some(dialog) = state.theme_dialog.as_ref() {
                     dialog.view(f, crate::theme_dialog::theme_area(area));
                 }
-                if let Some(dialog) = state.quit_confirm.as_ref() {
-                    dialog.view(f, crate::quit::quit_area(area));
+                if let Some(dialog) = state.confirm.as_ref() {
+                    dialog.view(f, crate::quit::confirm_area(area));
                 }
                 if state.quit_saving {
                     crate::quit::view_saving(f, crate::quit::saving_area(area));
@@ -879,10 +879,10 @@ fn fire_command(state: &mut AppState, cmd: UserCommand) {
             state.toggle_permission_mode();
         }
         UserCommand::TerminateSession => {
-            if let Some(active) = state.manager.active() {
-                state.terminate_session(active);
-                fit_active_pane(state);
-            }
+            // Kill asks first: Yes terminates the session that was
+            // active here, No keeps it.
+            state.open_kill_confirm();
+            fit_active_pane(state);
             state.dirty = true;
         }
         UserCommand::ToggleGrid => {
@@ -1118,20 +1118,32 @@ fn settle_quit_save(state: &mut AppState, home: &std::path::Path) -> bool {
     true
 }
 
-/// One quit-confirm key: Yes quits, anything else keeps running.
-fn handle_quit_key(state: &mut AppState, key: event::KeyEvent) {
-    let outcome = state.quit_confirm.as_mut().map(|d| d.key(&key));
+/// One confirm-modal key: Yes runs the confirmed action (quit forge
+/// or kill the targeted session), anything else keeps running.
+fn handle_confirm_key(state: &mut AppState, key: event::KeyEvent) {
+    let outcome = state.confirm.as_mut().map(|d| d.key(&key));
     match outcome {
-        Some(crate::quit::QuitOutcome::Confirmed) => {
-            state.quit_confirm = None;
-            // Yes swaps the confirm for the saving modal: it paints
-            // this tick, then the loop persists the snapshot and exits.
-            state.quit_saving = true;
-            state.should_quit = true;
+        Some(crate::quit::ConfirmOutcome::Confirmed) => {
+            match state.confirm.as_ref().map(|d| d.kind()) {
+                Some(crate::quit::ConfirmKind::QuitForge) => {
+                    state.confirm = None;
+                    // Yes swaps the confirm for the saving modal: it
+                    // paints this tick, then the loop persists the
+                    // snapshot and exits.
+                    state.quit_saving = true;
+                    state.should_quit = true;
+                }
+                Some(crate::quit::ConfirmKind::KillSession(id)) => {
+                    state.confirm = None;
+                    state.terminate_session(id);
+                    fit_active_pane(state);
+                }
+                None => {}
+            }
             state.dirty = true;
         }
-        Some(crate::quit::QuitOutcome::Dismissed) => {
-            state.quit_confirm = None;
+        Some(crate::quit::ConfirmOutcome::Dismissed) => {
+            state.confirm = None;
             state.dirty = true;
         }
         _ => {
@@ -1216,7 +1228,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     if state.theme_dialog.is_some() {
         return;
     }
-    if state.quit_confirm.is_some() {
+    if state.confirm.is_some() {
         return;
     }
     let (rows, cols) = state.term_size;
@@ -2704,11 +2716,11 @@ mod tests {
         let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
         handle_key(&mut state, &mut router, prefix);
         handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(state.quit_confirm.is_some(), "quit asks first");
+        assert!(state.confirm.is_some(), "quit asks first");
         assert!(!state.should_quit, "nothing quits yet");
         // No is default: Enter stays.
-        handle_quit_key(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(state.quit_confirm.is_none(), "confirm closed");
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.confirm.is_none(), "confirm closed");
         assert!(!state.should_quit, "No keeps running");
     }
 
@@ -2720,8 +2732,8 @@ mod tests {
         let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
         handle_key(&mut state, &mut router, prefix);
         handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        handle_quit_key(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
-        assert!(state.quit_confirm.is_none(), "confirm closed");
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(state.confirm.is_none(), "confirm closed");
         assert!(state.should_quit, "Yes quits");
     }
 
@@ -2733,8 +2745,8 @@ mod tests {
         let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
         handle_key(&mut state, &mut router, prefix);
         handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        handle_quit_key(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
-        assert!(state.quit_confirm.is_none(), "confirm closed");
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(state.confirm.is_none(), "confirm closed");
         assert!(state.quit_saving, "saving modal takes over");
         assert!(state.should_quit, "Yes still quits");
         assert!(state.dirty, "saving modal repaints");
@@ -3010,6 +3022,73 @@ mod tests {
     }
 
     #[test]
+    fn prefix_x_asks_to_kill_instead_of_terminating() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let victim = state.manager.active().unwrap();
+        let mut router = InputRouter::new();
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('x'), none));
+        assert!(state.manager.get(victim).is_some(), "session survives until confirmed");
+        assert!(
+            matches!(
+                state.confirm.as_ref().map(|d| d.kind()),
+                Some(crate::quit::ConfirmKind::KillSession(id)) if id == victim
+            ),
+            "kill confirm targets the active session"
+        );
+        assert!(!state.should_quit, "killing never quits forge");
+        let order = state.manager.order().to_vec();
+        for id in order {
+            assert!(state.manager.remove(id));
+        }
+    }
+
+    #[test]
+    fn kill_confirm_no_keeps_session() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let id = state.manager.active().unwrap();
+        state.open_kill_confirm();
+        assert!(state.confirm.is_some(), "kill confirm opens");
+        // No is default: Enter keeps the session.
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(state.confirm.is_none(), "confirm closed");
+        assert!(state.manager.get(id).is_some(), "session kept");
+        assert!(!state.should_quit, "keeping never quits");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn kill_confirm_yes_terminates_session() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        let victim = state.manager.active().unwrap();
+        state.broker.join(&state.manager, victim, "peers").unwrap();
+        let mut router = InputRouter::new();
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('x'), none));
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Char('y'), none));
+        assert!(state.confirm.is_none(), "confirm closed");
+        assert!(state.manager.get(victim).is_none(), "record gone from UI");
+        assert!(!state.broker.is_member(victim, "peers"), "left the group");
+        assert_eq!(state.manager.order().len(), 1);
+        assert_ne!(state.manager.active(), Some(victim));
+        let survivor = state.manager.active().unwrap();
+        assert!(state.manager.remove(survivor));
+    }
+
+    #[test]
     fn prefix_x_terminates_active_session() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let none = KeyModifiers::NONE;
@@ -3023,6 +3102,8 @@ mod tests {
         let mut router = InputRouter::new();
         handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
         handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('x'), none));
+        assert!(state.manager.get(victim).is_some(), "x asks first");
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Char('y'), none));
         assert!(state.manager.get(victim).is_none(), "record gone from UI");
         assert!(!state.broker.is_member(victim, "peers"), "left the group");
         assert_eq!(state.manager.order().len(), 1);

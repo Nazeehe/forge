@@ -1,27 +1,48 @@
-//! Quit-confirmation modal: "Are you sure you want to quit?" with
-//! Yes/No buttons. No is the default, so Enter or Esc keeps running;
-//! only an explicit Yes (or `y`) sets the quit flag.
+//! Generic Yes/No confirmation modal (quit forge, kill a session,
+//! ...): No is the default, so Enter or Esc keeps running; only an
+//! explicit Yes (or `y`) confirms.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 
-/// Outcome of one key inside the quit confirm.
+/// Outcome of one key inside the confirm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QuitOutcome {
+pub enum ConfirmOutcome {
     Pending,
     Confirmed,
     Dismissed,
 }
 
+/// What the confirm modal is asking about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmKind {
+    QuitForge,
+    KillSession(crate::session::SessionId),
+}
+
+impl ConfirmKind {
+    fn question(&self) -> &'static str {
+        match self {
+            ConfirmKind::QuitForge => "Are you sure you want to quit?",
+            ConfirmKind::KillSession(_) => "Are you sure you want to kill this session?",
+        }
+    }
+}
+
 /// Yes/No choice; index 1 (No) is the default.
-pub struct QuitConfirm {
+pub struct Confirm {
+    kind: ConfirmKind,
     choice: usize,
     pills: bool,
 }
 
-impl QuitConfirm {
-    pub fn new(pills: bool) -> Self {
-        QuitConfirm { choice: 1, pills }
+impl Confirm {
+    pub fn new(kind: ConfirmKind, pills: bool) -> Self {
+        Confirm { kind, choice: 1, pills }
+    }
+
+    pub fn kind(&self) -> ConfirmKind {
+        self.kind
     }
 
     /// Test hook: 0 is Yes, 1 is No.
@@ -30,31 +51,31 @@ impl QuitConfirm {
         self.choice
     }
 
-    pub fn key(&mut self, key: &KeyEvent) -> QuitOutcome {
+    pub fn key(&mut self, key: &KeyEvent) -> ConfirmOutcome {
         match key.code {
-            KeyCode::Esc => QuitOutcome::Dismissed,
+            KeyCode::Esc => ConfirmOutcome::Dismissed,
             KeyCode::Enter => {
                 if self.choice == 0 {
-                    QuitOutcome::Confirmed
+                    ConfirmOutcome::Confirmed
                 } else {
-                    QuitOutcome::Dismissed
+                    ConfirmOutcome::Dismissed
                 }
             }
             KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
                 self.choice = 1 - self.choice;
-                QuitOutcome::Pending
+                ConfirmOutcome::Pending
             }
             KeyCode::Char('h') | KeyCode::Char('l') if key.modifiers.is_empty() => {
                 self.choice = 1 - self.choice;
-                QuitOutcome::Pending
+                ConfirmOutcome::Pending
             }
             KeyCode::Char('y') | KeyCode::Char('Y') if key.modifiers.is_empty() => {
-                QuitOutcome::Confirmed
+                ConfirmOutcome::Confirmed
             }
             KeyCode::Char('n') | KeyCode::Char('N') if key.modifiers.is_empty() => {
-                QuitOutcome::Dismissed
+                ConfirmOutcome::Dismissed
             }
-            _ => QuitOutcome::Pending,
+            _ => ConfirmOutcome::Pending,
         }
     }
 
@@ -65,10 +86,14 @@ impl QuitConfirm {
         use crate::theme::{Role, modal_fill, style};
         // Opaque: the live grid must not show through the modal.
         frame.render_widget(Clear, area);
+        let title = match self.kind {
+            ConfirmKind::QuitForge => " Quit ",
+            ConfirmKind::KillSession(_) => " Kill session ",
+        };
         let block = Block::default()
             .borders(Borders::ALL)
                 .border_type(crate::theme::border_type())
-            .title(" Quit ")
+            .title(title)
             .style(modal_fill())
             .border_style(style(Role::BorderModal));
         let inner = block.inner(area);
@@ -85,14 +110,14 @@ impl QuitConfirm {
         };
         let mut lines = vec![
             center(vec![Span::styled(
-                "Are you sure you want to quit?",
+                self.kind.question(),
                 style(Role::Text),
             )]),
             Line::from(""),
             center(self.buttons()),
             Line::from(""),
             center(vec![Span::styled(
-                "←/→ select • Enter confirm • y quit • n stay • Esc",
+                "←/→ select • Enter confirm • y yes • n no • Esc",
                 style(Role::Muted),
             )]),
         ];
@@ -178,7 +203,7 @@ pub fn view_saving(frame: &mut ratatui::Frame, area: Rect) {
 }
 
 /// Centered confirm box, clamped into tiny terminals.
-pub fn quit_area(term: Rect) -> Rect {
+pub fn confirm_area(term: Rect) -> Rect {
     let (w, h) = (52.min(term.width), 7.min(term.height));
     Rect::new(
         term.x + term.width.saturating_sub(w) / 2,
@@ -199,21 +224,21 @@ mod tests {
 
     #[test]
     fn no_is_default_so_enter_stays() {
-        let mut q = QuitConfirm::new(true);
+        let mut q = Confirm::new(ConfirmKind::QuitForge, true);
         assert_eq!(q.choice(), 1, "No is default");
-        assert_eq!(q.key(&key(KeyCode::Enter)), QuitOutcome::Dismissed);
-        assert_eq!(q.key(&key(KeyCode::Esc)), QuitOutcome::Dismissed);
+        assert_eq!(q.key(&key(KeyCode::Enter)), ConfirmOutcome::Dismissed);
+        assert_eq!(q.key(&key(KeyCode::Esc)), ConfirmOutcome::Dismissed);
     }
 
     #[test]
     fn arrows_toggle_between_yes_and_no() {
-        let mut q = QuitConfirm::new(true);
-        assert_eq!(q.key(&key(KeyCode::Right)), QuitOutcome::Pending);
+        let mut q = Confirm::new(ConfirmKind::QuitForge, true);
+        assert_eq!(q.key(&key(KeyCode::Right)), ConfirmOutcome::Pending);
         assert_eq!(q.choice(), 0, "Yes");
-        assert_eq!(q.key(&key(KeyCode::Enter)), QuitOutcome::Confirmed);
-        assert_eq!(q.key(&key(KeyCode::Left)), QuitOutcome::Pending);
+        assert_eq!(q.key(&key(KeyCode::Enter)), ConfirmOutcome::Confirmed);
+        assert_eq!(q.key(&key(KeyCode::Left)), ConfirmOutcome::Pending);
         assert_eq!(q.choice(), 1, "back to No");
-        assert_eq!(q.key(&key(KeyCode::Enter)), QuitOutcome::Dismissed);
+        assert_eq!(q.key(&key(KeyCode::Enter)), ConfirmOutcome::Dismissed);
     }
 
     #[test]
@@ -223,7 +248,7 @@ mod tests {
         )
         .expect("left theme parses");
         let _guard = crate::theme::hold_external_theme(theme);
-        let q = QuitConfirm::new(true);
+        let q = Confirm::new(ConfirmKind::QuitForge, true);
         assert_eq!(q.choice(), 1, "No is default");
         let spans = q.buttons();
         // Yes group (5 spans) + gap + No group: No's left cap, fill, right cap.
@@ -239,10 +264,10 @@ mod tests {
 
     #[test]
     fn y_quits_and_n_stays() {
-        let mut q = QuitConfirm::new(false);
-        assert_eq!(q.key(&key(KeyCode::Char('y'))), QuitOutcome::Confirmed);
-        let mut q = QuitConfirm::new(false);
-        assert_eq!(q.key(&key(KeyCode::Char('n'))), QuitOutcome::Dismissed);
+        let mut q = Confirm::new(ConfirmKind::QuitForge, false);
+        assert_eq!(q.key(&key(KeyCode::Char('y'))), ConfirmOutcome::Confirmed);
+        let mut q = Confirm::new(ConfirmKind::QuitForge, false);
+        assert_eq!(q.key(&key(KeyCode::Char('n'))), ConfirmOutcome::Dismissed);
     }
 
     #[test]
@@ -269,13 +294,33 @@ mod tests {
     }
 
     #[test]
+    fn kill_question_paints_kill_session_text() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let id = crate::session::SessionId::fresh();
+        let dialog = Confirm::new(ConfirmKind::KillSession(id), true);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| dialog.view(f, confirm_area(f.area())))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = buf
+            .content
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(text.contains("Are you sure you want to kill this session?"));
+        assert!(text.contains("Yes"));
+        assert!(text.contains("No"));
+    }
+
+    #[test]
     fn modal_paints_question_and_dim_no_default() {
         use ratatui::{backend::TestBackend, Terminal};
         use ratatui::style::Color;
-        let q = QuitConfirm::new(true);
+        let q = Confirm::new(ConfirmKind::QuitForge, true);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
-            .draw(|f| q.view(f, quit_area(f.area())))
+            .draw(|f| q.view(f, confirm_area(f.area())))
             .unwrap();
         let buf = terminal.backend().buffer();
         let text: String = buf
