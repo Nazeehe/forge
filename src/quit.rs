@@ -139,6 +139,44 @@ impl QuitConfirm {
     }
 }
 
+/// Centered "Saving sessions..." box, clamped into tiny terminals.
+pub fn saving_area(term: Rect) -> Rect {
+    let (w, h) = (40.min(term.width), 5.min(term.height));
+    Rect::new(
+        term.x + term.width.saturating_sub(w) / 2,
+        term.y + term.height.saturating_sub(h) / 2,
+        w,
+        h,
+    )
+}
+
+/// Render the saving modal: opaque, one centered line, no input.
+pub fn view_saving(frame: &mut ratatui::Frame, area: Rect) {
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+    use crate::theme::{Role, modal_fill, style};
+    // Opaque: the live grid must not show through the modal.
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(crate::theme::border_type())
+        .title(" Saving ")
+        .style(modal_fill())
+        .border_style(style(Role::BorderModal));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height < 3 || inner.width < 20 {
+        return;
+    }
+    let width: usize = "Saving sessions...".len();
+    let pad = inner.width.saturating_sub(width as u16) / 2;
+    let mut padded = vec![Span::raw(" ".repeat(pad as usize))];
+    padded.push(Span::styled("Saving sessions...", style(Role::Text)));
+    let mut lines = vec![Line::from(""), Line::from(padded), Line::from("")];
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// Centered confirm box, clamped into tiny terminals.
 pub fn quit_area(term: Rect) -> Rect {
     let (w, h) = (52.min(term.width), 7.min(term.height));
@@ -205,6 +243,29 @@ mod tests {
         assert_eq!(q.key(&key(KeyCode::Char('y'))), QuitOutcome::Confirmed);
         let mut q = QuitConfirm::new(false);
         assert_eq!(q.key(&key(KeyCode::Char('n'))), QuitOutcome::Dismissed);
+    }
+
+    #[test]
+    fn saving_modal_paints_saving_sessions_centered() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| view_saving(f, saving_area(f.area())))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = buf
+            .content
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(text.contains("Saving sessions..."));
+        // Box is 40x5 at x20/y9: border, blank, text (row 11), blank, border.
+        let row: String = (0..80)
+            .map(|x| buf[(x, 11)].symbol().to_string())
+            .collect();
+        let byte = row.find("Saving sessions...").expect("saving line");
+        let x = row[..byte].chars().count() as u16;
+        assert_eq!((x, buf[(x, 11)].symbol()), (31, "S"), "text centered");
     }
 
     #[test]

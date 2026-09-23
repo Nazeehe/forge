@@ -566,6 +566,9 @@ fn loop_until_quit(
                 if let Some(dialog) = state.quit_confirm.as_ref() {
                     dialog.view(f, crate::quit::quit_area(area));
                 }
+                if state.quit_saving {
+                    crate::quit::view_saving(f, crate::quit::saving_area(area));
+                }
                 if let Some(picker) = state.restore_picker.as_ref() {
                     picker.view(f, crate::checkpoint::RestorePicker::picker_area(area));
                 }
@@ -587,6 +590,9 @@ fn loop_until_quit(
             }
             state.dirty = false;
         }
+        // Yes confirmed quit above: the saving modal just painted, so
+        // persist the snapshot now and let the loop exit.
+        settle_quit_save(state, home);
     }
     Ok(())
 }
@@ -1094,13 +1100,35 @@ fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
     }
 }
 
+/// One quit-save step, after the saving modal paints: persist the live
+/// sessions once, then let the loop exit. Failures warn instead of
+/// failing the exit, like the post-loop save. Returns true when a
+/// pending save ran.
+fn settle_quit_save(state: &mut AppState, home: &std::path::Path) -> bool {
+    if !state.quit_saving {
+        return false;
+    }
+    state.quit_saving = false;
+    if let Err(e) = crate::checkpoint::save_quit_snapshot(
+        &crate::branding::sessions_file(home),
+        state.snapshot_sessions(),
+    ) {
+        eprintln!("warning: cannot save sessions: {e}");
+    }
+    true
+}
+
 /// One quit-confirm key: Yes quits, anything else keeps running.
 fn handle_quit_key(state: &mut AppState, key: event::KeyEvent) {
     let outcome = state.quit_confirm.as_mut().map(|d| d.key(&key));
     match outcome {
         Some(crate::quit::QuitOutcome::Confirmed) => {
             state.quit_confirm = None;
+            // Yes swaps the confirm for the saving modal: it paints
+            // this tick, then the loop persists the snapshot and exits.
+            state.quit_saving = true;
             state.should_quit = true;
+            state.dirty = true;
         }
         Some(crate::quit::QuitOutcome::Dismissed) => {
             state.quit_confirm = None;
@@ -2695,6 +2723,59 @@ mod tests {
         handle_quit_key(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(state.quit_confirm.is_none(), "confirm closed");
         assert!(state.should_quit, "Yes quits");
+    }
+
+    #[test]
+    fn prefix_q_then_y_shows_saving_sessions() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        let prefix = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
+        handle_key(&mut state, &mut router, prefix);
+        handle_key(&mut state, &mut router, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        handle_quit_key(&mut state, KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(state.quit_confirm.is_none(), "confirm closed");
+        assert!(state.quit_saving, "saving modal takes over");
+        assert!(state.should_quit, "Yes still quits");
+        assert!(state.dirty, "saving modal repaints");
+    }
+
+    #[test]
+    fn quit_save_persists_snapshot_and_clears_flag() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "forge-quit-saving-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        // Nothing pending: no save, no file.
+        let mut idle = AppState::new();
+        assert!(!settle_quit_save(&mut idle, &home), "idle saves nothing");
+        assert!(
+            !crate::branding::sessions_file(&home).exists(),
+            "idle writes nothing"
+        );
+        // One live agent: the pending save persists it and clears the flag.
+        let mut state = AppState::new();
+        let id = state
+            .manager
+            .spawn_agent(
+                "qsave",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                crate::ids::RunId::generate(),
+                "claude",
+            )
+            .expect("spawn agent");
+        state.quit_saving = true;
+        assert!(settle_quit_save(&mut state, &home), "pending save runs");
+        assert!(!state.quit_saving, "flag clears after save");
+        let text = std::fs::read_to_string(crate::branding::sessions_file(&home))
+            .expect("sessions file written");
+        assert!(text.contains("qsave"), "snapshot saved: {text}");
+        assert!(state.manager.remove(id), "cleanup pane");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

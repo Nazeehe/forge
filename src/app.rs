@@ -112,6 +112,9 @@ pub struct AppState {
     /// Quit-confirmation modal, if the quit chord is pending an answer.
     /// Captures all input while present; No is the default.
     pub quit_confirm: Option<crate::quit::QuitConfirm>,
+    /// "Saving sessions..." modal, shown after Yes while the quit
+    /// snapshot persists. The loop saves, then exits.
+    pub quit_saving: bool,
     /// Open theme picker (`Ctrl-b e`), if any. Captures all input
     /// while present like every other modal.
     pub theme_dialog: Option<crate::theme_dialog::ThemeDialog>,
@@ -330,6 +333,7 @@ impl AppState {
             group_dialog: None,
             restore_picker: None,
             quit_confirm: None,
+            quit_saving: false,
             theme_dialog: None,
             themes_dir: None,
             permission_mode: crate::config::PermissionMode::Yolo,
