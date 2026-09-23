@@ -441,7 +441,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "walkthrough_start",
-            description: "Open a file tour for the operator: steps is one start:end:explanation header per step, file resolves against the session cwd. The overlay opens on the tour at once. Explanations render as Markdown and may span lines: indent continuation lines with one space (it is stripped, so Markdown nesting survives) and use blank lines for paragraph breaks. Write each explanation like a coworker walking through their code out loud: context, what these lines do, and why it matters — never a bare label.",
+            description: "When the operator / user asks to walk through code, open a file tour for the operator: steps is one start:end:explanation header per step, file resolves against the session cwd. The overlay opens on the tour at once. Explanations render as Markdown and may span lines: indent continuation lines with one space (it is stripped, so Markdown nesting survives) and use blank lines for paragraph breaks. Write each explanation like a coworker walking through their code out loud: context, what these lines do, and why it matters — never a bare label.",
             schema: r#"{"type":"object","properties":{"file":{"type":"string"},"steps":{"type":"string"},"title":{"type":"string"}},"required":["file","steps"]}"#,
         },
         ToolDef {
@@ -513,7 +513,7 @@ fn tool_defs() -> Vec<ToolDef> {
         #[cfg(feature = "visual")]
         ToolDef {
             name: "visual_show",
-            description: "Render a diagram into your Visual tab: content is the diagram source, format is mermaid (only), title and alt label it for the operator.",
+            description: "When the user asks to visualize code, plan, etc, render a diagram into your Visual tab: content is the diagram source, format is mermaid (only), title and alt label it for the operator.",
             schema: r#"{"type":"object","properties":{"content":{"type":"string"},"format":{"type":"string"},"title":{"type":"string"},"alt":{"type":"string"}},"required":["content"]}"#,
         },
     ]
@@ -614,16 +614,34 @@ pub fn handle_line(
 }
 
 /// Resolve the broker endpoint: an explicit flag wins, otherwise the
-/// inherited environment. A per-session route file supersedes stale
-/// inheritance only for remote sessions (Phase 8); locally the inherited
-/// endpoint is always fresh because panes spawn after the listener.
+/// inherited environment, otherwise the TUI's live-endpoint file (for
+/// harnesses launched outside Forge panes, where neither flag nor
+/// environment exists — same fallback `hook-relay` uses). A per-session
+/// route file supersedes stale inheritance only for remote sessions
+/// (Phase 8); locally the inherited endpoint is always fresh because
+/// panes spawn after the listener.
 pub fn resolve_endpoint(explicit: Option<&str>) -> Option<String> {
+    resolve_endpoint_from(
+        explicit,
+        std::env::var("FORGE_IPC_ENDPOINT").ok(),
+        crate::relay::file_endpoint().map(|(_, sock)| sock),
+    )
+}
+
+/// Precedence core for [`resolve_endpoint`], kept free of environment
+/// reads so tests can pin the layering without process-global state.
+fn resolve_endpoint_from(
+    explicit: Option<&str>,
+    env: Option<String>,
+    file_sock: Option<String>,
+) -> Option<String> {
     if let Some(p) = explicit.filter(|p| !p.is_empty()) {
         return Some(p.to_string());
     }
-    std::env::var("FORGE_IPC_ENDPOINT")
-        .ok()
-        .filter(|p| !p.is_empty())
+    if let Some(p) = env.filter(|p| !p.is_empty()) {
+        return Some(p);
+    }
+    file_sock.filter(|p| !p.is_empty())
 }
 
 /// One `tools/call` over the IPC socket: send the comms record, await the
@@ -1125,17 +1143,30 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_resolution_prefers_explicit_over_env() {
-        std::env::set_var("FORGE_IPC_ENDPOINT", "/tmp/from-env.sock");
+    fn endpoint_resolution_prefers_explicit_over_env_over_file() {
+        let env = Some("/tmp/from-env.sock".to_string());
+        let file = Some("/tmp/from-file.sock".to_string());
         assert_eq!(
-            resolve_endpoint(Some("/tmp/explicit.sock")),
+            resolve_endpoint_from(
+                Some("/tmp/explicit.sock"),
+                env.clone(),
+                file.clone()
+            ),
             Some("/tmp/explicit.sock".to_string())
         );
         assert_eq!(
-            resolve_endpoint(None),
+            resolve_endpoint_from(None, env.clone(), file.clone()),
             Some("/tmp/from-env.sock".to_string())
         );
-        std::env::remove_var("FORGE_IPC_ENDPOINT");
-        assert_eq!(resolve_endpoint(None), None);
+        assert_eq!(
+            resolve_endpoint_from(None, None, file.clone()),
+            Some("/tmp/from-file.sock".to_string())
+        );
+        assert_eq!(resolve_endpoint_from(None, None, None), None);
+        assert_eq!(
+            resolve_endpoint_from(None, Some(String::new()), Some(String::new())),
+            None,
+            "empty layers fall through instead of resolving to nothing"
+        );
     }
 }
