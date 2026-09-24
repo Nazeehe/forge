@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forge Help — Terminal Control Plane for AI Coding Agents</title>
+<style>
+  :root {
+    --ink: #1c1917;
+    --muted: #57534e;
+    --line: #e7e5e4;
+    --paper: #ffffff;
+    --wash: #f5f4f2;
+    --amber: #b45309;
+    --amber-wash: #fef3e2;
+    --green: #15803d;
+    --code: #292524;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background: var(--paper);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .shell { display: flex; max-width: 1100px; margin: 0 auto; }
+  nav {
+    flex: 0 0 230px;
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+    max-height: 100vh;
+    overflow: auto;
+    padding: 32px 20px 32px 24px;
+    border-right: 1px solid var(--line);
+    font-size: 14px;
+  }
+  nav .brand { font-weight: 700; font-size: 17px; margin-bottom: 2px; }
+  nav .brand span { color: var(--amber); }
+  nav .ver { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; }
+  nav a { display: block; color: var(--muted); text-decoration: none; padding: 3px 0; }
+  nav a:hover { color: var(--amber); }
+  main { flex: 1; min-width: 0; padding: 36px 40px 80px; }
+  main > h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .lede { color: var(--muted); font-size: 16px; margin: 0 0 28px; max-width: 62ch; }
+  section { margin-bottom: 40px; max-width: 72ch; }
+  h2 {
+    font-size: 21px;
+    margin: 0 0 10px;
+    padding-top: 18px;
+    border-top: 2px solid var(--ink);
+  }
+  h3 { font-size: 16px; margin: 20px 0 6px; }
+  p { margin: 8px 0; }
+  ul, ol { margin: 8px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  kbd {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    background: var(--wash);
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 6px;
+    padding: 1px 7px;
+    white-space: nowrap;
+  }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13.5px;
+    background: var(--wash);
+    border-radius: 5px;
+    padding: 1px 5px;
+  }
+  pre {
+    background: var(--code);
+    color: #f5f4f2;
+    border-radius: 10px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 13.5px;
+    line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  pre .c { color: #a8a29e; }
+  .note {
+    background: var(--amber-wash);
+    border: 1px solid #f0d9b5;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 14.5px;
+  }
+  .ok { color: var(--green); font-weight: 600; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 48px; }
+  :root[data-theme="dark"] {
+    --ink: #e7e5e4;
+    --muted: #a8a29e;
+    --line: #44403c;
+    --paper: #1c1917;
+    --wash: #292524;
+    --amber: #f0a020;
+    --amber-wash: #3a2a12;
+    --green: #4ade80;
+    --code: #0c0a09;
+  }
+  :root[data-theme="dark"] .note { border-color: #6b4d1f; }
+  :root[data-theme="dark"] pre .c { color: #78716c; }
+  #theme-toggle {
+    font: inherit;
+    font-size: 13px;
+    color: var(--muted);
+    background: var(--wash);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 3px 12px;
+    margin-bottom: 14px;
+    cursor: pointer;
+  }
+  #theme-toggle:hover { color: var(--amber); border-color: var(--amber); }
+  @media (max-width: 760px) {
+    .shell { display: block; }
+    nav { position: static; border-right: none; border-bottom: 1px solid var(--line); max-height: none; }
+    main { padding: 24px 20px 60px; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+<nav>
+  <div class="brand">Forge <span>Help</span></div>
+  <div class="ver">Terminal control plane for AI coding agents</div>
+  <button id="theme-toggle" type="button">Dark mode</button>
+  <a href="#start">Start, quit &amp; restore</a>
+  <a href="#keys">Key map</a>
+  <a href="#sessions">Sessions</a>
+  <a href="#groups">Groups</a>
+  <a href="#permissions">Permissions</a>
+  <a href="#telegram">Telegram</a>
+  <a href="#themes">Themes</a>
+  <a href="#restore">Restore in detail</a>
+  <a href="#mouse">Mouse &amp; paste</a>
+  <a href="#sidebar">Sidebar &amp; fleet</a>
+  <a href="#cli">Command line</a>
+  <a href="#files">Files</a>
+  <a href="#faq">Troubleshooting</a>
+</nav>
+<main>
+  <h1>Forge Help</h1>
+  <p class="lede">Forge hosts your AI coding sessions side by side in one terminal:
+  spawn agents, watch them work, group them so they can coordinate, and gate
+  what they may do without asking. Everything below starts from one chord:
+  hold <kbd>Ctrl</kbd>, press <kbd>b</kbd>, release both, then press the
+  command key. <kbd>Esc</kbd> cancels a pending chord.</p>
+
+  <section id="start">
+    <h2>Start, quit &amp; restore</h2>
+    <p>Launch with <code>forge</code>. Quitting is a two-step handshake so you
+    never lose work by accident:</p>
+    <ol>
+      <li>Press <kbd>Ctrl-b</kbd> <kbd>q</kbd> — a confirm modal opens (<kbd>No</kbd> is the default).</li>
+      <li>Choose <kbd>Yes</kbd> (or <kbd>y</kbd>) — a <em>Saving sessions…</em> modal
+      appears while every live agent session is snapshotted, then Forge exits.</li>
+    </ol>
+    <p>Next launch offers the snapshot back in a restore picker:
+    <kbd>Enter</kbd> relaunches each session with its resume command,
+    <kbd>Esc</kbd> starts fresh. Quitting with no live sessions leaves the
+    saved file untouched, so an old snapshot survives an empty quit.</p>
+  </section>
+
+  <section id="keys">
+    <h2>Key map</h2>
+    <p>All bindings are <kbd>Ctrl-b</kbd> followed by the key. Hold
+    <kbd>Ctrl-b</kbd> for a quarter second to see them in-app, or press
+    <kbd>Ctrl-b</kbd> <kbd>?</kbd> to pin the list. This manual lives on
+    <kbd>Ctrl-b</kbd> <kbd>h</kbd>.</p>
+    <table>
+      <tr><th>Key</th><th>Does</th></tr>
+      <tr><td><kbd>c</kbd></td><td>New session dialog</td></tr>
+      <tr><td><kbd>n</kbd> / <kbd>p</kbd></td><td>Next / previous session</td></tr>
+      <tr><td><kbd>1</kbd>–<kbd>9</kbd></td><td>Jump to session by its bar number</td></tr>
+      <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Fleet cursor down / up</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>Activate the fleet cursor</td></tr>
+      <tr><td><kbd>x</kbd></td><td>Terminate session (asks first)</td></tr>
+      <tr><td><kbd>g</kbd></td><td>Manage groups</td></tr>
+      <tr><td><kbd>t</kbd></td><td>Switch the session's tab (agent / terminal)</td></tr>
+      <tr><td><kbd>w</kbd></td><td>Toggle grid: tile every session at once</td></tr>
+      <tr><td><kbd>y</kbd></td><td>Toggle permission mode Off / YOLO</td></tr>
+      <tr><td><kbd>m</kbd></td><td>Telegram settings</td></tr>
+      <tr><td><kbd>e</kbd></td><td>Theme picker</td></tr>
+      <tr><td><kbd>h</kbd></td><td>This manual</td></tr>
+      <tr><td><kbd>q</kbd></td><td>Quit (asks first, then saves)</td></tr>
+      <tr><td><kbd>?</kbd></td><td>Pin the key list</td></tr>
+    </table>
+  </section>
+
+  <section id="sessions">
+    <h2>Sessions</h2>
+    <h3>Creating one</h3>
+    <p><kbd>Ctrl-b</kbd> <kbd>c</kbd> opens the dialog. Fill in
+    <em>Directory</em> (prefilled with the current one), <em>Name</em>, pick
+    the agent <em>Tool</em> (Claude, Codex, Muse, …), optionally join a
+    <em>Group</em>, and submit. Forge spawns the agent in a pane and focuses it.</p>
+<pre><code><span class="c"># Example: start a docs session in ~/site with Codex</span>
+Ctrl-b c  →  Directory: ~/site  →  Name: docs  →  Tool: codex  →  Enter</code></pre>
+    <h3>Switching</h3>
+    <ul>
+      <li><kbd>Ctrl-b</kbd> <kbd>n</kbd> / <kbd>p</kbd> steps through sessions.</li>
+      <li><kbd>Ctrl-b</kbd> <kbd>1</kbd>–<kbd>9</kbd> jumps by the number shown in the bottom bar.</li>
+      <li>Move the fleet cursor with <kbd>Ctrl-b</kbd> <kbd>j</kbd>/<kbd>k</kbd>, open it with <kbd>Ctrl-b</kbd> <kbd>Enter</kbd>.</li>
+      <li>Click any tab, bar number, or pane to focus it with the mouse.</li>
+    </ul>
+    <h3>Tabs, grid, kill</h3>
+    <ul>
+      <li><kbd>Ctrl-b</kbd> <kbd>t</kbd> flips the focused session between its agent view and a plain terminal.</li>
+      <li><kbd>Ctrl-b</kbd> <kbd>w</kbd> tiles every session in a grid; repeat to return to one pane.</li>
+      <li><kbd>Ctrl-b</kbd> <kbd>x</kbd> asks <em>Are you sure you want to kill this session?</em> —
+      <kbd>Yes</kbd> leaves its groups, fails its queued work loudly, and drops it from the UI.</li>
+    </ul>
+    <div class="note">The bottom bar always lists <strong>ungrouped sessions first</strong>,
+    grouped ones after. Bar numbers follow that order, so digit <kbd>1</kbd> is always the leftmost entry.</div>
+  </section>
+
+  <section id="groups">
+    <h2>Groups</h2>
+    <p><kbd>Ctrl-b</kbd> <kbd>g</kbd> opens group management: create a group,
+    add or remove member sessions, rename it, or delete it. Joining a group at
+    session-creation time works too, via the dialog's <em>Group</em> picker.</p>
+    <p>Sessions in a group share a channel: queued peer messages deliver when a
+    session goes idle, so a fleet can hand work to whoever finishes first.</p>
+<pre><code><span class="c"># Example: a review fleet</span>
+Ctrl-b c  →  Name: writer   →  Group: review  →  Enter
+Ctrl-b c  →  Name: checker  →  Group: review  →  Enter</code></pre>
+  </section>
+
+  <section id="permissions">
+    <h2>Permissions</h2>
+    <p>Forge gates tool calls through hooks before the harness runs them. Four modes:</p>
+    <table>
+      <tr><th>Mode</th><th>Meaning</th></tr>
+      <tr><td>Off</td><td>Every ask goes back to the harness — the agent prompts you itself.</td></tr>
+      <tr><td>Safe-Only</td><td>Block patterns first, then allow patterns and safe reads; anything else asks. A block always wins, even over a matching allow.</td></tr>
+      <tr><td>YOLO</td><td>Everything is allowed without asking.</td></tr>
+      <tr><td>AI-Assisted</td><td>Reserved for a judging classifier; currently asks like Off.</td></tr>
+    </table>
+    <p><kbd>Ctrl-b</kbd> <kbd>y</kbd> flips between Off and YOLO, and the
+    sidebar <kbd>Off</kbd>/<kbd>Yolo</kbd> buttons set those two directly
+    with the mouse or keyboard. Safe-Only and AI-Assisted are config-file
+    only: set <code>mode</code> (one of <code>off</code>,
+    <code>safe-only</code>, <code>ai-assisted</code>, <code>yolo</code>) plus
+    <code>allow</code>/<code>block</code> patterns in
+    <code>~/.forge/config.toml</code> under <code>[permission]</code>. Every
+    verdict is appended to <code>~/.forge/audit.log</code> (owner-only).</p>
+<pre><code><span class="c"># Example: let listings through, never deletions</span>
+[permission]
+mode = "safe-only"
+allow = ["^ls", "^git status"]
+block = ["^rm -rf"]</code></pre>
+  </section>
+
+  <section id="telegram">
+    <h2>Telegram</h2>
+    <p><kbd>Ctrl-b</kbd> <kbd>m</kbd> opens Telegram settings: paste your bot
+    token, allowlist your user id, enable delivery, save. Forge then forwards
+    session output and attention pings to your phone; reply to a message
+    natively (or with <code>[name]</code>) to message that session back. The
+    sidebar shows delivery state (<span class="ok">on</span>, retrying,
+    failed) so a dead token never fails silently.</p>
+  </section>
+
+  <section id="themes">
+    <h2>Themes</h2>
+    <p><kbd>Ctrl-b</kbd> <kbd>e</kbd> opens the theme picker over the builtin
+    <em>default</em> plus every valid <code>theme.json</code> under
+    <code>~/.forge/themes</code>. Drop a file there to add your own — broken
+    files warn and are skipped, never hiding the rest. The choice persists
+    across restarts.</p>
+  </section>
+
+  <section id="restore">
+    <h2>Restore in detail</h2>
+    <p>The quit snapshot records each live agent session: name, tool, working
+    directory, groups, and the harness conversation id. Restoring relaunches
+    each with its resume command and rejoins its groups. Entries whose
+    directory vanished are skipped with a reason instead of failing the batch,
+    and quitting twice with the same layout refreshes the newest entry rather
+    than stacking duplicates.</p>
+  </section>
+
+  <section id="mouse">
+    <h2>Mouse &amp; paste</h2>
+    <ul>
+      <li>Click top-bar tabs, session-bar numbers, sidebar rows, and dialog buttons — every keyboard action has a mouse twin.</li>
+      <li>An open modal owns the mouse: clicks behind it do nothing.</li>
+      <li>Pasting into a pane uses bracketed paste when the pane wants it, so multiline text lands intact.</li>
+    </ul>
+  </section>
+
+  <section id="sidebar">
+    <h2>Sidebar &amp; fleet</h2>
+    <p>The sidebar shows the focused session's detail (tool, directory, state,
+    status) above the fleet: every session with its attention state. Idle
+    sessions queue peer messages and timer pings; twenty silent minutes marks
+    you away to every live session, and your next keystroke announces the return.</p>
+  </section>
+
+  <section id="cli">
+    <h2>Command line</h2>
+    <p>Beyond the TUI, the <code>forge</code> binary registers itself with
+    agent CLIs and serves their hooks:</p>
+<pre><code>forge --version | --help
+forge hook-relay [endpoint]   <span class="c"># one hook event from stdin; always exits 0</span>
+forge mcp-serve               <span class="c"># JSON-RPC comms server on stdio</span>
+forge install-hooks | install-mcp | install-skills
+forge uninstall-hooks | uninstall-mcp | uninstall-skills
+forge install-codex|gemini|metamate   <span class="c"># full per-harness setup</span></code></pre>
+  </section>
+
+  <section id="files">
+    <h2>Files</h2>
+    <table>
+      <tr><th>Path</th><th>Holds</th></tr>
+      <tr><td><code>~/.forge/config.toml</code></td><td>Permission mode and patterns, Telegram, bots, themes</td></tr>
+      <tr><td><code>~/.forge/sessions</code></td><td>Quit snapshots for the restore picker</td></tr>
+      <tr><td><code>~/.forge/audit.log</code></td><td>One line per hook verdict (owner-only)</td></tr>
+      <tr><td><code>~/.forge/forge.log</code></td><td>Rotating application log</td></tr>
+      <tr><td><code>~/.forge/agents.json</code></td><td>Agent CLI registry (harness binaries and hooks)</td></tr>
+      <tr><td><code>~/.forge/AGENTS.md</code></td><td>Configuration guide for AI agents</td></tr>
+      <tr><td><code>~/.forge/themes/</code></td><td>Custom <code>theme.json</code> files</td></tr>
+    </table>
+  </section>
+
+  <section id="faq">
+    <h2>Troubleshooting</h2>
+    <h3>No browser opened</h3>
+    <p>Help opens via <code>xdg-open</code>. If nothing appears, open
+    <code>/tmp/forge-help.html</code> yourself — Forge rewrites it on every
+    <kbd>Ctrl-b</kbd> <kbd>h</kbd>, so it is always current.</p>
+    <h3>A session wedged after its first tool call</h3>
+    <p>That is the turn-end edge missing: Forge tracks turn state through the
+    Stop hook. Re-run <code>forge install-hooks</code> and restart the session.</p>
+    <h3>Restore offers a stale entry</h3>
+    <p>Pick it and let missing directories skip, or quit empty once with the
+    picker dismissed — empty quits never clobber saved entries.</p>
+  </section>
+
+  <footer>Forge Help — extracted to <code>/tmp/forge-help.html</code> on every open. Press <code>Ctrl-b h</code> in Forge to see this page.</footer>
+</main>
+</div>
+<script>
+(function () {
+  var root = document.documentElement;
+  var btn = document.getElementById("theme-toggle");
+  function paint() {
+    btn.textContent = root.getAttribute("data-theme") === "dark" ? "Light mode" : "Dark mode";
+  }
+  function set(theme) {
+    if (theme === "dark") { root.setAttribute("data-theme", "dark"); }
+    else { root.removeAttribute("data-theme"); }
+    try { localStorage.setItem("forge-help-theme", theme); } catch (e) {}
+    paint();
+  }
+  var saved = null;
+  try { saved = localStorage.getItem("forge-help-theme"); } catch (e) {}
+  set(saved === "dark" || (!saved && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light");
+  btn.addEventListener("click", function () {
+    set(root.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  });
+})();
+</script>
+</body>
+</html>
