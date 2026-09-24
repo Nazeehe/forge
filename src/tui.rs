@@ -900,6 +900,11 @@ fn fire_command(state: &mut AppState, cmd: UserCommand) {
             let themes = state.available_themes();
             state.open_theme_dialog(themes);
         }
+        UserCommand::HelpManual => {
+            if let Err(e) = crate::help::open() {
+                eprintln!("warning: cannot open help manual: {e}");
+            }
+        }
         }
 }
 

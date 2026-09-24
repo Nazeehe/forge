@@ -299,14 +299,14 @@ impl RestorePicker {
             } else {
                 "sessions"
             };
-            let meta = format!(
+            let detail = format!(
                 "({} {noun} · {})",
                 entry.sessions.len(),
                 age_string(entry.saved_at_unix, now)
             );
             // Metadata is the load-bearing part; the label yields.
-            let room = (cw as usize).saturating_sub(3 + meta.chars().count());
-            let line = format!("{mark} {} {meta}", crate::groups::fit_row(&entry.label, room));
+            let room = (cw as usize).saturating_sub(3 + detail.chars().count());
+            let line = format!("{mark} {} {detail}", crate::groups::fit_row(&entry.label, room));
             let style = if index == self.selected {
                 crate::theme::style(crate::theme::Role::Focus)
             } else {

@@ -3130,10 +3130,28 @@ impl AppState {
     /// Focus session by order index (`Ctrl-b 1` is index 0). Returns false
     /// when out of range, leaving focus untouched.
     pub fn select_session(&mut self, index: usize) -> bool {
-        match self.manager.order().to_vec().get(index) {
+        match self.bar_order().get(index) {
             Some(&id) => self.focus_session(id),
             None => false,
         }
+    }
+
+    /// Session-bar order: ungrouped sessions left, grouped sessions
+    /// after, each side keeping manager order. The bar, its digits,
+    /// and bar clicks all resolve through here, so the numbers never
+    /// lie about what they select.
+    fn bar_order(&self) -> Vec<crate::session::SessionId> {
+        let mut ungrouped = Vec::new();
+        let mut grouped = Vec::new();
+        for id in self.manager.order().to_vec() {
+            if self.broker.primary_group(id).is_none() {
+                ungrouped.push(id);
+            } else {
+                grouped.push(id);
+            }
+        }
+        ungrouped.extend(grouped);
+        ungrouped
     }
 
     /// Focus a session by id: switch, clear its unread pings (attention
@@ -3296,9 +3314,7 @@ impl AppState {
     /// Session-bar tabs in order with live/focus flags.
     pub fn tabs(&self) -> Vec<crate::ui::SessionTab> {
         let active = self.manager.active();
-        self.manager
-            .order()
-            .to_vec()
+        self.bar_order()
             .into_iter()
             .filter_map(|id| {
                 self.manager.get(id).map(|rec| {
@@ -5826,6 +5842,30 @@ mod tests {
         assert_eq!(tabs.len(), 2);
         assert!(tabs[0].focused && !tabs[1].focused);
         assert_eq!(s.sidebar_info().pending, 0);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn bar_keeps_ungrouped_sessions_left_of_grouped() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "team").unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        // Manager order is [a, b], but the bar shows ungrouped first.
+        let titles: Vec<_> = s.tabs().iter().map(|t| t.title.clone()).collect();
+        assert_eq!(titles, vec!["b".to_string(), "a".to_string()]);
+        // Digits follow the bar, not the manager order.
+        assert!(s.select_session(0));
+        assert_eq!(s.manager.active(), Some(b));
+        assert!(s.select_session(1));
+        assert_eq!(s.manager.active(), Some(a));
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
     }
@@ -8567,7 +8607,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&token_path).expect("meta").permissions().mode();
+            let mode = std::fs::metadata(&token_path).expect("token metadata").permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "token file is owner-only");
         }
         let _ = std::fs::remove_dir_all(&home);

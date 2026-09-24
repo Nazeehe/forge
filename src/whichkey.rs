@@ -175,7 +175,9 @@ pub fn layout(term_w: u16) -> HudLayout {
         let desc_w = items.iter().map(|e| display_width(e.desc)).max().unwrap_or(0);
         let cell_w = key_w + display_width(KEY_GAP) + desc_w;
         let cols = ((inner_cap + COL_GAP) / (cell_w + COL_GAP).max(1)).max(1) as usize;
-        let cols = cols.min(items.len()).max(1);
+        // Two columns stay scannable at any width: wider groups wrap
+        // to more rows instead of sprawling sideways.
+        let cols = cols.min(items.len()).max(1).min(2);
         let rows = items.len().div_ceil(cols);
         groups.push(GroupLayout { name, cols, rows, cell_w });
     }
@@ -463,7 +465,7 @@ mod tests {
         // The big group stacks; a pair only where it still fits.
         let session = plan.groups.iter().find(|g| g.name == "Session").expect("session group");
         assert_eq!(session.cols, 1, "the wide group must stack at 40");
-        assert_eq!(plan.height, 24, "pinned plan height at 40");
+        assert_eq!(plan.height, 25, "pinned plan height at 40");
     }
 
     #[test]

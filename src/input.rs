@@ -74,6 +74,7 @@ pub static PREFIX_BINDINGS: &[PrefixBinding] = &[
     PrefixBinding { label: "m", desc: "Telegram settings", group: "Settings", invokes: PrefixInvoke::Command('m', UserCommand::TelegramSettings) },
     PrefixBinding { label: "e", desc: "Theme picker", group: "Settings", invokes: PrefixInvoke::Command('e', UserCommand::ThemePicker) },
     PrefixBinding { label: "q", desc: "Quit", group: "App", invokes: PrefixInvoke::Command('q', UserCommand::Quit) },
+    PrefixBinding { label: "h", desc: "Help manual", group: "App", invokes: PrefixInvoke::Command('h', UserCommand::HelpManual) },
     PrefixBinding { label: "?", desc: "All keys", group: "App", invokes: PrefixInvoke::Help },
 ];
 
@@ -108,6 +109,9 @@ pub enum UserCommand {
     TelegramSettings,
     /// Open the theme picker (`theme.json` files under `~/.forge/themes`).
     ThemePicker,
+    /// Extract the embedded HTML manual to /tmp and open it in the
+    /// default browser.
+    HelpManual,
 }
 
 /// Encode a forwarded key as PTY input bytes (xterm-style). `app_cursor`
@@ -588,6 +592,17 @@ mod tests {
             }
         }
         assert_eq!(structural, 3, "the Digit, Enter, and Help rows");
+    }
+
+    #[test]
+    fn prefix_h_routes_to_help_manual() {
+        let mut r = InputRouter::new();
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('h'))),
+            RoutedKey::Command(UserCommand::HelpManual)
+        );
+        assert!(!r.is_pending(), "help resolves the prefix like a command");
     }
 
     #[test]

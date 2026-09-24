@@ -17,6 +17,7 @@ mod event;
 mod fs_atomic;
 mod groups;
 mod harness;
+mod help;
 mod ids;
 mod input;
 mod install;
