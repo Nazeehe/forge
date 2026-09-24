@@ -387,7 +387,9 @@ fn loop_until_quit(
             match event::read()? {
                 event::Event::Key(key) => {
                     input_this_tick = true;
-                    if state.restore_picker.is_some() {
+                    if state.oobe_dialog.is_some() {
+                        handle_oobe_key(state, home, key);
+                    } else if state.restore_picker.is_some() {
                         handle_restore_key(state, key);
                     } else if state.create_dialog.is_some() {
                         handle_dialog_key(state, key);
@@ -405,7 +407,12 @@ fn loop_until_quit(
                 }
                 event::Event::Mouse(mev) => {
                     input_this_tick = true;
-                    if state.telegram_dialog.is_some() {
+                    if state.oobe_dialog.is_some() {
+                        // The first-run dialog owns the mouse like every
+                        // other modal: clicks inside hit rows/buttons,
+                        // everything else dies here.
+                        handle_oobe_mouse(state, home, mev);
+                    } else if state.telegram_dialog.is_some() {
                         // The settings modal owns the mouse like every
                         // other modal: clicks inside hit rows/buttons,
                         // everything else dies here.
@@ -423,7 +430,8 @@ fn loop_until_quit(
                         // every other modal still swallows pastes.
                         dialog.paste(&text);
                         state.dirty = true;
-                    } else if state.restore_picker.is_none()
+                    } else if state.oobe_dialog.is_none()
+                        && state.restore_picker.is_none()
                         && state.create_dialog.is_none()
                         && state.group_dialog.is_none()
                         && state.theme_dialog.is_none()
@@ -571,6 +579,11 @@ fn loop_until_quit(
                 }
                 if let Some(picker) = state.restore_picker.as_ref() {
                     picker.view(f, crate::checkpoint::RestorePicker::picker_area(area));
+                }
+                // First run sits above every other modal (below the tour):
+                // it owns input while present, so it paints on top.
+                if let Some(dialog) = state.oobe_dialog.as_ref() {
+                    dialog.view(f, crate::oobe::oobe_area(area));
                 }
                 // The tour takes over the main area above every dialog:
                 // it is opaque and owns input while open.
@@ -1105,6 +1118,65 @@ fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
     }
 }
 
+/// Binary path the hook commands point at: this exe, like the
+/// install-* subcommands in `main.rs`.
+fn forge_binary_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "forge".to_string())
+}
+
+/// One first-run outcome: Setup installs hooks for the pick. A clean
+/// sweep (every pick installed) closes at once; anything else (a skip
+/// like pi, an already-set-up entry, an error) reopens the dialog in
+/// results mode so the miss is visible instead of silent. Esc closes
+/// bare. `install-*` remains the repair path.
+fn settle_oobe_outcome(
+    state: &mut AppState,
+    home: &std::path::Path,
+    outcome: Option<crate::oobe::OobeOutcome>,
+) {
+    match outcome {
+        Some(crate::oobe::OobeOutcome::Submitted(ids)) => {
+            let outs = crate::oobe::install_selected(home, &ids, &forge_binary_path());
+            if outs.iter().all(|o| o.installed) {
+                state.oobe_dialog = None;
+            } else {
+                state.oobe_dialog =
+                    Some(crate::oobe::OobeDialog::results(outs, state.pill_tabs));
+            }
+            state.dirty = true;
+        }
+        Some(crate::oobe::OobeOutcome::Dismissed) => {
+            state.oobe_dialog = None;
+            state.dirty = true;
+        }
+        _ => {
+            state.dirty = true;
+        }
+    }
+}
+
+/// One first-run key: Enter installs hooks for the checked CLIs.
+fn handle_oobe_key(state: &mut AppState, home: &std::path::Path, key: event::KeyEvent) {
+    let outcome = state.oobe_dialog.as_mut().map(|d| d.key(&key));
+    settle_oobe_outcome(state, home, outcome);
+}
+
+/// One first-run click: a CLI row toggles, the Setup button installs.
+fn handle_oobe_mouse(state: &mut AppState, home: &std::path::Path, mev: event::MouseEvent) {
+    if !matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+        return;
+    }
+    let (rows, cols) = state.term_size;
+    let area = crate::oobe::oobe_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let outcome = state
+        .oobe_dialog
+        .as_mut()
+        .map(|d| d.click(mev.column, mev.row, area));
+    settle_oobe_outcome(state, home, outcome);
+}
+
 /// One quit-save step, after the saving modal paints: persist the live
 /// sessions once, then let the loop exit. Failures warn instead of
 /// failing the exit, like the post-loop save. Returns true when a
@@ -1205,6 +1277,11 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     // Modals own mouse input. Only a left press inside the group dialog
     // reaches its List/Checkbox rows; clicks behind it do nothing.
     // The restore picker is keyboard-only: every click dies here.
+    // The first-run dialog owns its mouse via handle_oobe_mouse (like
+    // Telegram settings); anything reaching here dies.
+    if state.oobe_dialog.is_some() {
+        return;
+    }
     if state.restore_picker.is_some() {
         return;
     }
@@ -3115,6 +3192,150 @@ mod tests {
         assert_ne!(state.manager.active(), Some(victim));
         let survivor = state.manager.active().unwrap();
         assert!(state.manager.remove(survivor));
+    }
+
+    #[test]
+    fn oobe_enter_installs_hooks_for_all_and_closes() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let home = std::env::temp_dir().join(format!(
+            "forge-oobe-wire-{}-enter",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        state.open_oobe_dialog();
+        assert!(state.oobe_dialog.is_some(), "first run opens setup");
+        // Uncheck codex, muse, and copilot: claude and gemini install
+        // from pure home-relative paths, pi skips, and the test never
+        // consults CODEX_HOME, COPILOT_HOME, or real config paths.
+        let none = KeyModifiers::NONE;
+        for _ in 0..2 {
+            handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
+            handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Char(' '), none));
+        }
+        handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
+        handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
+        handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Char(' '), none));
+        handle_oobe_key(
+            &mut state,
+            &home,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        // Pi skips, so Setup lands on the results screen instead of
+        // closing: the skip must be visible, not silent.
+        assert!(state.oobe_dialog.is_some(), "results open");
+        assert!(
+            state.oobe_dialog.as_ref().is_some_and(|d| d.done()),
+            "results mode"
+        );
+        let text =
+            std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        assert!(text.contains("hook-relay"), "hooks installed: {text}");
+        let gemini =
+            std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap();
+        assert!(gemini.contains("hook-relay"), "gemini installed: {gemini}");
+        assert!(
+            !home.join(".codex/hooks.json").exists(),
+            "unchecked CLI untouched"
+        );
+        assert!(
+            !home.join(".config/muse/settings.json").exists(),
+            "unchecked CLI untouched"
+        );
+        assert!(
+            !home.join(".copilot/hooks/forge.json").exists(),
+            "unchecked CLI untouched"
+        );
+        // Done closes the results.
+        handle_oobe_key(
+            &mut state,
+            &home,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(state.oobe_dialog.is_none(), "results close");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn oobe_all_installed_closes_without_results() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let home = std::env::temp_dir().join(format!(
+            "forge-oobe-wire-{}-clean",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        state.open_oobe_dialog();
+        // Uncheck everything but claude: a clean install closes at once.
+        let none = KeyModifiers::NONE;
+        for _ in 0..5 {
+            handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
+            handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Char(' '), none));
+        }
+        handle_oobe_key(
+            &mut state,
+            &home,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(state.oobe_dialog.is_none(), "clean setup closes");
+        let text =
+            std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        assert!(text.contains("hook-relay"), "hooks installed: {text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn oobe_esc_skips_without_touching_home() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let home = std::env::temp_dir().join(format!(
+            "forge-oobe-wire-{}-esc",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        state.open_oobe_dialog();
+        handle_oobe_key(
+            &mut state,
+            &home,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert!(state.oobe_dialog.is_none(), "skip closes");
+        assert!(
+            !home.join(".claude/settings.json").exists(),
+            "no hooks installed"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn oobe_swallows_clicks_behind_the_modal() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        spawn_shell_cmd(&mut state, "exec sleep 30");
+        state.open_oobe_dialog();
+        // Session-bar click that would switch sessions with no modal.
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 15,
+                row: 23,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        let order = state.manager.order().to_vec();
+        assert_eq!(state.manager.active(), Some(order[0]), "click died");
+        assert!(state.oobe_dialog.is_some(), "setup stays open");
+        assert!(state.manager.remove(order[0]));
+        assert!(state.manager.remove(order[1]));
     }
 
     #[test]

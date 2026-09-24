@@ -112,6 +112,9 @@ pub struct AppState {
     /// Generic Yes/No confirmation modal (quit forge, kill a session).
     /// Captures all input while present; No is the default.
     pub confirm: Option<crate::quit::Confirm>,
+    /// First-run setup dialog, if this boot found no `~/.forge`.
+    /// Captures all input while present, above every other modal.
+    pub oobe_dialog: Option<crate::oobe::OobeDialog>,
     /// "Saving sessions..." modal, shown after Yes while the quit
     /// snapshot persists. The loop saves, then exits.
     pub quit_saving: bool,
@@ -333,6 +336,7 @@ impl AppState {
             group_dialog: None,
             restore_picker: None,
             confirm: None,
+            oobe_dialog: None,
             quit_saving: false,
             theme_dialog: None,
             themes_dir: None,
@@ -2718,6 +2722,12 @@ impl AppState {
     /// Open the group management dialog.
     pub fn open_group_dialog(&mut self) {
         self.group_dialog = Some(crate::groups::GroupDialog::new());
+        self.dirty = true;
+    }
+
+    /// Open the first-run setup dialog (all CLIs checked).
+    pub fn open_oobe_dialog(&mut self) {
+        self.oobe_dialog = Some(crate::oobe::OobeDialog::new(self.pill_tabs));
         self.dirty = true;
     }
 

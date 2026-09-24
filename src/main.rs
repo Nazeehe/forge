@@ -24,6 +24,7 @@ mod install;
 mod listener;
 mod logging;
 mod mcp;
+mod oobe;
 mod paths;
 mod policy;
 mod pty;
@@ -92,7 +93,7 @@ fn print_help() {
     println!("  mcp-serve [--endpoint PATH]  JSON-RPC comms server on stdio for harnesses");
     println!("  install-hooks | install-mcp | install-skills  register forge with all harnesses");
     println!("  uninstall-hooks | uninstall-mcp | uninstall-skills  remove forge registration");
-    println!("  install-codex|gemini|metamate  full per-harness install (uninstall-* reverses)");
+    println!("  install-codex|gemini|copilot|pi|metamate  full per-harness install (uninstall-* reverses)");
 }
 
 /// Print installer outcomes, one line each. Skips are not failures; only
@@ -132,6 +133,9 @@ fn home_dir() -> std::path::PathBuf {
 /// configuration, mint the launch run ID. The TUI takes over in Phase 2.
 fn startup() -> i32 {
     let home = home_dir();
+    // First run is decided before anything materializes `~/.forge`
+    // below: its absence means Forge never ran.
+    let first_run = crate::oobe::is_first_run(&home);
     match config::migrate_legacy(&home) {
         Ok(config::Migration::Migrated) => eprintln!(
             "migrated legacy config to {}",
@@ -208,6 +212,11 @@ fn startup() -> i32 {
         ));
     }
     let mut state = app::AppState::new();
+    // Greet a fresh owner before anything else: the dialog offers
+    // every known CLI (all checked) and installs hooks for the pick.
+    if first_run {
+        state.open_oobe_dialog();
+    }
     // Operator bot clients come from config only (never self-registered):
     // each entry binds a token file, and bad entries warn instead of
     // failing the boot. Calls still fail closed per-call.
@@ -277,6 +286,18 @@ fn main() {
         }
         Some("uninstall-gemini") => {
             std::process::exit(report_install(install::uninstall_one(&home_dir(), "gemini")));
+        }
+        Some("install-copilot") => {
+            std::process::exit(report_install(install::install_one(&home_dir(), "copilot", &forge_binary())));
+        }
+        Some("uninstall-copilot") => {
+            std::process::exit(report_install(install::uninstall_one(&home_dir(), "copilot")));
+        }
+        Some("install-pi") => {
+            std::process::exit(report_install(install::install_one(&home_dir(), "pi", &forge_binary())));
+        }
+        Some("uninstall-pi") => {
+            std::process::exit(report_install(install::uninstall_one(&home_dir(), "pi")));
         }
         Some("install-metamate") => {
             std::process::exit(report_install(install::install_one(&home_dir(), "metamate", &forge_binary())));

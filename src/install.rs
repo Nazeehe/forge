@@ -88,6 +88,18 @@ fn codex_home(home: &std::path::Path) -> std::path::PathBuf {
         .unwrap_or_else(|| home.join(".codex"))
 }
 
+/// Copilot reads COPILOT_HOME for its user hooks directory, defaulting
+/// to ~/.copilot (official hooks reference). The MCP user config path
+/// is documented at ~/.copilot unconditionally, so only hooks consult
+/// this.
+fn copilot_home(home: &std::path::Path) -> std::path::PathBuf {
+    std::env::var("COPILOT_HOME")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".copilot"))
+}
+
 fn is_ours(cmd: &str) -> bool {
     cmd.contains("hook-relay")
 }
@@ -352,9 +364,130 @@ pub fn install_one_hooks(
                 Err(e) => Outcome::error(harness, e),
             }
         }
-        "gemini" => Outcome::skipped(
+        "gemini" => {
+            // Grounded in the official hooks reference: settings.json
+            // takes `hooks: {Event: [{matcher, sequential, hooks:
+            // [{type, command, timeout}]}]}` with the hook JSON on stdin.
+            // SessionStart carries the harness-side conversation id the
+            // restore path resumes with; Before/AfterAgent are the turn
+            // edges, BeforeTool the deny layer, SessionEnd the exit edge.
+            // `timeout` caps a wedged relay on the harness side; the
+            // relay itself gives up after 3 s and always exits 0, so
+            // 10 s never blocks a session.
+            let path = home.join(".gemini/settings.json");
+            let mut v = match read_json(&path) {
+                Ok(v) => v,
+                Err(e) => return Outcome::error(harness, e),
+            };
+            let handler = serde_json::json!({
+                "type": "command",
+                "command": hook_command(forge_bin),
+                "timeout": 10000,
+            });
+            let added = match merge_hook_groups(
+                &mut v,
+                &path,
+                &[
+                    "SessionStart",
+                    "BeforeTool",
+                    "AfterTool",
+                    "BeforeAgent",
+                    "AfterAgent",
+                    "SessionEnd",
+                ],
+                &handler,
+                forge_bin,
+            ) {
+                Ok(added) => added,
+                Err(e) => return Outcome::error(harness, e),
+            };
+            if added == 0 {
+                return Outcome::unchanged(harness, format!("already in {}", path.display()));
+            }
+            match write_json(&path, &v) {
+                Ok(()) => Outcome::installed(harness, path.display().to_string()),
+                Err(e) => Outcome::error(harness, e),
+            }
+        }
+        "copilot" => {
+            // Grounded in the official hooks reference: user hook files
+            // live in ~/.copilot/hooks/ (or $COPILOT_HOME/hooks/) as
+            // `{version: 1, hooks: {event: [entries]}}`. `exec`+`args`
+            // runs the relay directly without a shell (CLI-only, like
+            // codex); timeouts are fail-open on the harness side, and
+            // the relay itself gives up after 3 s, so 10 s never blocks
+            // a session. sessionStart reports the session, the prompt
+            // and agent edges mirror the other CLIs' turn tracking, and
+            // preToolUse/permissionRequest are the approval gates.
+            let path = copilot_home(home).join("hooks/forge.json");
+            let mut v = match read_json(&path) {
+                Ok(v) => v,
+                Err(e) => return Outcome::error(harness, e),
+            };
+            if let Some(version) = v.get("version") {
+                if version != &serde_json::Value::from(1) {
+                    return Outcome::error(
+                        harness,
+                        format!("unsupported version in {}", path.display()),
+                    );
+                }
+            } else {
+                v["version"] = serde_json::Value::from(1);
+            }
+            if !v.get("hooks").is_some_and(|h| h.is_object()) {
+                v["hooks"] = serde_json::Value::Object(Default::default());
+            }
+            let ours = forge_bin.to_string();
+            let mut added = 0;
+            for event in [
+                "sessionStart",
+                "userPromptSubmitted",
+                "preToolUse",
+                "permissionRequest",
+                "agentStop",
+            ] {
+                let slot = v["hooks"]
+                    .as_object_mut()
+                    .expect("hooks just normalized to object")
+                    .entry(event.to_string())
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                if !slot.is_array() {
+                    return Outcome::error(
+                        harness,
+                        format!("{event} is not an array in {}", path.display()),
+                    );
+                }
+                let entries = slot.as_array_mut().expect("just checked array");
+                let present = entries.iter().any(|e| {
+                    e.get("exec").and_then(|c| c.as_str()) == Some(&ours)
+                        && e.get("args").and_then(|a| a.as_array()).is_some_and(|args| {
+                            args.iter().any(|a| a.as_str() == Some("hook-relay"))
+                        })
+                });
+                if !present {
+                    entries.push(serde_json::json!({
+                        "type": "command",
+                        "exec": forge_bin,
+                        "args": ["hook-relay"],
+                        "timeoutSec": 10,
+                    }));
+                    added += 1;
+                }
+            }
+            if added == 0 {
+                return Outcome::unchanged(harness, format!("already in {}", path.display()));
+            }
+            match write_json(&path, &v) {
+                Ok(()) => Outcome::installed(harness, path.display().to_string()),
+                Err(e) => Outcome::error(harness, e),
+            }
+        }
+        // Pi (pi-mono) exposes no native hook surface: its extension
+        // bus (pi.on events) is in-process only, so there is nothing to
+        // register. Skips are not errors.
+        "pi" => Outcome::skipped(
             harness,
-            "no grounded gemini hook mechanism; gemini hooks stay uninstalled".to_string(),
+            "no native pi hook mechanism; pi hooks stay uninstalled".to_string(),
         ),
         other => Outcome::error(harness, format!("unknown harness {other:?}")),
     }
@@ -362,11 +495,28 @@ pub fn install_one_hooks(
 
 /// Remove hooks this installer owns. Entries mentioning other commands are
 /// kept; the codex file goes away only when nothing foreign remains.
+/// A copilot hook entry this installer owns: our relay invoked either
+/// directly (`exec` carrying hook-relay) or with hook-relay in `args`.
+fn is_copilot_ours(entry: &serde_json::Value) -> bool {
+    entry
+        .get("exec")
+        .and_then(|c| c.as_str())
+        .is_some_and(is_ours)
+        || entry
+            .get("args")
+            .and_then(|a| a.as_array())
+            .is_some_and(|args| {
+                args.iter()
+                    .any(|a| a.as_str().is_some_and(is_ours))
+            })
+}
+
 pub fn uninstall_one_hooks(home: &std::path::Path, harness: &str) -> Outcome {
     match harness {
-        "claude" | "muse" => {
+        "claude" | "muse" | "gemini" => {
             let path = match harness {
                 "claude" => home.join(".claude/settings.json"),
+                "gemini" => home.join(".gemini/settings.json"),
                 _ => home.join(".config/muse/settings.json"),
             };
             let mut v = match read_json(&path) {
@@ -381,6 +531,55 @@ pub fn uninstall_one_hooks(home: &std::path::Path, harness: &str) -> Outcome {
                 Err(e) => Outcome::error(harness, e),
             }
         }
+        "copilot" => {
+            // Our entries live in our own forge.json: drop them wherever
+            // they sit, prune emptied events, and remove the file when
+            // nothing remains. Anything foreign is kept; sibling files
+            // are never touched.
+            let path = copilot_home(home).join("hooks/forge.json");
+            let mut v = match read_json(&path) {
+                Ok(v) => v,
+                Err(e) => return Outcome::error(harness, e),
+            };
+            let mut dropped = 0;
+            if let Some(obj) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+                let mut dead_events = Vec::new();
+                for (event, slot) in obj.iter_mut() {
+                    let Some(entries) = slot.as_array_mut() else {
+                        continue;
+                    };
+                    let before = entries.len();
+                    entries.retain(|e| !is_copilot_ours(e));
+                    dropped += before - entries.len();
+                    if entries.is_empty() {
+                        dead_events.push(event.clone());
+                    }
+                }
+                for event in dead_events {
+                    obj.remove(&event);
+                }
+            }
+            if dropped == 0 {
+                return Outcome::unchanged(harness, "nothing to remove".to_string());
+            }
+            let hooks_empty = v
+                .get("hooks")
+                .is_some_and(|h| h.as_object().is_some_and(|o| o.is_empty()));
+            if hooks_empty {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => Outcome::removed(harness, path.display().to_string()),
+                    Err(e) => {
+                        Outcome::error(harness, format!("cannot remove {}: {e}", path.display()))
+                    }
+                }
+            } else {
+                match write_json(&path, &v) {
+                    Ok(()) => Outcome::removed(harness, path.display().to_string()),
+                    Err(e) => Outcome::error(harness, e),
+                }
+            }
+        }
+        "pi" => Outcome::skipped(harness, "pi hooks were never installed".to_string()),
         "codex" => {
             let path = codex_home(home).join("hooks.json");
             let mut v = match read_json(&path) {
@@ -449,7 +648,6 @@ pub fn uninstall_one_hooks(home: &std::path::Path, harness: &str) -> Outcome {
                 }
             }
         }
-        "gemini" => Outcome::skipped(harness, "gemini hooks were never installed".to_string()),
         other => Outcome::error(harness, format!("unknown harness {other:?}")),
     }
 }
@@ -533,8 +731,8 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
                 Err(e) => Outcome::error(harness, e),
             }
         }
-        // Best-effort: no gemini config on this machine to observe; the
-        // mcpServers map mirrors the documented settings.json shape.
+        // Grounded in the official MCP docs: the user settings file
+        // takes a stdio `mcpServers` map of {command, args, env}.
         "gemini" => {
             let path = home.join(".gemini/settings.json");
             let mut v = match read_json(&path) {
@@ -553,6 +751,38 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
                 Err(e) => Outcome::error(harness, e),
             }
         }
+        // Grounded in the official MCP docs: the user config at
+        // ~/.copilot/mcp-config.json takes {mcpServers: {name: {type:
+        // local, command, args, env, tools}}}. Direct file surgery like
+        // claude, so no copilot binary is needed; everything else in
+        // the file is preserved.
+        "copilot" => {
+            let path = home.join(".copilot/mcp-config.json");
+            let mut v = match read_json(&path) {
+                Ok(v) => v,
+                Err(e) => return Outcome::error(harness, e),
+            };
+            obj_mut(&mut v, "mcpServers").insert(
+                "forge".to_string(),
+                serde_json::json!({
+                    "type": "local",
+                    "command": forge_bin,
+                    "args": ["mcp-serve"],
+                    "env": {},
+                    "tools": ["*"],
+                }),
+            );
+            match write_json(&path, &v) {
+                Ok(()) => Outcome::installed(harness, path.display().to_string()),
+                Err(e) => Outcome::error(harness, e),
+            }
+        }
+        // Pi has no native MCP surface (only a third-party adapter with
+        // no documented config contract), so registration stays a skip.
+        "pi" => Outcome::skipped(
+            harness,
+            "no native pi MCP surface; pi MCP stays unregistered".to_string(),
+        ),
         other => Outcome::error(harness, format!("unknown harness {other:?}")),
     }
 }
@@ -656,6 +886,25 @@ pub fn uninstall_one_mcp(home: &std::path::Path, harness: &str) -> Outcome {
                 Err(e) => Outcome::error(harness, e),
             }
         }
+        "copilot" => {
+            let path = home.join(".copilot/mcp-config.json");
+            let mut v = match read_json(&path) {
+                Ok(v) => v,
+                Err(e) => return Outcome::error(harness, e),
+            };
+            let gone = v
+                .get_mut("mcpServers")
+                .and_then(|m| m.as_object_mut())
+                .is_some_and(|m| m.remove("forge").is_some());
+            if !gone {
+                return Outcome::unchanged(harness, "nothing to remove".to_string());
+            }
+            match write_json(&path, &v) {
+                Ok(()) => Outcome::removed(harness, path.display().to_string()),
+                Err(e) => Outcome::error(harness, e),
+            }
+        }
+        "pi" => Outcome::skipped(harness, "pi MCP was never registered".to_string()),
         other => Outcome::error(harness, format!("unknown harness {other:?}")),
     }
 }
@@ -811,6 +1060,8 @@ fn keys_for(harness: &str) -> Option<&'static str> {
     match harness {
         "codex" => Some("codex"),
         "gemini" => Some("gemini"),
+        "copilot" => Some("copilot"),
+        "pi" => Some("pi"),
         "metamate" | "muse" => Some("muse"),
         "claude" => Some("claude"),
         _ => None,
@@ -1256,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_mcp_round_trips_hooks_skip() {
+    fn gemini_mcp_round_trips() {
         let home = scratch_home();
         let out = install_one_mcp(&home, "gemini", FORGE_BIN);
         assert!(out.installed, "out: {out:?}");
@@ -1265,10 +1516,190 @@ mod tests {
         assert_eq!(v["mcpServers"]["forge"]["command"], serde_json::Value::String(FORGE_BIN.to_string()));
         let out = uninstall_one_mcp(&home, "gemini");
         assert!(out.removed, "out: {out:?}");
-        let hooks = install_one_hooks(&home, "gemini", FORGE_BIN);
-        assert!(hooks.skipped, "out: {hooks:?}");
         let skills = install_one_skills(&home, "gemini");
         assert!(skills.skipped, "out: {skills:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn gemini_hooks_merge_and_are_idempotent() {
+        // Grounded in the official hooks reference: settings.json takes
+        // `hooks: {Event: [{matcher?, sequential?, hooks: [...]}]}` with
+        // `{type: "command", command, timeout?}` entries.
+        let home = scratch_home();
+        let out = install_one_hooks(&home, "gemini", FORGE_BIN);
+        assert!(out.installed, "out: {out:?}");
+        let text = std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for event in [
+            "SessionStart",
+            "BeforeTool",
+            "AfterTool",
+            "BeforeAgent",
+            "AfterAgent",
+            "SessionEnd",
+        ] {
+            let groups = v["hooks"][event]
+                .as_array()
+                .unwrap_or_else(|| panic!("missing {event}: {text}"));
+            assert!(
+                groups.iter().any(|g| {
+                    g["hooks"].as_array().is_some_and(|hs| {
+                        hs.iter().any(|h| {
+                            h["command"].as_str() == Some(&hook_command(FORGE_BIN))
+                        })
+                    })
+                }),
+                "ours on {event}: {text}"
+            );
+        }
+        // Second install adds no duplicate.
+        install_one_hooks(&home, "gemini", FORGE_BIN);
+        let text = std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap();
+        assert_eq!(text.matches("hook-relay").count(), 6, "one per event: {text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn gemini_hooks_uninstall_removes_only_ours() {
+        let home = scratch_home();
+        install_one_hooks(&home, "gemini", FORGE_BIN);
+        let out = uninstall_one_hooks(&home, "gemini");
+        assert!(out.removed, "out: {out:?}");
+        let text = std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap();
+        assert!(!text.contains("hook-relay"), "gone: {text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Pin COPILOT_HOME at scratch so copilot paths never consult the
+    /// developer's real config. Same shape as ClearCodexHome: the
+    /// variable is process-global, so holders serialize on the lock.
+    struct ClearCopilotHome {
+        saved: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ClearCopilotHome {
+        fn pin() -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = std::env::var("COPILOT_HOME").ok();
+            std::env::remove_var("COPILOT_HOME");
+            ClearCopilotHome {
+                saved,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ClearCopilotHome {
+        fn drop(&mut self) {
+            if let Some(v) = self.saved.take() {
+                std::env::set_var("COPILOT_HOME", v);
+            }
+        }
+    }
+
+    #[test]
+    fn copilot_hooks_merge_and_are_idempotent() {
+        // Grounded in the official hooks reference: user hook files live
+        // in ~/.copilot/hooks/ as {version: 1, hooks: {event: [entries]}}
+        // with {type: command, exec, args, timeoutSec?} entries.
+        let _pin = ClearCopilotHome::pin();
+        let home = scratch_home();
+        let out = install_one_hooks(&home, "copilot", FORGE_BIN);
+        assert!(out.installed, "out: {out:?}");
+        let path = home.join(".copilot/hooks/forge.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["version"], serde_json::Value::from(1));
+        for event in [
+            "sessionStart",
+            "userPromptSubmitted",
+            "preToolUse",
+            "permissionRequest",
+            "agentStop",
+        ] {
+            let entries = v["hooks"][event]
+                .as_array()
+                .unwrap_or_else(|| panic!("missing {event}: {text}"));
+            assert!(
+                entries.iter().any(|e| {
+                    e["exec"].as_str() == Some(FORGE_BIN)
+                        && e["args"][0].as_str() == Some("hook-relay")
+                }),
+                "ours on {event}: {text}"
+            );
+        }
+        // Second install adds no duplicate.
+        install_one_hooks(&home, "copilot", FORGE_BIN);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("hook-relay").count(), 5, "one per event: {text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn copilot_hooks_uninstall_removes_file_and_keeps_foreign() {
+        let _pin = ClearCopilotHome::pin();
+        let home = scratch_home();
+        // A foreign hook file is never ours to touch.
+        std::fs::create_dir_all(home.join(".copilot/hooks")).unwrap();
+        std::fs::write(
+            home.join(".copilot/hooks/other.json"),
+            r#"{"version":1,"hooks":{"preToolUse":[{"type":"command","exec":"other"}]}}"#,
+        )
+        .unwrap();
+        install_one_hooks(&home, "copilot", FORGE_BIN);
+        let out = uninstall_one_hooks(&home, "copilot");
+        assert!(out.removed, "out: {out:?}");
+        assert!(
+            !home.join(".copilot/hooks/forge.json").exists(),
+            "our file goes away"
+        );
+        let foreign =
+            std::fs::read_to_string(home.join(".copilot/hooks/other.json")).unwrap();
+        assert!(foreign.contains("\"exec\":\"other\""), "foreign kept: {foreign}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn copilot_mcp_registers_forge_server() {
+        // Grounded in the official MCP docs: user config lives in
+        // ~/.copilot/mcp-config.json as {mcpServers: {name: {type:
+        // local, command, args, ...}}}.
+        let home = scratch_home();
+        let out = install_one_mcp(&home, "copilot", FORGE_BIN);
+        assert!(out.installed, "out: {out:?}");
+        let text =
+            std::fs::read_to_string(home.join(".copilot/mcp-config.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let srv = &v["mcpServers"]["forge"];
+        assert_eq!(srv["type"], serde_json::Value::String("local".to_string()));
+        assert_eq!(srv["command"], serde_json::Value::String(FORGE_BIN.to_string()));
+        assert_eq!(srv["args"][0], serde_json::Value::String("mcp-serve".to_string()));
+        let out = uninstall_one_mcp(&home, "copilot");
+        assert!(out.removed, "out: {out:?}");
+        let text =
+            std::fs::read_to_string(home.join(".copilot/mcp-config.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(v["mcpServers"].get("forge").is_none(), "gone: {text}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn pi_hooks_mcp_and_skills_skip() {
+        // Pi (pi-mono) exposes no native hook or MCP surface (only
+        // extension-bus events), so every installer reports skipped and
+        // writes nothing. Skips are not errors.
+        let home = scratch_home();
+        for out in install_one(&home, "pi", FORGE_BIN) {
+            assert!(out.skipped, "out: {out:?}");
+            assert!(out.error.is_none(), "skip is not failure: {out:?}");
+        }
+        assert!(!home.join(".pi").exists(), "nothing written");
+        for out in uninstall_one(&home, "pi") {
+            assert!(out.error.is_none(), "out: {out:?}");
+        }
         let _ = std::fs::remove_dir_all(&home);
     }
 
