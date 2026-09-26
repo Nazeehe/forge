@@ -23,7 +23,6 @@ pub trait Cli: Send + Sync {
 pub struct ClaudeCli;
 pub struct CodexCli;
 pub struct MuseCli;
-pub struct GeminiCli;
 pub struct CopilotCli;
 pub struct PiCli;
 
@@ -72,21 +71,6 @@ impl Cli for MuseCli {
     }
 }
 
-impl Cli for GeminiCli {
-    fn id(&self) -> &'static str {
-        "gemini"
-    }
-    fn display_name(&self) -> &'static str {
-        "gemini"
-    }
-    fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::install::install_one_hooks(home, self.id(), forge_bin)
-    }
-    fn uninstall(&self, home: &Path) -> Outcome {
-        crate::install::uninstall_one_hooks(home, self.id())
-    }
-}
-
 impl Cli for CopilotCli {
     fn id(&self) -> &'static str {
         "copilot"
@@ -120,14 +104,15 @@ impl Cli for PiCli {
 static CLAUDE: ClaudeCli = ClaudeCli;
 static CODEX: CodexCli = CodexCli;
 static MUSE: MuseCli = MuseCli;
-static GEMINI: GeminiCli = GeminiCli;
 static COPILOT: CopilotCli = CopilotCli;
 static PI: PiCli = PiCli;
 
 /// Every known CLI, in display order. Adding a CLI is a new [`Cli`]
 /// struct plus one entry here.
 pub fn all_clis() -> &'static [&'static dyn Cli] {
-    static ALL: &[&dyn Cli] = &[&CLAUDE, &CODEX, &MUSE, &GEMINI, &COPILOT, &PI];
+    // agy stays out: it is a supported session harness but documents
+    // no hook surface, so setup could only ever report skipped.
+    static ALL: &[&dyn Cli] = &[&CLAUDE, &CODEX, &MUSE, &COPILOT, &PI];
     ALL
 }
 
@@ -553,7 +538,7 @@ mod tests {
         let ids: Vec<_> = all_clis().iter().map(|c| c.id()).collect();
         assert_eq!(
             ids,
-            vec!["claude", "codex", "muse", "gemini", "copilot", "pi"]
+            vec!["claude", "codex", "muse", "copilot", "pi"]
         );
     }
 
@@ -562,7 +547,7 @@ mod tests {
         let dialog = OobeDialog::new(true);
         assert_eq!(
             dialog.selected_ids(),
-            vec!["claude", "codex", "muse", "gemini", "copilot", "pi"]
+            vec!["claude", "codex", "muse", "copilot", "pi"]
         );
     }
 
@@ -574,7 +559,7 @@ mod tests {
         assert!(dialog.is_checked(1), "other rows stay checked");
         assert_eq!(
             dialog.selected_ids(),
-            vec!["codex", "muse", "gemini", "copilot", "pi"]
+            vec!["codex", "muse", "copilot", "pi"]
         );
     }
 
@@ -597,7 +582,6 @@ mod tests {
             OobeOutcome::Submitted(vec![
                 "claude".to_string(),
                 "muse".to_string(),
-                "gemini".to_string(),
                 "copilot".to_string(),
                 "pi".to_string(),
             ])
@@ -710,7 +694,7 @@ mod tests {
         let buf = terminal.backend().buffer();
         let text: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
         assert!(text.contains("Welcome"), "greets: {text}");
-        for name in ["claude", "codex", "muse", "gemini", "copilot", "pi"] {
+        for name in ["claude", "codex", "muse", "copilot", "pi"] {
             assert!(text.contains(name), "lists {name}");
         }
         assert!(text.contains("Setup"), "action button");
@@ -742,7 +726,6 @@ mod tests {
             OobeOutcome::Submitted(vec![
                 "claude".to_string(),
                 "muse".to_string(),
-                "gemini".to_string(),
                 "copilot".to_string(),
                 "pi".to_string(),
             ])

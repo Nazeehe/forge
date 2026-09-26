@@ -45,6 +45,21 @@
       },
       "supports_hooks": true,
       "session_attribution": "cwd_window"
+    },
+    {
+      "name": "agy",
+      "binary": "agy",
+      "env_override": "AGY_BIN",
+      "model_flag": "--model",
+      "default_model": "",
+      "extra_args": [],
+      "resume": {
+        "subcommand": null,
+        "with_id": { "flag": "--conversation" },
+        "without_id": ["--continue"]
+      },
+      "supports_hooks": false,
+      "session_attribution": "hook_env"
     }
   ]
 }

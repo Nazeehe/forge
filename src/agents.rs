@@ -349,11 +349,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packaged_default_parses_to_three_known_agents() {
+    fn packaged_default_registers_agy_without_hooks() {
+        // Grounded in `agy --help`: resume by ID rides `--conversation`,
+        // `--continue` resumes the latest, `--model` picks the model.
+        // No hook surface is documented, so hook support stays off.
+        let agents = parse_agents(DEFAULT_AGENTS_JSON).expect("packaged default valid");
+        let agy = agents.iter().find(|a| a.name == "agy").expect("agy registered");
+        assert_eq!(agy.binary, "agy");
+        assert_eq!(agy.env_override, "AGY_BIN");
+        assert_eq!(agy.model_flag, "--model");
+        assert_eq!(agy.resume.subcommand, None);
+        assert_eq!(
+            agy.resume.with_id,
+            WithId::Flag("--conversation".to_string())
+        );
+        assert_eq!(agy.resume.without_id, ["--continue"]);
+        assert!(!agy.supports_hooks, "no grounded agy hook mechanism");
+        assert_eq!(agy.attribution, Attribution::HookEnv);
+    }
+
+    #[test]
+    fn packaged_default_parses_to_four_known_agents() {
         let agents = parse_agents(DEFAULT_AGENTS_JSON).expect("packaged default valid");
         assert_eq!(
             agents.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["claude", "codex", "muse"]
+            ["claude", "codex", "muse", "agy"]
         );
         assert_eq!(agents[0].resume.subcommand, None);
         assert_eq!(
@@ -365,7 +385,7 @@ mod tests {
         assert_eq!(agents[1].resume.with_id, WithId::Positional);
         assert_eq!(agents[2].attribution, Attribution::CwdWindow);
         assert!(agents.iter().all(|a| a.extra_args.is_empty()));
-        assert!(agents.iter().all(|a| a.supports_hooks));
+        assert!(agents.iter().filter(|a| a.name != "agy").all(|a| a.supports_hooks));
     }
 
     #[test]
@@ -389,11 +409,11 @@ mod tests {
         let path = dir.join("agents.json");
         std::fs::write(&path, DEFAULT_AGENTS_JSON).unwrap();
         load_registry(&path).expect("default file loads");
-        assert_eq!(registry().len(), 3);
+        assert_eq!(registry().len(), 4);
         assert_eq!(registry()[0].name, "claude");
         std::fs::write(&path, r#"{"version": 1, "agents": []}"#).unwrap();
         assert!(load_registry(&path).is_err(), "empty registry rejected");
-        assert_eq!(registry().len(), 3, "failed load changes nothing");
+        assert_eq!(registry().len(), 4, "failed load changes nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn registry_names_match_packaged_default_order() {
         let names: Vec<_> = Harness::all().iter().map(|h| h.as_str()).collect();
-        assert_eq!(names, ["claude", "codex", "muse"]);
+        assert_eq!(names, ["claude", "codex", "muse", "agy"]);
         assert!(Harness::from_name("gemini").is_none());
     }
 
@@ -217,6 +217,15 @@ mod tests {
             muse.resume_argv("muse", None),
             vec!["muse", "resume", "--last"]
         );
+        let agy = Harness::from_name("agy").expect("packaged agy");
+        assert_eq!(
+            agy.resume_argv("agy", Some("conv-1")),
+            vec!["agy", "--conversation", "conv-1"]
+        );
+        assert_eq!(
+            agy.resume_argv("agy", None),
+            vec!["agy", "--continue"]
+        );
     }
 
     #[test]
@@ -247,7 +256,7 @@ mod tests {
     #[test]
     fn hook_support_and_attribution_match_packaged_default() {
         for h in Harness::all() {
-            assert!(h.supports_hooks());
+            assert_eq!(h.supports_hooks(), h.as_str() != "agy");
         }
         let muse = Harness::from_name("muse").expect("packaged muse");
         assert!(muse.cwd_window_attribution());

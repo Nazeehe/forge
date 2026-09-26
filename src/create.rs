@@ -1012,11 +1012,13 @@ mod tests {
         assert_eq!(d.tool_choice(), agent("codex"));
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         assert_eq!(d.tool_choice(), agent("muse"));
+        assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
+        assert_eq!(d.tool_choice(), agent("agy"));
         // Rewind wraps back to claude.
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         assert_eq!(d.tool_choice(), agent("claude"));
         assert!(matches!(d.key(&key(KeyCode::Left), &names), DialogOutcome::Pending));
-        assert_eq!(d.tool_choice(), agent("muse"));
+        assert_eq!(d.tool_choice(), agent("agy"));
     }
 
     #[test]

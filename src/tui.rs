@@ -3207,17 +3207,14 @@ mod tests {
         state.apply(AppEvent::Resize(24, 80));
         state.open_oobe_dialog();
         assert!(state.oobe_dialog.is_some(), "first run opens setup");
-        // Uncheck codex, muse, and copilot: claude and gemini install
-        // from pure home-relative paths, pi skips, and the test never
+        // Uncheck codex, muse, and copilot: claude installs from a pure
+        // home-relative path, pi skips, and the test never
         // consults CODEX_HOME, COPILOT_HOME, or real config paths.
         let none = KeyModifiers::NONE;
-        for _ in 0..2 {
+        for _ in 0..3 {
             handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
             handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Char(' '), none));
         }
-        handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
-        handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
-        handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Char(' '), none));
         handle_oobe_key(
             &mut state,
             &home,
@@ -3233,9 +3230,6 @@ mod tests {
         let text =
             std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
         assert!(text.contains("hook-relay"), "hooks installed: {text}");
-        let gemini =
-            std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap();
-        assert!(gemini.contains("hook-relay"), "gemini installed: {gemini}");
         assert!(
             !home.join(".codex/hooks.json").exists(),
             "unchecked CLI untouched"
@@ -3272,7 +3266,7 @@ mod tests {
         state.open_oobe_dialog();
         // Uncheck everything but claude: a clean install closes at once.
         let none = KeyModifiers::NONE;
-        for _ in 0..5 {
+        for _ in 0..4 {
             handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
             handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Char(' '), none));
         }
