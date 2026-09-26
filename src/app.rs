@@ -2962,7 +2962,16 @@ impl AppState {
                 } else {
                     Some(spec.model.as_str())
                 };
-                let argv = hs.launch_argv(&hs.resolve_binary(), model);
+                let binary = hs.resolve_binary();
+                // Fresh launches carry the Forge runtime contract through
+                // the agent's strongest injection mechanism. Materialization
+                // fails open: a session without injection still launches.
+                let argv = match crate::runtime::ensure_materialized(
+                    &crate::branding::home_dir(),
+                ) {
+                    Ok(file) => h.launch_argv_with_runtime(&binary, model, &file),
+                    Err(_) => hs.launch_argv(&binary, model),
+                };
                 let mut cmd = String::from("exec ");
                 cmd.push_str(&crate::create::shell_join(&argv));
                 (cmd, h.as_str().to_string())

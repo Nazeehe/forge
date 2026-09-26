@@ -30,6 +30,7 @@ mod policy;
 mod pty;
 mod quit;
 mod relay;
+mod runtime;
 mod safe_text;
 mod telegram;
 mod telegram_dialog;
@@ -124,9 +125,7 @@ fn forge_binary() -> String {
 }
 
 fn home_dir() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
+    crate::branding::home_dir()
 }
 
 /// `--oobe` re-runs first-run setup inside the TUI.
@@ -198,6 +197,13 @@ fn startup(force_oobe: bool) -> i32 {
     // is missing or holds no themes, so the picker (`Ctrl-b e`) shows
     // something on first launch. Existing files are never overwritten.
     seed_example_themes(&home);
+    // Forge runtime contract: the canonical host-level instructions agents
+    // inject at launch (see `runtime.rs`). Forge-owned and refreshed every
+    // boot; a failed write warns instead of blocking startup because fresh
+    // launches re-ensure it (fail-open without injection).
+    if let Err(e) = crate::runtime::ensure_materialized(&home) {
+        eprintln!("warning: cannot write Forge runtime contract: {e}");
+    }
     // Configuration guide for AI agents: docs only, so a failed drop
     // warns instead of blocking startup — and an existing file is never
     // overwritten, since local edits must survive upgrades.

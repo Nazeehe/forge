@@ -411,17 +411,17 @@ fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "ask_session",
-            description: "Use this, not your CLI's own messaging, to ask a Forge peer session a question; first call list_sessions to resolve the live peer name. Returns a conversation ID immediately and injects the question when the target is idle. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Use this, not your CLI's own messaging, to ask a Forge peer session a question; first call list_sessions to resolve the live peer name. Returns a conversation ID immediately and injects the question when the target is idle. Use this whenever the user asks you to message, ask, tell, notify, send something to, or delegate work to another Forge-managed agent: never use provider-native messaging, subagents, or delegation for Forge-managed agents. Native subagents remain fine for private internal work that names no Forge-managed agent. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["target","message"]}"#,
         },
         ToolDef {
             name: "send_response",
-            description: "Use this, not your CLI's own messaging, to answer a conversation addressed to this session: use it the moment your pane shows [forge ask_session from ...], copying its conversation_id verbatim. Only an ask_session takes a response. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Use this, not your CLI's own messaging, to answer a conversation addressed to this session: use it the moment your pane shows [forge ask_session from ...], copying its conversation_id verbatim. Only a Forge ask_session conversation takes a response here. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"conversation_id":{"type":"string"},"message":{"type":"string"},"idempotency_key":{"type":"string"}},"required":["conversation_id","message"]}"#,
         },
         ToolDef {
             name: "tell_session",
-            description: "Use this, not your CLI's own messaging, to tell a Forge peer session something; the peer acknowledges asynchronously. To follow up on a received tell, pass its conversation_id plus its sender as target (a follow-up on the same conversation). Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
+            description: "Use this, not your CLI's own messaging, to tell a Forge peer session something; the peer acknowledges asynchronously. To follow up on a received tell, pass its conversation_id plus its sender as target (a follow-up on the same conversation). Use this whenever the user asks you to inform or notify another Forge-managed agent: never use provider-native messaging for Forge-managed agents. Optional idempotency_key (generate once per send, reuse on retry) makes timeout retries replay instead of duplicating.",
             schema: r#"{"type":"object","properties":{"target":{"type":"string"},"message":{"type":"string"},"conversation_id":{"type":"string"},"idempotency_key":{"type":"string"}}}"#,
         },
         ToolDef {
@@ -431,7 +431,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_sessions",
-            description: "Use this, not your CLI's own session listing, to discover Forge peers. List live peer sessions visible to this session: call it when asked what sessions are alive, and before contacting a peer, to resolve live names and groups. The `you` field names the calling session.",
+            description: "Use this, not your CLI's own session listing, to discover Forge peers. List live peer sessions visible to this session: call it when asked what sessions are alive, and before contacting a peer, to resolve live names and groups. This is how you discover Forge-managed agents: never use provider-native session listing for Forge peers. The `you` field names the calling session.",
             schema: r#"{"type":"object","properties":{}}"#,
         },
         ToolDef {
@@ -976,6 +976,44 @@ mod tests {
                 window(tool)
             );
         }
+    }
+
+    #[test]
+    fn comms_descriptions_route_natural_cross_agent_requests() {
+        // "Ask Codex to review this" must read as a Forge-tools job: the
+        // discovery/contact descriptions name Forge-managed agents plus the
+        // user-request verbs (message/ask/tell/delegate), and one of them
+        // explicitly keeps native subagents for private internal work.
+        let res = handle_line(
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("tools/list answers");
+        let window = |tool: &str| -> String {
+            let marker = format!(r#""name":"{tool}""#);
+            let at = res.find(&marker).expect("tool listed");
+            let rest = &res[at + marker.len()..];
+            let end = rest.find(r#""name":""#).unwrap_or(rest.len());
+            rest[..end].to_string()
+        };
+        for tool in ["ask_session", "tell_session", "list_sessions"] {
+            assert!(
+                window(tool).contains("Forge-managed"),
+                "{tool} must name Forge-managed peers: {}",
+                window(tool)
+            );
+        }
+        let ask = window("ask_session");
+        assert!(
+            ask.contains("delegate"),
+            "ask names delegation requests: {ask}"
+        );
+        assert!(
+            res.contains("private internal work"),
+            "native subagents must stay allowed for internal work: {res}"
+        );
     }
 
     #[test]

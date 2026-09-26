@@ -67,6 +67,28 @@ impl Harness {
         self.def().supports_hooks
     }
 
+    /// Provider-specific runtime adapter: how the canonical Forge runtime
+    /// contract reaches this agent at launch (see [`crate::runtime`]).
+    pub fn runtime_adapter(self) -> crate::runtime::RuntimeAdapter {
+        crate::runtime::RuntimeAdapter::for_agent(self.as_str())
+    }
+
+    /// Interactive argv plus the runtime-contract injection for a fresh
+    /// launch: binary, model, registry extra args, then the adapter extras.
+    /// Resume argv intentionally skips this: resumed sessions keep their
+    /// recorded instructions (Claude snapshots the system prompt; Codex
+    /// keeps thread developer instructions).
+    pub fn launch_argv_with_runtime(
+        self,
+        binary: &str,
+        model: Option<&str>,
+        runtime_file: &std::path::Path,
+    ) -> Vec<String> {
+        let mut argv = self.spec().launch_argv(binary, model);
+        argv.extend(self.runtime_adapter().launch_extras(runtime_file));
+        argv
+    }
+
     /// Whether hook reports need scrubbed-environment attribution: PTY
     /// process-session ID first, cwd+bootstrap-window for old relay records.
     pub fn cwd_window_attribution(self) -> bool {
@@ -226,6 +248,40 @@ mod tests {
             agy.resume_argv("agy", None),
             vec!["agy", "--continue"]
         );
+    }
+
+    #[test]
+    fn launch_argv_with_runtime_appends_injection_after_model() {
+        let file = std::path::Path::new("/home/tester/.forge/runtime.md");
+        let claude = Harness::from_name("claude").expect("packaged claude");
+        let argv = claude.launch_argv_with_runtime("claude", None, file);
+        assert_eq!(argv[0], "claude");
+        let tail = &argv[argv.len() - 2..];
+        assert_eq!(
+            tail,
+            [
+                "--append-system-prompt-file".to_string(),
+                "/home/tester/.forge/runtime.md".to_string(),
+            ]
+        );
+        // Injection never smuggles approval bypasses.
+        for arg in &argv {
+            assert!(!arg.contains("yolo"), "no bypass flags: {arg}");
+            assert!(!arg.contains("dangerously"), "no bypass flags: {arg}");
+        }
+        // Codex carries developer instructions; muse-family agents carry a
+        // startup prompt; every packaged agent injects something.
+        let codex = Harness::from_name("codex").expect("packaged codex");
+        let codex_argv = codex.launch_argv_with_runtime("codex", None, file);
+        assert!(codex_argv.contains(&"-c".to_string()));
+        for name in ["muse", "agy"] {
+            let h = Harness::from_name(name).expect("packaged agent");
+            let a = h.launch_argv_with_runtime(name, None, file);
+            assert!(
+                a.len() > 1 && a.last().unwrap().contains("Forge"),
+                "{name} must carry the runtime contract: {a:?}"
+            );
+        }
     }
 
     #[test]

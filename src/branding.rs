@@ -20,6 +20,14 @@ pub fn legacy_config_dir_name() -> &'static str {
     ".ccpp"
 }
 
+/// Process home for Forge-owned state. `$HOME` when set, the current
+/// directory otherwise (mirrors the headless startup fallback).
+pub fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// `~/.forge`
 pub fn config_dir(home: &Path) -> PathBuf {
     home.join(config_dir_name())
