@@ -84,7 +84,7 @@ fn seed_example_themes(home: &std::path::Path) {
 }
 
 fn print_help() {
-    println!("Usage: {} [--version|--help|hook-relay [endpoint]|mcp-serve [--endpoint PATH]|install-*|uninstall-*]", branding::binary_name());
+    println!("Usage: {} [--version|--help|--oobe|hook-relay [endpoint]|mcp-serve [--endpoint PATH]|install-*|uninstall-*]", branding::binary_name());
     println!(
         "{} terminal control plane for AI coding agents.",
         branding::product_name()
@@ -129,9 +129,14 @@ fn home_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
+/// `--oobe` re-runs first-run setup inside the TUI.
+fn oobe_forced(first_arg: Option<&str>) -> bool {
+    first_arg == Some("--oobe")
+}
+
 /// Headless startup sequence (Phase 1): migrate legacy state, load
 /// configuration, mint the launch run ID. The TUI takes over in Phase 2.
-fn startup() -> i32 {
+fn startup(force_oobe: bool) -> i32 {
     let home = home_dir();
     // First run is decided before anything materializes `~/.forge`
     // below: its absence means Forge never ran.
@@ -214,7 +219,8 @@ fn startup() -> i32 {
     let mut state = app::AppState::new();
     // Greet a fresh owner before anything else: the dialog offers
     // every known CLI (all checked) and installs hooks for the pick.
-    if first_run {
+    // `--oobe` replays that greeting on demand.
+    if first_run || force_oobe {
         state.open_oobe_dialog();
     }
     // Operator bot clients come from config only (never self-registered):
@@ -253,6 +259,9 @@ fn main() {
     match args.next().as_deref() {
         Some("--version") | Some("-V") => println!("{} {VERSION}", branding::binary_name()),
         Some("--help") | Some("-h") => print_help(),
+        Some(arg) if oobe_forced(Some(arg)) => {
+            std::process::exit(startup(true));
+        }
         Some("hook-relay") => {
             let endpoint = args.next();
             std::process::exit(relay::run_stdin(endpoint.as_deref()));
@@ -331,7 +340,7 @@ fn main() {
             std::process::exit(2);
         }
         None => {
-            std::process::exit(startup());
+            std::process::exit(startup(false));
         }
     }
 }
@@ -339,6 +348,14 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oobe_flag_forces_setup_regardless_of_other_args() {
+        assert!(oobe_forced(Some("--oobe")), "--oobe reruns setup");
+        assert!(!oobe_forced(None), "plain launch keeps first-run logic");
+        assert!(!oobe_forced(Some("--version")), "other flags unaffected");
+        assert!(!oobe_forced(Some("hook-relay")), "subcommands unaffected");
+    }
 
     #[test]
     fn seed_adds_missing_examples_without_touching_user_files() {
