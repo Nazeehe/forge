@@ -1,6 +1,7 @@
 //! Shared AppState test fixtures: cross-group call helpers.
 
 use super::*;
+use crate::infra::event::AppEvent;
 
 pub(super) fn comms_reply(state: &mut AppState, run: &str, tool: &str, args: &str) -> String {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -30,6 +31,18 @@ pub(super) fn message_user_agent() -> (AppState, crate::session::SessionId, Stri
     std::env::remove_var("CODEX_BIN");
     let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
     (state, id, live_run)
+}
+
+pub(super) fn hook_request(hook: &str, run_id: &str, body: &str) -> AppEvent {
+    let (reply_tx, _) = std::sync::mpsc::channel();
+    AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+        hook: hook.to_string(),
+        body: body.to_string(),
+        run_id: run_id.to_string(),
+        sync: false,
+        reply: reply_tx,
+        timed_out: Default::default(),
+    })
 }
 
 pub(super) fn tg_outbox(state: &AppState) -> Vec<crate::telegram::OutboundMessage> {
