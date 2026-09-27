@@ -14,7 +14,7 @@ pub fn path() -> std::path::PathBuf {
 /// Write the embedded manual to [`path`], replacing any older copy.
 pub fn extract() -> std::io::Result<std::path::PathBuf> {
     let dest = path();
-    crate::fs_atomic::write_atomic(&dest, HTML.as_bytes())?;
+    crate::core::fs_atomic::write_atomic(&dest, HTML.as_bytes())?;
     Ok(dest)
 }
 

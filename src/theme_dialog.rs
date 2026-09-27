@@ -135,7 +135,7 @@ impl ThemeDialog {
             let marker = if focused { "> " } else { "  " };
             let marker_style =
                 if focused { crate::theme::focus_row() } else { text };
-            let name = crate::safe_text::encode_for_display(&theme.name);
+            let name = crate::core::safe_text::encode_for_display(&theme.name);
             let active_tag = if theme.name == self.active {
                 " (active)".to_string()
             } else {

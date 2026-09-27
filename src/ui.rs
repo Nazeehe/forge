@@ -16,8 +16,9 @@ use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::State;
 
 use crate::{
+    core::safe_text,
     pty::{CellColor, CellFormat, FormattedCell},
-    safe_text, theme,
+    theme,
 };
 
 /// One styled run of pane text.

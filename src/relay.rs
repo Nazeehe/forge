@@ -35,7 +35,7 @@ pub fn write_endpoint_file(
         "{{\"pid\":{pid},\"sock\":{}}}",
         crate::mcp::escape_json(&sock.to_string_lossy())
     );
-    crate::fs_atomic::write_atomic(&endpoint_file_path(home), text.as_bytes())
+    crate::core::fs_atomic::write_atomic(&endpoint_file_path(home), text.as_bytes())
 }
 
 /// Remove the live-endpoint file at orderly shutdown so orphaned hook
@@ -331,13 +331,13 @@ fn trace_home() -> Option<std::path::PathBuf> {
 /// the return as the code.
 pub fn run_stdin(endpoint_override: Option<&str>) -> i32 {
     if let Some(home) = trace_home() {
-        crate::logging::set_hook_trace_path(crate::branding::hooks_log(&home));
+        crate::core::logging::set_hook_trace_path(crate::core::branding::hooks_log(&home));
     }
     let mut stdin_bytes = Vec::new();
     {
         use std::io::Read;
         if let Err(e) = std::io::stdin().read_to_end(&mut stdin_bytes) {
-            crate::logging::hook_trace_global(&format!("relay stdin read failed: {e}"));
+            crate::core::logging::hook_trace_global(&format!("relay stdin read failed: {e}"));
             return 0;
         }
     }
@@ -357,7 +357,7 @@ pub fn run_stdin(endpoint_override: Option<&str>) -> i32 {
     let mut handle = stdout.lock();
     let outcome = deliver(&stdin_bytes, endpoint.as_deref(), forge_pid, &mut handle, DECISION_TIMEOUT);
     let run_id = std::env::var("FORGE_RUN_ID").unwrap_or_default();
-    crate::logging::hook_trace_global(&trace_line(
+    crate::core::logging::hook_trace_global(&trace_line(
         &stdin_bytes,
         &run_id,
         &source,

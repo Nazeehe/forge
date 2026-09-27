@@ -14,8 +14,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::app::AppState;
-use crate::event::AppEvent;
-use crate::ids::RunId;
+use crate::core::event::AppEvent;
+use crate::core::ids::RunId;
 use crate::input::{self, InputRouter, RoutedKey, UserCommand};
 use crate::ui;
 
@@ -117,7 +117,7 @@ fn install_panic_hook() {
 /// startup.
 pub fn run(
     state: &mut AppState,
-    loaded: &mut crate::config::LoadedConfig,
+    loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
     audit_path: &std::path::Path,
 ) -> i32 {
@@ -131,7 +131,7 @@ pub fn run(
     install_panic_hook();
     state.permission_mode = loaded.config.permission.mode.clone();
     state.pill_tabs = loaded.config.pills_enabled;
-    state.themes_dir = Some(crate::branding::themes_dir(home));
+    state.themes_dir = Some(crate::core::branding::themes_dir(home));
     // Saved theme applies at startup; a missing or broken file warns
     // and keeps the builtin look instead of blocking boot.
     if loaded.config.theme != "default" {
@@ -158,7 +158,7 @@ pub fn run(
         Ok(policy) => policy,
         Err(e) => {
             eprintln!("warning: bad permission pattern ({e}); asking everything");
-            crate::policy::Policy::new(crate::config::PermissionMode::Off, &[], &[])
+            crate::policy::Policy::new(crate::core::config::PermissionMode::Off, &[], &[])
                 .expect("empty patterns compile")
         }
     };
@@ -178,9 +178,9 @@ pub fn run(
                 &spawned.sock_path,
             ) {
                 eprintln!("warning: cannot publish endpoint file: {e}");
-                crate::logging::hook_trace_global(&format!("tui endpoint file write failed: {e}"));
+                crate::core::logging::hook_trace_global(&format!("tui endpoint file write failed: {e}"));
             } else {
-                crate::logging::hook_trace_global(&format!(
+                crate::core::logging::hook_trace_global(&format!(
                     "tui listening sock={} endpoint_file={}",
                     spawned.sock_path.display(),
                     crate::relay::endpoint_file_path(home).display()
@@ -190,7 +190,7 @@ pub fn run(
         }
         Err(e) => {
             eprintln!("warning: ipc listener unavailable: {e}");
-            crate::logging::hook_trace_global(&format!("tui ipc listener unavailable: {e}"));
+            crate::core::logging::hook_trace_global(&format!("tui ipc listener unavailable: {e}"));
             None
         }
     };
@@ -230,9 +230,9 @@ pub fn run(
     if survivors > 0 {
         // The terminal still owns the screen, so the app log (not
         // stderr) carries the straggler report.
-        if let Ok(mut log) = crate::logging::FileLogger::open(
-            &crate::branding::app_log(home),
-            crate::logging::DEFAULT_MAX_BYTES,
+        if let Ok(mut log) = crate::core::logging::FileLogger::open(
+            &crate::core::branding::app_log(home),
+            crate::core::logging::DEFAULT_MAX_BYTES,
         ) {
             let _ = log.append(&format!(
                 "quit: {survivors} pane(s) ignored SIGTERM, SIGKILLed"
@@ -343,7 +343,7 @@ fn loop_until_quit(
     ipc_tx: &std::sync::mpsc::SyncSender<AppEvent>,
     policy: &mut crate::policy::Policy,
     audit_path: &std::path::Path,
-    loaded: &mut crate::config::LoadedConfig,
+    loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
 ) -> io::Result<()> {
     let mut router = InputRouter::new();
@@ -351,7 +351,7 @@ fn loop_until_quit(
     state.apply(AppEvent::Resize(size.height, size.width));
     // Saved snapshots offer themselves before anything else: a pick
     // restores the whole topology, Esc starts fresh.
-    let file = crate::checkpoint::SessionsFile::load(&crate::branding::sessions_file(home));
+    let file = crate::checkpoint::SessionsFile::load(&crate::core::branding::sessions_file(home));
     if let Some(picker) = crate::checkpoint::RestorePicker::new(&file) {
         state.restore_picker = Some(picker);
         state.dirty = true;
@@ -1183,7 +1183,7 @@ fn handle_group_key(state: &mut AppState, key: event::KeyEvent) {
 /// edits redraw.
 fn settle_telegram_outcome(
     state: &mut AppState,
-    loaded: &mut crate::config::LoadedConfig,
+    loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
     outcome: Option<crate::telegram_dialog::TelegramOutcome>,
 ) {
@@ -1212,7 +1212,7 @@ fn settle_telegram_outcome(
 /// One Telegram-settings key: Tab cycles rows, Enter fires.
 fn handle_telegram_key(
     state: &mut AppState,
-    loaded: &mut crate::config::LoadedConfig,
+    loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
     key: event::KeyEvent,
 ) {
@@ -1224,7 +1224,7 @@ fn handle_telegram_key(
 /// Clicks outside the modal die here so nothing behind it moves.
 fn handle_telegram_mouse(
     state: &mut AppState,
-    loaded: &mut crate::config::LoadedConfig,
+    loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
     mev: event::MouseEvent,
 ) {
@@ -1246,7 +1246,7 @@ fn handle_telegram_mouse(
 /// and persists `theme` in the config, cancel/close just redraws.
 fn settle_theme_outcome(
     state: &mut AppState,
-    loaded: &mut crate::config::LoadedConfig,
+    loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
     outcome: Option<crate::theme_dialog::ThemeOutcome>,
 ) {
@@ -1274,7 +1274,7 @@ fn settle_theme_outcome(
 /// One theme-picker key: arrows move, Enter applies, Esc closes.
 fn handle_theme_key(
     state: &mut AppState,
-    loaded: &mut crate::config::LoadedConfig,
+    loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
     key: event::KeyEvent,
 ) {
@@ -1286,7 +1286,7 @@ fn handle_theme_key(
 /// Clicks outside the modal die here so nothing behind it moves.
 fn handle_theme_mouse(
     state: &mut AppState,
-    loaded: &mut crate::config::LoadedConfig,
+    loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
     mev: event::MouseEvent,
 ) {
@@ -1398,7 +1398,7 @@ fn settle_quit_save(state: &mut AppState, home: &std::path::Path) -> bool {
     // between the last mutation and this exit.
     state.flush_boards(home);
     if let Err(e) = crate::checkpoint::save_quit_snapshot(
-        &crate::branding::sessions_file(home),
+        &crate::core::branding::sessions_file(home),
         state.snapshot_sessions(),
     ) {
         eprintln!("warning: cannot save sessions: {e}");
@@ -1677,13 +1677,13 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                 Some("yolo") => {
                     if ui::ChromeButton::new("[Yolo]", ratatui::style::Style::default())
                         .click(mev.column, mev.row, buttons.yolo) {
-                        state.set_permission_mode(crate::config::PermissionMode::Yolo);
+                        state.set_permission_mode(crate::core::config::PermissionMode::Yolo);
                     }
                 }
                 Some(_) => {
                     if ui::ChromeButton::new("[Off]", ratatui::style::Style::default())
                         .click(mev.column, mev.row, buttons.off) {
-                        state.set_permission_mode(crate::config::PermissionMode::Off);
+                        state.set_permission_mode(crate::core::config::PermissionMode::Off);
                     }
                 }
                 None => {}
@@ -2166,7 +2166,7 @@ mod tests {
                 "a",
                 &std::env::temp_dir(),
                 "exec cat",
-                crate::ids::RunId::generate(),
+                crate::core::ids::RunId::generate(),
                 "codex",
             )
             .unwrap();
@@ -3004,7 +3004,7 @@ mod tests {
         // Sidebar is x=64..80; with nothing pending the footer
         // shrinks and buttons sit at y=19, Off at x=66..71, the
         // Kanban button one row below at y=20, Tetris at y=21.
-        assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Yolo);
         forward_mouse(
             &mut state,
             MouseEvent {
@@ -3014,7 +3014,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
+        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Off);
         // The Kanban row toggles the board, never the permission mode.
         assert!(!state.board_open);
         forward_mouse(
@@ -3027,7 +3027,7 @@ mod tests {
             },
         );
         assert!(state.board_open);
-        assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
+        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Off);
         // Hover over Yolo (x=72..78) must not flip it back.
         state.dirty = false;
         forward_mouse(
@@ -3039,7 +3039,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
+        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Off);
         assert!(!state.dirty, "hover leaves no work");
         // Click Yolo to return (pill starts at x=74, footer row 19).
         forward_mouse(
@@ -3051,7 +3051,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Yolo);
     }
 
     #[test]
@@ -3526,7 +3526,7 @@ mod tests {
         let mut idle = AppState::new();
         assert!(!settle_quit_save(&mut idle, &home), "idle saves nothing");
         assert!(
-            !crate::branding::sessions_file(&home).exists(),
+            !crate::core::branding::sessions_file(&home).exists(),
             "idle writes nothing"
         );
         // One live agent: the pending save persists it and clears the flag.
@@ -3537,14 +3537,14 @@ mod tests {
                 "qsave",
                 &std::env::temp_dir(),
                 "exec sleep 30",
-                crate::ids::RunId::generate(),
+                crate::core::ids::RunId::generate(),
                 "claude",
             )
             .expect("spawn agent");
         state.quit_saving = true;
         assert!(settle_quit_save(&mut state, &home), "pending save runs");
         assert!(!state.quit_saving, "flag clears after save");
-        let text = std::fs::read_to_string(crate::branding::sessions_file(&home))
+        let text = std::fs::read_to_string(crate::core::branding::sessions_file(&home))
             .expect("sessions file written");
         assert!(text.contains("qsave"), "snapshot saved: {text}");
         assert!(state.manager.remove(id), "cleanup pane");
@@ -3586,10 +3586,10 @@ mod tests {
         (area.x + start as u16 + (needle.chars().count() as u16) / 2, y)
     }
 
-    fn telegram_test_ctx() -> (crate::config::LoadedConfig, std::path::PathBuf) {
+    fn telegram_test_ctx() -> (crate::core::config::LoadedConfig, std::path::PathBuf) {
         let home = std::env::temp_dir().join(format!("forge-tg-click-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let loaded = crate::config::LoadedConfig::load(&home.join("config.toml"))
+        let loaded = crate::core::config::LoadedConfig::load(&home.join("config.toml"))
             .expect("missing file loads defaults");
         (loaded, home)
     }
@@ -3661,7 +3661,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&home);
-        let dir = crate::branding::themes_dir(&home);
+        let dir = crate::core::branding::themes_dir(&home);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("square.json"),
@@ -3678,12 +3678,12 @@ mod tests {
         // Move to square and apply; the config persists the choice.
         handle_theme_key(
             &mut state,
-            &mut crate::config::LoadedConfig::load(&crate::branding::config_file(&home)).unwrap(),
+            &mut crate::core::config::LoadedConfig::load(&crate::core::branding::config_file(&home)).unwrap(),
             &home,
             KeyEvent::new(KeyCode::Down, none),
         );
         let mut loaded =
-            crate::config::LoadedConfig::load(&crate::branding::config_file(&home)).unwrap();
+            crate::core::config::LoadedConfig::load(&crate::core::branding::config_file(&home)).unwrap();
         handle_theme_key(
             &mut state,
             &mut loaded,
@@ -4090,7 +4090,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Yolo);
         assert!(!state.dirty, "swallowed clicks leave no work");
         // Esc closes.
         handle_group_key(&mut state, gkey(KeyCode::Esc));

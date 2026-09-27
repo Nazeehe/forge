@@ -5,7 +5,7 @@
 //! focused action), Esc cancels. Validation errors stay in a fixed slot
 //! so the layout never shifts. Submitting never touches the network:
 //! the token writes to its file atomically (`0600`) and the section
-//! saves to `config.toml` through [`crate::config::LoadedConfig`].
+//! saves to `config.toml` through [`crate::core::config::LoadedConfig`].
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +16,7 @@ use tuirealm::command::{Cmd, Direction};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
-use crate::config::TelegramConfig;
+use crate::core::config::TelegramConfig;
 
 /// Focus rows in Tab order. The token lives at
 /// [`crate::telegram::TELEGRAM_TOKEN_FILE`] and has no row.
@@ -699,7 +699,7 @@ mod tests {
     }
 
     fn fresh() -> TelegramDialog {
-        TelegramDialog::new(&crate::config::TelegramConfig::default(), true)
+        TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true)
     }
 
     fn typed(dialog: &mut TelegramDialog, text: &str) {
@@ -774,12 +774,12 @@ mod tests {
 
     #[test]
     fn saving_preserves_configured_timing_values() {
-        let cfg = crate::config::TelegramConfig {
+        let cfg = crate::core::config::TelegramConfig {
             token_file: "/run/custom-forge.token".to_string(),
             poll_seconds: 7,
             backoff_min_seconds: 9,
             backoff_max_seconds: 33,
-            ..crate::config::TelegramConfig::default()
+            ..crate::core::config::TelegramConfig::default()
         };
         let mut d = TelegramDialog::new(&cfg, true);
         tab(&mut d, 7);
@@ -906,7 +906,7 @@ mod tests {
     #[test]
     fn action_row_uses_pill_buttons() {
         use ratatui::{backend::TestBackend, Terminal};
-        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         terminal.draw(|f| d.view(f, area)).unwrap();
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn click_save_submits_with_hardcoded_token_file() {
-        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
         assert!(matches!(d.key(&key(KeyCode::Right)), TelegramOutcome::Pending));
         let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         let y = area.y + 2 + 7;
@@ -931,17 +931,17 @@ mod tests {
 
     #[test]
     fn click_test_and_cancel_fire() {
-        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
         let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         let y = area.y + 2 + 7;
         assert!(matches!(click_text(&mut d, area, y, "Test"), Some(TelegramOutcome::Test { .. })));
-        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
         assert!(matches!(click_text(&mut d, area, y, "Cancel"), Some(TelegramOutcome::Cancelled)));
     }
 
     #[test]
     fn click_row_focuses_and_outside_is_ignored() {
-        let mut d = TelegramDialog::new(&crate::config::TelegramConfig::default(), true);
+        let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
         let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         // Allowed IDs is the third form row (Enabled, Token, Allowed).
         let row = area.y + 2 + 2;

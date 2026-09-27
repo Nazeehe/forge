@@ -9,31 +9,24 @@ mod app;
 mod audit;
 mod board;
 mod bot;
-mod branding;
 mod card_edit;
 mod comms;
-mod config;
+mod core;
 mod create;
 mod checkpoint;
-mod event;
-mod fs_atomic;
 mod groups;
 mod harness;
 mod help;
-mod ids;
 mod input;
 mod install;
 mod listener;
-mod logging;
 mod mcp;
 mod oobe;
-mod paths;
 mod policy;
 mod pty;
 mod quit;
 mod relay;
 mod runtime;
-mod safe_text;
 mod telegram;
 mod telegram_dialog;
 mod tetris;
@@ -73,7 +66,7 @@ const EXAMPLE_THEMES: &[(&str, &str)] = &[
 /// never overwritten, so user edits survive. Failures warn instead of
 /// blocking startup — themes are cosmetic, unlike `agents.json`.
 fn seed_example_themes(home: &std::path::Path) {
-    let dir = branding::themes_dir(home);
+    let dir = core::branding::themes_dir(home);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -88,10 +81,10 @@ fn seed_example_themes(home: &std::path::Path) {
 }
 
 fn print_help() {
-    println!("Usage: {} [--version|--help|--oobe|hook-relay [endpoint]|mcp-serve [--endpoint PATH]|install-*|uninstall-*]", branding::binary_name());
+    println!("Usage: {} [--version|--help|--oobe|hook-relay [endpoint]|mcp-serve [--endpoint PATH]|install-*|uninstall-*]", core::branding::binary_name());
     println!(
         "{} terminal control plane for AI coding agents.",
-        branding::product_name()
+        core::branding::product_name()
     );
     println!("  hook-relay [endpoint]  forward one hook event from stdin; always exits 0");
     println!("  mcp-serve [--endpoint PATH]  JSON-RPC comms server on stdio for harnesses");
@@ -128,7 +121,7 @@ fn forge_binary() -> String {
 }
 
 fn home_dir() -> std::path::PathBuf {
-    crate::branding::home_dir()
+    crate::core::branding::home_dir()
 }
 
 /// `--oobe` re-runs first-run setup inside the TUI.
@@ -143,15 +136,15 @@ fn startup(force_oobe: bool) -> i32 {
     // First run is decided before anything materializes `~/.forge`
     // below: its absence means Forge never ran.
     let first_run = crate::oobe::is_first_run(&home);
-    match config::migrate_legacy(&home) {
-        Ok(config::Migration::Migrated) => eprintln!(
+    match core::config::migrate_legacy(&home) {
+        Ok(core::config::Migration::Migrated) => eprintln!(
             "migrated legacy config to {}",
-            branding::config_dir(&home).display()
+            core::branding::config_dir(&home).display()
         ),
-        Ok(config::Migration::Collision) => eprintln!(
+        Ok(core::config::Migration::Collision) => eprintln!(
             "warning: both {} and {} exist; leaving both intact",
-            branding::config_dir(&home).display(),
-            branding::legacy_config_dir(&home).display()
+            core::branding::config_dir(&home).display(),
+            core::branding::legacy_config_dir(&home).display()
         ),
         Ok(_) => {}
         Err(e) => {
@@ -159,8 +152,8 @@ fn startup(force_oobe: bool) -> i32 {
             return 1;
         }
     }
-    branding::migrate_sessions_file(&home);
-    let mut loaded = match config::LoadedConfig::load_home(&home) {
+    core::branding::migrate_sessions_file(&home);
+    let mut loaded = match core::config::LoadedConfig::load_home(&home) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("error: {e}");
@@ -170,15 +163,15 @@ fn startup(force_oobe: bool) -> i32 {
     // First launch normalizes state: a missing config file is materialized
     // from defaults (preserving nothing, since there is nothing yet) and an
     // absent audit log is created private before any decision is recorded.
-    if !branding::config_file(&home).exists() {
+    if !core::branding::config_file(&home).exists() {
         if let Err(e) = loaded.save_home(&home) {
             eprintln!("error: cannot write config: {e}");
             return 1;
         }
     }
-    let audit = branding::audit_log(&home);
+    let audit = core::branding::audit_log(&home);
     if !audit.exists() {
-        if let Err(e) = fs_atomic::write_private(&audit, b"") {
+        if let Err(e) = core::fs_atomic::write_private(&audit, b"") {
             eprintln!("error: cannot init audit log: {e}");
             return 1;
         }
@@ -186,7 +179,7 @@ fn startup(force_oobe: bool) -> i32 {
     // Agent CLI definitions: materialize the packaged default on first
     // launch, then load. A bad file is a hard error — launching an agent
     // with the wrong argv is worse than not launching.
-    let agents_path = branding::agents_file(&home);
+    let agents_path = core::branding::agents_file(&home);
     if !agents_path.exists() {
         if let Err(e) = std::fs::write(&agents_path, crate::agents::DEFAULT_AGENTS_JSON) {
             eprintln!("error: cannot write agents file: {e}");
@@ -211,29 +204,29 @@ fn startup(force_oobe: bool) -> i32 {
     // Configuration guide for AI agents: docs only, so a failed drop
     // warns instead of blocking startup — and an existing file is never
     // overwritten, since local edits must survive upgrades.
-    let guide_path = branding::guide_file(&home);
+    let guide_path = core::branding::guide_file(&home);
     if !guide_path.exists() {
         if let Err(e) = std::fs::write(&guide_path, DEFAULT_AGENTS_MD) {
             eprintln!("warning: cannot write configuration guide: {e}");
         }
     }
-    let run = ids::RunId::generate();
+    let run = core::ids::RunId::generate();
     if let Ok(mut log) =
-        logging::FileLogger::open(&branding::app_log(&home), logging::DEFAULT_MAX_BYTES)
+        core::logging::FileLogger::open(&core::branding::app_log(&home), core::logging::DEFAULT_MAX_BYTES)
     {
         let _ = log.append(&format!(
             "forge {VERSION} start run {run} permission={:?}",
             loaded.config.permission.mode
         ));
     }
-    logging::set_hook_trace_path(branding::hooks_log(&home));
-    logging::set_comms_trace_path(branding::comms_log(&home));
-    logging::hook_trace_global(&format!(
+    core::logging::set_hook_trace_path(core::branding::hooks_log(&home));
+    core::logging::set_comms_trace_path(core::branding::comms_log(&home));
+    core::logging::hook_trace_global(&format!(
         "tui start pid={} run={run} exe={}",
         std::process::id(),
         std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()
     ));
-    logging::comms_trace_global(&format!("comms start pid={} run={run}", std::process::id()));
+    core::logging::comms_trace_global(&format!("comms start pid={} run={run}", std::process::id()));
     let mut state = app::AppState::new();
     // Greet a fresh owner before anything else: the dialog offers
     // every known CLI (all checked) and installs hooks for the pick.
@@ -265,7 +258,7 @@ fn startup(force_oobe: bool) -> i32 {
     // each entry's age.
     state.trace_snapshot("quit");
     if let Err(e) = checkpoint::save_quit_snapshot(
-        &branding::sessions_file(&home),
+        &core::branding::sessions_file(&home),
         state.snapshot_sessions(),
     ) {
         eprintln!("warning: cannot save sessions: {e}");
@@ -276,7 +269,7 @@ fn startup(force_oobe: bool) -> i32 {
 fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("--version") | Some("-V") => println!("{} {VERSION}", branding::binary_name()),
+        Some("--version") | Some("-V") => println!("{} {VERSION}", core::branding::binary_name()),
         Some("--help") | Some("-h") => print_help(),
         Some(arg) if oobe_forced(Some(arg)) => {
             std::process::exit(startup(true));
@@ -380,7 +373,7 @@ mod tests {
     fn seed_adds_missing_examples_without_touching_user_files() {
         let home = std::env::temp_dir().join(format!("forge-seed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let dir = branding::themes_dir(&home);
+        let dir = core::branding::themes_dir(&home);
         std::fs::create_dir_all(&dir).unwrap();
         // A user file plus a customized packaged file: both must survive.
         std::fs::write(dir.join("mine.json"), r##"{"name": "mine"}"##).unwrap();

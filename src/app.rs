@@ -4,7 +4,7 @@
 //! `AppEvent` through [`AppState::apply`]. Workers never touch this struct;
 //! dirty-flag rendering and shutdown flow out of the same reduction.
 
-use crate::event::AppEvent;
+use crate::core::event::AppEvent;
 use crate::session::SessionManager;
 
 /// Restore outcome counts for the status line.
@@ -35,7 +35,7 @@ pub struct AppState {
     /// poller thread: modal saves land within one poll turn, and the
     /// token file itself is re-read every turn, so rotation and edits
     /// bite at once without a restart.
-    pub telegram_config: std::sync::Arc<std::sync::Mutex<crate::config::TelegramConfig>>,
+    pub telegram_config: std::sync::Arc<std::sync::Mutex<crate::core::config::TelegramConfig>>,
     /// Open Telegram settings form (`Ctrl-b m`), if any.
     pub telegram_dialog: Option<crate::telegram_dialog::TelegramDialog>,
     /// Connection-test results from the worker thread (see
@@ -127,7 +127,7 @@ pub struct AppState {
     pub themes_dir: Option<std::path::PathBuf>,
     /// Live permission mode. The TUI loop rebuilds policy and persists the
     /// config whenever this diverges from the loaded one.
-    pub permission_mode: crate::config::PermissionMode,
+    pub permission_mode: crate::core::config::PermissionMode,
     /// Cross-session message broker (Phase 4): groups, conversations, queues.
     pub broker: crate::comms::Broker,
     /// Last human key/paste per session. Injections wait out a short
@@ -371,7 +371,7 @@ impl AppState {
             telegram_dropped: 0,
             telegram_last_poll_failed: false,
             telegram_config: std::sync::Arc::new(std::sync::Mutex::new(
-                crate::config::TelegramConfig::default(),
+                crate::core::config::TelegramConfig::default(),
             )),
             telegram_dialog: None,
             telegram_test_tx,
@@ -404,13 +404,13 @@ impl AppState {
             quit_saving: false,
             theme_dialog: None,
             themes_dir: None,
-            permission_mode: crate::config::PermissionMode::Yolo,
+            permission_mode: crate::core::config::PermissionMode::Yolo,
             broker: crate::comms::Broker::new(),
             last_human_input: std::collections::HashMap::new(),
             last_broker_tick: None,
             last_hook_activity: std::collections::HashMap::new(),
-            hook_trace: crate::logging::hook_trace_path(),
-            comms_trace: crate::logging::comms_trace_path(),
+            hook_trace: crate::core::logging::hook_trace_path(),
+            comms_trace: crate::core::logging::comms_trace_path(),
             pending_enter: std::collections::HashMap::new(),
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
@@ -526,7 +526,7 @@ impl AppState {
     /// Load workspace boards; a missing file starts empty, anything
     /// unreadable or corrupt quarantines aside with a footer notice.
     pub fn load_boards(&mut self, home: &std::path::Path) {
-        let path = crate::branding::kanban_file(home);
+        let path = crate::core::branding::kanban_file(home);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -558,8 +558,8 @@ impl AppState {
     /// Persist workspace boards atomically; failures are the caller's
     /// to surface (a toast/notice), never silent.
     pub fn save_boards(&self, home: &std::path::Path) -> std::io::Result<()> {
-        crate::fs_atomic::write_atomic(
-            &crate::branding::kanban_file(home),
+        crate::core::fs_atomic::write_atomic(
+            &crate::core::branding::kanban_file(home),
             self.boards.to_json_string().as_bytes(),
         )
     }
@@ -896,7 +896,7 @@ impl AppState {
             .map(|(ci, col)| {
                 let cards = board.cards_in(&col.name);
                 crate::ui::BoardColumnView {
-                    name: crate::safe_text::encode_for_display(&col.name),
+                    name: crate::core::safe_text::encode_for_display(&col.name),
                     wip_limit: col.wip_limit,
                     count: cards.len(),
                     selected: ci == self.board_focus.column,
@@ -908,7 +908,7 @@ impl AppState {
                             if !card.assignee.is_empty() {
                                 meta.push_str(&format!(
                                     " @{}",
-                                    crate::safe_text::encode_for_display(&card.assignee)
+                                    crate::core::safe_text::encode_for_display(&card.assignee)
                                 ));
                             }
                             meta.push_str(&format!(" {}%", card.progress));
@@ -918,17 +918,17 @@ impl AppState {
                             if let Some(start) = card.start_date.as_deref() {
                                 meta.push_str(&format!(
                                     " · {}→",
-                                    crate::safe_text::encode_for_display(start)
+                                    crate::core::safe_text::encode_for_display(start)
                                 ));
                             }
                             if let Some(due) = card.due_date.as_deref() {
                                 meta.push_str(&format!(
                                     " · {}",
-                                    crate::safe_text::encode_for_display(due)
+                                    crate::core::safe_text::encode_for_display(due)
                                 ));
                             }
                             crate::ui::BoardCardView {
-                                title: crate::safe_text::encode_for_display(&card.title),
+                                title: crate::core::safe_text::encode_for_display(&card.title),
                                 meta,
                                 selected: ci == self.board_focus.column
                                     && ki == self.board_focus.card,
@@ -939,7 +939,7 @@ impl AppState {
             })
             .collect();
         crate::ui::BoardView {
-            title: format!("Kanban · {}", crate::safe_text::encode_for_display(&board.name)),
+            title: format!("Kanban · {}", crate::core::safe_text::encode_for_display(&board.name)),
             columns,
             focus_col: self.board_focus.column,
             hints,
@@ -1229,7 +1229,7 @@ impl AppState {
     /// Set the live permission mode; true when it changed. Non Off/Yolo
     /// modes collapse to Yolo on toggle, never back (toggle only spans
     /// the two sidebar buttons).
-    pub fn set_permission_mode(&mut self, mode: crate::config::PermissionMode) -> bool {
+    pub fn set_permission_mode(&mut self, mode: crate::core::config::PermissionMode) -> bool {
         if self.permission_mode == mode {
             return false;
         }
@@ -1241,8 +1241,8 @@ impl AppState {
     /// Toggle Off <-> Yolo for the keyboard path.
     pub fn toggle_permission_mode(&mut self) -> bool {
         let next = match self.permission_mode {
-            crate::config::PermissionMode::Yolo => crate::config::PermissionMode::Off,
-            _ => crate::config::PermissionMode::Yolo,
+            crate::core::config::PermissionMode::Yolo => crate::core::config::PermissionMode::Off,
+            _ => crate::core::config::PermissionMode::Yolo,
         };
         self.set_permission_mode(next)
     }
@@ -1623,8 +1623,8 @@ impl AppState {
                 vec![crate::ui::SpanView {
                     text: format!(
                         "Q ({}): {}",
-                        crate::safe_text::encode_for_display(&q.shape_label),
-                        crate::safe_text::encode_for_display(&q.question)
+                        crate::core::safe_text::encode_for_display(&q.shape_label),
+                        crate::core::safe_text::encode_for_display(&q.question)
                     ),
                     style: text,
                 }],
@@ -1979,7 +1979,7 @@ impl AppState {
             strip.push(crate::ui::SpanView {
                 text: format!(
                     "  ▸  {}",
-                    crate::safe_text::encode_for_display(&shape.label)
+                    crate::core::safe_text::encode_for_display(&shape.label)
                 ),
                 style: text,
             });
@@ -1990,7 +1990,7 @@ impl AppState {
             let alt = vec![crate::ui::SpanView {
                 text: format!(
                     "  ·  {}",
-                    crate::safe_text::encode_for_display(&slot.alt)
+                    crate::core::safe_text::encode_for_display(&slot.alt)
                 ),
                 style: muted,
             }];
@@ -2152,7 +2152,7 @@ impl AppState {
                     vec![
                         crate::ui::SpanView { text: "> ".to_string(), style: text },
                         crate::ui::SpanView {
-                            text: format!("{}{}", crate::safe_text::encode_for_display(d), cursor),
+                            text: format!("{}{}", crate::core::safe_text::encode_for_display(d), cursor),
                             style: text,
                         },
                     ]
@@ -3227,7 +3227,7 @@ impl AppState {
             self.broker.push(
                 id,
                 crate::comms::Injection {
-                    conv: crate::ids::ConversationId::generate().to_string(),
+                    conv: crate::core::ids::ConversationId::generate().to_string(),
                     kind: crate::comms::InjectKind::Tell,
                     from,
                     text: prompt,
@@ -3344,7 +3344,7 @@ impl AppState {
         let text = crate::telegram::truncate_text(&message, crate::telegram::MAX_TEXT).to_string();
         self.message_user_badges.insert(caller, text.clone());
         self.last_telegram_badged = Some(caller);
-        let conv = crate::ids::ConversationId::generate().to_string();
+        let conv = crate::core::ids::ConversationId::generate().to_string();
         let cfg = self
             .telegram_config
             .lock()
@@ -3746,14 +3746,14 @@ impl AppState {
     /// open for the caller to surface.
     pub fn apply_telegram_form(
         &mut self,
-        loaded: &mut crate::config::LoadedConfig,
+        loaded: &mut crate::core::config::LoadedConfig,
         home: &std::path::Path,
         form: crate::telegram_dialog::TelegramForm,
     ) -> Result<(), String> {
         if !form.token.is_empty() {
             let path =
                 crate::telegram_dialog::expand_token_path(&form.config.token_file, home);
-            crate::fs_atomic::write_private(std::path::Path::new(&path), form.token.as_bytes())
+            crate::core::fs_atomic::write_private(std::path::Path::new(&path), form.token.as_bytes())
                 .map_err(|e| format!("cannot write token file: {e}"))?;
         }
         loaded.config.telegram = form.config.clone();
@@ -3772,7 +3772,7 @@ impl AppState {
     /// Start a connection test for the open dialog. A dialog-provided
     /// token wins; otherwise the fixed token file reads now and
     /// reports inline. Network runs on a worker thread; the verdict
-    /// returns as [`crate::event::AppEvent::TelegramTested`].
+    /// returns as [`crate::core::event::AppEvent::TelegramTested`].
     pub fn start_telegram_test(&mut self, token: String) {
         let Some(dialog) = self.telegram_dialog.as_mut() else {
             return;
@@ -4123,14 +4123,14 @@ impl AppState {
                 ))
             })
             .collect();
-        crate::logging::hook_trace(path, &format!("tui snapshot {reason}: {}", sessions.join(" ")));
+        crate::core::logging::hook_trace(path, &format!("tui snapshot {reason}: {}", sessions.join(" ")));
     }
 
     /// Append one line to the comms trace, when on. Best-effort:
     /// tracing never fails or blocks the send or delivery it describes.
     fn trace_comms(&self, line: &str) {
         if let Some(path) = self.comms_trace.as_deref() {
-            crate::logging::comms_trace(path, line);
+            crate::core::logging::comms_trace(path, line);
         }
     }
 
@@ -4215,7 +4215,7 @@ impl AppState {
                 format!("comms tool={tool} {caller} {summary} -> ok{conv}{target_state}")
             }
             Err(e) => {
-                let reason = crate::logging::truncate(e, 200);
+                let reason = crate::core::logging::truncate(e, 200);
                 let caller_queued = match caller_id {
                     Some(id) => format!(" caller_queued={}", self.broker.queued(id)),
                     None => String::new(),
@@ -4289,7 +4289,7 @@ impl AppState {
             let argv = harness.resume_argv(&spec.resolve_binary(), saved.harness_session_id.as_deref());
             let mut cmd = String::from("exec ");
             cmd.push_str(&crate::create::shell_join(&argv));
-            let run = crate::ids::RunId::generate();
+            let run = crate::core::ids::RunId::generate();
             match self.manager.spawn_agent(&saved.name, &cwd, &cmd, run, &saved.cli_tool) {
                 Ok(id) => {
                     // The save file knows the resume ID the argv above
@@ -4339,7 +4339,7 @@ impl AppState {
                 // the agent's strongest injection mechanism. Materialization
                 // fails open: a session without injection still launches.
                 let argv = match crate::runtime::ensure_materialized(
-                    &crate::branding::home_dir(),
+                    &crate::core::branding::home_dir(),
                 ) {
                     Ok(file) => h.launch_argv_with_runtime(&binary, model, &file),
                     Err(_) => hs.launch_argv(&binary, model),
@@ -4351,7 +4351,7 @@ impl AppState {
         };
         // Agent CLIs get the dual-tab layout (agent on tab 0, a lazy
         // human terminal on tab 1); plain shells stay single-tab.
-        let run = crate::ids::RunId::generate();
+        let run = crate::core::ids::RunId::generate();
         let id = match spec.kind {
             SessionKind::Agent(_) => {
                 self.manager
@@ -4514,7 +4514,7 @@ impl AppState {
                         crate::comms::log_quote(&head.conv),
                         head.kind.label(),
                         crate::comms::log_quote(&head.from),
-                        crate::comms::log_quote(&crate::logging::truncate(
+                        crate::comms::log_quote(&crate::core::logging::truncate(
                             &e.to_string(),
                             200
                         )),
@@ -4581,7 +4581,7 @@ impl AppState {
                     self.trace_comms(&format!(
                         "enter-fail to={} err={}",
                         crate::comms::log_quote(&to),
-                        crate::comms::log_quote(&crate::logging::truncate(&e.to_string(), 200)),
+                        crate::comms::log_quote(&crate::core::logging::truncate(&e.to_string(), 200)),
                     ));
                 }
             }
@@ -5249,7 +5249,7 @@ impl AppState {
                         .and_then(|id| self.manager.get(id))
                         .and_then(|rec| rec.harness_session_id.clone())
                         .unwrap_or_else(|| "-".to_string());
-                    crate::logging::hook_trace(
+                    crate::core::logging::hook_trace(
                         path,
                         &format!(
                             "tui hook={} run={} source_sid={} by_sid={} session_id={} cwd={} attributed={} harness_after={harness_after}",
@@ -5282,8 +5282,8 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::AppEvent;
-    use crate::ids::RunId;
+    use crate::core::event::AppEvent;
+    use crate::core::ids::RunId;
     use crate::session::SessionId;
 
     #[test]
@@ -5316,7 +5316,7 @@ mod tests {
 
     #[test]
     fn codex_pre_tool_use_allow_is_silent_claude_stays_explicit() {
-        use crate::config::PermissionMode;
+        use crate::core::config::PermissionMode;
         let audit = std::env::temp_dir().join(format!(
             "forge-codex-silent-test-{}",
             std::process::id()
@@ -5414,7 +5414,7 @@ mod tests {
 
     #[test]
     fn codex_permission_request_allow_skips_prompt_ask_defers() {
-        use crate::config::PermissionMode;
+        use crate::core::config::PermissionMode;
         let audit = std::env::temp_dir().join(format!(
             "forge-codex-preq-test-{}",
             std::process::id()
@@ -5981,7 +5981,7 @@ mod tests {
         // Newer Claude (and muse) reject the legacy top-level `decision`
         // field on PreToolUse replies: "unsupported legacy PreToolUse
         // output; use hookSpecificOutput.permissionDecision".
-        use crate::config::PermissionMode;
+        use crate::core::config::PermissionMode;
         let audit = std::env::temp_dir().join(format!(
             "forge-hookshape-test-{}",
             std::process::id()
@@ -6025,7 +6025,7 @@ mod tests {
 
     #[test]
     fn settle_hooks_replies_every_verdict_immediately() {
-        use crate::config::PermissionMode;
+        use crate::core::config::PermissionMode;
         let audit = std::env::temp_dir().join(format!(
             "forge-settle-test-{}",
             std::process::id()
@@ -6090,7 +6090,7 @@ mod tests {
 
     #[test]
     fn settle_hooks_dirties_only_when_a_hook_fires() {
-        use crate::config::PermissionMode;
+        use crate::core::config::PermissionMode;
         let audit = std::env::temp_dir().join(format!(
             "forge-settle-idle-test-{}",
             std::process::id()
@@ -6185,7 +6185,7 @@ mod tests {
 
     #[test]
     fn safe_only_blocks_still_deny_without_a_modal() {
-        use crate::config::PermissionMode;
+        use crate::core::config::PermissionMode;
         let audit = std::env::temp_dir().join(format!(
             "forge-block-test-{}",
             std::process::id()
@@ -7171,7 +7171,7 @@ mod tests {
         // stamp must use the same attribution, or a slow batch ages
         // the enqueue stamp past the beat and the verdict protects
         // nobody.
-        use crate::config::PermissionMode;
+        use crate::core::config::PermissionMode;
         let mut s = AppState::new();
         let run_a = RunId::generate();
         let a = s
@@ -7349,7 +7349,7 @@ mod tests {
 
     #[test]
     fn hook_requests_and_verdicts_stamp_hook_activity() {
-        use crate::config::PermissionMode;
+        use crate::core::config::PermissionMode;
         let mut s = AppState::new();
         let run_a = RunId::generate();
         let a = s
@@ -7758,18 +7758,18 @@ mod tests {
     #[test]
     fn permission_mode_toggle_spans_off_and_yolo() {
         let mut s = AppState::new();
-        assert_eq!(s.permission_mode, crate::config::PermissionMode::Yolo);
+        assert_eq!(s.permission_mode, crate::core::config::PermissionMode::Yolo);
         s.dirty = false;
         assert!(s.toggle_permission_mode());
-        assert_eq!(s.permission_mode, crate::config::PermissionMode::Off);
+        assert_eq!(s.permission_mode, crate::core::config::PermissionMode::Off);
         assert!(s.dirty);
-        assert!(!s.set_permission_mode(crate::config::PermissionMode::Off));
+        assert!(!s.set_permission_mode(crate::core::config::PermissionMode::Off));
         assert!(s.toggle_permission_mode());
-        assert_eq!(s.permission_mode, crate::config::PermissionMode::Yolo);
+        assert_eq!(s.permission_mode, crate::core::config::PermissionMode::Yolo);
         // Foreign modes collapse to Yolo, never back through the toggle.
-        assert!(s.set_permission_mode(crate::config::PermissionMode::SafeOnly));
+        assert!(s.set_permission_mode(crate::core::config::PermissionMode::SafeOnly));
         assert!(s.toggle_permission_mode());
-        assert_eq!(s.permission_mode, crate::config::PermissionMode::Yolo);
+        assert_eq!(s.permission_mode, crate::core::config::PermissionMode::Yolo);
     }
 
     fn scratch_home() -> std::path::PathBuf {
@@ -7842,7 +7842,7 @@ mod tests {
     fn board_load_corrupt_quarantines_and_notices() {
         let mut s = AppState::new();
         let home = scratch_home();
-        let path = crate::branding::kanban_file(&home);
+        let path = crate::core::branding::kanban_file(&home);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"{torn").unwrap();
         s.load_boards(&home);
@@ -7973,11 +7973,11 @@ mod tests {
         // (angle brackets paint literally and execute nothing here).
         for shown in [&card.title, &card.meta] {
             assert!(
-                !crate::safe_text::contains_bidi_controls(shown),
+                !crate::core::safe_text::contains_bidi_controls(shown),
                 "bidi encoded: {shown:?}"
             );
             assert!(
-                !crate::safe_text::contains_invisibles(shown),
+                !crate::core::safe_text::contains_invisibles(shown),
                 "invisibles encoded: {shown:?}"
             );
             assert!(
@@ -8214,7 +8214,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&audit);
         let mut yolo =
-            crate::policy::Policy::new(crate::config::PermissionMode::Yolo, &[], &[]).unwrap();
+            crate::policy::Policy::new(crate::core::config::PermissionMode::Yolo, &[], &[]).unwrap();
         s.settle_hooks(&mut yolo, &audit);
         assert!(s.pending_hooks.is_empty(), "queue drains");
         assert!(s.last_hook_activity.contains_key(&id), "verdict stamps activity");
@@ -8262,7 +8262,7 @@ mod tests {
         state.term_size = (40, 180);
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
         assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
@@ -8282,7 +8282,7 @@ mod tests {
         state.term_size = (40, 180);
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
         assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
@@ -8296,7 +8296,7 @@ mod tests {
         state.term_size = (40, 180);
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let view = state.visual_view(id, false);
         let text: String = view.lines.iter().flatten().map(|span| span.text.as_str()).collect::<Vec<_>>().join("\n");
@@ -8311,7 +8311,7 @@ mod tests {
         state.term_size = (40, 180);
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let view = state.walkthrough_view(id);
         let text: String = view.lines.iter().flatten().map(|span| span.text.as_str()).collect::<Vec<_>>().join("\n");
@@ -8492,7 +8492,7 @@ mod tests {
     fn spawn_visual_agent(state: &mut AppState, name: &str) -> (crate::session::SessionId, String) {
         let id = state.manager.spawn_agent(
             name, &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let run = state.manager.get(id).unwrap().run_id.as_str().to_string();
         (id, run)
@@ -8667,7 +8667,7 @@ mod tests {
         let mut state = AppState::new();
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
         // Unknown formats name the supported set.
@@ -10097,7 +10097,7 @@ mod tests {
         state.term_size = (40, 180);
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         // The fake harness calls with the record's own run ID.
         let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
@@ -10149,7 +10149,7 @@ mod tests {
                 "agent",
                 &std::env::temp_dir(),
                 "exec cat",
-                crate::ids::RunId::generate(),
+                crate::core::ids::RunId::generate(),
                 "codex",
             )
             .unwrap();
@@ -10395,7 +10395,7 @@ mod tests {
         state.term_size = (40, 180);
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
         let missing = comms_reply(
@@ -10418,7 +10418,7 @@ mod tests {
         let mut state = AppState::new();
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         std::env::remove_var("CODEX_BIN");
         let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
@@ -10518,7 +10518,7 @@ mod tests {
                 "agent",
                 &std::env::temp_dir(),
                 "exec cat",
-                crate::ids::RunId::generate(),
+                crate::core::ids::RunId::generate(),
                 "codex",
             )
             .unwrap();
@@ -10570,7 +10570,7 @@ mod tests {
                 name,
                 &std::env::temp_dir(),
                 "exec cat",
-                crate::ids::RunId::generate(),
+                crate::core::ids::RunId::generate(),
                 "codex",
             )
             .unwrap();
@@ -10901,23 +10901,23 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ));
-        std::fs::create_dir_all(crate::branding::config_dir(&dir)).unwrap();
+        std::fs::create_dir_all(crate::core::branding::config_dir(&dir)).unwrap();
         dir
     }
 
     #[test]
     fn telegram_form_save_writes_token_and_lives() {
         let home = tg_home();
-        let path = crate::branding::config_file(&home);
-        let mut loaded = crate::config::LoadedConfig::load(&path).expect("defaults load");
+        let path = crate::core::branding::config_file(&home);
+        let mut loaded = crate::core::config::LoadedConfig::load(&path).expect("defaults load");
         let token_path = home.join("tg.token");
         let mut state = AppState::new();
         state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
-            &crate::config::TelegramConfig::default(),
+            &crate::core::config::TelegramConfig::default(),
             true,
         ));
         let form = crate::telegram_dialog::TelegramForm {
-            config: crate::config::TelegramConfig {
+            config: crate::core::config::TelegramConfig {
                 enabled: true,
                 token_file: token_path.to_string_lossy().into_owned(),
                 allowed_user_ids: vec![11],
@@ -10951,7 +10951,7 @@ mod tests {
     fn telegram_tested_lands_in_open_dialog() {
         let mut state = AppState::new();
         state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
-            &crate::config::TelegramConfig::default(),
+            &crate::core::config::TelegramConfig::default(),
             true,
         ));
         state
@@ -10990,7 +10990,7 @@ mod tests {
         std::env::set_var("HOME", &scratch);
         let mut state = AppState::new();
         state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
-            &crate::config::TelegramConfig::default(),
+            &crate::core::config::TelegramConfig::default(),
             true,
         ));
         state.start_telegram_test(String::new());
@@ -11103,7 +11103,7 @@ mod tests {
                 "agent",
                 &std::env::temp_dir(),
                 "exec cat",
-                crate::ids::RunId::generate(),
+                crate::core::ids::RunId::generate(),
                 "codex",
             )
             .unwrap();
@@ -11113,7 +11113,7 @@ mod tests {
                 "gone",
                 &std::env::temp_dir(),
                 "exec cat",
-                crate::ids::RunId::generate(),
+                crate::core::ids::RunId::generate(),
                 "codex",
             )
             .unwrap();
@@ -11179,11 +11179,11 @@ mod tests {
         let mut state = AppState::new();
         let a = state.manager.spawn_agent(
             "a", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let b = state.manager.spawn_agent(
             "b", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         std::env::remove_var("CODEX_BIN");
         let run_a = state.manager.get(a).unwrap().run_id.as_str().to_string();
@@ -11212,7 +11212,7 @@ mod tests {
         let mut state = AppState::new();
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         std::env::remove_var("CODEX_BIN");
         let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
@@ -11262,7 +11262,7 @@ mod tests {
         std::env::set_var("CODEX_BIN", "cat");
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         std::env::remove_var("CODEX_BIN");
         let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
@@ -11319,7 +11319,7 @@ mod tests {
         state.term_size = (40, 180);
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         // Index 2 is a real PTY tab now, not an overlay: selecting it
         // lazily spawns the pane (the shell reports a missing binary as
@@ -11339,7 +11339,7 @@ mod tests {
         state.term_size = (40, 180);
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
         assert!(labels[0].starts_with("🤖 "));
@@ -11356,7 +11356,7 @@ mod tests {
         state.apply(AppEvent::Resize(40, 180));
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         assert!(state.select_top_tab(3));
         state.apply(AppEvent::Resize(24, 80));
@@ -11371,7 +11371,7 @@ mod tests {
         state.apply(AppEvent::Resize(30, 120));
         let id = state.manager.spawn_agent(
             "agent", &std::env::temp_dir(), "exec cat",
-            crate::ids::RunId::generate(), "codex",
+            crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         assert_eq!(state.topbar().tabs.len(), 5);
         let bar = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
@@ -11383,7 +11383,7 @@ mod tests {
     fn visual_tab_keeps_its_label_under_hook_traffic() {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(40, 180));
-        let run = crate::ids::RunId::generate();
+        let run = crate::core::ids::RunId::generate();
         let id = state.manager.spawn_agent("agent", &std::env::temp_dir(), "exec cat", run.clone(), "codex").unwrap();
         let (reply, _) = std::sync::mpsc::channel();
         state.apply(AppEvent::HookRequest(crate::listener::HookRequest {

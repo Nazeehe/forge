@@ -71,7 +71,7 @@ pub const COMMS_LOG_TEXT_PREVIEW: usize = 200;
 
 /// Quote one log field: backslashes and double quotes escape so the
 /// `name="value"` shape survives hostile text. Control characters are
-/// stripped later at write time (see [`crate::logging::FileLogger`]).
+/// stripped later at write time (see [`crate::core::logging::FileLogger`]).
 pub(crate) fn log_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -103,7 +103,7 @@ fn log_text_part(text: Option<String>) -> String {
             let len: usize = t.chars().count();
             format!(
                 "text_len={len} text={}",
-                log_quote(&crate::logging::truncate(&t, COMMS_LOG_TEXT_PREVIEW))
+                log_quote(&crate::core::logging::truncate(&t, COMMS_LOG_TEXT_PREVIEW))
             )
         }
         None => "text=absent".to_string(),
@@ -137,10 +137,10 @@ pub fn summarize_call(tool: &str, args: &str) -> String {
         "schedule_prompt" => {
             let mut out = log_text_part(text());
             if let Some(raw) = crate::mcp::top_raw(args, "delay_seconds") {
-                out.push_str(&format!(" delay={}", crate::logging::truncate(raw.trim(), 32)));
+                out.push_str(&format!(" delay={}", crate::core::logging::truncate(raw.trim(), 32)));
             }
             if let Some(raw) = crate::mcp::top_raw(args, "clear_context") {
-                out.push_str(&format!(" clear={}", crate::logging::truncate(raw.trim(), 8)));
+                out.push_str(&format!(" clear={}", crate::core::logging::truncate(raw.trim(), 8)));
             }
             out
         }
@@ -1118,7 +1118,7 @@ impl Broker {
                 "client send cap reached",
             ));
         }
-        let conv = crate::ids::ConversationId::generate().to_string();
+        let conv = crate::core::ids::ConversationId::generate().to_string();
         let target_name_live = self.names(sessions, target);
         self.push(
             target,
@@ -1228,7 +1228,7 @@ impl Broker {
                 "client send cap reached",
             ));
         }
-        let conv = crate::ids::ConversationId::generate().to_string();
+        let conv = crate::core::ids::ConversationId::generate().to_string();
         let target_name_live = self.names(sessions, target);
         self.push(
             target,
@@ -1644,7 +1644,7 @@ impl Broker {
                 return self.send_client(sessions, caller, &target_name, &text, now, BotConvKind::Ask);
             }
         };
-        let conv = crate::ids::ConversationId::generate().to_string();
+        let conv = crate::core::ids::ConversationId::generate().to_string();
         let from = self.names(sessions, caller);
         let target_name_live = self.names(sessions, target);
         self.push(
@@ -1705,7 +1705,7 @@ impl Broker {
         {
             return Err(format!("pressure cap reached for {target_name:?}"));
         }
-        let conv = crate::ids::ConversationId::generate().to_string();
+        let conv = crate::core::ids::ConversationId::generate().to_string();
         let from_name = self.names(sessions, caller);
         let from_id = caller.to_string();
         let event = match kind {
@@ -1787,7 +1787,7 @@ impl Broker {
         self.push(
             target,
             Injection {
-                conv: crate::ids::ConversationId::generate().to_string(),
+                conv: crate::core::ids::ConversationId::generate().to_string(),
                 kind: InjectKind::Command,
                 from: self.names(sessions, caller),
                 text: "/compact".to_string(),
@@ -1833,7 +1833,7 @@ impl Broker {
         } else {
             prompt
         };
-        let timer = crate::ids::ConversationId::generate().to_string();
+        let timer = crate::core::ids::ConversationId::generate().to_string();
         self.timers.insert(
             timer.clone(),
             Timer {
@@ -2017,7 +2017,7 @@ impl Broker {
                 return self.send_client(sessions, caller, &target_name, &text, now, BotConvKind::Tell);
             }
         };
-        let conv = crate::ids::ConversationId::generate().to_string();
+        let conv = crate::core::ids::ConversationId::generate().to_string();
         let from = self.names(sessions, caller);
         let target_name_live = self.names(sessions, target);
         self.push(
@@ -2875,8 +2875,8 @@ impl Broker {
 mod tests {
     use super::*;
     use crate::app::AppState;
-    use crate::event::AppEvent;
-    use crate::ids::RunId;
+    use crate::core::event::AppEvent;
+    use crate::core::ids::RunId;
     use crate::session::SessionId;
 
     fn json_field(haystack: &str, field: &str) -> Option<String> {
@@ -3357,7 +3357,7 @@ mod tests {
         // Ambiguous names fail rather than guess.
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
-        let run_c = crate::ids::RunId::generate();
+        let run_c = crate::core::ids::RunId::generate();
         let c = p
             .state
             .manager
@@ -3875,7 +3875,7 @@ mod tests {
                 "c",
                 &std::env::temp_dir(),
                 "exec sleep 30",
-                crate::ids::RunId::generate(),
+                crate::core::ids::RunId::generate(),
                 "shell",
             )
             .unwrap();
