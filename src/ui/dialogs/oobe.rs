@@ -178,8 +178,8 @@ fn setup_y(area: Rect) -> u16 {
 
 /// One outcome's row status: short text plus a semantic role. Text
 /// always differs, so color never carries meaning alone.
-fn outcome_status(outcome: &Outcome) -> (&'static str, crate::theme::Role) {
-    use crate::theme::Role;
+fn outcome_status(outcome: &Outcome) -> (&'static str, crate::ui::theme::Role) {
+    use crate::ui::theme::Role;
     if outcome.error.is_some() {
         ("error", Role::Danger)
     } else if outcome.installed {
@@ -195,10 +195,10 @@ fn outcome_status(outcome: &Outcome) -> (&'static str, crate::theme::Role) {
 /// default carrying `*` with the `>` chosen-marker, like `create.rs`.
 fn action_spans(pills: bool, label: &str) -> Vec<ratatui::text::Span<'static>> {
     use ratatui::text::Span;
-    use crate::theme::{Role, focus_row, style};
+    use crate::ui::theme::{Role, focus_row, style};
     if pills {
         use ratatui::style::{Color, Style};
-        let (fill, left_cap, right_cap) = crate::theme::button_chrome(
+        let (fill, left_cap, right_cap) = crate::ui::theme::button_chrome(
             true,
             style(Role::TabActive),
             style(Role::TabInactive),
@@ -207,14 +207,14 @@ fn action_spans(pills: bool, label: &str) -> Vec<ratatui::text::Span<'static>> {
         vec![
             Span::styled(">", focus_row()),
             Span::styled(
-                crate::theme::pill_left().to_string(),
+                crate::ui::theme::pill_left().to_string(),
                 Style::default().fg(left_cap),
             ),
             Span::styled(" ".to_string(), fill),
             Span::styled(label.to_string(), fill),
             Span::styled(" ".to_string(), fill),
             Span::styled(
-                crate::theme::pill_right().to_string(),
+                crate::ui::theme::pill_right().to_string(),
                 Style::default().fg(right_cap),
             ),
         ]
@@ -381,18 +381,18 @@ impl OobeDialog {
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, focus_row, style};
         // Opaque: the live grid must not show through the modal.
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(crate::theme::border_type())
+            .border_type(crate::ui::theme::border_type())
             .title(if self.done() {
                 " Setup complete "
             } else {
                 " Welcome to Forge "
             })
-            .style(crate::theme::modal_fill())
+            .style(crate::ui::theme::modal_fill())
             .border_style(style(Role::BorderModal));
         let inner = inner_rect(area);
         frame.render_widget(block, area);

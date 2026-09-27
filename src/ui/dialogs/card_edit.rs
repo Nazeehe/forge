@@ -387,7 +387,7 @@ impl CardEditDialog {
     fn action_spans(&self) -> Vec<ratatui::text::Span<'static>> {
         use ratatui::style::{Color, Style};
         use ratatui::text::Span;
-        use crate::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, focus_row, style};
         let text = style(Role::Text);
         let choice = self.actions.states.choice;
         let focused = self.focus == FOCUS_ACTIONS;
@@ -422,18 +422,18 @@ impl CardEditDialog {
             if chosen {
                 spans.push(Span::styled(">", focus_row()));
             }
-            let (fill, left_cap, right_cap) = crate::theme::button_chrome(
+            let (fill, left_cap, right_cap) = crate::ui::theme::button_chrome(
                 hot,
                 style(Role::TabActive),
                 style(Role::TabInactive),
                 Color::DarkGray,
             );
             let tag = if default { format!("{label}*") } else { label.to_string() };
-            spans.push(frame(crate::theme::pill_left(), left_cap));
+            spans.push(frame(crate::ui::theme::pill_left(), left_cap));
             spans.push(Span::styled(" ", fill));
             spans.push(Span::styled(tag, fill));
             spans.push(Span::styled(" ", fill));
-            spans.push(frame(crate::theme::pill_right(), right_cap));
+            spans.push(frame(crate::ui::theme::pill_right(), right_cap));
         }
         spans
     }
@@ -449,7 +449,7 @@ impl CardEditDialog {
         }
         let inner = Block::default()
             .borders(Borders::ALL)
-            .border_type(crate::theme::border_type())
+            .border_type(crate::ui::theme::border_type())
             .inner(area);
         if inner.height < 17 || inner.width < 44 {
             return None;
@@ -504,13 +504,13 @@ impl CardEditDialog {
     pub fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, focus_row, style};
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(crate::theme::border_type())
+            .border_type(crate::ui::theme::border_type())
             .title(" Edit card ")
-            .style(crate::theme::modal_fill())
+            .style(crate::ui::theme::modal_fill())
             .border_style(style(Role::BorderModal));
         let inner = block.inner(area);
         frame.render_widget(block, area);

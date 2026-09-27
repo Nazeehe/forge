@@ -16,25 +16,14 @@ const MAX_FILE_LINES: usize = 1500;
 const FLAT_ALLOWED: &[&str] = &[
     "app.rs",
     "bot.rs",
-    "card_edit.rs",
     "comms.rs",
-    "create.rs",
-    "groups.rs",
-    "help.rs",
     "input.rs",
-    "oobe.rs",
-    "quit.rs",
-    "telegram_dialog.rs",
-    "theme.rs",
-    "theme_dialog.rs",
     "tui.rs",
-    "ui.rs",
-    "whichkey.rs",
 ];
 
 /// `.rs` files under `src/` (paths relative to `src/`) allowed to exceed
 /// [`MAX_FILE_LINES`]. Emptied as the oversized files are split.
-const OVERSIZE_ALLOWED: &[&str] = &["app.rs", "comms.rs", "hooks/install.rs", "tui.rs", "ui.rs"];
+const OVERSIZE_ALLOWED: &[&str] = &["app.rs", "comms.rs", "hooks/install.rs", "tui.rs", "ui/mod.rs"];
 
 fn src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")

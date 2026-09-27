@@ -492,7 +492,7 @@ impl GroupDialog {
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect, ctx: &GroupCtx) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, focus_row, style};
         // Opaque: the live grid must not show through the modal.
         frame.render_widget(Clear, area);
         let hint = match self.mode {
@@ -502,9 +502,9 @@ impl GroupDialog {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-                .border_type(crate::theme::border_type())
+                .border_type(crate::ui::theme::border_type())
             .title(hint)
-            .style(crate::theme::modal_fill())
+            .style(crate::ui::theme::modal_fill())
             .border_style(style(Role::BorderModal));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -647,7 +647,7 @@ impl GroupDialog {
         let footer_hints: Option<Vec<ratatui::text::Span>> = match self.mode {
             Mode::List => {
                 use ratatui::text::Span;
-                let key = crate::theme::style(crate::theme::Role::KeyHint);
+                let key = crate::ui::theme::style(crate::ui::theme::Role::KeyHint);
                 // `r` follows the cursor: a member row removes that
                 // session from the group, a header renames the group.
                 let r_hint = if self.member.is_some() {
@@ -664,7 +664,7 @@ impl GroupDialog {
             }
             Mode::Members => {
                 use ratatui::text::Span;
-                let key = crate::theme::style(crate::theme::Role::KeyHint);
+                let key = crate::ui::theme::style(crate::ui::theme::Role::KeyHint);
                 Some(vec![
                     Span::styled("↑↓", key), Span::raw(" navigate   "),
                     Span::styled("Space", key), Span::raw(" toggle   "),

@@ -1,6 +1,6 @@
 //! Telegram settings dialog: the `[telegram]` section as a form.
 //!
-//! Tui-realm inputs mirror [`crate::create::CreateDialog`]: Tab cycles
+//! Tui-realm inputs mirror [`crate::ui::dialogs::create::CreateDialog`]: Tab cycles
 //! rows, typing edits the focused input, Enter submits (or activates the
 //! focused action), Esc cancels. Validation errors stay in a fixed slot
 //! so the layout never shifts. Submitting never touches the network:
@@ -347,7 +347,7 @@ impl TelegramDialog {
     fn action_spans(&self) -> Vec<ratatui::text::Span<'static>> {
         use ratatui::style::{Color, Style};
         use ratatui::text::Span;
-        use crate::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, focus_row, style};
         let text = style(Role::Text);
         let choice = self.actions.states.choice;
         let focused = self.focus == FOCUS_ACTIONS;
@@ -384,18 +384,18 @@ impl TelegramDialog {
             if chosen {
                 spans.push(Span::styled(">", focus_row()));
             }
-            let (fill, left_cap, right_cap) = crate::theme::button_chrome(
+            let (fill, left_cap, right_cap) = crate::ui::theme::button_chrome(
                 hot,
                 style(Role::TabActive),
                 style(Role::TabInactive),
                 Color::DarkGray,
             );
             let tag = if default { format!("{label}*") } else { label.to_string() };
-            spans.push(frame(crate::theme::pill_left(), left_cap));
+            spans.push(frame(crate::ui::theme::pill_left(), left_cap));
             spans.push(Span::styled(" ", fill));
             spans.push(Span::styled(tag, fill));
             spans.push(Span::styled(" ", fill));
-            spans.push(frame(crate::theme::pill_right(), right_cap));
+            spans.push(frame(crate::ui::theme::pill_right(), right_cap));
         }
         spans
     }
@@ -411,7 +411,7 @@ impl TelegramDialog {
         }
         let inner = Block::default()
             .borders(Borders::ALL)
-            .border_type(crate::theme::border_type())
+            .border_type(crate::ui::theme::border_type())
             .inner(area);
         if inner.height < 14 || inner.width < 44 {
             return None;
@@ -466,13 +466,13 @@ impl TelegramDialog {
     pub fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, focus_row, style};
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
-                .border_type(crate::theme::border_type())
+                .border_type(crate::ui::theme::border_type())
             .title(" Telegram ")
-            .style(crate::theme::modal_fill())
+            .style(crate::ui::theme::modal_fill())
             .border_style(style(Role::BorderModal));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -859,9 +859,9 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
         let mut d = fresh();
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal.draw(|f| d.view(f, crate::telegram_dialog::telegram_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::telegram::telegram_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let area = crate::ui::dialogs::telegram::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         assert_eq!(area.x, (100 - area.width) / 2, "horizontally centered");
         let title: String = (area.x..area.x + area.width).map(|x| buf[(x, area.y)].symbol()).collect();
         assert!(title.contains("Telegram"), "title: {title:?}");
@@ -908,10 +908,10 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
         let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let area = crate::ui::dialogs::telegram::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         terminal.draw(|f| d.view(f, area)).unwrap();
         let (_, text) = action_row_text(terminal.backend().buffer(), area);
-        assert!(text.contains(crate::theme::pill_left()), "pill caps: {text:?}");
+        assert!(text.contains(crate::ui::theme::pill_left()), "pill caps: {text:?}");
         assert!(text.contains("Save"), "save button: {text:?}");
     }
 
@@ -919,7 +919,7 @@ mod tests {
     fn click_save_submits_with_hardcoded_token_file() {
         let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
         assert!(matches!(d.key(&key(KeyCode::Right)), TelegramOutcome::Pending));
-        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let area = crate::ui::dialogs::telegram::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         let y = area.y + 2 + 7;
         match click_text(&mut d, area, y, "Save") {
             Some(TelegramOutcome::Submitted(form)) => {
@@ -932,7 +932,7 @@ mod tests {
     #[test]
     fn click_test_and_cancel_fire() {
         let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
-        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let area = crate::ui::dialogs::telegram::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         let y = area.y + 2 + 7;
         assert!(matches!(click_text(&mut d, area, y, "Test"), Some(TelegramOutcome::Test { .. })));
         let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn click_row_focuses_and_outside_is_ignored() {
         let mut d = TelegramDialog::new(&crate::core::config::TelegramConfig::default(), true);
-        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let area = crate::ui::dialogs::telegram::telegram_area(ratatui::layout::Rect::new(0, 0, 100, 40));
         // Allowed IDs is the third form row (Enabled, Token, Allowed).
         let row = area.y + 2 + 2;
         assert!(matches!(d.click(area.x + 5, row, area), Some(TelegramOutcome::Pending)));

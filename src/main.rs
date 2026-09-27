@@ -6,30 +6,20 @@
 
 mod app;
 mod bot;
-mod card_edit;
 mod comms;
 mod core;
-mod create;
-mod groups;
-mod help;
 mod hooks;
 mod input;
 mod ipc;
 mod kanban;
-mod oobe;
-mod quit;
-mod telegram;
-mod telegram_dialog;
-mod tetris;
-mod theme_dialog;
 mod session;
-mod theme;
+mod telegram;
+mod tetris;
 mod tui;
 mod ui;
 #[cfg(feature = "visual")]
 mod visual;
 mod walkthrough;
-mod whichkey;
 
 const VERSION: &str = "1.0.0";
 
@@ -123,7 +113,7 @@ fn startup(force_oobe: bool) -> i32 {
     let home = home_dir();
     // First run is decided before anything materializes `~/.forge`
     // below: its absence means Forge never ran.
-    let first_run = crate::oobe::is_first_run(&home);
+    let first_run = crate::ui::dialogs::oobe::is_first_run(&home);
     match core::config::migrate_legacy(&home) {
         Ok(core::config::Migration::Migrated) => eprintln!(
             "migrated legacy config to {}",
@@ -226,7 +216,7 @@ fn startup(force_oobe: bool) -> i32 {
     // each entry binds a token file, and bad entries warn instead of
     // failing the boot. Calls still fail closed per-call.
     for reg in &loaded.config.bots {
-        let path = create::expand_folder(&reg.token_file, &home);
+        let path = ui::dialogs::create::expand_folder(&reg.token_file, &home);
         match state.broker.register_client_file(
             &state.manager,
             &reg.name,

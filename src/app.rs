@@ -37,7 +37,7 @@ pub struct AppState {
     /// bite at once without a restart.
     pub telegram_config: std::sync::Arc<std::sync::Mutex<crate::core::config::TelegramConfig>>,
     /// Open Telegram settings form (`Ctrl-b m`), if any.
-    pub telegram_dialog: Option<crate::telegram_dialog::TelegramDialog>,
+    pub telegram_dialog: Option<crate::ui::dialogs::telegram::TelegramDialog>,
     /// Connection-test results from the worker thread (see
     /// [`Self::start_telegram_test`]).
     telegram_test_tx: std::sync::mpsc::Sender<crate::telegram::TelegramTested>,
@@ -101,26 +101,26 @@ pub struct AppState {
     /// `message_user` idempotency replays, one bounded cache shared by
     /// all sessions (keys carry their session).
     message_user_idem: crate::bot::IdemCache,
-    pub create_dialog: Option<crate::create::CreateDialog>,
+    pub create_dialog: Option<crate::ui::dialogs::create::CreateDialog>,
     /// Open group-management dialog, if any. Captures all input while
     /// present; never both dialogs at once (openers are unreachable
     /// behind the other dialog).
-    pub group_dialog: Option<crate::groups::GroupDialog>,
+    pub group_dialog: Option<crate::ui::dialogs::groups::GroupDialog>,
     /// Startup restore picker, if a sessions file offered entries. First
     /// input goes here until it resolves to a pick or a fresh start.
     pub restore_picker: Option<crate::session::checkpoint::RestorePicker>,
     /// Generic Yes/No confirmation modal (quit forge, kill a session).
     /// Captures all input while present; No is the default.
-    pub confirm: Option<crate::quit::Confirm>,
+    pub confirm: Option<crate::ui::dialogs::quit::Confirm>,
     /// First-run setup dialog, if this boot found no `~/.forge`.
     /// Captures all input while present, above every other modal.
-    pub oobe_dialog: Option<crate::oobe::OobeDialog>,
+    pub oobe_dialog: Option<crate::ui::dialogs::oobe::OobeDialog>,
     /// "Saving sessions..." modal, shown after Yes while the quit
     /// snapshot persists. The loop saves, then exits.
     pub quit_saving: bool,
     /// Open theme picker (`Ctrl-b e`), if any. Captures all input
     /// while present like every other modal.
-    pub theme_dialog: Option<crate::theme_dialog::ThemeDialog>,
+    pub theme_dialog: Option<crate::ui::dialogs::theme::ThemeDialog>,
     /// Directory scanned for `theme.json` files when the picker opens.
     /// `None` means builtin only (tests); production sets this from
     /// `~/.forge/themes` at startup.
@@ -198,14 +198,14 @@ pub struct AppState {
     pub board_draft: Option<BoardDraft>,
     /// Full-field card editor modal (`e`); `None` when closed.
     /// Captures all board input while present, like every other modal.
-    pub card_edit: Option<crate::card_edit::CardEditDialog>,
+    pub card_edit: Option<crate::ui::dialogs::card_edit::CardEditDialog>,
     /// One-line board notice (corrupt save quarantined, ...), shown in
     /// the board footer until dismissed by opening the board.
     pub board_notice: Option<String>,
     /// Which-key hotkey HUD (`Ctrl-b` pause shows it, `Ctrl-b ?` pins
     /// it). Pure display state: dispatch authority stays in the input
     /// router, timing ticks in the TUI loop.
-    pub whichkey: crate::whichkey::WhichKeyHud,
+    pub whichkey: crate::ui::whichkey::WhichKeyHud,
     /// Monotonic visual generation: every accepted `visual_show` takes
     /// the next number so stale renders never win. U3 scopes this per
     /// session with the raster state; the global counter stays as the
@@ -425,7 +425,7 @@ impl AppState {
             board_draft: None,
             card_edit: None,
             board_notice: None,
-            whichkey: crate::whichkey::WhichKeyHud::new(),
+            whichkey: crate::ui::whichkey::WhichKeyHud::new(),
             visual_seq: 0,
             pill_tabs: true,
             #[cfg(feature = "visual")]
@@ -987,7 +987,7 @@ impl AppState {
         };
         let columns = board.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
         self.card_edit =
-            Some(crate::card_edit::CardEditDialog::new(card, &columns, self.pill_tabs));
+            Some(crate::ui::dialogs::card_edit::CardEditDialog::new(card, &columns, self.pill_tabs));
         self.board_draft = None;
         self.dirty = true;
     }
@@ -998,19 +998,19 @@ impl AppState {
     pub fn board_card_edit_key(
         &mut self,
         key: &crossterm::event::KeyEvent,
-    ) -> Option<crate::card_edit::CardEditOutcome> {
+    ) -> Option<crate::ui::dialogs::card_edit::CardEditOutcome> {
         let outcome = self.card_edit.as_mut().map(|d| d.key(key))?;
         match outcome {
-            crate::card_edit::CardEditOutcome::Pending => {
+            crate::ui::dialogs::card_edit::CardEditOutcome::Pending => {
                 self.dirty = true;
-                Some(crate::card_edit::CardEditOutcome::Pending)
+                Some(crate::ui::dialogs::card_edit::CardEditOutcome::Pending)
             }
-            crate::card_edit::CardEditOutcome::Cancelled => {
+            crate::ui::dialogs::card_edit::CardEditOutcome::Cancelled => {
                 self.card_edit = None;
                 self.dirty = true;
                 None
             }
-            crate::card_edit::CardEditOutcome::Submitted(result) => {
+            crate::ui::dialogs::card_edit::CardEditOutcome::Submitted(result) => {
                 self.apply_card_edit(result);
                 None
             }
@@ -1023,10 +1023,10 @@ impl AppState {
     pub fn board_card_edit_click(&mut self, col: u16, row: u16, area: ratatui::layout::Rect) {
         let outcome = self.card_edit.as_mut().and_then(|d| d.click(col, row, area));
         match outcome {
-            Some(crate::card_edit::CardEditOutcome::Submitted(result)) => {
+            Some(crate::ui::dialogs::card_edit::CardEditOutcome::Submitted(result)) => {
                 self.apply_card_edit(result);
             }
-            Some(crate::card_edit::CardEditOutcome::Cancelled) => {
+            Some(crate::ui::dialogs::card_edit::CardEditOutcome::Cancelled) => {
                 self.card_edit = None;
                 self.dirty = true;
             }
@@ -1049,7 +1049,7 @@ impl AppState {
     /// first, then the scalar patch. A blocked move reports in the
     /// footer and keeps the modal open so nothing is lost; scalar
     /// failures do the same. Success closes and confirms.
-    fn apply_card_edit(&mut self, result: crate::card_edit::CardEditResult) {
+    fn apply_card_edit(&mut self, result: crate::ui::dialogs::card_edit::CardEditResult) {
         let Some(id) = self.focused_card_id() else {
             self.board_notice = Some("no card focused".to_string());
             self.dirty = true;
@@ -1610,7 +1610,7 @@ impl AppState {
     /// walkthrough Q&A log. The viewport shows the tail of these.
     #[cfg(feature = "visual")]
     fn visual_chat_history_lines(&self, slot: &VisualSlot) -> Vec<Vec<crate::ui::SpanView>> {
-        use crate::theme::{style, Role};
+        use crate::ui::theme::{style, Role};
         let width = self.visual_footer_width();
         let text = style(Role::Text);
         let muted = style(Role::Muted);
@@ -1921,8 +1921,8 @@ impl AppState {
         let rec = self.manager.get(id).expect("ordered session exists");
         let live = rec.state.is_live();
         let title = format!("{} · Visual", rec.name);
-        let text = crate::theme::style(crate::theme::Role::Text);
-        let muted = crate::theme::style(crate::theme::Role::Muted);
+        let text = crate::ui::theme::style(crate::ui::theme::Role::Text);
+        let muted = crate::ui::theme::style(crate::ui::theme::Role::Muted);
         let line = |content: &str, style: Style| {
             vec![crate::ui::SpanView {
                 text: content.to_string(),
@@ -2189,8 +2189,8 @@ impl AppState {
     pub fn walkthrough_view(&self, id: crate::session::SessionId) -> crate::ui::PaneView {
         let rec = self.manager.get(id).expect("ordered session exists");
         let live = rec.state.is_live();
-        let muted = crate::theme::style(crate::theme::Role::Muted);
-        let text = crate::theme::style(crate::theme::Role::Text);
+        let muted = crate::ui::theme::style(crate::ui::theme::Role::Muted);
+        let text = crate::ui::theme::style(crate::ui::theme::Role::Text);
         let line = |content: &str, style: ratatui::style::Style| {
             vec![crate::ui::SpanView {
                 text: content.to_string(),
@@ -3210,8 +3210,8 @@ impl AppState {
             .or_else(|| self.broker.primary_group(caller).map(str::to_string));
         let previous = self.manager.active();
         let id = self
-            .create_session(&crate::create::SessionSpec {
-                kind: crate::create::SessionKind::Agent(harness),
+            .create_session(&crate::ui::dialogs::create::SessionSpec {
+                kind: crate::ui::dialogs::create::SessionKind::Agent(harness),
                 name: name.clone(),
                 cwd,
                 model: String::new(),
@@ -3736,7 +3736,7 @@ impl AppState {
             .lock()
             .map(|cfg| cfg.clone())
             .unwrap_or_default();
-        self.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(&cfg, self.pill_tabs));
+        self.telegram_dialog = Some(crate::ui::dialogs::telegram::TelegramDialog::new(&cfg, self.pill_tabs));
         self.dirty = true;
     }
 
@@ -3748,11 +3748,11 @@ impl AppState {
         &mut self,
         loaded: &mut crate::core::config::LoadedConfig,
         home: &std::path::Path,
-        form: crate::telegram_dialog::TelegramForm,
+        form: crate::ui::dialogs::telegram::TelegramForm,
     ) -> Result<(), String> {
         if !form.token.is_empty() {
             let path =
-                crate::telegram_dialog::expand_token_path(&form.config.token_file, home);
+                crate::ui::dialogs::telegram::expand_token_path(&form.config.token_file, home);
             crate::core::fs_atomic::write_private(std::path::Path::new(&path), form.token.as_bytes())
                 .map_err(|e| format!("cannot write token file: {e}"))?;
         }
@@ -3854,7 +3854,7 @@ impl AppState {
                             title: format!("{} · {label}", rec.name),
                             lines: vec![vec![crate::ui::SpanView {
                                 text: format!("{label} view unavailable in this build"),
-                                style: crate::theme::style(crate::theme::Role::Muted),
+                                style: crate::ui::theme::style(crate::ui::theme::Role::Muted),
                             }]],
                             live,
                             focused: true,
@@ -3947,25 +3947,25 @@ impl AppState {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let name = self.suggested_session_name();
         let groups = self.broker.group_names();
-        self.create_dialog = Some(crate::create::CreateDialog::new(&name, &cwd, &groups, self.pill_tabs));
+        self.create_dialog = Some(crate::ui::dialogs::create::CreateDialog::new(&name, &cwd, &groups, self.pill_tabs));
         self.dirty = true;
     }
 
     /// Open the group management dialog.
     pub fn open_group_dialog(&mut self) {
-        self.group_dialog = Some(crate::groups::GroupDialog::new());
+        self.group_dialog = Some(crate::ui::dialogs::groups::GroupDialog::new());
         self.dirty = true;
     }
 
     /// Open the first-run setup dialog (all CLIs checked).
     pub fn open_oobe_dialog(&mut self) {
-        self.oobe_dialog = Some(crate::oobe::OobeDialog::new(self.pill_tabs));
+        self.oobe_dialog = Some(crate::ui::dialogs::oobe::OobeDialog::new(self.pill_tabs));
         self.dirty = true;
     }
 
     pub fn open_quit_confirm(&mut self) {
-        self.confirm = Some(crate::quit::Confirm::new(
-            crate::quit::ConfirmKind::QuitForge,
+        self.confirm = Some(crate::ui::dialogs::quit::Confirm::new(
+            crate::ui::dialogs::quit::ConfirmKind::QuitForge,
             self.pill_tabs,
         ));
         self.dirty = true;
@@ -3976,8 +3976,8 @@ impl AppState {
     /// was active here.
     pub fn open_kill_confirm(&mut self) {
         if let Some(active) = self.manager.active() {
-            self.confirm = Some(crate::quit::Confirm::new(
-                crate::quit::ConfirmKind::KillSession(active),
+            self.confirm = Some(crate::ui::dialogs::quit::Confirm::new(
+                crate::ui::dialogs::quit::ConfirmKind::KillSession(active),
                 self.pill_tabs,
             ));
             self.dirty = true;
@@ -3987,19 +3987,19 @@ impl AppState {
     /// Every theme the picker can offer: builtin `default` first,
     /// then each valid file under [`Self::themes_dir`]. Invalid files
     /// never hide the rest.
-    pub fn available_themes(&self) -> Vec<crate::theme::ExternalTheme> {
+    pub fn available_themes(&self) -> Vec<crate::ui::theme::ExternalTheme> {
         match &self.themes_dir {
-            Some(dir) => crate::theme::list_external_themes(dir),
-            None => vec![crate::theme::ExternalTheme::builtin()],
+            Some(dir) => crate::ui::theme::list_external_themes(dir),
+            None => vec![crate::ui::theme::ExternalTheme::builtin()],
         }
     }
 
     /// Open the theme picker over `themes` (builtin `default` first),
     /// preselected on the currently applied theme.
-    pub fn open_theme_dialog(&mut self, themes: Vec<crate::theme::ExternalTheme>) {
-        let current = crate::theme::active_theme_name();
+    pub fn open_theme_dialog(&mut self, themes: Vec<crate::ui::theme::ExternalTheme>) {
+        let current = crate::ui::theme::active_theme_name();
         self.theme_dialog =
-            Some(crate::theme_dialog::ThemeDialog::new(themes, &current, self.pill_tabs));
+            Some(crate::ui::dialogs::theme::ThemeDialog::new(themes, &current, self.pill_tabs));
         self.dirty = true;
     }
 
@@ -4009,12 +4009,12 @@ impl AppState {
     pub fn apply_theme_name(
         &mut self,
         name: &str,
-        themes: &[crate::theme::ExternalTheme],
+        themes: &[crate::ui::theme::ExternalTheme],
     ) -> bool {
         if name == "default" {
-            crate::theme::clear_external_theme();
+            crate::ui::theme::clear_external_theme();
         } else if let Some(theme) = themes.iter().find(|t| t.name == name) {
-            crate::theme::apply_external_theme(theme.clone());
+            crate::ui::theme::apply_external_theme(theme.clone());
         } else {
             return false;
         }
@@ -4026,12 +4026,12 @@ impl AppState {
     /// Fresh snapshot for the group dialog: groups with live member
     /// counts, sessions in bar order, and the selected group's current
     /// members for the checkbox pre-check.
-    pub fn group_ctx(&self) -> crate::groups::GroupCtx {
+    pub fn group_ctx(&self) -> crate::ui::dialogs::groups::GroupCtx {
         let groups = self
             .broker
             .group_names()
             .into_iter()
-            .map(|name| crate::groups::GroupRow {
+            .map(|name| crate::ui::dialogs::groups::GroupRow {
                 members: self.broker.group_members(&name).len(),
                 member_names: self.broker.group_members(&name).into_iter()
                     .filter_map(|id| self.manager.get(id).map(|rec| rec.name.clone()))
@@ -4046,7 +4046,7 @@ impl AppState {
             .to_vec()
             .into_iter()
             .filter_map(|id| {
-                self.manager.get(id).map(|rec| crate::groups::SessionRow {
+                self.manager.get(id).map(|rec| crate::ui::dialogs::groups::SessionRow {
                     id,
                     name: rec.name.clone(),
                 })
@@ -4058,7 +4058,7 @@ impl AppState {
             .map(|d| d.selected_name())
             .unwrap_or_default();
         let members = self.broker.group_members(selected);
-        crate::groups::GroupCtx {
+        crate::ui::dialogs::groups::GroupCtx {
             groups,
             sessions,
             members,
@@ -4069,8 +4069,8 @@ impl AppState {
     /// names against a fresh snapshot, so these are infallible in practice;
     /// failures (exit races) stay silent and keep the dialog open.
     /// Unknown session IDs (exited mid-dialog) are skipped.
-    pub fn apply_group(&mut self, outcome: crate::groups::GroupOutcome) {
-        use crate::groups::GroupOutcome as Out;
+    pub fn apply_group(&mut self, outcome: crate::ui::dialogs::groups::GroupOutcome) {
+        use crate::ui::dialogs::groups::GroupOutcome as Out;
         match outcome {
             Out::Create(name) => {
                 let _ = self.broker.create_group(&name);
@@ -4288,7 +4288,7 @@ impl AppState {
             let spec = harness.spec();
             let argv = harness.resume_argv(&spec.resolve_binary(), saved.harness_session_id.as_deref());
             let mut cmd = String::from("exec ");
-            cmd.push_str(&crate::create::shell_join(&argv));
+            cmd.push_str(&crate::ui::dialogs::create::shell_join(&argv));
             let run = crate::core::ids::RunId::generate();
             match self.manager.spawn_agent(&saved.name, &cwd, &cmd, run, &saved.cli_tool) {
                 Ok(id) => {
@@ -4319,9 +4319,9 @@ impl AppState {
     /// login shell, agents run their registry argv. Returns the new id.
     pub fn create_session(
         &mut self,
-        spec: &crate::create::SessionSpec,
+        spec: &crate::ui::dialogs::create::SessionSpec,
     ) -> std::io::Result<crate::session::SessionId> {
-        use crate::create::SessionKind;
+        use crate::ui::dialogs::create::SessionKind;
         let (cmd, cli_tool) = match spec.kind {
             SessionKind::Shell => {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
@@ -4345,7 +4345,7 @@ impl AppState {
                     Err(_) => hs.launch_argv(&binary, model),
                 };
                 let mut cmd = String::from("exec ");
-                cmd.push_str(&crate::create::shell_join(&argv));
+                cmd.push_str(&crate::ui::dialogs::create::shell_join(&argv));
                 (cmd, h.as_str().to_string())
             }
         };
@@ -5402,7 +5402,7 @@ mod tests {
             .spawn("c", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
             .unwrap();
         assert_eq!(s.manager.order(), &[a, b, c]);
-        s.apply_group(crate::groups::GroupOutcome::SetMembers {
+        s.apply_group(crate::ui::dialogs::groups::GroupOutcome::SetMembers {
             group: "peers".to_string(),
             members: vec![a, c],
         });
@@ -7392,8 +7392,8 @@ mod tests {
     #[test]
     fn create_session_spawns_named_shell() {
         let mut s = AppState::new();
-        let spec = crate::create::SessionSpec {
-            kind: crate::create::SessionKind::Shell,
+        let spec = crate::ui::dialogs::create::SessionSpec {
+            kind: crate::ui::dialogs::create::SessionKind::Shell,
             name: "work".to_string(),
             cwd: std::env::temp_dir(),
             model: String::new(),
@@ -7410,8 +7410,8 @@ mod tests {
     #[test]
     fn create_session_focuses_the_new_session() {
         let mut s = AppState::new();
-        let spec = |name: &str| crate::create::SessionSpec {
-            kind: crate::create::SessionKind::Shell,
+        let spec = |name: &str| crate::ui::dialogs::create::SessionSpec {
+            kind: crate::ui::dialogs::create::SessionKind::Shell,
             name: name.to_string(),
             cwd: std::env::temp_dir(),
             model: String::new(),
@@ -7430,8 +7430,8 @@ mod tests {
         let mut s = AppState::new();
         s.broker.create_group("team").unwrap();
         let id = s
-            .create_session(&crate::create::SessionSpec {
-                kind: crate::create::SessionKind::Shell,
+            .create_session(&crate::ui::dialogs::create::SessionSpec {
+                kind: crate::ui::dialogs::create::SessionKind::Shell,
                 name: "work".to_string(),
                 cwd: std::env::temp_dir(),
                 model: String::new(),
@@ -7450,8 +7450,8 @@ mod tests {
         let saved = std::env::var("CODEX_BIN").ok();
         std::env::set_var("CODEX_BIN", "/bin/true");
         let mut s = AppState::new();
-        let spec = crate::create::SessionSpec {
-            kind: crate::create::SessionKind::Agent(
+        let spec = crate::ui::dialogs::create::SessionSpec {
+            kind: crate::ui::dialogs::create::SessionKind::Agent(
                 crate::session::harness::Harness::from_name("codex").unwrap(),
             ),
             name: "coder".to_string(),
@@ -8229,8 +8229,8 @@ mod tests {
         std::env::set_var("CODEX_BIN", "cat");
         let mut s = AppState::new();
         let agent = s
-            .create_session(&crate::create::SessionSpec {
-                kind: crate::create::SessionKind::Agent(
+            .create_session(&crate::ui::dialogs::create::SessionSpec {
+                kind: crate::ui::dialogs::create::SessionKind::Agent(
                     crate::session::harness::Harness::from_name("codex").unwrap(),
                 ),
                 name: "codex-1".to_string(),
@@ -8243,8 +8243,8 @@ mod tests {
         assert_eq!(s.manager.tab_count(agent), 3);
         assert!(s.manager.switch_tab(agent));
         let shell = s
-            .create_session(&crate::create::SessionSpec {
-                kind: crate::create::SessionKind::Shell,
+            .create_session(&crate::ui::dialogs::create::SessionSpec {
+                kind: crate::ui::dialogs::create::SessionKind::Shell,
                 name: "shell-1".to_string(),
                 cwd: std::env::temp_dir(),
                 model: String::new(),
@@ -9407,7 +9407,7 @@ mod tests {
         let hint = row.iter().find(|s| s.text.contains("type question here")).unwrap();
         assert_eq!(
             hint.style,
-            crate::theme::style(crate::theme::Role::Muted),
+            crate::ui::theme::style(crate::ui::theme::Role::Muted),
             "placeholder is gray"
         );
         state.visual_slots.get_mut(&id).unwrap().draft = Some("why?".to_string());
@@ -10912,11 +10912,11 @@ mod tests {
         let mut loaded = crate::core::config::LoadedConfig::load(&path).expect("defaults load");
         let token_path = home.join("tg.token");
         let mut state = AppState::new();
-        state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
+        state.telegram_dialog = Some(crate::ui::dialogs::telegram::TelegramDialog::new(
             &crate::core::config::TelegramConfig::default(),
             true,
         ));
-        let form = crate::telegram_dialog::TelegramForm {
+        let form = crate::ui::dialogs::telegram::TelegramForm {
             config: crate::core::config::TelegramConfig {
                 enabled: true,
                 token_file: token_path.to_string_lossy().into_owned(),
@@ -10950,7 +10950,7 @@ mod tests {
     #[test]
     fn telegram_tested_lands_in_open_dialog() {
         let mut state = AppState::new();
-        state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
+        state.telegram_dialog = Some(crate::ui::dialogs::telegram::TelegramDialog::new(
             &crate::core::config::TelegramConfig::default(),
             true,
         ));
@@ -10989,7 +10989,7 @@ mod tests {
         std::fs::create_dir_all(&scratch).unwrap();
         std::env::set_var("HOME", &scratch);
         let mut state = AppState::new();
-        state.telegram_dialog = Some(crate::telegram_dialog::TelegramDialog::new(
+        state.telegram_dialog = Some(crate::ui::dialogs::telegram::TelegramDialog::new(
             &crate::core::config::TelegramConfig::default(),
             true,
         ));

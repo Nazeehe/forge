@@ -1,7 +1,7 @@
 //! Agent CLI handles: indexes into the process-wide agent registry
 //! (`agents.json`, see [`crate::session::agents`]). The registry is set once at
 //! startup and never replaced, so indexes are stable and the handle
-//! stays `Copy` for [`crate::create::SessionKind`].
+//! stays `Copy` for [`crate::ui::dialogs::create::SessionKind`].
 //!
 //! Launch facts used to live here as a three-variant enum; they now
 //! come from the registry file, so adding an agent is a config edit.

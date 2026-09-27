@@ -9,7 +9,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 
-use crate::theme::ExternalTheme;
+use crate::ui::theme::ExternalTheme;
 
 /// Outcome of one key or click inside the picker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,11 +102,11 @@ impl ThemeDialog {
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::theme::{Role, modal_fill, style};
+        use crate::ui::theme::{Role, modal_fill, style};
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(crate::theme::border_type())
+            .border_type(crate::ui::theme::border_type())
             .title(" Themes ")
             .style(modal_fill())
             .border_style(style(Role::BorderModal));
@@ -134,7 +134,7 @@ impl ThemeDialog {
             let focused = idx == self.selected;
             let marker = if focused { "> " } else { "  " };
             let marker_style =
-                if focused { crate::theme::focus_row() } else { text };
+                if focused { crate::ui::theme::focus_row() } else { text };
             let name = crate::core::safe_text::encode_for_display(&theme.name);
             let active_tag = if theme.name == self.active {
                 " (active)".to_string()
@@ -149,7 +149,7 @@ impl ThemeDialog {
                 theme.button_left, " Sample ", theme.button_right, active_tag
             );
             let row_style = if focused {
-                crate::theme::focus_row()
+                crate::ui::theme::focus_row()
             } else {
                 text
             };
@@ -202,46 +202,46 @@ impl ThemeDialog {
 
     fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
         use ratatui::text::Span;
-        use crate::theme::{Role, style};
+        use crate::ui::theme::{Role, style};
         let mut spans = Vec::new();
         if self.pills {
             use ratatui::style::{Color, Style};
             // Pills mirror create.rs: accent-filled default carrying
             // `*`, `>` chosen-marker, caps from the ACTIVE theme (the
             // picker previews shapes in the rows above).
-            let (apply_fill, apply_left, apply_right) = crate::theme::button_chrome(
+            let (apply_fill, apply_left, apply_right) = crate::ui::theme::button_chrome(
                 true,
                 style(Role::TabActive),
                 style(Role::TabInactive),
                 Color::DarkGray,
             );
-            let (cancel_fill, cancel_left, cancel_right) = crate::theme::button_chrome(
+            let (cancel_fill, cancel_left, cancel_right) = crate::ui::theme::button_chrome(
                 false,
                 style(Role::TabActive),
                 style(Role::TabInactive),
                 Color::DarkGray,
             );
             spans.push(Span::styled(
-                crate::theme::pill_left().to_string(),
+                crate::ui::theme::pill_left().to_string(),
                 Style::default().fg(apply_left),
             ));
             spans.push(Span::styled(" ".to_string(), apply_fill));
             spans.push(Span::styled("Apply*".to_string(), apply_fill));
             spans.push(Span::styled(" ".to_string(), apply_fill));
             spans.push(Span::styled(
-                crate::theme::pill_right().to_string(),
+                crate::ui::theme::pill_right().to_string(),
                 Style::default().fg(apply_right),
             ));
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
-                crate::theme::pill_left().to_string(),
+                crate::ui::theme::pill_left().to_string(),
                 Style::default().fg(cancel_left),
             ));
             spans.push(Span::styled(" ".to_string(), cancel_fill));
             spans.push(Span::styled("Cancel".to_string(), cancel_fill));
             spans.push(Span::styled(" ".to_string(), cancel_fill));
             spans.push(Span::styled(
-                crate::theme::pill_right().to_string(),
+                crate::ui::theme::pill_right().to_string(),
                 Style::default().fg(cancel_right),
             ));
         } else {
@@ -364,11 +364,11 @@ mod tests {
     fn sample_themes() -> Vec<ExternalTheme> {
         vec![
             ExternalTheme::builtin(),
-            crate::theme::parse_external_theme(
+            crate::ui::theme::parse_external_theme(
                 r##"{"name": "square", "buttons": {"left": "[", "right": "]"}}"##,
             )
             .unwrap(),
-            crate::theme::parse_external_theme(
+            crate::ui::theme::parse_external_theme(
                 r##"{"name": "round", "buttons": {"left": "(", "right": ")"}}"##,
             )
             .unwrap(),

@@ -7,7 +7,7 @@
 
 use super::HLSpan;
 
-use crate::theme::{style, Role};
+use crate::ui::theme::{style, Role};
 
 /// Static code palette (OneDark hues): body text, dim comments,
 /// green strings, purple keywords, blue names, teal types, orange

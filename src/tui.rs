@@ -368,7 +368,7 @@ fn loop_until_quit(
         .unwrap_or_else(Instant::now);
     // OS theme watcher: a switch repaints with the new map next frame,
     // no restart. Missing state (non-Omarchy, SSH) polls false forever.
-    let mut theme_watcher = crate::theme::ThemeWatcher::omarchy();
+    let mut theme_watcher = crate::ui::theme::ThemeWatcher::omarchy();
     while !state.should_quit {
         state.dirty |= theme_watcher.poll();
         // Live mode switches (sidebar buttons, `y` key) rebuild policy and
@@ -582,33 +582,33 @@ fn loop_until_quit(
                 // every modal: it only ever opens off the prefix path,
                 // which modals bypass, so both can never want input.
                 if state.whichkey.visible() {
-                    let hud = crate::whichkey::whichkey_area(area);
-                    crate::whichkey::render_whichkey(f, area, hud);
+                    let hud = crate::ui::whichkey::whichkey_area(area);
+                    crate::ui::whichkey::render_whichkey(f, area, hud);
                 }
                 if let Some(dialog) = state.create_dialog.as_mut() {
-                    dialog.view(f, crate::create::create_area(area));
+                    dialog.view(f, crate::ui::dialogs::create::create_area(area));
                 }
                 if state.group_dialog.is_some() {
                     let ctx = state.group_ctx();
-                    let garea = crate::groups::group_area(area);
+                    let garea = crate::ui::dialogs::groups::group_area(area);
                     if let Some(dialog) = state.group_dialog.as_ref() {
                         dialog.view(f, garea, &ctx);
                     }
                 }
                 if let Some(dialog) = state.telegram_dialog.as_mut() {
-                    dialog.view(f, crate::telegram_dialog::telegram_area(area));
+                    dialog.view(f, crate::ui::dialogs::telegram::telegram_area(area));
                 }
                 if let Some(dialog) = state.card_edit.as_mut() {
-                    dialog.view(f, crate::card_edit::card_edit_area(area));
+                    dialog.view(f, crate::ui::dialogs::card_edit::card_edit_area(area));
                 }
                 if let Some(dialog) = state.theme_dialog.as_ref() {
-                    dialog.view(f, crate::theme_dialog::theme_area(area));
+                    dialog.view(f, crate::ui::dialogs::theme::theme_area(area));
                 }
                 if let Some(dialog) = state.confirm.as_ref() {
-                    dialog.view(f, crate::quit::confirm_area(area));
+                    dialog.view(f, crate::ui::dialogs::quit::confirm_area(area));
                 }
                 if state.quit_saving {
-                    crate::quit::view_saving(f, crate::quit::saving_area(area));
+                    crate::ui::dialogs::quit::view_saving(f, crate::ui::dialogs::quit::saving_area(area));
                 }
                 if let Some(picker) = state.restore_picker.as_ref() {
                     picker.view(f, crate::session::checkpoint::RestorePicker::picker_area(area));
@@ -616,7 +616,7 @@ fn loop_until_quit(
                 // First run sits above every other modal (below the tour):
                 // it owns input while present, so it paints on top.
                 if let Some(dialog) = state.oobe_dialog.as_ref() {
-                    dialog.view(f, crate::oobe::oobe_area(area));
+                    dialog.view(f, crate::ui::dialogs::oobe::oobe_area(area));
                 }
                 // The tour takes over the main area above every dialog:
                 // it is opaque and owns input while open.
@@ -988,7 +988,7 @@ fn fire_command(state: &mut AppState, cmd: UserCommand) {
             state.open_theme_dialog(themes);
         }
         UserCommand::HelpManual => {
-            if let Err(e) = crate::help::open() {
+            if let Err(e) = crate::ui::help::open() {
                 eprintln!("warning: cannot open help manual: {e}");
             }
         }
@@ -1167,7 +1167,7 @@ fn handle_group_key(state: &mut AppState, key: event::KeyEvent) {
     let ctx = state.group_ctx();
     let outcome = state.group_dialog.as_mut().map(|d| d.key(&key, &ctx));
     match outcome {
-        Some(crate::groups::GroupOutcome::Closed) => {
+        Some(crate::ui::dialogs::groups::GroupOutcome::Closed) => {
             state.group_dialog = None;
             state.dirty = true;
         }
@@ -1185,10 +1185,10 @@ fn settle_telegram_outcome(
     state: &mut AppState,
     loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
-    outcome: Option<crate::telegram_dialog::TelegramOutcome>,
+    outcome: Option<crate::ui::dialogs::telegram::TelegramOutcome>,
 ) {
     match outcome {
-        Some(crate::telegram_dialog::TelegramOutcome::Submitted(form)) => {
+        Some(crate::ui::dialogs::telegram::TelegramOutcome::Submitted(form)) => {
             if let Err(e) = state.apply_telegram_form(loaded, home, form) {
                 if let Some(dialog) = state.telegram_dialog.as_mut() {
                     dialog.set_error(e);
@@ -1196,10 +1196,10 @@ fn settle_telegram_outcome(
             }
             state.dirty = true;
         }
-        Some(crate::telegram_dialog::TelegramOutcome::Test { token }) => {
+        Some(crate::ui::dialogs::telegram::TelegramOutcome::Test { token }) => {
             state.start_telegram_test(token);
         }
-        Some(crate::telegram_dialog::TelegramOutcome::Cancelled) => {
+        Some(crate::ui::dialogs::telegram::TelegramOutcome::Cancelled) => {
             state.telegram_dialog = None;
             state.dirty = true;
         }
@@ -1232,7 +1232,7 @@ fn handle_telegram_mouse(
         return;
     }
     let (rows, cols) = state.term_size;
-    let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let area = crate::ui::dialogs::telegram::telegram_area(ratatui::layout::Rect::new(0, 0, cols, rows));
     let outcome = state
         .telegram_dialog
         .as_mut()
@@ -1248,10 +1248,10 @@ fn settle_theme_outcome(
     state: &mut AppState,
     loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
-    outcome: Option<crate::theme_dialog::ThemeOutcome>,
+    outcome: Option<crate::ui::dialogs::theme::ThemeOutcome>,
 ) {
     match outcome {
-        Some(crate::theme_dialog::ThemeOutcome::Applied(name)) => {
+        Some(crate::ui::dialogs::theme::ThemeOutcome::Applied(name)) => {
             let themes = state.available_themes();
             if state.apply_theme_name(&name, &themes) {
                 loaded.config.theme = name;
@@ -1261,7 +1261,7 @@ fn settle_theme_outcome(
             }
             state.dirty = true;
         }
-        Some(crate::theme_dialog::ThemeOutcome::Cancelled) => {
+        Some(crate::ui::dialogs::theme::ThemeOutcome::Cancelled) => {
             state.theme_dialog = None;
             state.dirty = true;
         }
@@ -1294,7 +1294,7 @@ fn handle_theme_mouse(
         return;
     }
     let (rows, cols) = state.term_size;
-    let area = crate::theme_dialog::theme_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let area = crate::ui::dialogs::theme::theme_area(ratatui::layout::Rect::new(0, 0, cols, rows));
     let outcome = state
         .theme_dialog
         .as_mut()
@@ -1342,20 +1342,20 @@ fn forge_binary_path() -> String {
 fn settle_oobe_outcome(
     state: &mut AppState,
     home: &std::path::Path,
-    outcome: Option<crate::oobe::OobeOutcome>,
+    outcome: Option<crate::ui::dialogs::oobe::OobeOutcome>,
 ) {
     match outcome {
-        Some(crate::oobe::OobeOutcome::Submitted(ids)) => {
-            let outs = crate::oobe::install_selected(home, &ids, &forge_binary_path());
+        Some(crate::ui::dialogs::oobe::OobeOutcome::Submitted(ids)) => {
+            let outs = crate::ui::dialogs::oobe::install_selected(home, &ids, &forge_binary_path());
             if outs.iter().all(|o| o.installed) {
                 state.oobe_dialog = None;
             } else {
                 state.oobe_dialog =
-                    Some(crate::oobe::OobeDialog::results(outs, state.pill_tabs));
+                    Some(crate::ui::dialogs::oobe::OobeDialog::results(outs, state.pill_tabs));
             }
             state.dirty = true;
         }
-        Some(crate::oobe::OobeOutcome::Dismissed) => {
+        Some(crate::ui::dialogs::oobe::OobeOutcome::Dismissed) => {
             state.oobe_dialog = None;
             state.dirty = true;
         }
@@ -1377,7 +1377,7 @@ fn handle_oobe_mouse(state: &mut AppState, home: &std::path::Path, mev: event::M
         return;
     }
     let (rows, cols) = state.term_size;
-    let area = crate::oobe::oobe_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let area = crate::ui::dialogs::oobe::oobe_area(ratatui::layout::Rect::new(0, 0, cols, rows));
     let outcome = state
         .oobe_dialog
         .as_mut()
@@ -1411,9 +1411,9 @@ fn settle_quit_save(state: &mut AppState, home: &std::path::Path) -> bool {
 fn handle_confirm_key(state: &mut AppState, key: event::KeyEvent) {
     let outcome = state.confirm.as_mut().map(|d| d.key(&key));
     match outcome {
-        Some(crate::quit::ConfirmOutcome::Confirmed) => {
+        Some(crate::ui::dialogs::quit::ConfirmOutcome::Confirmed) => {
             match state.confirm.as_ref().map(|d| d.kind()) {
-                Some(crate::quit::ConfirmKind::QuitForge) => {
+                Some(crate::ui::dialogs::quit::ConfirmKind::QuitForge) => {
                     state.confirm = None;
                     // Yes swaps the confirm for the saving modal: it
                     // paints this tick, then the loop persists the
@@ -1421,7 +1421,7 @@ fn handle_confirm_key(state: &mut AppState, key: event::KeyEvent) {
                     state.quit_saving = true;
                     state.should_quit = true;
                 }
-                Some(crate::quit::ConfirmKind::KillSession(id)) => {
+                Some(crate::ui::dialogs::quit::ConfirmKind::KillSession(id)) => {
                     state.confirm = None;
                     state.terminate_session(id);
                     fit_active_pane(state);
@@ -1430,7 +1430,7 @@ fn handle_confirm_key(state: &mut AppState, key: event::KeyEvent) {
             }
             state.dirty = true;
         }
-        Some(crate::quit::ConfirmOutcome::Dismissed) => {
+        Some(crate::ui::dialogs::quit::ConfirmOutcome::Dismissed) => {
             state.confirm = None;
             state.dirty = true;
         }
@@ -1445,14 +1445,14 @@ fn handle_dialog_key(state: &mut AppState, key: event::KeyEvent) {
     let names = state.live_names();
     let outcome = state.create_dialog.as_mut().map(|d| d.key(&key, &names));
     match outcome {
-        Some(crate::create::DialogOutcome::Submitted(spec)) => {
+        Some(crate::ui::dialogs::create::DialogOutcome::Submitted(spec)) => {
             state.create_dialog = None;
             if state.create_session(&spec).is_ok() {
                 fit_active_pane(state);
             }
             state.dirty = true;
         }
-        Some(crate::create::DialogOutcome::Cancelled) => {
+        Some(crate::ui::dialogs::create::DialogOutcome::Cancelled) => {
             state.create_dialog = None;
             state.dirty = true;
         }
@@ -1499,7 +1499,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     if state.group_dialog.is_some() {
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let (rows, cols) = state.term_size;
-            let area = crate::groups::group_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+            let area = crate::ui::dialogs::groups::group_area(ratatui::layout::Rect::new(0, 0, cols, rows));
             if mev.column >= area.x && mev.column < area.right()
                 && mev.row >= area.y && mev.row < area.bottom()
             {
@@ -1530,7 +1530,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     // and Save/Cancel fire, clicks behind it move nothing.
     if state.card_edit.is_some() {
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
-            let area = crate::card_edit::card_edit_area(ratatui::layout::Rect::new(
+            let area = crate::ui::dialogs::card_edit::card_edit_area(ratatui::layout::Rect::new(
                 0, 0, cols, rows,
             ));
             state.board_card_edit_click(mev.column, mev.row, area);
@@ -3365,7 +3365,7 @@ mod tests {
         assert!(
             state.whichkey.poll(
                 true,
-                t0 + Duration::from_millis(crate::whichkey::WHICHKEY_DELAY_MS)
+                t0 + Duration::from_millis(crate::ui::whichkey::WHICHKEY_DELAY_MS)
             ),
             "the pause earns its HUD"
         );
@@ -3454,7 +3454,7 @@ mod tests {
         );
         assert!(state.whichkey.poll(
             true,
-            t0 + Duration::from_millis(crate::whichkey::WHICHKEY_DELAY_MS)
+            t0 + Duration::from_millis(crate::ui::whichkey::WHICHKEY_DELAY_MS)
         ));
         assert!(state.whichkey.visible());
         // No live session in a fresh state: the fallthrough is a silent
@@ -3463,7 +3463,7 @@ mod tests {
             &mut state,
             &mut router,
             KeyEvent::new(KeyCode::Char('z'), none),
-            t0 + Duration::from_millis(crate::whichkey::WHICHKEY_DELAY_MS + 10),
+            t0 + Duration::from_millis(crate::ui::whichkey::WHICHKEY_DELAY_MS + 10),
         );
         assert!(!state.whichkey.visible(), "invalid key dismisses the HUD");
         assert!(!router.is_pending(), "prefix mode always resolves");
@@ -3570,7 +3570,7 @@ mod tests {
     /// from a real paint so the click tests real geometry.
     fn telegram_button_cell(state: &mut AppState, needle: &str) -> (u16, u16) {
         use ratatui::backend::TestBackend;
-        let area = crate::telegram_dialog::telegram_area(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let area = crate::ui::dialogs::telegram::telegram_area(ratatui::layout::Rect::new(0, 0, 180, 40));
         let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
         if let Some(dialog) = state.telegram_dialog.as_mut() {
             terminal.draw(|f| dialog.view(f, area)).unwrap();
@@ -3691,9 +3691,9 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, none),
         );
         assert!(state.theme_dialog.is_none(), "apply closes");
-        assert_eq!(crate::theme::active_theme_name(), "square");
-        assert_eq!(crate::theme::pill_left(), '[');
-        crate::theme::clear_external_theme();
+        assert_eq!(crate::ui::theme::active_theme_name(), "square");
+        assert_eq!(crate::ui::theme::pill_left(), '[');
+        crate::ui::theme::clear_external_theme();
         assert_eq!(loaded.config.theme, "square", "choice persists");
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -3798,7 +3798,7 @@ mod tests {
         assert!(
             matches!(
                 state.confirm.as_ref().map(|d| d.kind()),
-                Some(crate::quit::ConfirmKind::KillSession(id)) if id == victim
+                Some(crate::ui::dialogs::quit::ConfirmKind::KillSession(id)) if id == victim
             ),
             "kill confirm targets the active session"
         );
@@ -4105,10 +4105,10 @@ mod tests {
         state.apply(AppEvent::Resize(24, 80));
         spawn_shell_cmd(&mut state, "exec sleep 30");
         let id = state.manager.order()[0];
-        state.apply_group(crate::groups::GroupOutcome::Create("team".into()));
+        state.apply_group(crate::ui::dialogs::groups::GroupOutcome::Create("team".into()));
         state.open_group_dialog();
         handle_group_key(&mut state, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        let area = crate::groups::group_area(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let area = crate::ui::dialogs::groups::group_area(ratatui::layout::Rect::new(0, 0, 80, 24));
         // Padded content: header sits one row down, first session on
         // the row after it.
         forward_mouse(&mut state, MouseEvent {

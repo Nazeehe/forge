@@ -489,7 +489,7 @@ impl Walkthrough {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Clear, Paragraph};
         use crate::core::safe_text::encode_for_display;
-        use crate::theme::{style, Role};
+        use crate::ui::theme::{style, Role};
         frame.render_widget(Clear, area);
         let (x, y, w, h) = (area.x, area.y, area.width, area.height);
         if w < 10 || h < 2 {
@@ -590,7 +590,7 @@ impl Walkthrough {
     fn render_lower(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-        use crate::theme::{style, Role};
+        use crate::ui::theme::{style, Role};
         if area.height == 0 {
             return;
         }
@@ -614,7 +614,7 @@ impl Walkthrough {
         );
         let block = Block::default()
             .borders(Borders::ALL)
-                .border_type(crate::theme::border_type())
+                .border_type(crate::ui::theme::border_type())
             .border_style(style(Role::BorderModal))
             .title(Line::from(Span::styled(" Q&A ", style(Role::Muted))));
         let inner = block.inner(ratatui::layout::Rect::new(
@@ -638,7 +638,7 @@ impl Walkthrough {
     fn entry_lines(q: &Question) -> Vec<ratatui::text::Line<'_>> {
         use ratatui::style::Modifier;
         use ratatui::text::{Line, Span};
-        use crate::theme::{style, Role};
+        use crate::ui::theme::{style, Role};
         let mut lines = vec![Line::from(vec![
             Span::styled("Q: ", style(Role::Brand).add_modifier(Modifier::BOLD)),
             Span::styled(q.question.clone(), style(Role::Text)),
@@ -659,7 +659,7 @@ impl Walkthrough {
     /// shed oldest-first behind a `... N earlier` note.
     fn qa_text(&self, height: usize) -> ratatui::text::Text<'_> {
         use ratatui::text::{Line, Span, Text};
-        use crate::theme::{style, Role};
+        use crate::ui::theme::{style, Role};
         if height == 0 || self.questions.is_empty() {
             return Text::default();
         }
@@ -704,7 +704,7 @@ impl Walkthrough {
         use ratatui::style::Modifier;
         use ratatui::text::{Line, Span};
         use ratatui::widgets::Paragraph;
-        use crate::theme::{style, Role};
+        use crate::ui::theme::{style, Role};
         if let Some(status) = self.status.as_deref() {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![

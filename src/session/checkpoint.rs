@@ -275,9 +275,9 @@ impl RestorePicker {
         use ratatui::widgets::{Block, Borders, Paragraph};
         let block = Block::default()
             .borders(Borders::ALL)
-                .border_type(crate::theme::border_type())
+                .border_type(crate::ui::theme::border_type())
             .title(" Restore session ")
-            .style(crate::theme::style(crate::theme::Role::BorderFocused));
+            .style(crate::ui::theme::style(crate::ui::theme::Role::BorderFocused));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.height < 4 || inner.width < 20 {
@@ -306,11 +306,11 @@ impl RestorePicker {
             );
             // Metadata is the load-bearing part; the label yields.
             let room = (cw as usize).saturating_sub(3 + detail.chars().count());
-            let line = format!("{mark} {} {detail}", crate::groups::fit_row(&entry.label, room));
+            let line = format!("{mark} {} {detail}", crate::ui::dialogs::groups::fit_row(&entry.label, room));
             let style = if index == self.selected {
-                crate::theme::style(crate::theme::Role::Focus)
+                crate::ui::theme::style(crate::ui::theme::Role::Focus)
             } else {
-                crate::theme::style(crate::theme::Role::Text)
+                crate::ui::theme::style(crate::ui::theme::Role::Text)
             };
             frame.render_widget(
                 Paragraph::new(line).style(style),

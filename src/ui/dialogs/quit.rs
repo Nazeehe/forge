@@ -83,7 +83,7 @@ impl Confirm {
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::theme::{Role, modal_fill, style};
+        use crate::ui::theme::{Role, modal_fill, style};
         // Opaque: the live grid must not show through the modal.
         frame.render_widget(Clear, area);
         let title = match self.kind {
@@ -92,7 +92,7 @@ impl Confirm {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-                .border_type(crate::theme::border_type())
+                .border_type(crate::ui::theme::border_type())
             .title(title)
             .style(modal_fill())
             .border_style(style(Role::BorderModal));
@@ -127,7 +127,7 @@ impl Confirm {
 
     fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
         use ratatui::text::Span;
-        use crate::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, focus_row, style};
         let mut spans = Vec::new();
         for (index, label) in ["Yes", "No"].iter().enumerate() {
             if index > 0 {
@@ -136,21 +136,21 @@ impl Confirm {
             let chosen = index == self.choice;
             if self.pills {
                 use ratatui::style::{Color, Style};
-                let (fill, left_cap, right_cap) = crate::theme::button_chrome(
+                let (fill, left_cap, right_cap) = crate::ui::theme::button_chrome(
                     chosen,
                     style(Role::TabActive),
                     style(Role::TabInactive),
                     Color::DarkGray,
                 );
                 spans.push(Span::styled(
-                    crate::theme::pill_left().to_string(),
+                    crate::ui::theme::pill_left().to_string(),
                     Style::default().fg(left_cap),
                 ));
                 spans.push(Span::styled(" ".to_string(), fill));
                 spans.push(Span::styled(label.to_string(), fill));
                 spans.push(Span::styled(" ".to_string(), fill));
                 spans.push(Span::styled(
-                    crate::theme::pill_right().to_string(),
+                    crate::ui::theme::pill_right().to_string(),
                     Style::default().fg(right_cap),
                 ));
             } else if chosen {
@@ -179,12 +179,12 @@ pub fn saving_area(term: Rect) -> Rect {
 pub fn view_saving(frame: &mut ratatui::Frame, area: Rect) {
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-    use crate::theme::{Role, modal_fill, style};
+    use crate::ui::theme::{Role, modal_fill, style};
     // Opaque: the live grid must not show through the modal.
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(crate::theme::border_type())
+        .border_type(crate::ui::theme::border_type())
         .title(" Saving ")
         .style(modal_fill())
         .border_style(style(Role::BorderModal));
@@ -243,11 +243,11 @@ mod tests {
 
     #[test]
     fn left_highlight_lights_only_the_left_bookend() {
-        let theme = crate::theme::parse_external_theme(
+        let theme = crate::ui::theme::parse_external_theme(
             r##"{"name": "tri", "highlight": "left", "buttons": {"left": "[", "right": "]"}}"##,
         )
         .expect("left theme parses");
-        let _guard = crate::theme::hold_external_theme(theme);
+        let _guard = crate::ui::theme::hold_external_theme(theme);
         let q = Confirm::new(ConfirmKind::QuitForge, true);
         assert_eq!(q.choice(), 1, "No is default");
         let spans = q.buttons();
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(spans[8].content, "No");
         assert_eq!(
             spans[8].style,
-            crate::theme::style(crate::theme::Role::TabInactive),
+            crate::ui::theme::style(crate::ui::theme::Role::TabInactive),
             "chosen button keeps its rest color"
         );
         assert_eq!(spans[6].style.fg, Some(ratatui::style::Color::Yellow));

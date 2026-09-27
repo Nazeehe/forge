@@ -431,7 +431,7 @@ fn pill_actions(
 ) -> Vec<ratatui::text::Span<'static>> {
     use ratatui::style::{Color, Style};
     use ratatui::text::Span;
-    use crate::theme::{Role, focus_row, style};
+    use crate::ui::theme::{Role, focus_row, style};
     let frame = |glyph: char, color: Color| {
         Span::styled(glyph.to_string(), Style::default().fg(color))
     };
@@ -439,14 +439,14 @@ fn pill_actions(
     let create_chosen = focused && choice == 0;
     // Create is the default action: always emphasized. Cancel follows
     // the selection. Both honor the theme highlight behavior.
-    let (create_style, create_left, create_right) = crate::theme::button_chrome(
+    let (create_style, create_left, create_right) = crate::ui::theme::button_chrome(
         true,
         style(Role::TabActive),
         style(Role::TabInactive),
         Color::Yellow,
     );
     let cancel_chosen = focused && choice == 1;
-    let (cancel_style, cancel_left, cancel_right) = crate::theme::button_chrome(
+    let (cancel_style, cancel_left, cancel_right) = crate::ui::theme::button_chrome(
         cancel_chosen,
         style(Role::TabActive),
         style(Role::TabInactive),
@@ -456,20 +456,20 @@ fn pill_actions(
     if create_chosen {
         spans.push(Span::styled(">", focus_row()));
     }
-    spans.push(frame(crate::theme::pill_left(), create_left));
+    spans.push(frame(crate::ui::theme::pill_left(), create_left));
     spans.push(pad(create_style));
     spans.push(Span::styled("Create*".to_string(), create_style));
     spans.push(pad(create_style));
-    spans.push(frame(crate::theme::pill_right(), create_right));
+    spans.push(frame(crate::ui::theme::pill_right(), create_right));
     spans.push(Span::styled("  ".to_string(), text));
     if cancel_chosen {
         spans.push(Span::styled(">", focus_row()));
     }
-    spans.push(frame(crate::theme::pill_left(), cancel_left));
+    spans.push(frame(crate::ui::theme::pill_left(), cancel_left));
     spans.push(pad(cancel_style));
     spans.push(Span::styled("Cancel".to_string(), cancel_style));
     spans.push(pad(cancel_style));
-    spans.push(frame(crate::theme::pill_right(), cancel_right));
+    spans.push(frame(crate::ui::theme::pill_right(), cancel_right));
     spans
 }
 
@@ -516,14 +516,14 @@ impl CreateDialog {
         use ratatui::style::Modifier;
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, focus_row, style};
         // Opaque: the live grid must not show through the modal.
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
-                .border_type(crate::theme::border_type())
+                .border_type(crate::ui::theme::border_type())
             .title(" New Session ")
-            .style(crate::theme::modal_fill())
+            .style(crate::ui::theme::modal_fill())
             .border_style(style(Role::BorderModal));
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -819,7 +819,7 @@ mod tests {
         use ratatui::style::{Color, Modifier};
         let (mut d, _) = fresh();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         // create_area centers 78x12; padded content starts at (4, 8).
         let mark = &buf[(4, 8)];
@@ -858,7 +858,7 @@ mod tests {
         step(&mut d, &names, 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         // Centered 20-wide row at x30: `[Create*]` plus two spaces,
         // then `>[Cancel]` whose marker lands at x41.
@@ -877,7 +877,7 @@ mod tests {
         let (mut d, names) = fresh();
         d.pills = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         // Unfocused: the 23-wide pill row centers at x28, Create pill
         // carries the accent, Cancel stays dim.
@@ -892,7 +892,7 @@ mod tests {
         // Chosen Cancel: `>` marker plus filled container.
         step(&mut d, &names, 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(41, 14)].symbol(), ">", "chosen marked");
         assert_eq!(buf[(42, 14)].fg, Color::Yellow, "cancel cap lights");
@@ -906,7 +906,7 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
         let (mut d, _) = fresh();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         // Content columns only: the modal border frames the row.
         let blank: String = (4..76)
             .map(|x| terminal.backend().buffer()[(x, 15)].symbol())
@@ -918,7 +918,7 @@ mod tests {
             d.key(&key(KeyCode::Enter), &["claude-1".to_string()]),
             DialogOutcome::Pending
         ));
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         let err: String = (0..80).map(|x| buf[(x, 15)].symbol()).collect();
         assert!(err.contains("already taken"), "fixed slot: {err:?}");
@@ -935,7 +935,7 @@ mod tests {
         // 80x11 squeezes the area to 11 rows: 9 inner rows means
         // compact stacking, no top pad, hint right after the form.
         let mut terminal = Terminal::new(TestBackend::new(80, 11)).unwrap();
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(4, 1)].symbol(), ">", "content still padded");
         assert_eq!(buf[(4, 8)].symbol(), "T", "hint follows the form");
@@ -947,10 +947,10 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
         use ratatui::style::Color;
         let _guard =
-            crate::theme::hold_delta(crate::theme::AbsoluteDelta::LIGHT);
+            crate::ui::theme::hold_delta(crate::ui::theme::AbsoluteDelta::LIGHT);
         let (mut d, _) = fresh();
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         // Unfocused Name label goes black for light terminals.
         assert_eq!(buf[(6, 9)].fg, Color::Black);
@@ -1229,7 +1229,7 @@ mod tests {
         assert!(long.chars().count() > 57);
         let mut d = CreateDialog::new("x", std::path::Path::new(long), &[], false);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal.draw(|f| d.view(f, crate::create::create_area(f.area()))).unwrap();
+        terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
         // Directory row (y 8): `[` at x 17, then the `…tail` box.
         let row: String = (17..17 + 59)

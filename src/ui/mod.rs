@@ -4,6 +4,11 @@
 //! takes snapshots, so the whole grid is assertable through a test backend
 //! without a terminal.
 
+pub mod dialogs;
+pub mod help;
+pub mod theme;
+pub mod whichkey;
+
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -18,7 +23,6 @@ use tuirealm::state::State;
 use crate::{
     core::safe_text,
     session::pty::{CellColor, CellFormat, FormattedCell},
-    theme,
 };
 
 /// One styled run of pane text.
@@ -270,11 +274,11 @@ pub fn visual_button_spans(pills: bool, chat_open: bool) -> Vec<SpanView> {
             if !spans.is_empty() {
                 spans.push(SpanView { text: "  ".to_string(), style: Style::default() });
             }
-            spans.push(SpanView { text: crate::theme::pill_left().to_string(), style: cap_left });
+            spans.push(SpanView { text: crate::ui::theme::pill_left().to_string(), style: cap_left });
             spans.push(SpanView { text: " ".to_string(), style });
             spans.push(SpanView { text: text.to_string(), style });
             spans.push(SpanView { text: " ".to_string(), style });
-            spans.push(SpanView { text: crate::theme::pill_right().to_string(), style: cap_right });
+            spans.push(SpanView { text: crate::ui::theme::pill_right().to_string(), style: cap_right });
         }
         spans
     } else {
@@ -635,8 +639,8 @@ pub fn group_palette(index: usize) -> Color {
 /// Nerd Font half circles framing a pill tab: `label`. Single-cell
 /// each; a Nerd Font is required, otherwise they show as gaps (see the
 /// `pills` config flag).
-pub const PILL_LEFT: char = crate::theme::BUILTIN_PILL_LEFT;
-pub const PILL_RIGHT: char = crate::theme::BUILTIN_PILL_RIGHT;
+pub const PILL_LEFT: char = crate::ui::theme::BUILTIN_PILL_LEFT;
+pub const PILL_RIGHT: char = crate::ui::theme::BUILTIN_PILL_RIGHT;
 
 /// One rendered chunk of the sessions bar: literal text, its style, and the
 /// tab it selects when clicked (`None` for group headers, which never
@@ -1465,9 +1469,9 @@ fn kanban_line(info: &SidebarInfo, pills: bool) -> Line<'static> {
         };
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(crate::theme::pill_left().to_string(), Style::default().fg(cap)),
+            Span::styled(crate::ui::theme::pill_left().to_string(), Style::default().fg(cap)),
             Span::styled(" Kanban ", style),
-            Span::styled(crate::theme::pill_right().to_string(), Style::default().fg(cap)),
+            Span::styled(crate::ui::theme::pill_right().to_string(), Style::default().fg(cap)),
         ])
     } else if info.board_open {
         Line::from(vec![
@@ -1524,13 +1528,13 @@ fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static
         };
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(crate::theme::pill_left().to_string(), Style::default().fg(off_cap)),
+            Span::styled(crate::ui::theme::pill_left().to_string(), Style::default().fg(off_cap)),
             Span::styled(" Off ", off_style),
-            Span::styled(crate::theme::pill_right().to_string(), Style::default().fg(off_cap)),
+            Span::styled(crate::ui::theme::pill_right().to_string(), Style::default().fg(off_cap)),
             Span::raw(" "),
-            Span::styled(crate::theme::pill_left().to_string(), Style::default().fg(yolo_cap)),
+            Span::styled(crate::ui::theme::pill_left().to_string(), Style::default().fg(yolo_cap)),
             Span::styled(" Yolo ", yolo_style),
-            Span::styled(crate::theme::pill_right().to_string(), Style::default().fg(yolo_cap)),
+            Span::styled(crate::ui::theme::pill_right().to_string(), Style::default().fg(yolo_cap)),
         ])
     } else {
         Line::from(vec![
@@ -1825,12 +1829,12 @@ fn tetris_line(pills: bool) -> Line<'static> {
         Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                crate::theme::pill_left().to_string(),
+                crate::ui::theme::pill_left().to_string(),
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(" Tetris ", theme::style(theme::Role::TabInactive)),
             Span::styled(
-                crate::theme::pill_right().to_string(),
+                crate::ui::theme::pill_right().to_string(),
                 Style::default().fg(Color::DarkGray),
             ),
         ])
@@ -2137,7 +2141,7 @@ fn board_footer_height(view: &BoardView) -> usize {
 pub fn render_board(frame: &mut Frame, area: Rect, view: &BoardView) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(crate::theme::border_type())
+        .border_type(crate::ui::theme::border_type())
         .border_style(theme::style(theme::Role::BorderFocused))
         .title(format!(" {} ", view.title));
     let inner = block.inner(area);
@@ -2418,7 +2422,7 @@ fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], _chrome: &Chro
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                            .border_type(crate::theme::border_type())
+                            .border_type(crate::ui::theme::border_type())
                         .border_style(theme::style(theme::Role::BorderUnfocused))
                         .title(" forge "),
                 );
@@ -2442,7 +2446,7 @@ fn render_grid(frame: &mut Frame, area: Rect, panes: &[PaneView], _chrome: &Chro
         };
         let block = Block::default()
             .borders(Borders::ALL)
-                .border_type(crate::theme::border_type())
+                .border_type(crate::ui::theme::border_type())
             .border_style(border)
             .title(Span::styled(title, name_style));
         let inner = block.inner(*cell);
@@ -2538,7 +2542,7 @@ fn render_focused(
             };
             let block = Block::default()
                 .borders(Borders::ALL)
-                    .border_type(crate::theme::border_type())
+                    .border_type(crate::ui::theme::border_type())
                 .border_style(theme::style(theme::Role::BorderFocused))
                 .title(title);
             let mut text = pane_text(view);
@@ -2556,7 +2560,7 @@ fn render_focused(
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                                .border_type(crate::theme::border_type())
+                                .border_type(crate::ui::theme::border_type())
                             .border_style(theme::style(theme::Role::BorderUnfocused))
                             .title(" forge "),
                     );
@@ -2630,7 +2634,7 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
         let side = Paragraph::new(Text::from(lines)).block(
             Block::default()
                 .borders(Borders::ALL)
-                    .border_type(crate::theme::border_type())
+                    .border_type(crate::ui::theme::border_type())
                 .border_style(theme::style(theme::Role::BorderUnfocused))
                 .title(" status "),
         );
@@ -2733,14 +2737,14 @@ fn render_pill(
 ) {
     let line = Line::from(vec![
         Span::styled(
-            crate::theme::pill_left().to_string(),
+            crate::ui::theme::pill_left().to_string(),
             Style::default().fg(left_cap),
         ),
         Span::styled(" ".to_string(), style),
         Span::styled(text.to_string(), style),
         Span::styled(" ".to_string(), style),
         Span::styled(
-            crate::theme::pill_right().to_string(),
+            crate::ui::theme::pill_right().to_string(),
             Style::default().fg(right_cap),
         ),
     ]);
@@ -2835,13 +2839,13 @@ mod tests {
     #[cfg(feature = "visual")]
     #[test]
     fn button_caps_follow_the_active_theme() {
-        let text = crate::theme::parse_external_theme(
+        let text = crate::ui::theme::parse_external_theme(
             r##"{"name": "sq", "buttons": {"left": "[", "right": "]"}}"##,
         )
         .expect("square theme parses");
-        let _guard = crate::theme::hold_external_theme(text);
-        assert_eq!(crate::theme::pill_left(), '[');
-        assert_eq!(crate::theme::pill_right(), ']');
+        let _guard = crate::ui::theme::hold_external_theme(text);
+        assert_eq!(crate::ui::theme::pill_left(), '[');
+        assert_eq!(crate::ui::theme::pill_right(), ']');
         let strip: String = visual_button_spans(true, false)
             .iter()
             .map(|s| s.text.as_str())
@@ -2852,11 +2856,11 @@ mod tests {
 
     #[test]
     fn left_highlight_keeps_group_fill_with_split_caps() {
-        let theme = crate::theme::parse_external_theme(
+        let theme = crate::ui::theme::parse_external_theme(
             r##"{"name": "t", "highlight": "left"}"##,
         )
         .expect("left theme parses");
-        let _guard = crate::theme::hold_external_theme(theme);
+        let _guard = crate::ui::theme::hold_external_theme(theme);
         let g = group_palette(2);
         // Focused grouped tab: group fill stays, left edge lights.
         let (fill, left, right) = pill_chrome(&grouped("a", true, "team", 2));

@@ -224,18 +224,18 @@ pub fn render_whichkey(frame: &mut Frame, term: Rect, area: Rect) {
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(crate::theme::border_type())
-        .border_style(crate::theme::style(crate::theme::Role::BorderModal))
+        .border_type(crate::ui::theme::border_type())
+        .border_style(crate::ui::theme::style(crate::ui::theme::Role::BorderModal))
         .title(" Ctrl-b keys ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let key_style = crate::theme::style(crate::theme::Role::KeyHint)
+    let key_style = crate::ui::theme::style(crate::ui::theme::Role::KeyHint)
         .add_modifier(Modifier::BOLD);
-    let desc_style = crate::theme::style(crate::theme::Role::KeyDesc);
-    let group_style = crate::theme::style(crate::theme::Role::Muted);
+    let desc_style = crate::ui::theme::style(crate::ui::theme::Role::KeyDesc);
+    let group_style = crate::ui::theme::style(crate::ui::theme::Role::Muted);
     let mut lines: Vec<Line<'static>> = vec![Line::from("")];
     let all = entries();
     for group in &layout(term.width).groups {
