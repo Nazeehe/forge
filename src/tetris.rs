@@ -33,7 +33,7 @@ impl PieceKind {
     ];
 
     /// Spawn-orientation cells, origin near the piece center.
-    fn cells(self) -> [(i8, i8); 4] {
+    pub fn cells(self) -> [(i8, i8); 4] {
         match self {
             PieceKind::I => [(-2, 0), (-1, 0), (0, 0), (1, 0)],
             PieceKind::O => [(0, 0), (1, 0), (0, 1), (1, 1)],
@@ -62,6 +62,8 @@ struct Active {
 pub struct TetrisGame {
     settled: [[Option<PieceKind>; WIDTH]; HEIGHT],
     active: Active,
+    /// Previewed piece: spawns next after the active locks.
+    next: PieceKind,
     bag: Vec<PieceKind>,
     rng: u64,
     score: u64,
@@ -90,6 +92,7 @@ impl TetrisGame {
                 x: 4,
                 y: 0,
             },
+            next: PieceKind::T,
             bag: Vec::new(),
             rng: seed | 1,
             score: 0,
@@ -97,7 +100,18 @@ impl TetrisGame {
             paused: false,
             over: false,
         };
-        game.spawn();
+        let first = game.next_kind();
+        let preview = game.next_kind();
+        game.active = Active {
+            kind: first,
+            cells: first.cells(),
+            x: 4,
+            y: 0,
+        };
+        game.next = preview;
+        if game.collides(&game.active) {
+            game.over = true;
+        }
         game
     }
 
@@ -136,7 +150,8 @@ impl TetrisGame {
     }
 
     fn spawn(&mut self) {
-        let kind = self.next_kind();
+        let upcoming = self.next_kind();
+        let kind = std::mem::replace(&mut self.next, upcoming);
         self.active = Active {
             kind,
             cells: kind.cells(),
@@ -180,6 +195,39 @@ impl TetrisGame {
     /// Active piece kind plus its absolute cells, for the paint.
     pub fn active(&self) -> (PieceKind, Vec<(i8, i8)>) {
         (self.active.kind, self.active_cells())
+    }
+
+    /// Previewed piece: the kind the next spawn will drop.
+    pub fn next_piece(&self) -> PieceKind {
+        self.next
+    }
+
+    /// Landing spot of the falling piece: the lowest valid position
+    /// straight down. Empty when the game is over; cells may sit above
+    /// the well and clip in the paint like the active piece.
+    pub fn ghost_cells(&self) -> Vec<(i8, i8)> {
+        if self.over {
+            return Vec::new();
+        }
+        let mut landed = self.active;
+        loop {
+            let next = Active {
+                x: landed.x,
+                y: landed.y + 1,
+                ..landed
+            };
+            if self.collides(&next) {
+                break;
+            }
+            landed = next;
+        }
+        let mut out: Vec<(i8, i8)> = landed
+            .cells
+            .iter()
+            .map(|(dx, dy)| (landed.x + dx, landed.y + dy))
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     /// Settled well, row 0 at the top.
@@ -426,6 +474,40 @@ mod tests {
         let before = game.active_cells();
         game.step();
         assert_eq!(game.active_cells(), before, "over pieces never fall");
+    }
+
+    #[test]
+    fn next_piece_previews_the_upcoming_spawn() {
+        let mut game = TetrisGame::with_seed(42);
+        let preview = game.next_piece();
+        game.hard_drop();
+        assert_eq!(
+            game.active().0,
+            preview,
+            "previewed piece spawns after the lock"
+        );
+    }
+
+    #[test]
+    fn ghost_shows_landing_position_below_active() {
+        let game = TetrisGame::force_spawn(PieceKind::I);
+        let active = game.active_cells();
+        let ghost = game.ghost_cells();
+        assert!(!ghost.is_empty(), "open well has a landing spot");
+        let top_active = active.iter().map(|(_, y)| *y).min().unwrap();
+        let top_ghost = ghost.iter().map(|(_, y)| *y).min().unwrap();
+        assert!(
+            top_ghost >= top_active,
+            "ghost lands at or below the piece: active {active:?} ghost {ghost:?}"
+        );
+        // Ghost is the resting spot: every cell is valid, but one row
+        // lower collides with the floor or the stack.
+        for (x, y) in &ghost {
+            assert!(
+                *x >= 0 && *x < WIDTH as i8 && *y < HEIGHT as i8,
+                "ghost stays in the well: {ghost:?}"
+            );
+        }
     }
 
     #[test]
