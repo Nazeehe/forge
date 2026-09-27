@@ -13,6 +13,9 @@ pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 pub struct FileLogger {
     path: PathBuf,
     max_bytes: u64,
+    /// Owner-only (`0600`) on create, with mode drift repaired on each
+    /// append. For logs that carry private text (comms previews).
+    private: bool,
 }
 
 impl FileLogger {
@@ -25,7 +28,15 @@ impl FileLogger {
         Ok(FileLogger {
             path: path.to_path_buf(),
             max_bytes,
+            private: false,
         })
+    }
+
+    /// [`FileLogger::open`], but the file stays owner-only (`0600`).
+    pub fn open_private(path: &Path, max_bytes: u64) -> io::Result<Self> {
+        let mut log = Self::open(path, max_bytes)?;
+        log.private = true;
+        Ok(log)
     }
 
     /// Append one sanitized line (without trailing newline handling by the
@@ -38,10 +49,20 @@ impl FileLogger {
             std::fs::rename(&self.path, &rotated)?;
         }
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        if self.private {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            opts.mode(0o600);
+            let mut f = opts.open(&self.path)?;
+            if f.metadata()?.permissions().mode() & 0o777 != 0o600 {
+                f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            writeln!(f, "{}", sanitize(line))?;
+            return f.sync_all();
+        }
+        let mut f = opts.open(&self.path)?;
         writeln!(f, "{}", sanitize(line))?;
         f.sync_all()
     }
@@ -106,7 +127,7 @@ pub fn comms_trace(path: &Path, line: &str) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    if let Ok(mut log) = FileLogger::open(path, DEFAULT_MAX_BYTES) {
+    if let Ok(mut log) = FileLogger::open_private(path, DEFAULT_MAX_BYTES) {
         let _ = log.append(&format!(
             "{}.{:03} {line}",
             now.as_secs(),
@@ -219,6 +240,22 @@ mod tests {
         assert_eq!(sanitize("a\nb\rc\td"), "a b c d");
         assert_eq!(sanitize("x\x00y\x1bz"), "xyz");
         assert_eq!(sanitize("ok ✓"), "ok ✓");
+    }
+
+    #[test]
+    fn comms_trace_is_owner_only() {
+        // The trace carries message-body previews: private like audit.log,
+        // both on create and when an older world-readable file exists.
+        use std::os::unix::fs::PermissionsExt;
+        let path = scratch();
+        comms_trace(&path, "comms start");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "created mode was {mode:o}");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        comms_trace(&path, "comms tool=tell_session -> ok");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "drift repaired, was {mode:o}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

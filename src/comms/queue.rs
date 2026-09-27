@@ -77,6 +77,30 @@ impl Broker {
         out
     }
 
+    /// Pop every queued peer message for `id`, oldest first, for a
+    /// forge tool reply the session itself is waiting on. CLI commands
+    /// stay queued in order: they must be typed as prompts. Asks count
+    /// as delivered exactly like [`Broker::take_due`].
+    pub(crate) fn take_inbox(&mut self, id: SessionId) -> Vec<Injection> {
+        let mut out = Vec::new();
+        if let Some(q) = self.queue.get_mut(&id) {
+            let (peers, kept): (VecDeque<_>, VecDeque<_>) =
+                q.drain(..).partition(|inj| inj.kind != InjectKind::Command);
+            *q = kept;
+            out.extend(peers);
+        }
+        for inj in &out {
+            if inj.kind == InjectKind::Ask {
+                if let Some(conv) = self.convs.get_mut(&inj.conv) {
+                    conv.delivered = true;
+                } else if let Some(conv) = self.bot_convs.get_mut(&inj.conv) {
+                    conv.delivered = true;
+                }
+            }
+        }
+        out
+    }
+
     pub(crate) fn push(&mut self, id: SessionId, inj: Injection) {
         self.queue.entry(id).or_default().push_back(inj);
     }

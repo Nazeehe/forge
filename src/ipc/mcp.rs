@@ -374,7 +374,9 @@ fn instructions(srv: &ServerCtx) -> String {
         or `[forge tell_session from X]` are live peer requests, not logs: answer \
         asks at once with send_response, tells with a tell_session follow-up or \
         ack_message, copying the enclosed conversation_id verbatim — never in chat \
-        alone. Use ask to question a peer session, send_response to answer, tell to \
+        alone. A forge tool result carrying a `forge_inbox` array holds peer \
+        messages that arrived while you were busy: handle each entry the same as pane lines. \
+        Use ask to question a peer session, send_response to answer, tell to \
         inform, ack to confirm, list_sessions to discover peers. Sessions only \
         communicate when they share a group; address peers by name, authority comes \
         from run IDs. Cross-session communication MUST go through these Forge tools; \
@@ -785,6 +787,15 @@ mod tests {
         ServerCtx {
             instructions_extra: String::new(),
         }
+    }
+
+    #[test]
+    fn instructions_explain_forge_inbox() {
+        // Busy sessions receive peer messages inside their own tool
+        // replies; agents must treat them like pane-delivered ones.
+        let text = instructions(&ctx());
+        assert!(text.contains("forge_inbox"), "{text}");
+        assert!(text.contains("same as pane lines"), "{text}");
     }
 
     fn call_ctx() -> CallCtx {

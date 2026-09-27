@@ -505,6 +505,12 @@ impl Broker {
             if conv.state != ConvState::Open {
                 return Err("conversation is closed".to_string());
             }
+            if caller == conv.source && self.shared_group(caller, conv.target) {
+                // The source is acking a follow-up it received. Those
+                // expect no ack, so succeed quietly: nothing reaches
+                // the target, and courtesy stays the target's own.
+                return Ok(format!(r#"{{"conversation":"{id}","acknowledged":true}}"#));
+            }
             if caller != conv.target {
                 return Err("only the target acknowledges".to_string());
             }
@@ -541,6 +547,38 @@ impl Broker {
 mod tests {
     use super::*;
     use crate::comms::test_support::*;
+
+    #[test]
+    fn source_acking_a_follow_up_is_a_quiet_success() {
+        // a tells b, b follows up back to a. a acking that follow-up used
+        // to fail "only the target acknowledges". Follow-ups expect no
+        // ack, so the source's ack succeeds without pinging b, and it
+        // never stands in for b's own ack (courtesy stays b's).
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"hi"}"#)
+            .expect("tell");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.state.broker.take_due(p.b, 10);
+        p.call(
+            &p.run_b.clone(),
+            "tell_session",
+            &format!(r#"{{"target":"a","message":"back at you","conversation_id":"{conv}"}}"#),
+        )
+        .expect("follow-up");
+        p.state.broker.take_due(p.a, 10);
+        let ack = p
+            .call(&p.run_a.clone(), "ack_message", &format!(r#"{{"conversation_id":"{conv}"}}"#))
+            .expect("source ack of a follow-up succeeds");
+        assert!(ack.contains("\"acknowledged\":true"), "{ack}");
+        assert_eq!(p.state.broker.queued(p.b), 0, "no ack pinged back to b");
+        // b's own ack still goes to a exactly as before.
+        p.call(&p.run_b.clone(), "ack_message", &format!(r#"{{"conversation_id":"{conv}"}}"#))
+            .expect("target ack");
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].kind, InjectKind::Ack);
+    }
 
     #[test]
     fn bot_ask_response_roundtrip_never_touches_a_pane() {

@@ -76,6 +76,14 @@ pub const INJECT_ENTER_DELAY: Duration = Duration::from_millis(300);
 pub const INJECT_HOOK_DEBOUNCE: Duration = Duration::from_millis(500);
 /// The staged Enter byte.
 pub const INJECT_ENTER_CR: u8 = b'\r';
+/// While a delivery hold keeps the same reason, comms.log repeats it
+/// at most this often; a changed reason logs at once.
+pub const HOLD_LOG_REMINDER: Duration = Duration::from_secs(30);
+/// Longest wait after a submitted Enter for the harness to report the
+/// turn it started. Until a newer hook lands the pane only looks idle,
+/// so the next body waits; harnesses that never hook (plain shells)
+/// resume after this bound instead of stalling.
+pub const INJECT_TURN_GRACE: Duration = Duration::from_secs(2);
 /// Bound on a logged message-text preview: the trace names the exact
 /// length plus this many leading characters. The queue keeps the full
 /// text; the log never does.
@@ -207,6 +215,15 @@ impl InjectKind {
             InjectKind::Failed => "failed",
             InjectKind::Reminder => "reminder",
             InjectKind::Command => "command",
+        }
+    }
+
+    /// Single-token label for comms.log `kind=` fields: the pane label
+    /// carries a space that splits key=value parsing.
+    pub fn trace_label(self) -> &'static str {
+        match self {
+            InjectKind::FollowUp => "tell_followup",
+            other => other.label(),
         }
     }
 }
@@ -487,6 +504,23 @@ mod tests {
         // Credentials never ride the summary, even if present.
         let s = summarize_call("tell_session", r#"{"target":"b","text":"hi","token":"tok-1"}"#);
         assert!(!s.contains("tok-1"), "{s}");
+    }
+
+    #[test]
+    fn trace_labels_are_single_tokens() {
+        // `kind=tell (follow-up)` split on the space and broke key=value
+        // parsing of comms.log; every trace label is one bare token.
+        use InjectKind::*;
+        for kind in [Ask, Response, Tell, FollowUp, Ack, Failed, Reminder, Command] {
+            let label = kind.trace_label();
+            assert!(
+                !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+                "{kind:?} -> {label:?}"
+            );
+        }
+        assert_eq!(FollowUp.trace_label(), "tell_followup");
+        // The pane label agents read stays as it was.
+        assert_eq!(FollowUp.label(), "tell (follow-up)");
     }
 
     #[test]

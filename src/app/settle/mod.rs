@@ -3,6 +3,9 @@
 use super::*;
 
 pub mod hooks;
+mod inbox;
+#[cfg(test)]
+mod trace;
 
 impl AppState {
     pub fn settle_comms(&mut self) {
@@ -29,11 +32,31 @@ impl AppState {
             let idle = self.manager.get(id).is_some_and(|rec| {
                 matches!(rec.activity, Activity::Idle | Activity::Stopped)
             });
-            let settled = self.injection_settled_for(id, now);
+            let settled = self.injection_settled_for(id, now) && self.turn_registered(id, now);
             let enter_pending = self.pending_enter.contains_key(&id);
             if !idle || !settled || enter_pending {
                 if swept {
                     if let Some(head) = self.broker.peek_due(id) {
+                        // Log a hold when its reason changes, else only as
+                        // a periodic reminder: a stuck message must not
+                        // flood the trace and rotate the evidence away.
+                        let reason = format!(
+                            "{}|{:?}|{}|{}|{}",
+                            head.conv,
+                            self.manager.get(id).map(|rec| rec.activity),
+                            self.broker.queued(id),
+                            enter_pending,
+                            settled,
+                        );
+                        let quiet = self.hold_logged.get(&id).is_some_and(|(last, at)| {
+                            *last == reason
+                                && now.saturating_duration_since(*at)
+                                    < crate::comms::HOLD_LOG_REMINDER
+                        });
+                        if quiet {
+                            continue;
+                        }
+                        self.hold_logged.insert(id, (reason, now));
                         let to = self
                             .manager
                             .get(id)
@@ -55,7 +78,7 @@ impl AppState {
                             "hold to={} conv={} kind={} from={} {summary}",
                             crate::comms::log_quote(&to),
                             crate::comms::log_quote(&head.conv),
-                            head.kind.label(),
+                            head.kind.trace_label(),
                             crate::comms::log_quote(&head.from),
                         ));
                     }
@@ -76,6 +99,7 @@ impl AppState {
             let bytes = head.render_framed(bracketed);
             match self.manager.inject_write(id, &bytes) {
                 Ok(()) => {
+                    self.hold_logged.remove(&id);
                     let taken = self.broker.take_due(id, 1);
                     debug_assert!(taken.first().map(|t| &t.conv) == Some(&head.conv));
                     // Arm the staged Enter: the CR goes out on a later tick,
@@ -96,7 +120,7 @@ impl AppState {
                         "deliver to={} conv={} kind={} from={} bytes={} queued_left={left}",
                         crate::comms::log_quote(&to),
                         crate::comms::log_quote(&head.conv),
-                        head.kind.label(),
+                        head.kind.trace_label(),
                         crate::comms::log_quote(&head.from),
                         bytes.len(),
                     ));
@@ -112,7 +136,7 @@ impl AppState {
                         "deliver-fail to={} conv={} kind={} from={} err={}",
                         crate::comms::log_quote(&to),
                         crate::comms::log_quote(&head.conv),
-                        head.kind.label(),
+                        head.kind.trace_label(),
                         crate::comms::log_quote(&head.from),
                         crate::comms::log_quote(&crate::infra::logging::truncate(
                             &e.to_string(),
@@ -153,6 +177,7 @@ impl AppState {
             match self.manager.inject_write(id, &[crate::comms::INJECT_ENTER_CR]) {
                 Ok(()) => {
                     self.pending_enter.remove(&id);
+                    self.enter_sent.insert(id, now);
                     let to = self
                         .manager
                         .get(id)
@@ -163,7 +188,7 @@ impl AppState {
                             "enter to={} conv={} kind={}",
                             crate::comms::log_quote(&to),
                             crate::comms::log_quote(&conv),
-                            kind.label(),
+                            kind.trace_label(),
                         )),
                         None => self.trace_comms(&format!(
                             "enter to={} conv=none kind=command",
@@ -192,6 +217,27 @@ impl AppState {
         self.pending_enter.retain(|id, _| {
             self.manager.get(*id).is_some_and(|rec| rec.state.is_live())
         });
+        self.enter_sent.retain(|id, _| {
+            self.manager.get(*id).is_some_and(|rec| rec.state.is_live())
+        });
+        self.hold_logged.retain(|id, _| {
+            self.manager.get(*id).is_some_and(|rec| rec.state.is_live())
+        });
+    }
+
+    /// Whether the turn the last Enter started has registered: a hook
+    /// newer than that Enter, or [`crate::comms::INJECT_TURN_GRACE`]
+    /// passed. Until then the pane only looks idle. Panes that never
+    /// hooked (plain shells) report no turns, so they never wait.
+    /// Saturating, since Enters may be stamped with a supplied `now`.
+    fn turn_registered(&self, id: crate::session::SessionId, now: std::time::Instant) -> bool {
+        let Some(&sent) = self.enter_sent.get(&id) else {
+            return true;
+        };
+        let Some(&hooked_at) = self.last_hook_activity.get(&id) else {
+            return true;
+        };
+        hooked_at > sent || now.saturating_duration_since(sent) >= crate::comms::INJECT_TURN_GRACE
     }
 
     /// Deliver due injections into idle, non-recently-typed panes. Targets
@@ -390,141 +436,78 @@ mod tests {
     }
 
     #[test]
-    fn comms_trace_records_send_verdicts() {
-        let dir = std::env::temp_dir().join(format!("forge-comms-trace-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let log = dir.join("comms.log");
+    fn settle_comms_waits_for_the_turn_an_enter_starts() {
+        // The harness reports the turn an Enter starts ~100-300ms later.
+        // Until then the pane still reads idle, and the next body used
+        // to land in a busy pane, its own Enter then held for the whole
+        // turn (comms.log: mu_2, 96s stuck, then wiped by typing).
         let mut s = AppState::new();
-        s.comms_trace = Some(log.clone());
         let run_a = RunId::generate();
         let a = s
             .manager
             .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
             .unwrap();
-        let run_b = RunId::generate();
         let b = s
             .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
             .unwrap();
-        let comms = |s: &mut AppState, run_id: String, tool: &str, args: &str| {
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        for text in ["first", "second"] {
             let (reply_tx, _) = std::sync::mpsc::channel();
             s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id,
-                tool: tool.to_string(),
-                args: args.to_string(),
+                run_id: run_a.to_string(),
+                tool: "tell_session".to_string(),
+                args: format!("{{\"target\":\"b\",\"text\":\"{text}\"}}"),
                 reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                    crate::ipc::listener::CLAIM_PENDING,
+                )),
             }));
-        };
-        // No shared group: the rejection lands in the trace with the cause.
-        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"b\",\"text\":\"hi\"}");
-        // Unknown target: liveness reads false, never a guess.
-        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"ghost\",\"text\":\"hi\"}");
-        // Grouped: the accept lands with its conversation and queue depth.
-        s.broker.join(&s.manager, a, "peers").unwrap();
-        s.broker.join(&s.manager, b, "peers").unwrap();
-        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"b\",\"text\":\"hello-b\"}");
-        let text = std::fs::read_to_string(&log).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 3, "{text}");
-        assert!(lines[0].contains("tool=tell_session"), "{}", lines[0]);
-        assert!(lines[0].contains("caller=\"a\""), "{}", lines[0]);
-        assert!(lines[0].contains("-> err"), "{}", lines[0]);
-        assert!(lines[0].contains("no shared group"), "{}", lines[0]);
-        assert!(lines[0].contains("shared_group=false"), "{}", lines[0]);
-        assert!(lines[1].contains("-> err"), "{}", lines[1]);
-        assert!(lines[1].contains("target_live=false"), "{}", lines[1]);
-        assert!(lines[2].contains("-> ok"), "{}", lines[2]);
-        assert!(lines[2].contains("conv="), "{}", lines[2]);
-        assert!(lines[2].contains("to=\"b\""), "{}", lines[2]);
-        assert!(lines[2].contains("queued=1"), "{}", lines[2]);
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(s.manager.remove(a));
-        assert!(s.manager.remove(b));
-    }
-
-    #[test]
-    fn comms_trace_records_delivery_and_busy_holds() {
-        let dir = std::env::temp_dir().join(format!("forge-comms-hold-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let log = dir.join("comms.log");
-        let mut s = AppState::new();
-        s.comms_trace = Some(log.clone());
-        let run_a = RunId::generate();
-        let a = s
-            .manager
-            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-            .unwrap();
-        let run_b = RunId::generate();
-        let b = s
-            .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-            .unwrap();
-        s.broker.join(&s.manager, a, "peers").unwrap();
-        s.broker.join(&s.manager, b, "peers").unwrap();
+        }
+        // b is a hooking harness: an earlier, settled hook is on record.
+        s.last_hook_activity
+            .insert(b, std::time::Instant::now() - std::time::Duration::from_secs(5));
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "first body out");
+        s.settle_enters(std::time::Instant::now() + crate::comms::INJECT_ENTER_DELAY);
+        assert!(!s.pending_enter.contains_key(&b), "first Enter out");
+        // No hook has reported the new turn yet: the pane only looks idle.
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "second body waits for the turn to register");
+        // A hook newer than the Enter registers the turn (its activity
+        // gates from here); once its debounce settles the body goes.
+        let now = std::time::Instant::now();
+        s.enter_sent.insert(b, now - std::time::Duration::from_millis(1000));
+        s.last_hook_activity.insert(b, now - std::time::Duration::from_millis(600));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "registered turn releases the body");
+        // A turn whose hook never lands resumes after the grace bound.
+        s.pending_enter.remove(&b);
+        s.last_hook_activity
+            .insert(b, std::time::Instant::now() - std::time::Duration::from_secs(5));
+        s.enter_sent.insert(b, std::time::Instant::now());
         let (reply_tx, _) = std::sync::mpsc::channel();
         s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
-            args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
+            args: "{\"target\":\"b\",\"text\":\"third\"}".to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                crate::ipc::listener::CLAIM_PENDING,
+            )),
         }));
-        // Busy target: the hold names the pane activity, not just silence.
-        assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
         s.settle_comms();
-        assert_eq!(s.broker.queued(b), 1);
-        // Idle target: the delivery names conv, kind, and queue remainder.
-        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        assert_eq!(s.broker.queued(b), 1, "inside the grace: still waiting");
+        s.enter_sent
+            .insert(b, std::time::Instant::now() - crate::comms::INJECT_TURN_GRACE);
         s.settle_comms();
-        assert_eq!(s.broker.queued(b), 0);
-        let text = std::fs::read_to_string(&log).unwrap();
-        assert!(text.contains("hold"), "{text}");
-        assert!(text.contains("to=\"b\""), "{text}");
-        assert!(text.contains("activity=ToolUse"), "{text}");
-        assert!(text.contains("deliver"), "{text}");
-        assert!(text.contains("queued_left=0"), "{text}");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(s.manager.remove(a));
-        assert!(s.manager.remove(b));
-    }
-
-    #[test]
-    fn comms_trace_records_staged_enters() {
-        let dir = std::env::temp_dir().join(format!("forge-comms-enter-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let log = dir.join("comms.log");
-        let mut s = AppState::new();
-        s.comms_trace = Some(log.clone());
-        let run_a = RunId::generate();
-        let a = s
-            .manager
-            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-            .unwrap();
-        let run_b = RunId::generate();
-        let b = s
-            .manager
-            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-            .unwrap();
-        s.broker.join(&s.manager, a, "peers").unwrap();
-        s.broker.join(&s.manager, b, "peers").unwrap();
-        let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-            run_id: run_a.to_string(),
-            tool: "tell_session".to_string(),
-            args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
-            reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-        }));
-        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
-        s.settle_comms();
-        assert_eq!(s.broker.queued(b), 0);
-        assert!(s.pending_enter.contains_key(&b), "body stages its Enter");
-        s.settle_enters(std::time::Instant::now() + std::time::Duration::from_millis(500));
-        let text = std::fs::read_to_string(&log).unwrap();
-        assert!(text.contains("enter"), "{text}");
-        assert!(text.contains("to=\"b\""), "{text}");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(s.broker.queued(b), 0, "grace elapsed: body goes");
+        // A pane that never hooked (plain shell) never waits at all.
+        s.last_hook_activity.remove(&b);
+        s.enter_sent.insert(b, std::time::Instant::now());
+        assert!(s.turn_registered(b, std::time::Instant::now()));
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
     }

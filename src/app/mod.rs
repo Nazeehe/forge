@@ -179,6 +179,16 @@ pub struct AppState {
             Option<(String, crate::comms::InjectKind)>,
         ),
     >,
+    /// When each session's last staged Enter went out. The next body
+    /// waits until a newer hook reports the turn it started, or
+    /// [`crate::comms::INJECT_TURN_GRACE`] passes. Pruned with
+    /// `pending_enter`, so it stays bounded by live sessions.
+    pub enter_sent: std::collections::HashMap<crate::session::SessionId, std::time::Instant>,
+    /// Last hold reason logged per session, and when: comms.log repeats
+    /// an unchanged hold only every [`crate::comms::HOLD_LOG_REMINDER`].
+    /// Cleared on delivery; pruned with `pending_enter`.
+    pub hold_logged:
+        std::collections::HashMap<crate::session::SessionId, (String, std::time::Instant)>,
     /// One read-only chrome view, scoped to the currently focused session.
     pub overlay_view: Option<(crate::session::SessionId, usize)>,
     /// Live walkthroughs by session. Entered agent-side through the
@@ -425,6 +435,8 @@ impl AppState {
             hook_trace: crate::infra::logging::hook_trace_path(),
             comms_trace: crate::infra::logging::comms_trace_path(),
             pending_enter: std::collections::HashMap::new(),
+            enter_sent: std::collections::HashMap::new(),
+            hold_logged: std::collections::HashMap::new(),
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
             grid_mode: false,
@@ -562,6 +574,8 @@ impl AppState {
                     },
                 };
                 self.trace_comms_verdict(&req.tool, &req.run_id, &req.args, &verdict);
+                let verdict =
+                    verdict.map(|result| self.attach_inbox(&req.run_id, &req.tool, result));
                 let line = match verdict {
                     Ok(result) => format!("{{\"ok\":true,\"result\":{result}}}\n"),
                     Err(e) => format!(
