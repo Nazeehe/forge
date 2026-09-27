@@ -523,7 +523,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "board_get",
-            description: "Show one board's columns and cards with WIP limits, priority, assignee, and progress. Defaults to the focused board when neither board_name nor board_id is given.",
+            description: "Show one board's columns and cards with WIP limits, priority, assignee, tags, start/due dates, estimate, and progress. Defaults to the focused board when neither board_name nor board_id is given.",
             schema: r#"{"type":"object","properties":{"board_name":{"type":"string"},"board_id":{"type":"string"}}}"#,
         },
         ToolDef {
@@ -533,8 +533,8 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "card_create",
-            description: "Add a card to a board (default column Backlog). WIP limits bind: a full column rejects the create.",
-            schema: r#"{"type":"object","properties":{"board_name":{"type":"string"},"title":{"type":"string"},"column":{"type":"string"},"description":{"type":"string"},"assignee":{"type":"string"},"priority":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"due_date":{"type":"string"}},"required":["board_name","title"]}"#,
+            description: "Add a card to a board (default column Backlog). WIP limits bind: a full column rejects the create. Fields: title, column(status), description, assignee, priority, tags(labels), start_date, due_date, estimate(points).",
+            schema: r#"{"type":"object","properties":{"board_name":{"type":"string"},"title":{"type":"string"},"column":{"type":"string"},"description":{"type":"string"},"assignee":{"type":"string"},"priority":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"start_date":{"type":"string"},"due_date":{"type":"string"},"estimate":{"type":"integer"}},"required":["board_name","title"]}"#,
         },
         ToolDef {
             name: "card_move",
@@ -543,8 +543,8 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "card_update",
-            description: "Partially update a card: title, description, assignee, priority, progress (clamped 0-100), tags, due_date.",
-            schema: r#"{"type":"object","properties":{"card_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"assignee":{"type":"string"},"priority":{"type":"string"},"progress":{"type":"integer"},"tags":{"type":"array","items":{"type":"string"}},"due_date":{"type":"string"}},"required":["card_id"]}"#,
+            description: "Partially update a card: title, description, column(status, WIP-checked move), assignee (empty clears), priority, progress (clamped 0-100), tags(labels), start_date (empty clears), due_date (empty clears), estimate(points, empty clears).",
+            schema: r#"{"type":"object","properties":{"card_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"column":{"type":"string"},"assignee":{"type":"string"},"priority":{"type":"string"},"progress":{"type":"integer"},"tags":{"type":"array","items":{"type":"string"}},"start_date":{"type":"string"},"due_date":{"type":"string"},"estimate":{"type":"integer"}},"required":["card_id"]}"#,
         },
         ToolDef {
             name: "card_delete",

@@ -450,6 +450,10 @@ fn loop_until_quit(
                                 tour.push_paste(&text);
                                 state.dirty = true;
                             }
+                        } else if state.card_edit.is_some() {
+                            // The open card editor takes the paste like
+                            // typing; the panes behind it never see it.
+                            state.board_card_edit_paste(&text);
                         } else if state.board_draft.is_some() {
                             // An open board draft takes the paste
                             // single-line like typing; the panes behind
@@ -580,6 +584,9 @@ fn loop_until_quit(
                 }
                 if let Some(dialog) = state.telegram_dialog.as_mut() {
                     dialog.view(f, crate::telegram_dialog::telegram_area(area));
+                }
+                if let Some(dialog) = state.card_edit.as_mut() {
+                    dialog.view(f, crate::card_edit::card_edit_area(area));
                 }
                 if let Some(dialog) = state.theme_dialog.as_ref() {
                     dialog.view(f, crate::theme_dialog::theme_area(area));
@@ -980,7 +987,7 @@ fn handle_walkthrough_key(state: &mut AppState, key: event::KeyEvent) {
 }
 
 /// One key inside the open kanban board: the blueprint's clikan map
-/// minus text entry (add/edit/columns stay MCP-only and say so).
+/// plus the `a` add draft and the `e` full-field editor modal.
 /// Ctrl/Alt chords never reach here — the dispatcher keeps them for
 /// the prefix path — and `q`/Esc leaves the board.
 fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
@@ -992,8 +999,13 @@ fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
     if !plain {
         return;
     }
-    // Open text entry owns every plain key: typing appends, Enter
-    // submits, Esc cancels, navigation never fires mid-draft.
+    // The open card editor owns every plain key: typing edits the
+    // focused row, Enter saves, Esc cancels, navigation never fires
+    // mid-edit. The single-line add draft owns its keys the same way.
+    if state.card_edit.is_some() {
+        state.board_card_edit_key(&key);
+        return;
+    }
     if state.board_draft.is_some() {
         state.board_draft_key(&key);
         return;
@@ -1050,9 +1062,6 @@ fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
             'q' => state.toggle_board(),
             'a' => state.board_start_add_draft(),
             'e' => state.board_start_title_draft(),
-            't' => state.board_defer_to_mcp("tag"),
-            '@' => state.board_defer_to_mcp("assignee"),
-            'c' => state.board_defer_to_mcp("column"),
             _ => {}
         },
     }
@@ -1434,6 +1443,17 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     }
     let (rows, cols) = state.term_size;
     let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    // The open card editor swallows ALL mouse input: rows take focus
+    // and Save/Cancel fire, clicks behind it move nothing.
+    if state.card_edit.is_some() {
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+            let area = crate::card_edit::card_edit_area(ratatui::layout::Rect::new(
+                0, 0, cols, rows,
+            ));
+            state.board_card_edit_click(mev.column, mev.row, area);
+        }
+        return;
+    }
     // The open board owns main-area clicks: column/card focus follows
     // the painted cells, footer and border stay dead, and nothing
     // falls through to the panes behind the board.
@@ -2932,18 +2952,106 @@ mod tests {
         assert_eq!(board.cards.len(), 1);
         assert_eq!(board.cards[0].column, "Backlog", "lands in the focused column");
         assert!(state.boards_dirty, "human adds persist");
-        // `e` prefills the title; typing appends to it.
+        // `e` opens the full-field editor prefilled with the card;
+        // typing on the title row appends to it, Enter saves.
         handle_board_key(&mut state, ch('e'));
-        assert_eq!(
-            state.board_draft.as_ref().map(|d| d.buffer.as_str()),
-            Some("first"),
-            "prefilled, not blank"
-        );
+        assert!(state.card_edit.is_some(), "e opens the card editor");
         for c in " v2".chars() {
             handle_board_key(&mut state, ch(c));
         }
         handle_board_key(&mut state, enter);
+        assert!(state.card_edit.is_none(), "save closes the editor");
         assert_eq!(state.boards.board("team").unwrap().cards[0].title, "first v2");
+    }
+
+    #[test]
+    fn board_e_opens_full_card_editor_prefilled() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let mut state = AppState::new();
+        state.boards.board_create("team", None).unwrap();
+        state
+            .boards
+            .board_mut("team")
+            .unwrap()
+            .card_create(crate::board::CardDraft::new("first"))
+            .unwrap();
+        state.board_open = true;
+        state.ensure_board_focus();
+        handle_board_key(&mut state, ch('e'));
+        assert!(state.card_edit.is_some(), "e opens the full card editor");
+        assert!(state.board_draft.is_none(), "no single-line draft behind the modal");
+    }
+
+    #[test]
+    fn board_editor_saves_every_field_and_moves_status() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let mut state = AppState::new();
+        state.boards.board_create("team", None).unwrap();
+        let id = state
+            .boards
+            .board_mut("team")
+            .unwrap()
+            .card_create(crate::board::CardDraft::new("first"))
+            .unwrap();
+        state.board_open = true;
+        state.ensure_board_focus();
+        handle_board_key(&mut state, ch('e'));
+        // Jump to the assignee row (title 0, desc 1, status 2, assignee 3)
+        // and claim the card; the status cycler moves Backlog -> Todo.
+        for _ in 0..3 {
+            handle_board_key(&mut state, tab);
+        }
+        for c in "sam".chars() {
+            handle_board_key(&mut state, ch(c));
+        }
+        handle_board_key(&mut state, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        handle_board_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        );
+        handle_board_key(&mut state, enter);
+        assert!(state.card_edit.is_none(), "save closes the editor");
+        let card = state.boards.board("team").unwrap().card(&id).unwrap();
+        assert_eq!(card.assignee, "sam", "assignee saved");
+        assert_eq!(card.column, "Todo", "status move applied");
+        assert!(state.boards_dirty, "editor saves persist");
+        assert!(
+            state.board_notice.is_some_and(|n| n.contains("updated")),
+            "save confirms in the footer"
+        );
+    }
+
+    #[test]
+    fn board_editor_esc_cancels_without_touching_the_card() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut state = AppState::new();
+        state.boards.board_create("team", None).unwrap();
+        let id = state
+            .boards
+            .board_mut("team")
+            .unwrap()
+            .card_create(crate::board::CardDraft::new("first"))
+            .unwrap();
+        state.board_open = true;
+        state.ensure_board_focus();
+        handle_board_key(&mut state, ch('e'));
+        for c in " v2".chars() {
+            handle_board_key(&mut state, ch(c));
+        }
+        handle_board_key(&mut state, esc);
+        assert!(state.card_edit.is_none(), "esc closes the editor");
+        assert_eq!(
+            state.boards.board("team").unwrap().card(&id).unwrap().title,
+            "first",
+            "cancelled typing never lands"
+        );
+        assert!(!state.boards_dirty, "cancel persists nothing");
     }
 
     #[test]

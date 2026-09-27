@@ -10,6 +10,7 @@ mod audit;
 mod board;
 mod bot;
 mod branding;
+mod card_edit;
 mod comms;
 mod config;
 mod create;

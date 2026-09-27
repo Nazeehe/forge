@@ -181,6 +181,9 @@ pub struct AppState {
     pub board_focus: BoardFocus,
     /// Open board text entry; `None` outside draft mode.
     pub board_draft: Option<BoardDraft>,
+    /// Full-field card editor modal (`e`); `None` when closed.
+    /// Captures all board input while present, like every other modal.
+    pub card_edit: Option<crate::card_edit::CardEditDialog>,
     /// One-line board notice (corrupt save quarantined, ...), shown in
     /// the board footer until dismissed by opening the board.
     pub board_notice: Option<String>,
@@ -400,6 +403,7 @@ impl AppState {
             boards_dirty: false,
             board_focus: BoardFocus::default(),
             board_draft: None,
+            card_edit: None,
             board_notice: None,
             whichkey: crate::whichkey::WhichKeyHud::new(),
             visual_seq: 0,
@@ -754,6 +758,24 @@ impl AppState {
                         meta.push_str(&format!(" · @{}", c.assignee));
                     }
                     meta.push_str(&format!(" · {}%", c.progress));
+                    if let Some(est) = c.estimate {
+                        meta.push_str(&format!(" · {est}pt"));
+                    }
+                    match (&c.start_date, &c.due_date) {
+                        (Some(s), Some(d)) => {
+                            meta.push_str(&format!(" · {s} → {d}"));
+                        }
+                        (Some(s), None) => {
+                            meta.push_str(&format!(" · since {s}"));
+                        }
+                        (None, Some(d)) => {
+                            meta.push_str(&format!(" · due {d}"));
+                        }
+                        (None, None) => {}
+                    }
+                    if !c.tags.is_empty() {
+                        meta.push_str(&format!(" · #{}", c.tags.join(" #")));
+                    }
                     parts.push(meta);
                     parts.join(" — ")
                 })
@@ -841,6 +863,15 @@ impl AppState {
                                 ));
                             }
                             meta.push_str(&format!(" {}%", card.progress));
+                            if let Some(est) = card.estimate {
+                                meta.push_str(&format!(" · {est}pt"));
+                            }
+                            if let Some(start) = card.start_date.as_deref() {
+                                meta.push_str(&format!(
+                                    " · {}→",
+                                    crate::safe_text::encode_for_display(start)
+                                ));
+                            }
                             if let Some(due) = card.due_date.as_deref() {
                                 meta.push_str(&format!(
                                     " · {}",
@@ -869,13 +900,6 @@ impl AppState {
         }
     }
 
-    /// Text-entry editing (add/edit/columns/picker) is MCP-only in this
-    /// build; the footer says so instead of swallowing the key.
-    pub fn board_defer_to_mcp(&mut self, what: &str) {
-        self.board_notice = Some(format!("{what} editing is MCP-only here — see board_* tools"));
-        self.dirty = true;
-    }
-
     /// Open the `a` draft: a board when there is nothing yet, else a
     /// card in the focused column.
     pub fn board_start_add_draft(&mut self) {
@@ -899,20 +923,126 @@ impl AppState {
         self.dirty = true;
     }
 
-    /// Open the `e` draft, prefilled with the focused card's title.
+    /// Open the `e` editor: the full-field card modal prefilled from
+    /// the focused card. Kept under the old `board_start_title_draft`
+    /// name so the `e` binding does not move.
     pub fn board_start_title_draft(&mut self) {
-        let title = match self.focused_card_id().and_then(|id| {
-            self.focused_board().and_then(|b| b.card(&id).map(|c| c.title.clone()))
-        }) {
-            Some(title) => title,
-            None => return,
+        let (Some(id), Some(board)) = (
+            self.focused_card_id(),
+            self.focused_board().cloned(),
+        ) else {
+            return;
         };
-        self.board_draft = Some(BoardDraft {
-            prompt: "Edit title",
-            buffer: title,
-            action: BoardDraftAction::EditTitle,
-        });
+        let Some(card) = board.card(&id) else {
+            return;
+        };
+        let columns = board.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        self.card_edit =
+            Some(crate::card_edit::CardEditDialog::new(card, &columns, self.pill_tabs));
+        self.board_draft = None;
         self.dirty = true;
+    }
+
+    /// One key inside the open card editor: typing edits the focused
+    /// row, Enter saves, Esc cancels. Anything else stays inside the
+    /// modal so board navigation never fires mid-edit.
+    pub fn board_card_edit_key(
+        &mut self,
+        key: &crossterm::event::KeyEvent,
+    ) -> Option<crate::card_edit::CardEditOutcome> {
+        let outcome = self.card_edit.as_mut().map(|d| d.key(key))?;
+        match outcome {
+            crate::card_edit::CardEditOutcome::Pending => {
+                self.dirty = true;
+                Some(crate::card_edit::CardEditOutcome::Pending)
+            }
+            crate::card_edit::CardEditOutcome::Cancelled => {
+                self.card_edit = None;
+                self.dirty = true;
+                None
+            }
+            crate::card_edit::CardEditOutcome::Submitted(result) => {
+                self.apply_card_edit(result);
+                None
+            }
+        }
+    }
+
+    /// One left-click inside the open card editor: rows take focus,
+    /// Save/Cancel fire at once. Dead space and outside clicks are
+    /// `None`; the caller still swallows everything while open.
+    pub fn board_card_edit_click(&mut self, col: u16, row: u16, area: ratatui::layout::Rect) {
+        let outcome = self.card_edit.as_mut().and_then(|d| d.click(col, row, area));
+        match outcome {
+            Some(crate::card_edit::CardEditOutcome::Submitted(result)) => {
+                self.apply_card_edit(result);
+            }
+            Some(crate::card_edit::CardEditOutcome::Cancelled) => {
+                self.card_edit = None;
+                self.dirty = true;
+            }
+            _ => {
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Paste bracketed-paste text into the open card editor's focused
+    /// text row. No-op without an open editor so pastes never leak.
+    pub fn board_card_edit_paste(&mut self, text: &str) {
+        if let Some(dialog) = self.card_edit.as_mut() {
+            dialog.paste(text);
+            self.dirty = true;
+        }
+    }
+
+    /// Apply a submitted card edit: optional WIP-checked status move
+    /// first, then the scalar patch. A blocked move reports in the
+    /// footer and keeps the modal open so nothing is lost; scalar
+    /// failures do the same. Success closes and confirms.
+    fn apply_card_edit(&mut self, result: crate::card_edit::CardEditResult) {
+        let Some(id) = self.focused_card_id() else {
+            self.board_notice = Some("no card focused".to_string());
+            self.dirty = true;
+            return;
+        };
+        let target = result.column.clone();
+        let patch = result.patch;
+        if let Some(target) = target.as_deref() {
+            let moved = self
+                .focused_board_mut()
+                .map(|board| board.card_move(&id, target))
+                .unwrap_or(Err(crate::board::BoardError::CardNotFound(id.clone())));
+            if let Err(e) = moved {
+                self.board_notice = Some(e.to_string());
+                self.dirty = true;
+                return;
+            }
+            if let Some(next) = self
+                .focused_board()
+                .and_then(|b| b.columns.iter().position(|c| c.name == target))
+            {
+                self.board_focus.column = next;
+            }
+        }
+        match self
+            .focused_board_mut()
+            .map(|board| board.card_update(&id, patch))
+            .unwrap_or(Err(crate::board::BoardError::CardNotFound(id.clone())))
+        {
+            Ok(()) => {
+                self.card_edit = None;
+                self.refocus_card(&id);
+                self.board_notice = Some("card updated".to_string());
+                self.ensure_board_focus();
+                self.note_boards_changed();
+                self.dirty = true;
+            }
+            Err(e) => {
+                self.board_notice = Some(e.to_string());
+                self.dirty = true;
+            }
+        }
     }
 
     /// Sanitize pasted text into the open draft: breaks and tabs
@@ -2285,6 +2415,10 @@ impl AppState {
                 let (Some(board_name), Some(title)) = (arg("board_name"), arg("title")) else {
                     return Some(Err("card_create needs board_name and title".to_string()));
                 };
+                let estimate = match Self::parse_estimate_arg(&args_v) {
+                    Ok(estimate) => estimate,
+                    Err(e) => return Some(Err(e)),
+                };
                 let draft = crate::board::CardDraft {
                     title,
                     column: arg("column"),
@@ -2303,7 +2437,9 @@ impl AppState {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    start_date: arg("start_date"),
                     due_date: arg("due_date"),
+                    estimate,
                 };
                 match self.boards.board_mut(&board_name) {
                     None => Err(format!("board not found: {board_name}")),
@@ -2332,28 +2468,44 @@ impl AppState {
                 let Some(card_id) = arg("card_id") else {
                     return Some(Err("card_update needs card_id".to_string()));
                 };
-                let progress = match args_v.get("progress") {
-                    None | Some(serde_json::Value::Null) => None,
-                    Some(serde_json::Value::Number(n)) => n.as_u64().map(|p| p.min(10_000) as u16),
-                    Some(_) => return Some(Err("progress must be a number".to_string())),
+                let progress = match Self::parse_progress_arg(&args_v) {
+                    Ok(progress) => progress,
+                    Err(e) => return Some(Err(e)),
+                };
+                let (estimate, clear_estimate) = match Self::parse_estimate_patch(&args_v) {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                let raw_empty = |key: &str| {
+                    args_v.get(key).and_then(|v| v.as_str()).is_some_and(|s| s.trim().is_empty())
                 };
                 let patch = crate::board::CardPatch {
                     title: arg("title"),
                     description: arg("description"),
                     assignee: arg("assignee"),
-                    clear_assignee: false,
+                    clear_assignee: raw_empty("assignee"),
                     priority: arg("priority").map(|p| crate::board::Priority::parse(&p)),
                     progress,
                     tags: args_v.get("tags").and_then(|t| t.as_array()).map(|arr| {
                         arr.iter().filter_map(|t| t.as_str()).map(|t| t.to_string()).collect()
                     }),
+                    start_date: arg("start_date"),
+                    clear_start_date: raw_empty("start_date"),
                     due_date: arg("due_date"),
-                    clear_due_date: false,
+                    clear_due_date: raw_empty("due_date"),
+                    estimate,
+                    clear_estimate,
                 };
+                let column = arg("column");
                 match self.locate_card(&card_id) {
                     None => Err(format!("card not found: {card_id}")),
                     Some((bi, _)) => {
                         let board = &mut self.boards.boards[bi];
+                        if let Some(target) = column {
+                            if let Err(e) = board.card_move(&card_id, &target) {
+                                return Some(Err(e.to_string()));
+                            }
+                        }
                         match board.card_update(&card_id, patch) {
                             Ok(()) => Ok(Self::card_json(board.card(&card_id).expect("just updated"))),
                             Err(e) => Err(e.to_string()),
@@ -2468,10 +2620,69 @@ impl AppState {
             "priority": card.priority.as_str(),
             "created_at": card.created_at,
             "updated_at": card.updated_at,
+            "start_date": card.start_date,
             "due_date": card.due_date,
+            "estimate": card.estimate,
             "progress": card.progress,
         })
         .to_string()
+    }
+
+    /// `card_create` estimate: a number or numeric string; absent/null
+    /// means no estimate. Anything else is a loud error, never silent.
+    fn parse_estimate_arg(args: &serde_json::Value) -> Result<Option<u32>, String> {
+        match args.get("estimate") {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(n)) => n
+                .as_u64()
+                .map(|e| Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32))
+                .ok_or_else(|| "estimate must be a number".to_string()),
+            Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok(None),
+            Some(serde_json::Value::String(s)) => s
+                .trim()
+                .parse::<u64>()
+                .map(|e| Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32))
+                .map_err(|_| "estimate must be a number".to_string()),
+            Some(_) => Err("estimate must be a number".to_string()),
+        }
+    }
+
+    /// `card_update` estimate: absent/null keeps, empty string or null
+    /// with intent clears, numbers/strings set. Returns (set, clear).
+    fn parse_estimate_patch(args: &serde_json::Value) -> Result<(Option<u32>, bool), String> {
+        match args.get("estimate") {
+            None | Some(serde_json::Value::Null) => Ok((None, false)),
+            Some(serde_json::Value::Number(n)) => n
+                .as_u64()
+                .map(|e| (Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32), false))
+                .ok_or_else(|| "estimate must be a number".to_string()),
+            Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok((None, true)),
+            Some(serde_json::Value::String(s)) => s
+                .trim()
+                .parse::<u64>()
+                .map(|e| (Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32), false))
+                .map_err(|_| "estimate must be a number".to_string()),
+            Some(_) => Err("estimate must be a number".to_string()),
+        }
+    }
+
+    /// `card_update` progress: a number (or numeric string) 0+, clamped
+    /// to 100 by the domain. Anything else is a loud error.
+    fn parse_progress_arg(args: &serde_json::Value) -> Result<Option<u16>, String> {
+        match args.get("progress") {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(n)) => n
+                .as_u64()
+                .map(|p| Some(p.min(10_000) as u16))
+                .ok_or_else(|| "progress must be a number".to_string()),
+            Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok(None),
+            Some(serde_json::Value::String(s)) => s
+                .trim()
+                .parse::<u64>()
+                .map(|p| Some(p.min(10_000) as u16))
+                .map_err(|_| "progress must be a number".to_string()),
+            Some(_) => Err("progress must be a number".to_string()),
+        }
     }
 
     fn board_list_json(&self) -> String {
@@ -2514,7 +2725,8 @@ impl AppState {
                     "id": c.id, "title": c.title, "description": c.description,
                     "column": c.column, "assignee": c.assignee, "tags": c.tags,
                     "priority": c.priority.as_str(), "created_at": c.created_at,
-                    "updated_at": c.updated_at, "due_date": c.due_date, "progress": c.progress,
+                    "updated_at": c.updated_at, "start_date": c.start_date,
+                    "due_date": c.due_date, "estimate": c.estimate, "progress": c.progress,
                 })
             }).collect::<Vec<_>>(),
         })
@@ -9404,6 +9616,88 @@ mod tests {
         assert!(by_id.contains("Backlog"), "by id: {by_id}");
         let bare = comms_reply(&mut state, &live_run, "board_get", r#"{}"#);
         assert!(bare.contains("Backlog"), "default: {bare}");
+    }
+
+    #[test]
+    fn board_tools_read_and_edit_every_card_field() {
+        let (mut state, live_run) = board_live_state();
+        comms_reply(&mut state, &live_run, "board_create", r#"{"name":"team"}"#);
+        let card = comms_reply(
+            &mut state,
+            &live_run,
+            "card_create",
+            r#"{"board_name":"team","title":"full","description":"desc","assignee":"kins","priority":"high","tags":["a","b"],"start_date":"2026-09-01","due_date":"2026-10-01","estimate":5}"#,
+        );
+        assert!(card.contains(r#""ok":true"#), "card: {card}");
+        for needle in [
+            r#""description":"desc""#,
+            r#""assignee":"kins""#,
+            r#""priority":"high""#,
+            r#""start_date":"2026-09-01""#,
+            r#""due_date":"2026-10-01""#,
+            r#""estimate":5"#,
+        ] {
+            assert!(card.contains(needle), "card carries {needle}: {card}");
+        }
+        let body = &card[card.find(r#""result":"#).unwrap_or(0)..];
+        let start = body.find(r#""id":""#).map(|i| i + 6).unwrap_or(0);
+        let rest = &body[start..];
+        let id = rest[..rest.find('"').unwrap_or(0)].to_string();
+        // card_update edits every field, including a WIP-checked column move.
+        let updated = comms_reply(
+            &mut state,
+            &live_run,
+            "card_update",
+            &format!(
+                r#"{{"card_id":{},"title":"full2","description":"d2","column":"Todo","assignee":"sam","priority":"low","tags":["c"],"start_date":"2026-09-02","due_date":"2026-11-01","estimate":8,"progress":40}}"#,
+                crate::mcp::escape_json(&id)
+            ),
+        );
+        assert!(updated.contains(r#""ok":true"#), "updated: {updated}");
+        for needle in [
+            r#""title":"full2""#,
+            r#""column":"Todo""#,
+            r#""assignee":"sam""#,
+            r#""start_date":"2026-09-02""#,
+            r#""estimate":8"#,
+            r#""progress":40"#,
+        ] {
+            assert!(updated.contains(needle), "updated carries {needle}: {updated}");
+        }
+        // Empty strings clear the clearable fields.
+        let cleared = comms_reply(
+            &mut state,
+            &live_run,
+            "card_update",
+            &format!(
+                r#"{{"card_id":{},"assignee":"","start_date":"","due_date":"","estimate":""}}"#,
+                crate::mcp::escape_json(&id)
+            ),
+        );
+        assert!(cleared.contains(r#""ok":true"#), "cleared: {cleared}");
+        assert!(cleared.contains(r#""assignee":"""#), "assignee cleared: {cleared}");
+        assert!(cleared.contains(r#""start_date":null"#), "start cleared: {cleared}");
+        assert!(cleared.contains(r#""estimate":null"#), "estimate cleared: {cleared}");
+        // board_get reads every field back.
+        let got = comms_reply(
+            &mut state,
+            &live_run,
+            "board_get",
+            r#"{"board_name":"team"}"#,
+        );
+        assert!(got.contains("full2") && got.contains("Todo"), "get: {got}");
+        assert!(got.contains("start_date") && got.contains("estimate"), "get: {got}");
+        // Bad estimate values fail loudly, never silently.
+        let bad = comms_reply(
+            &mut state,
+            &live_run,
+            "card_update",
+            &format!(
+                r#"{{"card_id":{},"estimate":"lots"}}"#,
+                crate::mcp::escape_json(&id)
+            ),
+        );
+        assert!(bad.contains("estimate must be a number"), "bad estimate: {bad}");
     }
 
     #[test]

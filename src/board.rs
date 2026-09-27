@@ -17,6 +17,10 @@ pub const MAX_DESCRIPTION_LEN: usize = 2000;
 pub const MAX_TAGS: usize = 16;
 /// Maximum tag length in chars.
 pub const MAX_TAG_LEN: usize = 40;
+/// Maximum date string length in chars (`YYYY-MM-DD` plus slack).
+pub const MAX_DATE_LEN: usize = 40;
+/// Maximum story-point estimate; larger values clamp instead of failing.
+pub const MAX_ESTIMATE: u32 = 9999;
 
 /// Default columns for a new board: Backlog, Todo, Doing (WIP 3), Done.
 pub fn default_columns() -> Vec<ColumnSpec> {
@@ -147,7 +151,9 @@ pub struct CardDraft {
     pub assignee: Option<String>,
     pub priority: Priority,
     pub tags: Vec<String>,
+    pub start_date: Option<String>,
     pub due_date: Option<String>,
+    pub estimate: Option<u32>,
 }
 
 impl CardDraft {
@@ -159,7 +165,9 @@ impl CardDraft {
             assignee: None,
             priority: Priority::Normal,
             tags: Vec::new(),
+            start_date: None,
             due_date: None,
+            estimate: None,
         }
     }
 }
@@ -174,8 +182,12 @@ pub struct CardPatch {
     pub priority: Option<Priority>,
     pub progress: Option<u16>,
     pub tags: Option<Vec<String>>,
+    pub start_date: Option<String>,
+    pub clear_start_date: bool,
     pub due_date: Option<String>,
     pub clear_due_date: bool,
+    pub estimate: Option<u32>,
+    pub clear_estimate: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,7 +201,9 @@ pub struct Card {
     pub priority: Priority,
     pub created_at: u64,
     pub updated_at: u64,
+    pub start_date: Option<String>,
     pub due_date: Option<String>,
+    pub estimate: Option<u32>,
     pub progress: u8,
 }
 
@@ -246,6 +260,17 @@ fn truncate_chars(s: &str, max: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max).collect()
+}
+
+/// Trim a date string, cap its length, and drop empties to `None`.
+/// Dates stay free-form (`YYYY-MM-DD` by convention); over-long
+/// values truncate, never fail.
+fn clean_date(raw: Option<String>) -> Option<String> {
+    let d = raw?.trim().to_string();
+    if d.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&d, MAX_DATE_LEN))
 }
 
 impl Board {
@@ -311,7 +336,9 @@ impl Board {
             priority: draft.priority,
             created_at: now,
             updated_at: now,
-            due_date: draft.due_date.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()),
+            start_date: clean_date(draft.start_date),
+            due_date: clean_date(draft.due_date),
+            estimate: draft.estimate.map(|e| e.min(MAX_ESTIMATE)),
             progress: 0,
         });
         Ok(id)
@@ -363,11 +390,20 @@ impl Board {
         if let Some(p) = patch.progress {
             self.cards[i].progress = p.min(100) as u8;
         }
+        if patch.clear_start_date {
+            self.cards[i].start_date = None;
+        } else if let Some(d) = patch.start_date {
+            self.cards[i].start_date = clean_date(Some(d));
+        }
         if patch.clear_due_date {
             self.cards[i].due_date = None;
         } else if let Some(d) = patch.due_date {
-            let d = d.trim().to_string();
-            self.cards[i].due_date = if d.is_empty() { None } else { Some(d) };
+            self.cards[i].due_date = clean_date(Some(d));
+        }
+        if patch.clear_estimate {
+            self.cards[i].estimate = None;
+        } else if let Some(e) = patch.estimate {
+            self.cards[i].estimate = Some(e.min(MAX_ESTIMATE));
         }
         if let Some(tags) = patch.tags {
             let mut kept: Vec<String> =
@@ -647,7 +683,16 @@ fn parse_card(raw: &serde_json::Value) -> Option<Card> {
         priority: raw.get("priority").and_then(|p| p.as_str()).map(Priority::parse).unwrap_or(Priority::Normal),
         created_at: json_u64(raw, "created_at"),
         updated_at: json_u64(raw, "updated_at"),
-        due_date: json_str(raw, "due_date").filter(|d| !d.trim().is_empty()),
+        start_date: json_str(raw, "start_date")
+            .map(|d| truncate_chars(d.trim(), MAX_DATE_LEN))
+            .filter(|d| !d.is_empty()),
+        due_date: json_str(raw, "due_date")
+            .map(|d| truncate_chars(d.trim(), MAX_DATE_LEN))
+            .filter(|d| !d.is_empty()),
+        estimate: raw
+            .get("estimate")
+            .and_then(|e| e.as_u64())
+            .map(|e| (e.min(MAX_ESTIMATE as u64)) as u32),
         progress: raw.get("progress").and_then(|p| p.as_u64()).unwrap_or(0).min(100) as u8,
     })
 }
@@ -681,7 +726,9 @@ impl BoardStore {
                             "priority": c.priority.as_str(),
                             "created_at": c.created_at,
                             "updated_at": c.updated_at,
+                            "start_date": c.start_date,
                             "due_date": c.due_date,
+                            "estimate": c.estimate,
                             "progress": c.progress,
                         })
                     }).collect::<Vec<_>>(),
@@ -1008,5 +1055,93 @@ mod tests {
         let card = back.board("t").unwrap().card("c-1").unwrap();
         assert_eq!(card.progress, 100);
         assert_eq!(card.priority, Priority::Normal);
+    }
+
+    #[test]
+    fn card_create_stores_start_date_and_estimate() {
+        let mut s = store();
+        s.board_create("team", None).unwrap();
+        let mut draft = CardDraft::new("plan");
+        draft.start_date = Some("2026-09-01".to_string());
+        draft.estimate = Some(5);
+        let id = s.board_mut("team").unwrap().card_create(draft).unwrap();
+        let card = s.board("team").unwrap().card(&id).unwrap();
+        assert_eq!(card.start_date.as_deref(), Some("2026-09-01"));
+        assert_eq!(card.estimate, Some(5));
+    }
+
+    #[test]
+    fn card_update_sets_and_clears_start_date_and_estimate() {
+        let mut s = store();
+        s.board_create("team", None).unwrap();
+        let id = s.board_mut("team").unwrap().card_create(CardDraft::new("plan")).unwrap();
+        s.board_mut("team")
+            .unwrap()
+            .card_update(
+                &id,
+                CardPatch {
+                    start_date: Some("2026-09-01".to_string()),
+                    estimate: Some(8),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let card = s.board("team").unwrap().card(&id).unwrap();
+        assert_eq!(card.start_date.as_deref(), Some("2026-09-01"));
+        assert_eq!(card.estimate, Some(8));
+        s.board_mut("team")
+            .unwrap()
+            .card_update(
+                &id,
+                CardPatch {
+                    clear_start_date: true,
+                    clear_estimate: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let card = s.board("team").unwrap().card(&id).unwrap();
+        assert_eq!(card.start_date, None);
+        assert_eq!(card.estimate, None);
+    }
+
+    #[test]
+    fn json_round_trip_preserves_start_date_and_estimate() {
+        let mut s = store();
+        s.board_create("team", None).unwrap();
+        let mut draft = CardDraft::new("plan");
+        draft.start_date = Some("2026-09-01".to_string());
+        draft.due_date = Some("2026-10-01".to_string());
+        draft.estimate = Some(3);
+        let id = s.board_mut("team").unwrap().card_create(draft).unwrap();
+        let text = s.to_json_string();
+        assert!(text.contains("start_date"), "saved: {text}");
+        assert!(text.contains("estimate"), "saved: {text}");
+        let back = BoardStore::from_json_str(&text).unwrap();
+        let card = back.board("team").unwrap().card(&id).unwrap();
+        assert_eq!(card.start_date.as_deref(), Some("2026-09-01"));
+        assert_eq!(card.estimate, Some(3));
+    }
+
+    #[test]
+    fn from_json_old_save_without_new_fields_defaults_them() {
+        let text = serde_json::json!({
+            "v": 1,
+            "boards": [{
+                "id": "b-1", "name": "t", "created_at": 1,
+                "columns": [{"name": "A", "position": 0, "wip_limit": 0}],
+                "cards": [{
+                    "id": "c-1", "title": "x", "description": "d",
+                    "column": "A", "assignee": "a", "tags": ["l"],
+                    "priority": "high", "created_at": 1, "updated_at": 1,
+                    "due_date": "2026-10-01", "progress": 10
+                }]
+            }]
+        })
+        .to_string();
+        let back = BoardStore::from_json_str(&text).unwrap();
+        let card = back.board("t").unwrap().card("c-1").unwrap();
+        assert_eq!(card.start_date, None);
+        assert_eq!(card.estimate, None);
     }
 }
