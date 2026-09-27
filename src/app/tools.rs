@@ -474,228 +474,228 @@ mod tests {
     use crate::app::test_support::*;
     use crate::infra::ids::RunId;
 
-        #[test]
-        fn session_status_round_trips_to_sidebar() {
-            std::env::set_var("CODEX_BIN", "cat");
-            let mut state = AppState::new();
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            std::env::remove_var("CODEX_BIN");
-            let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
-            let set = comms_reply(
-                &mut state, &live_run, "set_session_status",
-                r#"{"kind":"progress","message":"compiling"}"#,
-            );
-            assert!(set.contains(r#""ok":true"#), "set: {set}");
-            let detail = state.sidebar_info().session.expect("detail renders");
-            assert!(detail.status.as_deref() == Some("progress: compiling"), "detail: {detail:?}");
-            let lines = crate::ui::sidebar::sidebar_lines(&state.sidebar_info());
-            assert!(lines.iter().any(|l| {
-                l.spans.iter().any(|s| s.content.contains("progress: compiling"))
-            }), "sidebar shows status");
-            let bad_kind = comms_reply(
-                &mut state, &live_run, "set_session_status",
-                r#"{"kind":"urgent","message":"x"}"#,
-            );
-            assert!(bad_kind.contains("unknown status kind"), "bad_kind: {bad_kind}");
-            let long = comms_reply(
-                &mut state, &live_run, "set_session_status",
-                &format!(r#"{{"kind":"info","message":"{}"}}"#, "x".repeat(81)),
-            );
-            assert!(long.contains("over 80"), "long: {long}");
-            let cleared = comms_reply(&mut state, &live_run, "clear_session_status", "{}");
-            assert!(cleared.contains(r#""status_cleared":true"#), "cleared: {cleared}");
-            assert!(state.manager.get(id).unwrap().status.is_none());
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn session_status_round_trips_to_sidebar() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let set = comms_reply(
+            &mut state, &live_run, "set_session_status",
+            r#"{"kind":"progress","message":"compiling"}"#,
+        );
+        assert!(set.contains(r#""ok":true"#), "set: {set}");
+        let detail = state.sidebar_info().session.expect("detail renders");
+        assert!(detail.status.as_deref() == Some("progress: compiling"), "detail: {detail:?}");
+        let lines = crate::ui::sidebar::sidebar_lines(&state.sidebar_info());
+        assert!(lines.iter().any(|l| {
+            l.spans.iter().any(|s| s.content.contains("progress: compiling"))
+        }), "sidebar shows status");
+        let bad_kind = comms_reply(
+            &mut state, &live_run, "set_session_status",
+            r#"{"kind":"urgent","message":"x"}"#,
+        );
+        assert!(bad_kind.contains("unknown status kind"), "bad_kind: {bad_kind}");
+        let long = comms_reply(
+            &mut state, &live_run, "set_session_status",
+            &format!(r#"{{"kind":"info","message":"{}"}}"#, "x".repeat(81)),
+        );
+        assert!(long.contains("over 80"), "long: {long}");
+        let cleared = comms_reply(&mut state, &live_run, "clear_session_status", "{}");
+        assert!(cleared.contains(r#""status_cleared":true"#), "cleared: {cleared}");
+        assert!(state.manager.get(id).unwrap().status.is_none());
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn request_attention_raises_flag_and_clears_on_focus() {
-            let mut state = AppState::new();
-            let a = state
-                .manager
-                .spawn(
-                    "a",
-                    &std::env::temp_dir(),
-                    "exec sleep 30",
-                    RunId::generate(),
-                    "shell",
-                )
-                .unwrap();
-            let b = state
-                .manager
-                .spawn(
-                    "b",
-                    &std::env::temp_dir(),
-                    "exec sleep 30",
-                    RunId::generate(),
-                    "shell",
-                )
-                .unwrap();
-            // Operator looks at a; b raises attention while in the background.
-            let order = state.manager.order().to_vec();
-            let (ia, ib) = (
-                order.iter().position(|id| *id == a).unwrap(),
-                order.iter().position(|id| *id == b).unwrap(),
-            );
-            assert!(state.select_session(ia), "focus a");
-            let run_b = state.manager.get(b).unwrap().run_id.as_str().to_string();
-            let raised = comms_reply(
-                &mut state,
-                &run_b,
-                "request_attention",
-                r#"{"reason":"need the production API key"}"#,
-            );
-            assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
-            assert!(
-                state.attention_flags.contains_key(&b),
-                "background session flagged"
-            );
-            // Focusing the flagged session acknowledges it.
-            assert!(state.select_session(ib), "focus b");
-            assert!(
-                !state.attention_flags.contains_key(&b),
-                "focus clears attention"
-            );
-            // Bad reasons are rejected like status text.
-            let long = comms_reply(
-                &mut state,
-                &run_b,
-                "request_attention",
-                &format!(r#"{{"reason":"{}"}}"#, "x".repeat(81)),
-            );
-            assert!(long.contains("over 80"), "long: {long}");
-            assert!(state.manager.remove(a));
-            assert!(state.manager.remove(b));
-        }
+    #[test]
+    fn request_attention_raises_flag_and_clears_on_focus() {
+        let mut state = AppState::new();
+        let a = state
+            .manager
+            .spawn(
+                "a",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        let b = state
+            .manager
+            .spawn(
+                "b",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        // Operator looks at a; b raises attention while in the background.
+        let order = state.manager.order().to_vec();
+        let (ia, ib) = (
+            order.iter().position(|id| *id == a).unwrap(),
+            order.iter().position(|id| *id == b).unwrap(),
+        );
+        assert!(state.select_session(ia), "focus a");
+        let run_b = state.manager.get(b).unwrap().run_id.as_str().to_string();
+        let raised = comms_reply(
+            &mut state,
+            &run_b,
+            "request_attention",
+            r#"{"reason":"need the production API key"}"#,
+        );
+        assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
+        assert!(
+            state.attention_flags.contains_key(&b),
+            "background session flagged"
+        );
+        // Focusing the flagged session acknowledges it.
+        assert!(state.select_session(ib), "focus b");
+        assert!(
+            !state.attention_flags.contains_key(&b),
+            "focus clears attention"
+        );
+        // Bad reasons are rejected like status text.
+        let long = comms_reply(
+            &mut state,
+            &run_b,
+            "request_attention",
+            &format!(r#"{{"reason":"{}"}}"#, "x".repeat(81)),
+        );
+        assert!(long.contains("over 80"), "long: {long}");
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
+    }
 
-        #[test]
-        fn message_user_badges_without_forward_when_disabled() {
-            let (mut state, id, live_run) = message_user_agent();
-            let ok = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"hello operator"}"#);
-            assert!(ok.contains(r#""ok":true"#), "ok: {ok}");
-            assert!(ok.contains("conversation_id"), "ok: {ok}");
-            assert!(ok.contains(r#""forwarded":false"#), "disabled never forwards: {ok}");
-            assert_eq!(
-                state.message_user_badges.get(&id).map(String::as_str),
-                Some("hello operator")
-            );
-            let stale = comms_reply(&mut state, "bogus-run", "message_user", r#"{"message":"x"}"#);
-            assert!(stale.contains("unknown or stale run ID"), "stale: {stale}");
-            let empty = comms_reply(&mut state, &live_run, "message_user", "{}");
-            assert!(empty.contains("message_user needs a message"), "empty: {empty}");
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn message_user_badges_without_forward_when_disabled() {
+        let (mut state, id, live_run) = message_user_agent();
+        let ok = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"hello operator"}"#);
+        assert!(ok.contains(r#""ok":true"#), "ok: {ok}");
+        assert!(ok.contains("conversation_id"), "ok: {ok}");
+        assert!(ok.contains(r#""forwarded":false"#), "disabled never forwards: {ok}");
+        assert_eq!(
+            state.message_user_badges.get(&id).map(String::as_str),
+            Some("hello operator")
+        );
+        let stale = comms_reply(&mut state, "bogus-run", "message_user", r#"{"message":"x"}"#);
+        assert!(stale.contains("unknown or stale run ID"), "stale: {stale}");
+        let empty = comms_reply(&mut state, &live_run, "message_user", "{}");
+        assert!(empty.contains("message_user needs a message"), "empty: {empty}");
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn message_user_rate_limits_at_three_per_minute() {
-            let (mut state, _id, live_run) = message_user_agent();
-            for i in 0..3 {
-                let ok = comms_reply(
-                    &mut state,
-                    &live_run,
-                    "message_user",
-                    &format!(r#"{{"message":"note {i}"}}"#),
-                );
-                assert!(ok.contains(r#""ok":true"#), "send {i}: {ok}");
-            }
-            let fourth = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"note 3"}"#);
-            assert!(fourth.contains("rate limited"), "fourth: {fourth}");
-        }
-
-        #[test]
-        fn message_user_replays_idempotent_retries() {
-            let (mut state, id, live_run) = message_user_agent();
-            let args = r#"{"message":"same","idempotency_key":"k1"}"#;
-            let first = comms_reply(&mut state, &live_run, "message_user", args);
-            let second = comms_reply(&mut state, &live_run, "message_user", args);
-            assert!(first.contains(r#""ok":true"#), "first: {first}");
-            assert_eq!(first, second, "retry replays the same verdict");
-            let clash = comms_reply(
+    #[test]
+    fn message_user_rate_limits_at_three_per_minute() {
+        let (mut state, _id, live_run) = message_user_agent();
+        for i in 0..3 {
+            let ok = comms_reply(
                 &mut state,
                 &live_run,
                 "message_user",
-                r#"{"message":"different","idempotency_key":"k1"}"#,
+                &format!(r#"{{"message":"note {i}"}}"#),
             );
-            assert!(clash.contains("conflict"), "clash: {clash}");
-            assert!(state.manager.remove(id));
+            assert!(ok.contains(r#""ok":true"#), "send {i}: {ok}");
         }
+        let fourth = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"note 3"}"#);
+        assert!(fourth.contains("rate limited"), "fourth: {fourth}");
+    }
 
-        #[test]
-        fn message_user_forward_marks_session_keeps_badge_raw() {
-            let (mut state, id, live_run) = message_user_agent();
-            let dir = std::env::temp_dir().join(format!("forge-tg-fwd-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).unwrap();
-            let token_path = dir.join("tg.token");
-            std::fs::write(&token_path, "0123456789abcdef0123456789abcdef").unwrap();
-            {
-                let mut cfg = state.telegram_config.lock().expect("lock");
-                cfg.enabled = true;
-                cfg.token_file = token_path.to_string_lossy().into_owned();
-                cfg.notify_chat_id = 11;
-            }
-            let ok = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"hello"}"#);
-            assert!(ok.contains(r#""forwarded":true"#), "worker attempted: {ok}");
-            assert_eq!(
-                state.message_user_badges.get(&id).map(String::as_str),
-                Some("hello"),
-                "badge stays raw; only the Telegram text carries [name]"
-            );
-            let queued = tg_outbox(&state);
-            assert_eq!(queued.len(), 1, "forward uses the supervised sender queue");
-            assert_eq!(queued[0].text, "[agent] hello");
-            let _ = std::fs::remove_dir_all(&dir);
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn message_user_replays_idempotent_retries() {
+        let (mut state, id, live_run) = message_user_agent();
+        let args = r#"{"message":"same","idempotency_key":"k1"}"#;
+        let first = comms_reply(&mut state, &live_run, "message_user", args);
+        let second = comms_reply(&mut state, &live_run, "message_user", args);
+        assert!(first.contains(r#""ok":true"#), "first: {first}");
+        assert_eq!(first, second, "retry replays the same verdict");
+        let clash = comms_reply(
+            &mut state,
+            &live_run,
+            "message_user",
+            r#"{"message":"different","idempotency_key":"k1"}"#,
+        );
+        assert!(clash.contains("conflict"), "clash: {clash}");
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn start_session_validates_creates_and_keeps_focus() {
-            std::env::set_var("CODEX_BIN", "cat");
-            let mut state = AppState::new();
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            std::env::remove_var("CODEX_BIN");
-            let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
-            for (args, needle) in [
-                (r#"{"harness":"nope"}"#, "unknown harness"),
-                (r#"{"path":"/no/such/dir"}"#, "not a directory"),
-                (r#"{"name":"agent"}"#, "is taken"),
-                (r#"{"host":"remote"}"#, "unsupported"),
-                (r#"{"internet":true}"#, "unsupported"),
-            ] {
-                let err = comms_reply(&mut state, &live_run, "start_session", args);
-                assert!(err.contains(r#""ok":false"#), "args {args}: {err}");
-                assert!(err.contains(needle), "args {args}: {err}");
-            }
-            std::env::set_var("CODEX_BIN", "cat");
-            let started = comms_reply(
-                &mut state, &live_run, "start_session",
-                r#"{"name":"helper-1","harness":"codex","prompt":"hello"}"#,
-            );
-            std::env::remove_var("CODEX_BIN");
-            assert!(started.contains(r#""ok":true"#), "started: {started}");
-            assert!(started.contains(r#""name":"helper-1""#), "started: {started}");
-            assert_eq!(state.manager.active(), Some(id), "tool birth keeps focus");
-            let new = state.manager.order().iter()
-                .find(|&&cand| cand != id).copied().expect("second session exists");
-            assert_eq!(state.broker.queued(new), 1, "prompt queued for the birth");
-            let due = state.broker.take_due(new, 10);
-            assert_eq!(due[0].text, "hello");
-            // Default naming plus the caller's group carry over.
-            state.broker.join(&state.manager, id, "team").unwrap();
-            std::env::set_var("CODEX_BIN", "cat");
-            let auto = comms_reply(&mut state, &live_run, "start_session", r#"{"harness":"codex"}"#);
-            std::env::remove_var("CODEX_BIN");
-            assert!(auto.contains("codex-"), "auto name: {auto}");
-            let third = state.manager.order().iter()
-                .find(|&&cand| cand != id && cand != new).copied().expect("third exists");
-            assert_eq!(state.broker.primary_group(third), Some("team"));
-            assert!(state.manager.remove(id));
-            assert!(state.manager.remove(new));
-            assert!(state.manager.remove(third));
+    #[test]
+    fn message_user_forward_marks_session_keeps_badge_raw() {
+        let (mut state, id, live_run) = message_user_agent();
+        let dir = std::env::temp_dir().join(format!("forge-tg-fwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token_path = dir.join("tg.token");
+        std::fs::write(&token_path, "0123456789abcdef0123456789abcdef").unwrap();
+        {
+            let mut cfg = state.telegram_config.lock().expect("lock");
+            cfg.enabled = true;
+            cfg.token_file = token_path.to_string_lossy().into_owned();
+            cfg.notify_chat_id = 11;
         }
+        let ok = comms_reply(&mut state, &live_run, "message_user", r#"{"message":"hello"}"#);
+        assert!(ok.contains(r#""forwarded":true"#), "worker attempted: {ok}");
+        assert_eq!(
+            state.message_user_badges.get(&id).map(String::as_str),
+            Some("hello"),
+            "badge stays raw; only the Telegram text carries [name]"
+        );
+        let queued = tg_outbox(&state);
+        assert_eq!(queued.len(), 1, "forward uses the supervised sender queue");
+        assert_eq!(queued[0].text, "[agent] hello");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn start_session_validates_creates_and_keeps_focus() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        for (args, needle) in [
+            (r#"{"harness":"nope"}"#, "unknown harness"),
+            (r#"{"path":"/no/such/dir"}"#, "not a directory"),
+            (r#"{"name":"agent"}"#, "is taken"),
+            (r#"{"host":"remote"}"#, "unsupported"),
+            (r#"{"internet":true}"#, "unsupported"),
+        ] {
+            let err = comms_reply(&mut state, &live_run, "start_session", args);
+            assert!(err.contains(r#""ok":false"#), "args {args}: {err}");
+            assert!(err.contains(needle), "args {args}: {err}");
+        }
+        std::env::set_var("CODEX_BIN", "cat");
+        let started = comms_reply(
+            &mut state, &live_run, "start_session",
+            r#"{"name":"helper-1","harness":"codex","prompt":"hello"}"#,
+        );
+        std::env::remove_var("CODEX_BIN");
+        assert!(started.contains(r#""ok":true"#), "started: {started}");
+        assert!(started.contains(r#""name":"helper-1""#), "started: {started}");
+        assert_eq!(state.manager.active(), Some(id), "tool birth keeps focus");
+        let new = state.manager.order().iter()
+            .find(|&&cand| cand != id).copied().expect("second session exists");
+        assert_eq!(state.broker.queued(new), 1, "prompt queued for the birth");
+        let due = state.broker.take_due(new, 10);
+        assert_eq!(due[0].text, "hello");
+        // Default naming plus the caller's group carry over.
+        state.broker.join(&state.manager, id, "team").unwrap();
+        std::env::set_var("CODEX_BIN", "cat");
+        let auto = comms_reply(&mut state, &live_run, "start_session", r#"{"harness":"codex"}"#);
+        std::env::remove_var("CODEX_BIN");
+        assert!(auto.contains("codex-"), "auto name: {auto}");
+        let third = state.manager.order().iter()
+            .find(|&&cand| cand != id && cand != new).copied().expect("third exists");
+        assert_eq!(state.broker.primary_group(third), Some("team"));
+        assert!(state.manager.remove(id));
+        assert!(state.manager.remove(new));
+        assert!(state.manager.remove(third));
+    }
 }

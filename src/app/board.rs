@@ -764,184 +764,184 @@ pub(super) fn scratch_home() -> std::path::PathBuf {
 mod tests {
     use super::*;
 
-        #[test]
-        fn board_toggle_flips_global_view() {
-            let mut s = AppState::new();
-            assert!(!s.board_open);
-            s.dirty = false;
-            s.toggle_board();
-            assert!(s.board_open);
-            assert!(s.dirty);
-            s.toggle_board();
-            assert!(!s.board_open);
-        }
+    #[test]
+    fn board_toggle_flips_global_view() {
+        let mut s = AppState::new();
+        assert!(!s.board_open);
+        s.dirty = false;
+        s.toggle_board();
+        assert!(s.board_open);
+        assert!(s.dirty);
+        s.toggle_board();
+        assert!(!s.board_open);
+    }
 
-        #[test]
-        fn board_load_missing_starts_empty_without_notice() {
-            let mut s = AppState::new();
-            s.load_boards(&scratch_home());
-            assert!(s.boards.boards.is_empty());
-            assert!(s.board_notice.is_none());
-        }
+    #[test]
+    fn board_load_missing_starts_empty_without_notice() {
+        let mut s = AppState::new();
+        s.load_boards(&scratch_home());
+        assert!(s.boards.boards.is_empty());
+        assert!(s.board_notice.is_none());
+    }
 
-        #[test]
-        fn board_load_corrupt_quarantines_and_notices() {
-            let mut s = AppState::new();
-            let home = scratch_home();
-            let path = crate::infra::branding::kanban_file(&home);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, b"{torn").unwrap();
-            s.load_boards(&home);
-            assert!(s.boards.boards.is_empty());
-            assert!(s.board_notice.is_some());
-            assert!(!path.exists(), "corrupt save is quarantined away");
-        }
+    #[test]
+    fn board_load_corrupt_quarantines_and_notices() {
+        let mut s = AppState::new();
+        let home = scratch_home();
+        let path = crate::infra::branding::kanban_file(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{torn").unwrap();
+        s.load_boards(&home);
+        assert!(s.boards.boards.is_empty());
+        assert!(s.board_notice.is_some());
+        assert!(!path.exists(), "corrupt save is quarantined away");
+    }
 
-        #[test]
-        fn board_save_and_reload_round_trips() {
-            let mut s = AppState::new();
-            let home = scratch_home();
-            s.boards.board_create("team", None).unwrap();
-            s.save_boards(&home).unwrap();
-            let mut t = AppState::new();
-            t.load_boards(&home);
-            assert_eq!(t.boards.board_names(), vec!["team".to_string()]);
-            assert!(t.board_notice.is_none());
-        }
+    #[test]
+    fn board_save_and_reload_round_trips() {
+        let mut s = AppState::new();
+        let home = scratch_home();
+        s.boards.board_create("team", None).unwrap();
+        s.save_boards(&home).unwrap();
+        let mut t = AppState::new();
+        t.load_boards(&home);
+        assert_eq!(t.boards.board_names(), vec!["team".to_string()]);
+        assert!(t.board_notice.is_none());
+    }
 
-        #[test]
-        fn board_view_marks_selection_and_hints() {
-            let mut s = AppState::new();
-            s.boards.board_create("team", None).unwrap();
-            let draft_a = crate::kanban::board::CardDraft::new("alpha");
-            s.boards.board_mut("team").unwrap().card_create(draft_a).unwrap();
-            let mut draft_b = crate::kanban::board::CardDraft::new("beta");
-            draft_b.column = Some("Todo".to_string());
-            s.boards.board_mut("team").unwrap().card_create(draft_b).unwrap();
-            s.ensure_board_focus();
-            let view = s.board_view();
-            assert_eq!(view.title, "Kanban · team");
-            assert_eq!(view.columns.len(), 4);
-            assert!(view.empty.is_none());
-            assert!(view.columns[0].selected, "cursor starts on first column");
-            assert!(view.columns[0].cards.iter().any(|c| c.title == "alpha" && c.selected));
-            s.board_step_column(1);
-            let view = s.board_view();
-            assert!(view.columns[1].selected, "step moves the column cursor");
-            assert!(view.columns[1].cards.iter().any(|c| c.title == "beta" && c.selected));
-            assert!(!view.hints.is_empty(), "footer hints always paint");
-        }
+    #[test]
+    fn board_view_marks_selection_and_hints() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        let draft_a = crate::kanban::board::CardDraft::new("alpha");
+        s.boards.board_mut("team").unwrap().card_create(draft_a).unwrap();
+        let mut draft_b = crate::kanban::board::CardDraft::new("beta");
+        draft_b.column = Some("Todo".to_string());
+        s.boards.board_mut("team").unwrap().card_create(draft_b).unwrap();
+        s.ensure_board_focus();
+        let view = s.board_view();
+        assert_eq!(view.title, "Kanban · team");
+        assert_eq!(view.columns.len(), 4);
+        assert!(view.empty.is_none());
+        assert!(view.columns[0].selected, "cursor starts on first column");
+        assert!(view.columns[0].cards.iter().any(|c| c.title == "alpha" && c.selected));
+        s.board_step_column(1);
+        let view = s.board_view();
+        assert!(view.columns[1].selected, "step moves the column cursor");
+        assert!(view.columns[1].cards.iter().any(|c| c.title == "beta" && c.selected));
+        assert!(!view.hints.is_empty(), "footer hints always paint");
+    }
 
-        #[test]
-        fn board_view_empty_without_boards() {
-            let s = AppState::new();
-            let view = s.board_view();
-            assert!(view.empty.is_some(), "never a blank panel");
-            assert!(view.columns.is_empty());
-        }
+    #[test]
+    fn board_view_empty_without_boards() {
+        let s = AppState::new();
+        let view = s.board_view();
+        assert!(view.empty.is_some(), "never a blank panel");
+        assert!(view.columns.is_empty());
+    }
 
-        #[test]
-        fn board_move_blocked_by_wip_sets_notice() {
-            let mut s = AppState::new();
-            s.boards.board_create("team", None).unwrap();
-            for t in ["one", "two", "three"] {
-                let id = s.boards.board_mut("team").unwrap().card_create(crate::kanban::board::CardDraft::new(t)).unwrap();
-                s.boards.board_mut("team").unwrap().card_move(&id, "Doing").unwrap();
-            }
-            let mut fourth = crate::kanban::board::CardDraft::new("fourth");
-            fourth.column = Some("Todo".to_string());
-            let extra = s.boards.board_mut("team").unwrap().card_create(fourth).unwrap();
-            s.ensure_board_focus();
-            // Cursor to Todo's "fourth"; shifting right targets full Doing.
-            s.board_step_column(1);
-            s.board_shift_focused_card(1);
-            let card = s.boards.board("team").unwrap().card(&extra).unwrap();
-            assert_eq!(card.column, "Todo", "blocked move stays put");
-            assert!(s.board_notice.is_some_and(|n| n.contains("WIP")), "actionable notice");
-            assert!(!s.boards_dirty, "a blocked move persists nothing");
+    #[test]
+    fn board_move_blocked_by_wip_sets_notice() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        for t in ["one", "two", "three"] {
+            let id = s.boards.board_mut("team").unwrap().card_create(crate::kanban::board::CardDraft::new(t)).unwrap();
+            s.boards.board_mut("team").unwrap().card_move(&id, "Doing").unwrap();
         }
+        let mut fourth = crate::kanban::board::CardDraft::new("fourth");
+        fourth.column = Some("Todo".to_string());
+        let extra = s.boards.board_mut("team").unwrap().card_create(fourth).unwrap();
+        s.ensure_board_focus();
+        // Cursor to Todo's "fourth"; shifting right targets full Doing.
+        s.board_step_column(1);
+        s.board_shift_focused_card(1);
+        let card = s.boards.board("team").unwrap().card(&extra).unwrap();
+        assert_eq!(card.column, "Todo", "blocked move stays put");
+        assert!(s.board_notice.is_some_and(|n| n.contains("WIP")), "actionable notice");
+        assert!(!s.boards_dirty, "a blocked move persists nothing");
+    }
 
-        #[test]
-        fn board_complete_and_delete_focused_card() {
-            let mut s = AppState::new();
-            s.boards.board_create("team", None).unwrap();
-            let id = s.boards.board_mut("team").unwrap().card_create(crate::kanban::board::CardDraft::new("ship")).unwrap();
-            s.ensure_board_focus();
-            s.board_complete_focused();
-            assert_eq!(s.boards.board("team").unwrap().card(&id).unwrap().progress, 100);
-            s.board_delete_focused();
-            assert!(s.boards.board("team").unwrap().card(&id).is_none());
-            assert!(s.board_notice.is_some(), "delete confirms in the footer");
-        }
+    #[test]
+    fn board_complete_and_delete_focused_card() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        let id = s.boards.board_mut("team").unwrap().card_create(crate::kanban::board::CardDraft::new("ship")).unwrap();
+        s.ensure_board_focus();
+        s.board_complete_focused();
+        assert_eq!(s.boards.board("team").unwrap().card(&id).unwrap().progress, 100);
+        s.board_delete_focused();
+        assert!(s.boards.board("team").unwrap().card(&id).is_none());
+        assert!(s.board_notice.is_some(), "delete confirms in the footer");
+    }
 
-        #[test]
-        fn board_cycle_board_wraps() {
-            let mut s = AppState::new();
-            s.boards.board_create("one", None).unwrap();
-            s.boards.board_create("two", None).unwrap();
-            s.ensure_board_focus();
-            let first = s.board_focus.board.clone().unwrap();
-            s.board_cycle_board();
-            let second = s.board_focus.board.clone().unwrap();
-            assert_ne!(first, second);
-            s.board_cycle_board();
-            assert_eq!(s.board_focus.board.clone().unwrap(), first);
-        }
+    #[test]
+    fn board_cycle_board_wraps() {
+        let mut s = AppState::new();
+        s.boards.board_create("one", None).unwrap();
+        s.boards.board_create("two", None).unwrap();
+        s.ensure_board_focus();
+        let first = s.board_focus.board.clone().unwrap();
+        s.board_cycle_board();
+        let second = s.board_focus.board.clone().unwrap();
+        assert_ne!(first, second);
+        s.board_cycle_board();
+        assert_eq!(s.board_focus.board.clone().unwrap(), first);
+    }
 
-        #[test]
-        fn board_push_paste_sanitizes_and_needs_draft() {
-            let mut s = AppState::new();
-            // No draft: the paste goes nowhere, nothing to leak into.
-            s.board_push_paste("nope");
-            assert!(s.board_notice.is_none());
-            s.boards.board_create("team", None).unwrap();
-            s.ensure_board_focus();
-            s.board_start_add_draft();
-            s.board_push_paste("fix\nleak\tx\u{7}!");
-            assert_eq!(
-                s.board_draft.as_ref().map(|d| d.buffer.as_str()),
-                Some("fix leak x!"),
-                "breaks collapse, controls drop"
+    #[test]
+    fn board_push_paste_sanitizes_and_needs_draft() {
+        let mut s = AppState::new();
+        // No draft: the paste goes nowhere, nothing to leak into.
+        s.board_push_paste("nope");
+        assert!(s.board_notice.is_none());
+        s.boards.board_create("team", None).unwrap();
+        s.ensure_board_focus();
+        s.board_start_add_draft();
+        s.board_push_paste("fix\nleak\tx\u{7}!");
+        assert_eq!(
+            s.board_draft.as_ref().map(|d| d.buffer.as_str()),
+            Some("fix leak x!"),
+            "breaks collapse, controls drop"
+        );
+    }
+
+    #[test]
+    fn board_view_escapes_hostile_text() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        let mut draft = crate::kanban::board::CardDraft::new("<script>alert(1)</script>");
+        draft.assignee = Some("a\u{202E}b".to_string());
+        s.boards.board_mut("team").unwrap().card_create(draft).unwrap();
+        s.ensure_board_focus();
+        let view = s.board_view();
+        let card = &view.columns[0].cards[0];
+        // Terminal threat model is control/bidi/invisible spoofing
+        // (angle brackets paint literally and execute nothing here).
+        for shown in [&card.title, &card.meta] {
+            assert!(
+                !crate::infra::safe_text::contains_bidi_controls(shown),
+                "bidi encoded: {shown:?}"
+            );
+            assert!(
+                !crate::infra::safe_text::contains_invisibles(shown),
+                "invisibles encoded: {shown:?}"
+            );
+            assert!(
+                !shown.chars().any(|c| c.is_control()),
+                "controls encoded: {shown:?}"
             );
         }
+    }
 
-        #[test]
-        fn board_view_escapes_hostile_text() {
-            let mut s = AppState::new();
-            s.boards.board_create("team", None).unwrap();
-            let mut draft = crate::kanban::board::CardDraft::new("<script>alert(1)</script>");
-            draft.assignee = Some("a\u{202E}b".to_string());
-            s.boards.board_mut("team").unwrap().card_create(draft).unwrap();
-            s.ensure_board_focus();
-            let view = s.board_view();
-            let card = &view.columns[0].cards[0];
-            // Terminal threat model is control/bidi/invisible spoofing
-            // (angle brackets paint literally and execute nothing here).
-            for shown in [&card.title, &card.meta] {
-                assert!(
-                    !crate::infra::safe_text::contains_bidi_controls(shown),
-                    "bidi encoded: {shown:?}"
-                );
-                assert!(
-                    !crate::infra::safe_text::contains_invisibles(shown),
-                    "invisibles encoded: {shown:?}"
-                );
-                assert!(
-                    !shown.chars().any(|c| c.is_control()),
-                    "controls encoded: {shown:?}"
-                );
-            }
-        }
-
-        #[test]
-        fn board_focus_defaults_to_first_board_and_clamps() {
-            let mut s = AppState::new();
-            s.boards.board_create("team", None).unwrap();
-            s.ensure_board_focus();
-            let first = s.boards.boards.first().map(|b| b.id.clone());
-            assert_eq!(s.board_focus.board, first);
-            s.board_focus.card = 99;
-            s.ensure_board_focus();
-            assert_eq!(s.board_focus.card, 0);
-        }
+    #[test]
+    fn board_focus_defaults_to_first_board_and_clamps() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        s.ensure_board_focus();
+        let first = s.boards.boards.first().map(|b| b.id.clone());
+        assert_eq!(s.board_focus.board, first);
+        s.board_focus.card = 99;
+        s.ensure_board_focus();
+        assert_eq!(s.board_focus.card, 0);
+    }
 }

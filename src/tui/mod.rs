@@ -11,6 +11,9 @@ pub mod keys;
 pub mod mouse;
 pub mod visual;
 
+#[cfg(test)]
+mod test_support;
+
 use std::io;
 use std::time::{Duration, Instant};
 

@@ -328,7 +328,7 @@ fn pane_text(view: &PaneView) -> Text<'static> {
 #[cfg(test)]
 mod tests {
     use super::layout::{chrome_areas, pane_grid_area, translate_mouse};
-    use super::test_support::{area, buffer_rows, chrome, sidebar_chrome, tab};
+    use super::test_support::{area, buffer_rows, buffer_text, chrome, pane, sidebar_chrome, tab};
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
@@ -465,43 +465,6 @@ mod tests {
             "no status without detail: {legacy:?}"
         );
     }
-
-
-
-
-
-
-
-    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol().to_string())
-            .collect()
-    }
-
-    fn pane(title: &str, body: &str, live: bool) -> PaneView {
-        PaneView {
-            title: title.to_string(),
-            lines: body
-                .split('\n')
-                .map(|line| {
-                    vec![SpanView {
-                        text: line.to_string(),
-                        style: Style::default(),
-                    }]
-                })
-                .collect(),
-            live,
-            focused: true,
-            cursor: None,
-        }
-    }
-
-
-
 
     #[test]
     fn render_shows_titles_bodies_and_session_bar() {

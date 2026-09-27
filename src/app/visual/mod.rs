@@ -269,406 +269,406 @@ mod tests {
     use super::*;
     use crate::app::test_support::*;
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_show_accepts_mermaid_for_background_render() {
-            let mut state = AppState::new();
-            let (_id, live_run) = spawn_visual_agent(&mut state, "agent");
-            let out = comms_reply(
-                &mut state,
-                &live_run,
-                "visual_show",
-                r#"{"content":"flowchart LR\n    A-->B","format":"mermaid","title":"flow"}"#,
-            );
-            assert!(out.contains(r#""ok":true"#), "accepted: {out}");
-            assert!(out.contains("\"accepted\":true"), "queued: {out}");
-            assert!(out.contains("\"generation\":1"), "stamped: {out}");
-            assert!(!out.contains("\"width\""), "no sync dimensions: {out}");
-        }
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_show_accepts_mermaid_for_background_render() {
+        let mut state = AppState::new();
+        let (_id, live_run) = spawn_visual_agent(&mut state, "agent");
+        let out = comms_reply(
+            &mut state,
+            &live_run,
+            "visual_show",
+            r#"{"content":"flowchart LR\n    A-->B","format":"mermaid","title":"flow"}"#,
+        );
+        assert!(out.contains(r#""ok":true"#), "accepted: {out}");
+        assert!(out.contains("\"accepted\":true"), "queued: {out}");
+        assert!(out.contains("\"generation\":1"), "stamped: {out}");
+        assert!(!out.contains("\"width\""), "no sync dimensions: {out}");
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_complete_stores_newest_and_drops_stale() {
-            let mut state = AppState::new();
-            let (id, _) = spawn_visual_agent(&mut state, "agent");
-            complete(&mut state, id, 2, fake_png(64, 10, 10));
-            assert_eq!(state.visual_slots.get(&id).unwrap().generation, 2);
-            complete(&mut state, id, 1, fake_png(64, 20, 20));
-            let slot = state.visual_slots.get(&id).unwrap();
-            assert_eq!(slot.generation, 2, "stale render dropped");
-            assert_eq!((slot.width, slot.height), (10, 10));
-        }
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_complete_stores_newest_and_drops_stale() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 2, fake_png(64, 10, 10));
+        assert_eq!(state.visual_slots.get(&id).unwrap().generation, 2);
+        complete(&mut state, id, 1, fake_png(64, 20, 20));
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert_eq!(slot.generation, 2, "stale render dropped");
+        assert_eq!((slot.width, slot.height), (10, 10));
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_complete_drops_missing_session() {
-            let mut state = AppState::new();
-            let ghost = crate::session::SessionId::fresh();
-            complete(&mut state, ghost, 1, fake_png(64, 10, 10));
-            assert!(state.visual_slots.is_empty(), "no slot for dead session");
-        }
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_complete_drops_missing_session() {
+        let mut state = AppState::new();
+        let ghost = crate::session::SessionId::fresh();
+        complete(&mut state, ghost, 1, fake_png(64, 10, 10));
+        assert!(state.visual_slots.is_empty(), "no slot for dead session");
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_complete_focuses_the_visual_tab() {
-            let mut state = AppState::new();
-            state.apply(AppEvent::Resize(40, 180));
-            let (a, _) = spawn_visual_agent(&mut state, "a");
-            let (b, _) = spawn_visual_agent(&mut state, "b");
-            state.manager.switch(a);
-            complete(&mut state, a, 1, fake_png(64, 400, 200));
-            assert!(state.visual_tab_focused(), "active session jumps to Visual");
-            // A background visual never steals an overlay the operator has open.
-            complete(&mut state, b, 1, fake_png(64, 400, 200));
-            assert_eq!(state.overlay_view, Some((a, state.visual_slot(a).unwrap())));
-            // With no overlay open, it pre-selects Visual for when they switch.
-            state.overlay_view = None;
-            complete(&mut state, b, 2, fake_png(64, 400, 200));
-            state.manager.switch(b);
-            assert!(state.visual_tab_focused(), "background visual waits in its tab");
-            assert!(state.manager.remove(a));
-            assert!(state.manager.remove(b));
-        }
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_complete_focuses_the_visual_tab() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let (a, _) = spawn_visual_agent(&mut state, "a");
+        let (b, _) = spawn_visual_agent(&mut state, "b");
+        state.manager.switch(a);
+        complete(&mut state, a, 1, fake_png(64, 400, 200));
+        assert!(state.visual_tab_focused(), "active session jumps to Visual");
+        // A background visual never steals an overlay the operator has open.
+        complete(&mut state, b, 1, fake_png(64, 400, 200));
+        assert_eq!(state.overlay_view, Some((a, state.visual_slot(a).unwrap())));
+        // With no overlay open, it pre-selects Visual for when they switch.
+        state.overlay_view = None;
+        complete(&mut state, b, 2, fake_png(64, 400, 200));
+        state.manager.switch(b);
+        assert!(state.visual_tab_focused(), "background visual waits in its tab");
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_complete_skips_focus_on_narrow_terminals() {
-            let mut state = AppState::new();
-            state.apply(AppEvent::Resize(40, 90));
-            let (id, _) = spawn_visual_agent(&mut state, "agent");
-            complete(&mut state, id, 1, fake_png(64, 400, 200));
-            assert!(state.overlay_view.is_none(), "no overlay tabs under 100 cols");
-            assert!(state.manager.remove(id));
-        }
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_complete_skips_focus_on_narrow_terminals() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 90));
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 400, 200));
+        assert!(state.overlay_view.is_none(), "no overlay tabs under 100 cols");
+        assert!(state.manager.remove(id));
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_lru_evicts_oldest_inactive_first() {
-            let mut state = AppState::new();
-            state.visual_budget_count = 2;
-            let (a, _) = spawn_visual_agent(&mut state, "a");
-            let (b, _) = spawn_visual_agent(&mut state, "b");
-            let (c, _) = spawn_visual_agent(&mut state, "c");
-            assert!(state.select_session(0), "focus oldest");
-            assert_eq!(state.manager.active(), Some(a));
-            complete(&mut state, a, 1, fake_png(64, 10, 10));
-            complete(&mut state, b, 2, fake_png(64, 10, 10));
-            complete(&mut state, c, 3, fake_png(64, 10, 10));
-            assert_eq!(state.visual_slots.len(), 2);
-            assert!(state.visual_slots.contains_key(&a), "active survives");
-            assert!(state.visual_slots.contains_key(&c), "newest survives");
-            assert!(!state.visual_slots.contains_key(&b), "oldest inactive evicted");
-        }
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_lru_evicts_oldest_inactive_first() {
+        let mut state = AppState::new();
+        state.visual_budget_count = 2;
+        let (a, _) = spawn_visual_agent(&mut state, "a");
+        let (b, _) = spawn_visual_agent(&mut state, "b");
+        let (c, _) = spawn_visual_agent(&mut state, "c");
+        assert!(state.select_session(0), "focus oldest");
+        assert_eq!(state.manager.active(), Some(a));
+        complete(&mut state, a, 1, fake_png(64, 10, 10));
+        complete(&mut state, b, 2, fake_png(64, 10, 10));
+        complete(&mut state, c, 3, fake_png(64, 10, 10));
+        assert_eq!(state.visual_slots.len(), 2);
+        assert!(state.visual_slots.contains_key(&a), "active survives");
+        assert!(state.visual_slots.contains_key(&c), "newest survives");
+        assert!(!state.visual_slots.contains_key(&b), "oldest inactive evicted");
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_budget_counts_decoded_bytes() {
-            let mut state = AppState::new();
-            state.visual_budget_bytes = 100;
-            let (a, _) = spawn_visual_agent(&mut state, "a");
-            let (b, _) = spawn_visual_agent(&mut state, "b");
-            assert!(state.select_session(1), "focus newest");
-            complete(&mut state, a, 1, fake_png(60, 10, 10));
-            complete(&mut state, b, 2, fake_png(60, 10, 10));
-            assert_eq!(state.visual_slots.len(), 1);
-            assert!(state.visual_slots.contains_key(&b), "newest survives bytes");
-        }
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_budget_counts_decoded_bytes() {
+        let mut state = AppState::new();
+        state.visual_budget_bytes = 100;
+        let (a, _) = spawn_visual_agent(&mut state, "a");
+        let (b, _) = spawn_visual_agent(&mut state, "b");
+        assert!(state.select_session(1), "focus newest");
+        complete(&mut state, a, 1, fake_png(60, 10, 10));
+        complete(&mut state, b, 2, fake_png(60, 10, 10));
+        assert_eq!(state.visual_slots.len(), 1);
+        assert!(state.visual_slots.contains_key(&b), "newest survives bytes");
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_drain_collects_worker_results() {
-            let mut state = AppState::new();
-            let (id, _) = spawn_visual_agent(&mut state, "agent");
-            state.visual_tx.clone().send(crate::app::VisualDone {
-                session: id,
-                generation: 7,
-                title: "t".to_string(),
-                alt: String::new(),
-                result: Ok(crate::visual::RasterFrame {
-                    png: fake_png(64, 10, 10),
-                    rgba: Vec::new(),
-                    width: 10,
-                    height: 10,
-                    shapes: Vec::new(),
-                    vb: [0.0, 0.0, 10.0, 10.0],
-                }),
-            }).unwrap();
-            state.drain_visual();
-            assert_eq!(state.visual_slots.get(&id).unwrap().generation, 7);
-            assert_eq!(state.visual_slots.get(&id).unwrap().title, "t");
-        }
-
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_show_rejects_bad_format_empty_and_stale_caller() {
-            let mut state = AppState::new();
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
-            // Unknown formats name the supported set.
-            let out = comms_reply(
-                &mut state,
-                &live_run,
-                "visual_show",
-                r#"{"content":"<b>x</b>","format":"html"}"#,
-            );
-            assert!(out.contains(r#""ok":false"#), "rejected: {out}");
-            assert!(out.contains("mermaid"), "names supported: {out}");
-            // Missing format defaults to mermaid.
-            let out = comms_reply(
-                &mut state,
-                &live_run,
-                "visual_show",
-                r#"{"content":"flowchart LR\n    A-->B"}"#,
-            );
-            assert!(out.contains(r#""ok":true"#), "default format: {out}");
-            // Empty content and stale callers fail closed.
-            let out = comms_reply(&mut state, &live_run, "visual_show", r#"{"content":""}"#);
-            assert!(out.contains(r#""ok":false"#), "empty: {out}");
-            let out = comms_reply(
-                &mut state,
-                "run-dead",
-                "visual_show",
-                r#"{"content":"flowchart LR\n    A-->B"}"#,
-            );
-            assert!(out.contains("stale run ID"), "stale: {out}");
-        }
-
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_take_show_hide_tracks_terminal_image() {
-            let mut state = AppState::new();
-            let (id, _) = spawn_visual_agent(&mut state, "agent");
-            complete(&mut state, id, 1, fake_png(64, 10, 10));
-            show_visual_overlay(&mut state, id);
-            let paint = paint_for(&state, id);
-            let spec = state.visual_take_show(true, paint).expect("show once");
-            assert_eq!(spec.generation, 1);
-            assert!(state.visual_take_show(true, paint).is_none(), "already shown");
-            assert!(state.visual_take_show(false, paint).is_none(), "no kitty no show");
-            assert_eq!(state.visual_frame_png(id, 1, paint).unwrap().len(), 64);
-            // New generation hides the old image, then shows the new one.
-            complete(&mut state, id, 2, fake_png(64, 10, 10));
-            assert_eq!(state.visual_take_hide(), Some(spec.image_id));
-            let spec2 = state.visual_take_show(true, paint_for(&state, id)).expect("reshow");
-            assert_ne!(spec2.image_id, spec.image_id, "fresh placement id");
-            // Overlay away hides; double hide is silent.
-            state.overlay_view = None;
-            assert_eq!(state.visual_take_hide(), Some(spec2.image_id));
-            assert_eq!(state.visual_take_hide(), None);
-        }
-
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_take_show_repaints_viewport_changes_under_the_same_id() {
-            let mut state = AppState::new();
-            let (id, _) = spawn_visual_agent(&mut state, "agent");
-            complete(&mut state, id, 1, fake_png(64, 100, 100));
-            show_visual_overlay(&mut state, id);
-            let paint = paint_for(&state, id);
-            let spec = state.visual_take_show(true, paint).expect("show");
-            // Zooming changes the fingerprint but reuses the image id, so
-            // the fixed placement id swaps the re-display without a
-            // delete flash in between.
-            assert!(state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
-            let zoomed = paint_for(&state, id);
-            assert_ne!(zoomed, paint, "zoom moves the paint");
-            let reshow = state.visual_take_show(true, zoomed).expect("repaint");
-            assert_eq!(reshow.image_id, spec.image_id, "no fresh id for a viewport change");
-            assert!(state.visual_take_show(true, zoomed).is_none(), "paint now current");
-        }
-
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_question_submit_needs_selection_and_draft() {
-            // Asking mirrors the walkthrough: selection plus a typed draft
-            // submits shape context as markup, logs the pending question,
-            // and clears the draft while keeping the highlight.
-            use crate::visual::ShapeBox;
-            let mut state = AppState::new();
-            let (id, _) = spawn_visual_agent(&mut state, "agent");
-            state.visual_slots.insert(id, crate::app::VisualSlot {
-                generation: 1,
-                png: Vec::new(),
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_drain_collects_worker_results() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_tx.clone().send(crate::app::VisualDone {
+            session: id,
+            generation: 7,
+            title: "t".to_string(),
+            alt: String::new(),
+            result: Ok(crate::visual::RasterFrame {
+                png: fake_png(64, 10, 10),
                 rgba: Vec::new(),
-                width: 64,
-                height: 64,
-                title: "flow".to_string(),
-                alt: String::new(),
-                zoom: 1.0,
-                scroll_x: 0,
-                scroll_y: 0,
-                selected: None,
-                input_active: false,
-                chat_open: false,
-                chat_scroll: 0,
-                draft: None,
-                questions: Vec::new(),
-                shapes: vec![
-                    ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 64.0, height: 64.0 },
-                ],
-                vb: [0.0, 0.0, 64.0, 64.0],
-            });
-            assert!(!state.submit_visual_question(id), "no selection, no draft");
-            state.visual_slots.get_mut(&id).unwrap().selected = Some(0);
-            assert!(!state.submit_visual_question(id), "no draft yet");
-            state.visual_slots.get_mut(&id).unwrap().draft = Some("  what does it do? ".to_string());
-            assert!(state.submit_visual_question(id));
-            let slot = state.visual_slots.get(&id).unwrap();
-            assert_eq!(slot.questions.len(), 1);
-            assert_eq!(slot.questions[0].shape_id, "A");
-            assert_eq!(slot.questions[0].shape_label, "Start");
-            assert_eq!(slot.questions[0].question, "what does it do?");
-            assert!(slot.questions[0].answer.is_none());
-            assert_eq!(slot.draft, None, "draft clears");
-            assert_eq!(slot.selected, Some(0), "highlight stays");
-            assert!(state.manager.remove(id));
-        }
-
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_answer_resolves_latest_pending_only() {
-            // The agent answers through the visual_answer tool, latest
-            // pending first; thin air errors like the walkthrough twin.
-            let mut state = AppState::new();
-            let (id, live_run) = spawn_visual_agent(&mut state, "agent");
-            let early = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"x"}"#);
-            assert!(early.contains("no visual"), "early: {early}");
-            state.visual_slots.insert(id, crate::app::VisualSlot {
-                generation: 1,
-                png: Vec::new(),
-                rgba: Vec::new(),
-                width: 8,
-                height: 8,
-                title: String::new(),
-                alt: String::new(),
-                zoom: 1.0,
-                scroll_x: 0,
-                scroll_y: 0,
-                selected: None,
-                input_active: false,
-                chat_open: false,
-                chat_scroll: 0,
-                draft: None,
-                questions: Vec::new(),
+                width: 10,
+                height: 10,
                 shapes: Vec::new(),
-                vb: [0.0, 0.0, 8.0, 8.0],
-            });
-            state.visual_slots.get_mut(&id).unwrap().shapes =
-                vec![crate::visual::ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 }];
-            state.visual_slots.get_mut(&id).unwrap().vb = [0.0, 0.0, 8.0, 8.0];
-            state.visual_slots.get_mut(&id).unwrap().selected = Some(0);
-            state.visual_slots.get_mut(&id).unwrap().draft = Some("why?".to_string());
-            assert!(state.submit_visual_question(id));
-            let answered = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"because"}"#);
-            assert!(answered.contains(r#""answered":true"#), "answered: {answered}");
-            assert_eq!(
-                state.visual_slots.get(&id).unwrap().questions[0].answer.as_deref(),
-                Some("because")
-            );
-            let stale = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"again"}"#);
-            assert!(stale.contains("no visual question waiting"), "stale: {stale}");
-            assert!(state.manager.remove(id));
-        }
+                vb: [0.0, 0.0, 10.0, 10.0],
+            }),
+        }).unwrap();
+        state.drain_visual();
+        assert_eq!(state.visual_slots.get(&id).unwrap().generation, 7);
+        assert_eq!(state.visual_slots.get(&id).unwrap().title, "t");
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_submit_and_answer_retail_the_chat() {
-            // Asking or answering re-tails so fresh content is never
-            // stranded above the viewport.
-            let mut state = AppState::new();
-            let (id, live_run) = spawn_visual_agent(&mut state, "agent");
-            state.visual_slots.insert(id, crate::app::VisualSlot {
-                generation: 1,
-                png: Vec::new(),
-                rgba: Vec::new(),
-                width: 8,
-                height: 8,
-                title: String::new(),
-                alt: String::new(),
-                zoom: 1.0,
-                scroll_x: 0,
-                scroll_y: 0,
-                selected: Some(0),
-                draft: Some("why?".to_string()),
-                input_active: true,
-                chat_open: true,
-                chat_scroll: 5,
-                questions: Vec::new(),
-                shapes: vec![
-                    crate::visual::ShapeBox { id: "A".to_string(), label: "S".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
-                ],
-                vb: [0.0, 0.0, 8.0, 8.0],
-            });
-            assert!(state.submit_visual_question(id));
-            assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "ask re-tails");
-            assert!(state.visual_slots.get(&id).unwrap().input_active, "submit stays armed");
-            state.visual_slots.get_mut(&id).unwrap().chat_scroll = 5;
-            let out = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"because"}"#);
-            assert!(out.contains(r#""answered":true"#), "answered: {out}");
-            assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "answer re-tails");
-            assert!(state.manager.remove(id));
-        }
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_show_rejects_bad_format_empty_and_stale_caller() {
+        let mut state = AppState::new();
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        // Unknown formats name the supported set.
+        let out = comms_reply(
+            &mut state,
+            &live_run,
+            "visual_show",
+            r#"{"content":"<b>x</b>","format":"html"}"#,
+        );
+        assert!(out.contains(r#""ok":false"#), "rejected: {out}");
+        assert!(out.contains("mermaid"), "names supported: {out}");
+        // Missing format defaults to mermaid.
+        let out = comms_reply(
+            &mut state,
+            &live_run,
+            "visual_show",
+            r#"{"content":"flowchart LR\n    A-->B"}"#,
+        );
+        assert!(out.contains(r#""ok":true"#), "default format: {out}");
+        // Empty content and stale callers fail closed.
+        let out = comms_reply(&mut state, &live_run, "visual_show", r#"{"content":""}"#);
+        assert!(out.contains(r#""ok":false"#), "empty: {out}");
+        let out = comms_reply(
+            &mut state,
+            "run-dead",
+            "visual_show",
+            r#"{"content":"flowchart LR\n    A-->B"}"#,
+        );
+        assert!(out.contains("stale run ID"), "stale: {out}");
+    }
 
-        #[cfg(feature = "visual")]
-        #[test]
-        fn visual_tool_round_trip_renders_stores_and_shows() {
-            // Acceptance: tool call → background worker → sticky slot →
-            // fallback view → one terminal show claim. Bounded wait, same
-            // drain the main loop performs.
-            let mut state = AppState::new();
-            let (id, live_run) = spawn_visual_agent(&mut state, "agent");
-            let out = comms_reply(
-                &mut state,
-                &live_run,
-                "visual_show",
-                r#"{"content":"flowchart LR\n    A-->B","format":"mermaid","title":"flow","alt":"a to b"}"#,
-            );
-            assert!(out.contains(r#""accepted":true"#), "queued: {out}");
-            let mut stored = None;
-            for _ in 0..100 {
-                state.drain_visual();
-                if let Some(slot) = state.visual_slots.get(&id) {
-                    stored = Some((slot.generation, slot.width, slot.height));
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_take_show_hide_tracks_terminal_image() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 10, 10));
+        show_visual_overlay(&mut state, id);
+        let paint = paint_for(&state, id);
+        let spec = state.visual_take_show(true, paint).expect("show once");
+        assert_eq!(spec.generation, 1);
+        assert!(state.visual_take_show(true, paint).is_none(), "already shown");
+        assert!(state.visual_take_show(false, paint).is_none(), "no kitty no show");
+        assert_eq!(state.visual_frame_png(id, 1, paint).unwrap().len(), 64);
+        // New generation hides the old image, then shows the new one.
+        complete(&mut state, id, 2, fake_png(64, 10, 10));
+        assert_eq!(state.visual_take_hide(), Some(spec.image_id));
+        let spec2 = state.visual_take_show(true, paint_for(&state, id)).expect("reshow");
+        assert_ne!(spec2.image_id, spec.image_id, "fresh placement id");
+        // Overlay away hides; double hide is silent.
+        state.overlay_view = None;
+        assert_eq!(state.visual_take_hide(), Some(spec2.image_id));
+        assert_eq!(state.visual_take_hide(), None);
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_take_show_repaints_viewport_changes_under_the_same_id() {
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        complete(&mut state, id, 1, fake_png(64, 100, 100));
+        show_visual_overlay(&mut state, id);
+        let paint = paint_for(&state, id);
+        let spec = state.visual_take_show(true, paint).expect("show");
+        // Zooming changes the fingerprint but reuses the image id, so
+        // the fixed placement id swaps the re-display without a
+        // delete flash in between.
+        assert!(state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        let zoomed = paint_for(&state, id);
+        assert_ne!(zoomed, paint, "zoom moves the paint");
+        let reshow = state.visual_take_show(true, zoomed).expect("repaint");
+        assert_eq!(reshow.image_id, spec.image_id, "no fresh id for a viewport change");
+        assert!(state.visual_take_show(true, zoomed).is_none(), "paint now current");
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_question_submit_needs_selection_and_draft() {
+        // Asking mirrors the walkthrough: selection plus a typed draft
+        // submits shape context as markup, logs the pending question,
+        // and clears the draft while keeping the highlight.
+        use crate::visual::ShapeBox;
+        let mut state = AppState::new();
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 64,
+            height: 64,
+            title: "flow".to_string(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: vec![
+                ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 64.0, height: 64.0 },
+            ],
+            vb: [0.0, 0.0, 64.0, 64.0],
+        });
+        assert!(!state.submit_visual_question(id), "no selection, no draft");
+        state.visual_slots.get_mut(&id).unwrap().selected = Some(0);
+        assert!(!state.submit_visual_question(id), "no draft yet");
+        state.visual_slots.get_mut(&id).unwrap().draft = Some("  what does it do? ".to_string());
+        assert!(state.submit_visual_question(id));
+        let slot = state.visual_slots.get(&id).unwrap();
+        assert_eq!(slot.questions.len(), 1);
+        assert_eq!(slot.questions[0].shape_id, "A");
+        assert_eq!(slot.questions[0].shape_label, "Start");
+        assert_eq!(slot.questions[0].question, "what does it do?");
+        assert!(slot.questions[0].answer.is_none());
+        assert_eq!(slot.draft, None, "draft clears");
+        assert_eq!(slot.selected, Some(0), "highlight stays");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_answer_resolves_latest_pending_only() {
+        // The agent answers through the visual_answer tool, latest
+        // pending first; thin air errors like the walkthrough twin.
+        let mut state = AppState::new();
+        let (id, live_run) = spawn_visual_agent(&mut state, "agent");
+        let early = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"x"}"#);
+        assert!(early.contains("no visual"), "early: {early}");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            input_active: false,
+            chat_open: false,
+            chat_scroll: 0,
+            draft: None,
+            questions: Vec::new(),
+            shapes: Vec::new(),
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        state.visual_slots.get_mut(&id).unwrap().shapes =
+            vec![crate::visual::ShapeBox { id: "A".to_string(), label: "Start".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 }];
+        state.visual_slots.get_mut(&id).unwrap().vb = [0.0, 0.0, 8.0, 8.0];
+        state.visual_slots.get_mut(&id).unwrap().selected = Some(0);
+        state.visual_slots.get_mut(&id).unwrap().draft = Some("why?".to_string());
+        assert!(state.submit_visual_question(id));
+        let answered = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"because"}"#);
+        assert!(answered.contains(r#""answered":true"#), "answered: {answered}");
+        assert_eq!(
+            state.visual_slots.get(&id).unwrap().questions[0].answer.as_deref(),
+            Some("because")
+        );
+        let stale = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"again"}"#);
+        assert!(stale.contains("no visual question waiting"), "stale: {stale}");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_submit_and_answer_retail_the_chat() {
+        // Asking or answering re-tails so fresh content is never
+        // stranded above the viewport.
+        let mut state = AppState::new();
+        let (id, live_run) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: Some(0),
+            draft: Some("why?".to_string()),
+            input_active: true,
+            chat_open: true,
+            chat_scroll: 5,
+            questions: Vec::new(),
+            shapes: vec![
+                crate::visual::ShapeBox { id: "A".to_string(), label: "S".to_string(), x: 0.0, y: 0.0, width: 8.0, height: 8.0 },
+            ],
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        assert!(state.submit_visual_question(id));
+        assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "ask re-tails");
+        assert!(state.visual_slots.get(&id).unwrap().input_active, "submit stays armed");
+        state.visual_slots.get_mut(&id).unwrap().chat_scroll = 5;
+        let out = comms_reply(&mut state, &live_run, "visual_answer", r#"{"answer":"because"}"#);
+        assert!(out.contains(r#""answered":true"#), "answered: {out}");
+        assert_eq!(state.visual_slots.get(&id).unwrap().chat_scroll, 0, "answer re-tails");
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_tool_round_trip_renders_stores_and_shows() {
+        // Acceptance: tool call → background worker → sticky slot →
+        // fallback view → one terminal show claim. Bounded wait, same
+        // drain the main loop performs.
+        let mut state = AppState::new();
+        let (id, live_run) = spawn_visual_agent(&mut state, "agent");
+        let out = comms_reply(
+            &mut state,
+            &live_run,
+            "visual_show",
+            r#"{"content":"flowchart LR\n    A-->B","format":"mermaid","title":"flow","alt":"a to b"}"#,
+        );
+        assert!(out.contains(r#""accepted":true"#), "queued: {out}");
+        let mut stored = None;
+        for _ in 0..100 {
+            state.drain_visual();
+            if let Some(slot) = state.visual_slots.get(&id) {
+                stored = Some((slot.generation, slot.width, slot.height));
+                break;
             }
-            let (generation, width, height) =
-                stored.expect("worker stored the frame");
-            assert_eq!(generation, 1);
-            // Content-scaled, font-measured: bounds stay loose on purpose.
-            assert!(width > 50 && height > 20, "real raster: {width}x{height}");
-            let view = state.visual_view(id, false);
-            let text: String = view
-                .lines
-                .iter()
-                .flat_map(|row| row.iter().map(|s| s.text.as_str()))
-                .collect();
-            assert!(text.contains("flow"), "title: {text:?}");
-            assert!(text.contains("a to b"), "alt: {text:?}");
-            assert!(text.contains('▀'), "art: {text:?}");
-            show_visual_overlay(&mut state, id);
-            let paint = paint_for(&state, id);
-            let spec = state.visual_take_show(true, paint).expect("show");
-            assert_eq!(spec.generation, 1);
-            assert!(state.visual_frame_png(id, 1, paint).is_some(), "bytes behind the claim");
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        let (generation, width, height) =
+            stored.expect("worker stored the frame");
+        assert_eq!(generation, 1);
+        // Content-scaled, font-measured: bounds stay loose on purpose.
+        assert!(width > 50 && height > 20, "real raster: {width}x{height}");
+        let view = state.visual_view(id, false);
+        let text: String = view
+            .lines
+            .iter()
+            .flat_map(|row| row.iter().map(|s| s.text.as_str()))
+            .collect();
+        assert!(text.contains("flow"), "title: {text:?}");
+        assert!(text.contains("a to b"), "alt: {text:?}");
+        assert!(text.contains('▀'), "art: {text:?}");
+        show_visual_overlay(&mut state, id);
+        let paint = paint_for(&state, id);
+        let spec = state.visual_take_show(true, paint).expect("show");
+        assert_eq!(spec.generation, 1);
+        assert!(state.visual_frame_png(id, 1, paint).is_some(), "bytes behind the claim");
+    }
 
-        #[test]
-        fn visual_tab_keeps_its_label_under_hook_traffic() {
-            let mut state = AppState::new();
-            state.apply(AppEvent::Resize(40, 180));
-            let run = crate::infra::ids::RunId::generate();
-            let id = state.manager.spawn_agent("agent", &std::env::temp_dir(), "exec cat", run.clone(), "codex").unwrap();
-            let (reply, _) = std::sync::mpsc::channel();
-            state.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
-                hook: "PreToolUse".into(), body: "{}".into(), run_id: run.as_str().into(),
-                sync: false, reply, timed_out: Default::default(),
-            }));
-            assert_eq!(state.topbar().tabs[3].label, "📷 Visual");
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn visual_tab_keeps_its_label_under_hook_traffic() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let run = crate::infra::ids::RunId::generate();
+        let id = state.manager.spawn_agent("agent", &std::env::temp_dir(), "exec cat", run.clone(), "codex").unwrap();
+        let (reply, _) = std::sync::mpsc::channel();
+        state.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+            hook: "PreToolUse".into(), body: "{}".into(), run_id: run.as_str().into(),
+            sync: false, reply, timed_out: Default::default(),
+        }));
+        assert_eq!(state.topbar().tabs[3].label, "📷 Visual");
+        assert!(state.manager.remove(id));
+    }
 }

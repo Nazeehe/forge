@@ -537,543 +537,543 @@ mod tests {
     use crate::infra::ids::RunId;
     use crate::session::SessionId;
 
-        #[test]
-        fn session_start_captures_harness_id() {
-            let mut s = AppState::new();
-            let run = RunId::generate();
-            let id = s
-                .manager
-                .spawn_agent("a", &std::env::temp_dir(), "exec sleep 30", run.clone(), "claude")
-                .unwrap();
-            assert_eq!(s.manager.get(id).unwrap().harness_session_id, None);
-            // Claude envelope nests the harness JSON under body.
-            s.apply(hook_request(
-                "SessionStart",
-                run.as_str(),
-                r#"{"v":1,"hook":"SessionStart","run_id":"r","body":{"session_id":"harness-9","cwd":"/tmp"}}"#,
-            ));
-            assert_eq!(
-                s.manager.get(id).unwrap().harness_session_id.as_deref(),
-                Some("harness-9")
-            );
-            // Bodies without an ID (or other hooks) leave the value alone.
-            s.apply(hook_request("SessionStart", run.as_str(), "{}"));
-            s.apply(hook_request("PreToolUse", run.as_str(), "{}"));
-            assert_eq!(
-                s.manager.get(id).unwrap().harness_session_id.as_deref(),
-                Some("harness-9")
-            );
-            // Unknown runs touch nothing.
-            s.apply(hook_request(
-                "SessionStart",
-                "nope",
-                r#"{"v":1,"body":{"session_id":"other"}}"#,
-            ));
-            assert!(s.manager.remove(id));
-        }
+    #[test]
+    fn session_start_captures_harness_id() {
+        let mut s = AppState::new();
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent("a", &std::env::temp_dir(), "exec sleep 30", run.clone(), "claude")
+            .unwrap();
+        assert_eq!(s.manager.get(id).unwrap().harness_session_id, None);
+        // Claude envelope nests the harness JSON under body.
+        s.apply(hook_request(
+            "SessionStart",
+            run.as_str(),
+            r#"{"v":1,"hook":"SessionStart","run_id":"r","body":{"session_id":"harness-9","cwd":"/tmp"}}"#,
+        ));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("harness-9")
+        );
+        // Bodies without an ID (or other hooks) leave the value alone.
+        s.apply(hook_request("SessionStart", run.as_str(), "{}"));
+        s.apply(hook_request("PreToolUse", run.as_str(), "{}"));
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("harness-9")
+        );
+        // Unknown runs touch nothing.
+        s.apply(hook_request(
+            "SessionStart",
+            "nope",
+            r#"{"v":1,"body":{"session_id":"other"}}"#,
+        ));
+        assert!(s.manager.remove(id));
+    }
 
-        #[test]
-        fn snapshot_keeps_live_agents_with_groups() {
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn_agent("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "claude")
-                .unwrap();
-            s.manager.set_harness_session(a, "h-1".to_string());
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, a, "team").unwrap();
-            // Shells and exited sessions never snapshot.
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("sh", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            let snap = s.snapshot_sessions();
-            assert_eq!(snap.len(), 1, "agent only: {snap:?}");
-            assert_eq!(snap[0].name, "a");
-            assert_eq!(snap[0].cli_tool, "claude");
-            assert_eq!(snap[0].groups, vec!["peers".to_string(), "team".to_string()]);
-            assert_eq!(snap[0].harness_session_id.as_deref(), Some("h-1"));
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+    #[test]
+    fn snapshot_keeps_live_agents_with_groups() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn_agent("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "claude")
+            .unwrap();
+        s.manager.set_harness_session(a, "h-1".to_string());
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, a, "team").unwrap();
+        // Shells and exited sessions never snapshot.
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("sh", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        let snap = s.snapshot_sessions();
+        assert_eq!(snap.len(), 1, "agent only: {snap:?}");
+        assert_eq!(snap[0].name, "a");
+        assert_eq!(snap[0].cli_tool, "claude");
+        assert_eq!(snap[0].groups, vec!["peers".to_string(), "team".to_string()]);
+        assert_eq!(snap[0].harness_session_id.as_deref(), Some("h-1"));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn restore_respawns_with_resume_and_rejoins() {
-            // Hermetic stand-in binary; the record outlives its instant exit.
-            let saved = std::env::var("CODEX_BIN").ok();
-            std::env::set_var("CODEX_BIN", "/bin/true");
-            let mut s = AppState::new();
-            let entry = crate::session::checkpoint::SavedEntry {
-                label: "a, gone, weird".to_string(),
-                saved_at_unix: 1_700_000_000,
-                sessions: vec![
-                    crate::session::checkpoint::SavedSession {
-                        name: "a".to_string(),
-                        cli_tool: "codex".to_string(),
-                        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
-                        groups: vec!["peers".to_string()],
-                        harness_session_id: Some("uuid-a".to_string()),
-                    },
-                    crate::session::checkpoint::SavedSession {
-                        name: "gone".to_string(),
-                        cli_tool: "codex".to_string(),
-                        cwd: "/no/such/dir-anywhere".to_string(),
-                        groups: vec![],
-                        harness_session_id: None,
-                    },
-                    crate::session::checkpoint::SavedSession {
-                        name: "weird".to_string(),
-                        cli_tool: "shell".to_string(),
-                        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
-                        groups: vec![],
-                        harness_session_id: None,
-                    },
-                ],
-            };
-            let report = s.restore_entry(&entry);
-            assert_eq!(report.spawned, 1, "report: {:?}", report.skipped);
-            assert_eq!(report.skipped.len(), 2, "missing dir + shell: {:?}", report.skipped);
-            let id = s.manager.order().to_vec().pop().unwrap();
-            assert_eq!(s.manager.get(id).unwrap().name, "a");
-            assert!(s.broker.is_member(id, "peers"), "rejoined");
-            match saved {
-                Some(v) => std::env::set_var("CODEX_BIN", v),
-                None => std::env::remove_var("CODEX_BIN"),
-            }
-            assert!(s.manager.remove(id));
-        }
-
-        #[test]
-        fn restore_stamps_the_saved_harness_id() {
-            // The save file already knows the resume ID and the resume argv
-            // uses it — but the fresh record dropped it, so a resumed muse
-            // session (which fires no SessionStart) re-saved as null.
-            let saved = std::env::var("METAMATE_BIN").ok();
-            std::env::set_var("METAMATE_BIN", "/bin/true");
-            let mut s = AppState::new();
-            let entry = crate::session::checkpoint::SavedEntry {
-                label: "m".to_string(),
-                saved_at_unix: 1_700_000_000,
-                sessions: vec![crate::session::checkpoint::SavedSession {
-                    name: "m".to_string(),
-                    cli_tool: "muse".to_string(),
+    #[test]
+    fn restore_respawns_with_resume_and_rejoins() {
+        // Hermetic stand-in binary; the record outlives its instant exit.
+        let saved = std::env::var("CODEX_BIN").ok();
+        std::env::set_var("CODEX_BIN", "/bin/true");
+        let mut s = AppState::new();
+        let entry = crate::session::checkpoint::SavedEntry {
+            label: "a, gone, weird".to_string(),
+            saved_at_unix: 1_700_000_000,
+            sessions: vec![
+                crate::session::checkpoint::SavedSession {
+                    name: "a".to_string(),
+                    cli_tool: "codex".to_string(),
+                    cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                    groups: vec!["peers".to_string()],
+                    harness_session_id: Some("uuid-a".to_string()),
+                },
+                crate::session::checkpoint::SavedSession {
+                    name: "gone".to_string(),
+                    cli_tool: "codex".to_string(),
+                    cwd: "/no/such/dir-anywhere".to_string(),
+                    groups: vec![],
+                    harness_session_id: None,
+                },
+                crate::session::checkpoint::SavedSession {
+                    name: "weird".to_string(),
+                    cli_tool: "shell".to_string(),
                     cwd: std::env::temp_dir().to_string_lossy().into_owned(),
                     groups: vec![],
-                    harness_session_id: Some("muse-saved".to_string()),
-                }],
-            };
-            let report = s.restore_entry(&entry);
-            assert_eq!(report.spawned, 1, "report: {:?}", report.skipped);
-            let id = s.manager.order().to_vec().pop().unwrap();
-            assert_eq!(
-                s.manager.get(id).unwrap().harness_session_id.as_deref(),
-                Some("muse-saved"),
-                "restored record keeps its resume ID"
-            );
-            match saved {
-                Some(v) => std::env::set_var("METAMATE_BIN", v),
-                None => std::env::remove_var("METAMATE_BIN"),
-            }
-            assert!(s.manager.remove(id));
+                    harness_session_id: None,
+                },
+            ],
+        };
+        let report = s.restore_entry(&entry);
+        assert_eq!(report.spawned, 1, "report: {:?}", report.skipped);
+        assert_eq!(report.skipped.len(), 2, "missing dir + shell: {:?}", report.skipped);
+        let id = s.manager.order().to_vec().pop().unwrap();
+        assert_eq!(s.manager.get(id).unwrap().name, "a");
+        assert!(s.broker.is_member(id, "peers"), "rejoined");
+        match saved {
+            Some(v) => std::env::set_var("CODEX_BIN", v),
+            None => std::env::remove_var("CODEX_BIN"),
         }
+        assert!(s.manager.remove(id));
+    }
 
-        #[test]
-        fn create_session_spawns_named_shell() {
-            let mut s = AppState::new();
-            let spec = crate::ui::dialogs::create::SessionSpec {
+    #[test]
+    fn restore_stamps_the_saved_harness_id() {
+        // The save file already knows the resume ID and the resume argv
+        // uses it — but the fresh record dropped it, so a resumed muse
+        // session (which fires no SessionStart) re-saved as null.
+        let saved = std::env::var("METAMATE_BIN").ok();
+        std::env::set_var("METAMATE_BIN", "/bin/true");
+        let mut s = AppState::new();
+        let entry = crate::session::checkpoint::SavedEntry {
+            label: "m".to_string(),
+            saved_at_unix: 1_700_000_000,
+            sessions: vec![crate::session::checkpoint::SavedSession {
+                name: "m".to_string(),
+                cli_tool: "muse".to_string(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                groups: vec![],
+                harness_session_id: Some("muse-saved".to_string()),
+            }],
+        };
+        let report = s.restore_entry(&entry);
+        assert_eq!(report.spawned, 1, "report: {:?}", report.skipped);
+        let id = s.manager.order().to_vec().pop().unwrap();
+        assert_eq!(
+            s.manager.get(id).unwrap().harness_session_id.as_deref(),
+            Some("muse-saved"),
+            "restored record keeps its resume ID"
+        );
+        match saved {
+            Some(v) => std::env::set_var("METAMATE_BIN", v),
+            None => std::env::remove_var("METAMATE_BIN"),
+        }
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn create_session_spawns_named_shell() {
+        let mut s = AppState::new();
+        let spec = crate::ui::dialogs::create::SessionSpec {
+            kind: crate::ui::dialogs::create::SessionKind::Shell,
+            name: "work".to_string(),
+            cwd: std::env::temp_dir(),
+            model: String::new(),
+            group: None,
+        };
+        let id = s.create_session(&spec).unwrap();
+        let rec = s.manager.get(id).unwrap();
+        assert_eq!(rec.name, "work");
+        assert_eq!(rec.cli_tool, "shell");
+        assert_eq!(rec.cwd, std::env::temp_dir());
+        assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn create_session_focuses_the_new_session() {
+        let mut s = AppState::new();
+        let spec = |name: &str| crate::ui::dialogs::create::SessionSpec {
+            kind: crate::ui::dialogs::create::SessionKind::Shell,
+            name: name.to_string(),
+            cwd: std::env::temp_dir(),
+            model: String::new(),
+            group: None,
+        };
+        let first = s.create_session(&spec("a")).unwrap();
+        assert_eq!(s.manager.active(), Some(first));
+        let second = s.create_session(&spec("b")).unwrap();
+        assert_eq!(s.manager.active(), Some(second), "creating focuses the new one");
+        assert!(s.manager.remove(first));
+        assert!(s.manager.remove(second));
+    }
+
+    #[test]
+    fn create_session_with_group_joins_at_birth() {
+        let mut s = AppState::new();
+        s.broker.create_group("team").unwrap();
+        let id = s
+            .create_session(&crate::ui::dialogs::create::SessionSpec {
                 kind: crate::ui::dialogs::create::SessionKind::Shell,
                 name: "work".to_string(),
                 cwd: std::env::temp_dir(),
                 model: String::new(),
-                group: None,
-            };
-            let id = s.create_session(&spec).unwrap();
-            let rec = s.manager.get(id).unwrap();
-            assert_eq!(rec.name, "work");
-            assert_eq!(rec.cli_tool, "shell");
-            assert_eq!(rec.cwd, std::env::temp_dir());
-            assert!(s.manager.remove(id));
-        }
+                group: Some("team".to_string()),
+            })
+            .unwrap();
+        assert!(s.broker.is_member(id, "team"));
+        assert_eq!(s.tabs().iter().find(|t| t.title == "work").and_then(|t| t.group.clone()), Some("team".to_string()), "bar reflects it");
+        assert!(s.manager.remove(id));
+    }
 
-        #[test]
-        fn create_session_focuses_the_new_session() {
-            let mut s = AppState::new();
-            let spec = |name: &str| crate::ui::dialogs::create::SessionSpec {
-                kind: crate::ui::dialogs::create::SessionKind::Shell,
-                name: name.to_string(),
-                cwd: std::env::temp_dir(),
-                model: String::new(),
-                group: None,
-            };
-            let first = s.create_session(&spec("a")).unwrap();
-            assert_eq!(s.manager.active(), Some(first));
-            let second = s.create_session(&spec("b")).unwrap();
-            assert_eq!(s.manager.active(), Some(second), "creating focuses the new one");
-            assert!(s.manager.remove(first));
-            assert!(s.manager.remove(second));
+    #[test]
+    fn create_session_agent_records_cli_tool() {
+        // Hermetic: stand in for the codex binary; argv shape is locked in
+        // the harness registry tests.
+        let saved = std::env::var("CODEX_BIN").ok();
+        std::env::set_var("CODEX_BIN", "/bin/true");
+        let mut s = AppState::new();
+        let spec = crate::ui::dialogs::create::SessionSpec {
+            kind: crate::ui::dialogs::create::SessionKind::Agent(
+                crate::session::harness::Harness::from_name("codex").unwrap(),
+            ),
+            name: "coder".to_string(),
+            cwd: std::env::temp_dir(),
+            model: "gpt-5".to_string(),
+            group: None,
+        };
+        let id = s.create_session(&spec).unwrap();
+        let rec = s.manager.get(id).unwrap();
+        assert_eq!(rec.cli_tool, "codex");
+        assert!(s.manager.remove(id));
+        match saved {
+            Some(v) => std::env::set_var("CODEX_BIN", v),
+            None => std::env::remove_var("CODEX_BIN"),
         }
+    }
 
-        #[test]
-        fn create_session_with_group_joins_at_birth() {
-            let mut s = AppState::new();
-            s.broker.create_group("team").unwrap();
-            let id = s
-                .create_session(&crate::ui::dialogs::create::SessionSpec {
-                    kind: crate::ui::dialogs::create::SessionKind::Shell,
-                    name: "work".to_string(),
-                    cwd: std::env::temp_dir(),
-                    model: String::new(),
-                    group: Some("team".to_string()),
-                })
-                .unwrap();
-            assert!(s.broker.is_member(id, "team"));
-            assert_eq!(s.tabs().iter().find(|t| t.title == "work").and_then(|t| t.group.clone()), Some("team".to_string()), "bar reflects it");
-            assert!(s.manager.remove(id));
-        }
-
-        #[test]
-        fn create_session_agent_records_cli_tool() {
-            // Hermetic: stand in for the codex binary; argv shape is locked in
-            // the harness registry tests.
-            let saved = std::env::var("CODEX_BIN").ok();
-            std::env::set_var("CODEX_BIN", "/bin/true");
-            let mut s = AppState::new();
-            let spec = crate::ui::dialogs::create::SessionSpec {
+    #[test]
+    fn create_session_routes_agent_to_dual_tabs() {
+        // Point the codex binary at `cat` so the test never depends on a
+        // real agent CLI being installed; no other test reads this var.
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut s = AppState::new();
+        let agent = s
+            .create_session(&crate::ui::dialogs::create::SessionSpec {
                 kind: crate::ui::dialogs::create::SessionKind::Agent(
                     crate::session::harness::Harness::from_name("codex").unwrap(),
                 ),
-                name: "coder".to_string(),
+                name: "codex-1".to_string(),
                 cwd: std::env::temp_dir(),
-                model: "gpt-5".to_string(),
+                model: String::new(),
                 group: None,
-            };
-            let id = s.create_session(&spec).unwrap();
-            let rec = s.manager.get(id).unwrap();
-            assert_eq!(rec.cli_tool, "codex");
-            assert!(s.manager.remove(id));
-            match saved {
-                Some(v) => std::env::set_var("CODEX_BIN", v),
-                None => std::env::remove_var("CODEX_BIN"),
-            }
-        }
+            })
+            .unwrap();
+        std::env::remove_var("CODEX_BIN");
+        assert_eq!(s.manager.tab_count(agent), 3);
+        assert!(s.manager.switch_tab(agent));
+        let shell = s
+            .create_session(&crate::ui::dialogs::create::SessionSpec {
+                kind: crate::ui::dialogs::create::SessionKind::Shell,
+                name: "shell-1".to_string(),
+                cwd: std::env::temp_dir(),
+                model: String::new(),
+                group: None,
+            })
+            .unwrap();
+        assert_eq!(s.manager.tab_count(shell), 1);
+        assert!(s.manager.remove(agent));
+        assert!(s.manager.remove(shell));
+    }
 
-        #[test]
-        fn create_session_routes_agent_to_dual_tabs() {
-            // Point the codex binary at `cat` so the test never depends on a
-            // real agent CLI being installed; no other test reads this var.
-            std::env::set_var("CODEX_BIN", "cat");
-            let mut s = AppState::new();
-            let agent = s
-                .create_session(&crate::ui::dialogs::create::SessionSpec {
-                    kind: crate::ui::dialogs::create::SessionKind::Agent(
-                        crate::session::harness::Harness::from_name("codex").unwrap(),
-                    ),
-                    name: "codex-1".to_string(),
-                    cwd: std::env::temp_dir(),
-                    model: String::new(),
-                    group: None,
-                })
-                .unwrap();
-            std::env::remove_var("CODEX_BIN");
-            assert_eq!(s.manager.tab_count(agent), 3);
-            assert!(s.manager.switch_tab(agent));
-            let shell = s
-                .create_session(&crate::ui::dialogs::create::SessionSpec {
-                    kind: crate::ui::dialogs::create::SessionKind::Shell,
-                    name: "shell-1".to_string(),
-                    cwd: std::env::temp_dir(),
-                    model: String::new(),
-                    group: None,
-                })
-                .unwrap();
-            assert_eq!(s.manager.tab_count(shell), 1);
-            assert!(s.manager.remove(agent));
-            assert!(s.manager.remove(shell));
-        }
+    #[test]
+    fn suggested_name_skips_taken_names() {
+        let mut s = AppState::new();
+        assert_eq!(s.suggested_session_name(), "claude-1");
+        s.open_create_dialog();
+        assert!(s.create_dialog.is_some());
+        let id = s
+            .manager
+            .spawn("claude-1", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        assert_eq!(s.suggested_session_name(), "claude-2");
+        assert!(s.manager.remove(id));
+    }
 
-        #[test]
-        fn suggested_name_skips_taken_names() {
-            let mut s = AppState::new();
-            assert_eq!(s.suggested_session_name(), "claude-1");
-            s.open_create_dialog();
-            assert!(s.create_dialog.is_some());
-            let id = s
-                .manager
-                .spawn("claude-1", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            assert_eq!(s.suggested_session_name(), "claude-2");
-            assert!(s.manager.remove(id));
-        }
+    #[test]
+    fn session_traffic_dirties() {
+        let mut s = AppState::new();
+        s.dirty = false;
+        let id = SessionId::fresh();
+        s.apply(AppEvent::SessionOutput { id });
+        assert!(s.dirty);
+        s.dirty = false;
+        s.apply(AppEvent::SessionExited { id, code: Some(0) });
+        assert!(s.dirty);
+    }
 
-        #[test]
-        fn session_traffic_dirties() {
-            let mut s = AppState::new();
-            s.dirty = false;
-            let id = SessionId::fresh();
-            s.apply(AppEvent::SessionOutput { id });
-            assert!(s.dirty);
-            s.dirty = false;
-            s.apply(AppEvent::SessionExited { id, code: Some(0) });
-            assert!(s.dirty);
-        }
+    #[test]
+    fn resize_records_and_dirties() {
+        let mut s = AppState::new();
+        s.dirty = false;
+        s.apply(AppEvent::Resize(40, 120));
+        assert_eq!(s.term_size, (40, 120));
+        assert!(s.dirty);
+    }
 
-        #[test]
-        fn resize_records_and_dirties() {
-            let mut s = AppState::new();
-            s.dirty = false;
-            s.apply(AppEvent::Resize(40, 120));
-            assert_eq!(s.term_size, (40, 120));
-            assert!(s.dirty);
-        }
+    #[test]
+    fn select_session_focuses_by_index() {
+        let mut s = AppState::new();
+        assert!(!s.select_session(0), "empty: no-op");
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        assert!(s.select_session(1));
+        assert_eq!(s.manager.active(), Some(b));
+        assert!(s.select_session(0));
+        assert_eq!(s.manager.active(), Some(a));
+        assert!(!s.select_session(9), "out of range keeps focus");
+        assert_eq!(s.manager.active(), Some(a));
+        let tabs = s.tabs();
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs[0].focused && !tabs[1].focused);
+        assert_eq!(s.sidebar_info().pending, 0);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn select_session_focuses_by_index() {
-            let mut s = AppState::new();
-            assert!(!s.select_session(0), "empty: no-op");
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            assert!(s.select_session(1));
-            assert_eq!(s.manager.active(), Some(b));
-            assert!(s.select_session(0));
-            assert_eq!(s.manager.active(), Some(a));
-            assert!(!s.select_session(9), "out of range keeps focus");
-            assert_eq!(s.manager.active(), Some(a));
-            let tabs = s.tabs();
-            assert_eq!(tabs.len(), 2);
-            assert!(tabs[0].focused && !tabs[1].focused);
-            assert_eq!(s.sidebar_info().pending, 0);
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+    #[test]
+    fn bar_keeps_ungrouped_sessions_left_of_grouped() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "team").unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        // Manager order is [a, b], but the bar shows ungrouped first.
+        let titles: Vec<_> = s.tabs().iter().map(|t| t.title.clone()).collect();
+        assert_eq!(titles, vec!["b".to_string(), "a".to_string()]);
+        // Digits follow the bar, not the manager order.
+        assert!(s.select_session(0));
+        assert_eq!(s.manager.active(), Some(b));
+        assert!(s.select_session(1));
+        assert_eq!(s.manager.active(), Some(a));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn bar_keeps_ungrouped_sessions_left_of_grouped() {
-            let mut s = AppState::new();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "team").unwrap();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            // Manager order is [a, b], but the bar shows ungrouped first.
-            let titles: Vec<_> = s.tabs().iter().map(|t| t.title.clone()).collect();
-            assert_eq!(titles, vec!["b".to_string(), "a".to_string()]);
-            // Digits follow the bar, not the manager order.
-            assert!(s.select_session(0));
-            assert_eq!(s.manager.active(), Some(b));
-            assert!(s.select_session(1));
-            assert_eq!(s.manager.active(), Some(a));
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+    #[test]
+    fn terminate_session_drops_ui_and_groups() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, a, "other").unwrap();
+        assert!(s.terminate_session(a));
+        assert!(s.manager.get(a).is_none(), "record gone");
+        assert_eq!(s.manager.order().len(), 1);
+        assert!(!s.broker.is_member(a, "peers"), "left peers");
+        assert!(!s.broker.is_member(a, "other"), "left other");
+        assert_eq!(s.manager.active(), Some(b), "focus falls through");
+        assert!(!s.terminate_session(a), "unknown id is a no-op");
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn terminate_session_drops_ui_and_groups() {
-            let mut s = AppState::new();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, a, "other").unwrap();
-            assert!(s.terminate_session(a));
-            assert!(s.manager.get(a).is_none(), "record gone");
-            assert_eq!(s.manager.order().len(), 1);
-            assert!(!s.broker.is_member(a, "peers"), "left peers");
-            assert!(!s.broker.is_member(a, "other"), "left other");
-            assert_eq!(s.manager.active(), Some(b), "focus falls through");
-            assert!(!s.terminate_session(a), "unknown id is a no-op");
-            assert!(s.manager.remove(b));
-        }
+    #[test]
+    fn terminate_session_prunes_debounce_entries() {
+        // Manual termination must clean the per-target debounce maps
+        // like a natural exit does, or they grow with every session.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        s.note_human_input(a);
+        s.last_hook_activity.insert(a, std::time::Instant::now());
+        assert!(s.terminate_session(a));
+        assert!(!s.last_human_input.contains_key(&a), "typing entry pruned");
+        assert!(!s.last_hook_activity.contains_key(&a), "hook entry pruned");
+    }
 
-        #[test]
-        fn terminate_session_prunes_debounce_entries() {
-            // Manual termination must clean the per-target debounce maps
-            // like a natural exit does, or they grow with every session.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            s.note_human_input(a);
-            s.last_hook_activity.insert(a, std::time::Instant::now());
-            assert!(s.terminate_session(a));
-            assert!(!s.last_human_input.contains_key(&a), "typing entry pruned");
-            assert!(!s.last_hook_activity.contains_key(&a), "hook entry pruned");
-        }
+    #[test]
+    fn fleet_lists_attention_first() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn(
+                "aaa",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        let b = s
+            .manager
+            .spawn(
+                "bbb",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        // Idle order follows spawn order.
+        let ids: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![a, b], "spawn order: {ids:?}");
+        // Background attention jumps to the top.
+        let run_b = s.manager.get(b).unwrap().run_id.as_str().to_string();
+        let raised = comms_reply(
+            &mut s,
+            &run_b,
+            "request_attention",
+            r#"{"reason":"need a decision"}"#,
+        );
+        assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
+        let ids: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
+        assert_eq!(ids[0], b, "attention first: {ids:?}");
+        assert!(
+            s.sidebar_info().sessions[0].reason.contains("need a decision"),
+            "reason rides along"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn fleet_lists_attention_first() {
-            let mut s = AppState::new();
-            let a = s
-                .manager
-                .spawn(
-                    "aaa",
-                    &std::env::temp_dir(),
-                    "exec sleep 30",
-                    RunId::generate(),
-                    "shell",
-                )
-                .unwrap();
-            let b = s
-                .manager
-                .spawn(
-                    "bbb",
-                    &std::env::temp_dir(),
-                    "exec sleep 30",
-                    RunId::generate(),
-                    "shell",
-                )
-                .unwrap();
-            // Idle order follows spawn order.
-            let ids: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
-            assert_eq!(ids, vec![a, b], "spawn order: {ids:?}");
-            // Background attention jumps to the top.
-            let run_b = s.manager.get(b).unwrap().run_id.as_str().to_string();
-            let raised = comms_reply(
-                &mut s,
-                &run_b,
-                "request_attention",
-                r#"{"reason":"need a decision"}"#,
+    #[test]
+    fn focusing_clears_badge_entry_keeps_reply_target() {
+        let (mut state, id, live_run) = message_user_agent();
+        let ok = comms_reply(
+            &mut state,
+            &live_run,
+            "message_user",
+            r#"{"message":"hello operator"}"#,
+        );
+        assert!(ok.contains(r#""ok":true"#), "ok: {ok}");
+        assert!(state.message_user_badges.contains_key(&id));
+        let order = state.manager.order().to_vec();
+        let idx = order.iter().position(|s| *s == id).unwrap();
+        assert!(state.select_session(idx), "focus it");
+        assert!(
+            !state.message_user_badges.contains_key(&id),
+            "seen badge clears"
+        );
+        assert_eq!(
+            state.last_telegram_badged,
+            Some(id),
+            "bare-text replies still route"
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn fleet_order_ignores_hook_recency() {
+        let mut s = AppState::new();
+        let mut ids = Vec::new();
+        for name in ["aaa", "bbb", "ccc"] {
+            ids.push(
+                s.manager
+                    .spawn(
+                        name,
+                        &std::env::temp_dir(),
+                        "exec sleep 30",
+                        RunId::generate(),
+                        "shell",
+                    )
+                    .unwrap(),
             );
-            assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
-            let ids: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
-            assert_eq!(ids[0], b, "attention first: {ids:?}");
-            assert!(
-                s.sidebar_info().sessions[0].reason.contains("need a decision"),
-                "reason rides along"
-            );
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
         }
-
-        #[test]
-        fn focusing_clears_badge_entry_keeps_reply_target() {
-            let (mut state, id, live_run) = message_user_agent();
-            let ok = comms_reply(
-                &mut state,
-                &live_run,
-                "message_user",
-                r#"{"message":"hello operator"}"#,
-            );
-            assert!(ok.contains(r#""ok":true"#), "ok: {ok}");
-            assert!(state.message_user_badges.contains_key(&id));
-            let order = state.manager.order().to_vec();
-            let idx = order.iter().position(|s| *s == id).unwrap();
-            assert!(state.select_session(idx), "focus it");
-            assert!(
-                !state.message_user_badges.contains_key(&id),
-                "seen badge clears"
-            );
-            assert_eq!(
-                state.last_telegram_badged,
-                Some(id),
-                "bare-text replies still route"
-            );
-            assert!(state.manager.remove(id));
-        }
-
-        #[test]
-        fn fleet_order_ignores_hook_recency() {
-            let mut s = AppState::new();
-            let mut ids = Vec::new();
-            for name in ["aaa", "bbb", "ccc"] {
-                ids.push(
-                    s.manager
-                        .spawn(
-                            name,
-                            &std::env::temp_dir(),
-                            "exec sleep 30",
-                            RunId::generate(),
-                            "shell",
-                        )
-                        .unwrap(),
-                );
-            }
-            // Late hook activity on the last session must not reshuffle
-            // idle peers: spatial memory beats recency.
-            s.last_hook_activity
-                .insert(ids[2], std::time::Instant::now());
-            let order: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
-            assert_eq!(order, ids, "spawn order holds");
-            for id in ids {
-                assert!(s.manager.remove(id));
-            }
-        }
-
-        #[test]
-        fn fleet_cursor_survives_resort_and_activates() {
-            let mut s = AppState::new();
-            let a = s
-                .manager
-                .spawn(
-                    "aaa",
-                    &std::env::temp_dir(),
-                    "exec sleep 30",
-                    RunId::generate(),
-                    "shell",
-                )
-                .unwrap();
-            let b = s
-                .manager
-                .spawn(
-                    "bbb",
-                    &std::env::temp_dir(),
-                    "exec sleep 30",
-                    RunId::generate(),
-                    "shell",
-                )
-                .unwrap();
-            s.fleet_step(1);
-            s.fleet_step(1);
-            assert_eq!(s.fleet_cursor, Some(b), "two steps reach b");
-            // Resorting under the cursor keeps it by id, not position.
-            let run_a = s.manager.get(a).unwrap().run_id.as_str().to_string();
-            let raised = comms_reply(
-                &mut s,
-                &run_a,
-                "request_attention",
-                r#"{"reason":"need a decision"}"#,
-            );
-            assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
-            assert_eq!(s.fleet_cursor, Some(b), "cursor stable across resort");
-            assert!(s.fleet_activate(), "activate focuses cursor");
-            assert_eq!(s.manager.active(), Some(b));
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn step_is_safe_when_empty() {
-            let mut s = AppState::new();
-            s.step_session(1);
-            assert!(s.manager.active().is_none());
-        }
-
-        #[test]
-        fn manager_spawn_flows_through_state() {
-            let mut s = AppState::new();
-            let id = s
-                .manager
-                .spawn("w", &std::env::temp_dir(), "exit 0", RunId::generate(), "shell")
-                .unwrap();
-            assert!(s.manager.get(id).is_some());
+        // Late hook activity on the last session must not reshuffle
+        // idle peers: spatial memory beats recency.
+        s.last_hook_activity
+            .insert(ids[2], std::time::Instant::now());
+        let order: Vec<_> = s.sidebar_info().sessions.iter().map(|r| r.id).collect();
+        assert_eq!(order, ids, "spawn order holds");
+        for id in ids {
             assert!(s.manager.remove(id));
         }
+    }
+
+    #[test]
+    fn fleet_cursor_survives_resort_and_activates() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn(
+                "aaa",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        let b = s
+            .manager
+            .spawn(
+                "bbb",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        s.fleet_step(1);
+        s.fleet_step(1);
+        assert_eq!(s.fleet_cursor, Some(b), "two steps reach b");
+        // Resorting under the cursor keeps it by id, not position.
+        let run_a = s.manager.get(a).unwrap().run_id.as_str().to_string();
+        let raised = comms_reply(
+            &mut s,
+            &run_a,
+            "request_attention",
+            r#"{"reason":"need a decision"}"#,
+        );
+        assert!(raised.contains(r#""ok":true"#), "raise: {raised}");
+        assert_eq!(s.fleet_cursor, Some(b), "cursor stable across resort");
+        assert!(s.fleet_activate(), "activate focuses cursor");
+        assert_eq!(s.manager.active(), Some(b));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn step_is_safe_when_empty() {
+        let mut s = AppState::new();
+        s.step_session(1);
+        assert!(s.manager.active().is_none());
+    }
+
+    #[test]
+    fn manager_spawn_flows_through_state() {
+        let mut s = AppState::new();
+        let id = s
+            .manager
+            .spawn("w", &std::env::temp_dir(), "exit 0", RunId::generate(), "shell")
+            .unwrap();
+        assert!(s.manager.get(id).is_some());
+        assert!(s.manager.remove(id));
+    }
 }

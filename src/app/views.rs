@@ -356,356 +356,356 @@ mod tests {
     use crate::app::test_support::*;
     use crate::infra::ids::RunId;
 
-        #[test]
-        fn toggle_grid_flips_and_select_exits() {
-            let mut s = AppState::new();
-            assert!(!s.grid_mode);
-            s.toggle_grid();
-            assert!(s.grid_mode);
-            s.toggle_grid();
-            assert!(!s.grid_mode);
-            // Picking a number always returns to the focused view.
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            s.toggle_grid();
-            assert!(s.select_session(1));
-            assert!(!s.grid_mode, "select exits grid");
-            assert_eq!(s.manager.active(), Some(b));
-            s.toggle_grid();
-            assert!(!s.select_session(9), "out of range");
-            assert!(s.grid_mode, "failed select stays in grid");
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+    #[test]
+    fn toggle_grid_flips_and_select_exits() {
+        let mut s = AppState::new();
+        assert!(!s.grid_mode);
+        s.toggle_grid();
+        assert!(s.grid_mode);
+        s.toggle_grid();
+        assert!(!s.grid_mode);
+        // Picking a number always returns to the focused view.
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        s.toggle_grid();
+        assert!(s.select_session(1));
+        assert!(!s.grid_mode, "select exits grid");
+        assert_eq!(s.manager.active(), Some(b));
+        s.toggle_grid();
+        assert!(!s.select_session(9), "out of range");
+        assert!(s.grid_mode, "failed select stays in grid");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn views_begin_empty() {
-            let s = AppState::new();
-            assert!(s.views().is_empty());
-        }
+    #[test]
+    fn views_begin_empty() {
+        let s = AppState::new();
+        assert!(s.views().is_empty());
+    }
 
-        #[test]
-        fn views_reflect_sessions() {
-            let mut s = AppState::new();
-            let a = s
-                .manager
-                .spawn("one", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            let b = s
-                .manager
-                .spawn("two", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            let views = s.views();
-            assert_eq!(views.len(), 2);
-            assert_eq!(views[0].title, "one");
-            assert_eq!(views[1].title, "two");
-            assert!(views[0].focused && !views[1].focused);
-            assert!(views.iter().all(|v| v.live));
-            s.step_session(1);
-            assert_eq!(s.manager.active(), Some(b));
-            s.step_session(1);
-            assert_eq!(s.manager.active(), Some(a));
-            s.step_session(-1);
-            assert_eq!(s.manager.active(), Some(b));
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+    #[test]
+    fn views_reflect_sessions() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("one", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("two", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let views = s.views();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].title, "one");
+        assert_eq!(views[1].title, "two");
+        assert!(views[0].focused && !views[1].focused);
+        assert!(views.iter().all(|v| v.live));
+        s.step_session(1);
+        assert_eq!(s.manager.active(), Some(b));
+        s.step_session(1);
+        assert_eq!(s.manager.active(), Some(a));
+        s.step_session(-1);
+        assert_eq!(s.manager.active(), Some(b));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn views_skip_line_materialization_for_background_sessions() {
-            let mut s = AppState::new();
-            let a = s
+    #[test]
+    fn views_skip_line_materialization_for_background_sessions() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("one", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn(
+                "two",
+                &std::env::temp_dir(),
+                "echo BACKGROUND-MARKER; exec sleep 30",
+                RunId::generate(),
+                "shell",
+            )
+            .unwrap();
+        assert_eq!(s.manager.active(), Some(a), "first spawn stays focused");
+        // Wait for the background session to actually paint its marker
+        // into the vt100 screen, so there is a real non-empty screen to
+        // skip below (an empty screen would pass trivially).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for _ in s.manager.drain_pty_max(100) {}
+            if s
                 .manager
-                .spawn("one", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            let b = s
-                .manager
-                .spawn(
-                    "two",
-                    &std::env::temp_dir(),
-                    "echo BACKGROUND-MARKER; exec sleep 30",
-                    RunId::generate(),
-                    "shell",
-                )
-                .unwrap();
-            assert_eq!(s.manager.active(), Some(a), "first spawn stays focused");
-            // Wait for the background session to actually paint its marker
-            // into the vt100 screen, so there is a real non-empty screen to
-            // skip below (an empty screen would pass trivially).
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for _ in s.manager.drain_pty_max(100) {}
-                if s
-                    .manager
-                    .screen_text(b)
-                    .is_some_and(|text| text.contains("BACKGROUND-MARKER"))
-                {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "background session never painted its marker"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                .screen_text(b)
+                .is_some_and(|text| text.contains("BACKGROUND-MARKER"))
+            {
+                break;
             }
-
-            // Focused (non-grid) mode: only the focused pane's lines get
-            // materialized. The background session behind it must not pay
-            // for a screen it never draws (app.rs `views()`).
-            let focused_mode = s.views();
-            let bg_view = focused_mode.iter().find(|v| v.title == "two").unwrap();
             assert!(
-                bg_view.lines.is_empty(),
-                "background pane must skip line materialization outside grid mode"
+                std::time::Instant::now() < deadline,
+                "background session never painted its marker"
             );
-            let fg_view = focused_mode.iter().find(|v| v.title == "one").unwrap();
-            assert!(!fg_view.lines.is_empty(), "the focused pane still renders");
-
-            // Grid mode draws every pane, so every session still needs real
-            // lines there.
-            s.grid_mode = true;
-            let grid_mode = s.views();
-            let bg_view = grid_mode.iter().find(|v| v.title == "two").unwrap();
-            let rendered: String = bg_view
-                .lines
-                .iter()
-                .flatten()
-                .map(|span| span.text.as_str())
-                .collect();
-            assert!(
-                rendered.contains("BACKGROUND-MARKER"),
-                "grid mode must still materialize every pane, got: {rendered:?}"
-            );
-
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
-        #[test]
-        fn tetris_toggle_flips_sidebar_game() {
-            let mut s = AppState::new();
-            assert!(!s.tetris_open);
-            s.dirty = false;
-            s.toggle_tetris();
-            assert!(s.tetris_open);
-            assert!(s.dirty);
-            s.toggle_tetris();
-            assert!(!s.tetris_open);
-        }
+        // Focused (non-grid) mode: only the focused pane's lines get
+        // materialized. The background session behind it must not pay
+        // for a screen it never draws (app.rs `views()`).
+        let focused_mode = s.views();
+        let bg_view = focused_mode.iter().find(|v| v.title == "two").unwrap();
+        assert!(
+            bg_view.lines.is_empty(),
+            "background pane must skip line materialization outside grid mode"
+        );
+        let fg_view = focused_mode.iter().find(|v| v.title == "one").unwrap();
+        assert!(!fg_view.lines.is_empty(), "the focused pane still renders");
 
-        #[test]
-        fn tetris_tick_steps_gravity_when_due() {
-            let mut s = AppState::new();
-            let t0 = std::time::Instant::now();
-            s.toggle_tetris();
-            s.tetris_tick(t0);
-            assert!(s.tetris_last_drop.is_some(), "first tick arms the timer");
-            let before = s.tetris.active_cells();
-            s.dirty = false;
-            s.tetris_tick(t0 + std::time::Duration::from_millis(900));
-            assert_ne!(s.tetris.active_cells(), before, "gravity moves the piece");
-            assert!(s.dirty);
-        }
+        // Grid mode draws every pane, so every session still needs real
+        // lines there.
+        s.grid_mode = true;
+        let grid_mode = s.views();
+        let bg_view = grid_mode.iter().find(|v| v.title == "two").unwrap();
+        let rendered: String = bg_view
+            .lines
+            .iter()
+            .flatten()
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(
+            rendered.contains("BACKGROUND-MARKER"),
+            "grid mode must still materialize every pane, got: {rendered:?}"
+        );
 
-        #[test]
-        fn tetris_tick_sleeps_while_closed() {
-            let mut s = AppState::new();
-            let t0 = std::time::Instant::now();
-            s.tetris_tick(t0 + std::time::Duration::from_secs(60));
-            assert!(s.tetris_last_drop.is_none(), "closed game never arms");
-        }
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn scm_tab_selects_a_live_lazygit_pane() {
-            let mut state = AppState::new();
-            state.term_size = (40, 180);
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            // Index 2 is a real PTY tab now, not an overlay: selecting it
-            // lazily spawns the pane (the shell reports a missing binary as
-            // an exited child, so this holds with or without lazygit).
-            assert!(state.select_top_tab(2));
-            assert!(state.topbar().tabs[2].active);
-            assert_eq!(
-                state.manager.active_tab_kind(id),
-                Some(crate::session::TabKind::Scm)
-            );
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn tetris_toggle_flips_sidebar_game() {
+        let mut s = AppState::new();
+        assert!(!s.tetris_open);
+        s.dirty = false;
+        s.toggle_tetris();
+        assert!(s.tetris_open);
+        assert!(s.dirty);
+        s.toggle_tetris();
+        assert!(!s.tetris_open);
+    }
 
-        #[test]
-        fn agent_topbar_exposes_clickable_read_only_views() {
-            let mut state = AppState::new();
-            state.term_size = (40, 180);
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-            assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
-            assert!(state.select_top_tab(3));
-            assert!(state.topbar().tabs[3].active);
-            let view = state.views().into_iter().find(|v| v.focused).unwrap();
-            assert!(view.lines.iter().flatten().any(|span| span.text.contains("renders diagrams")));
-            assert!(view.lines.iter().flatten().any(|span| span.text.contains("visualize the flow for")));
-            assert!(state.select_top_tab(0));
-            assert!(state.topbar().tabs[0].active);
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn tetris_tick_steps_gravity_when_due() {
+        let mut s = AppState::new();
+        let t0 = std::time::Instant::now();
+        s.toggle_tetris();
+        s.tetris_tick(t0);
+        assert!(s.tetris_last_drop.is_some(), "first tick arms the timer");
+        let before = s.tetris.active_cells();
+        s.dirty = false;
+        s.tetris_tick(t0 + std::time::Duration::from_millis(900));
+        assert_ne!(s.tetris.active_cells(), before, "gravity moves the piece");
+        assert!(s.dirty);
+    }
 
-        #[test]
-        fn topbar_omits_events_and_tasks() {
-            let mut state = AppState::new();
-            state.term_size = (40, 180);
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-            assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn tetris_tick_sleeps_while_closed() {
+        let mut s = AppState::new();
+        let t0 = std::time::Instant::now();
+        s.tetris_tick(t0 + std::time::Duration::from_secs(60));
+        assert!(s.tetris_last_drop.is_none(), "closed game never arms");
+    }
 
-        #[test]
-        fn wide_agent_topbar_uses_labeled_icons_from_reference() {
-            let mut state = AppState::new();
-            state.term_size = (40, 180);
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-            assert!(labels[0].starts_with("🤖 "));
-            assert!(labels[1].starts_with("💻 "));
-            assert!(labels[2].starts_with("🔀 "));
-            assert!(labels[3].starts_with("📷 "));
-            assert!(labels[4].starts_with("📖 "));
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn scm_tab_selects_a_live_lazygit_pane() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        // Index 2 is a real PTY tab now, not an overlay: selecting it
+        // lazily spawns the pane (the shell reports a missing binary as
+        // an exited child, so this holds with or without lazygit).
+        assert!(state.select_top_tab(2));
+        assert!(state.topbar().tabs[2].active);
+        assert_eq!(
+            state.manager.active_tab_kind(id),
+            Some(crate::session::TabKind::Scm)
+        );
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn shrinking_hides_and_closes_extra_view() {
-            let mut state = AppState::new();
-            state.apply(AppEvent::Resize(40, 180));
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            assert!(state.select_top_tab(3));
-            state.apply(AppEvent::Resize(24, 80));
-            assert!(!state.overlay_active());
-            assert_eq!(state.topbar().tabs.len(), 3);
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn agent_topbar_exposes_clickable_read_only_views() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
+        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
+        assert!(state.select_top_tab(3));
+        assert!(state.topbar().tabs[3].active);
+        let view = state.views().into_iter().find(|v| v.focused).unwrap();
+        assert!(view.lines.iter().flatten().any(|span| span.text.contains("renders diagrams")));
+        assert!(view.lines.iter().flatten().any(|span| span.text.contains("visualize the flow for")));
+        assert!(state.select_top_tab(0));
+        assert!(state.topbar().tabs[0].active);
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn ordinary_wide_terminal_keeps_all_topbar_views_visible() {
-            let mut state = AppState::new();
-            state.apply(AppEvent::Resize(30, 120));
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            assert_eq!(state.topbar().tabs.len(), 5);
-            let bar = crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
-            assert_eq!(crate::ui::topbar::layout_topbar(bar, &state.topbar().tabs, false).len(), 5);
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn topbar_omits_events_and_tasks() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
+        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn sidebar_collapses_background_timers() {
-            std::env::set_var("CODEX_BIN", "cat");
-            let mut state = AppState::new();
-            let a = state
-                .manager
-                .spawn_agent(
-                    "a",
-                    &std::env::temp_dir(),
-                    "exec cat",
-                    RunId::generate(),
-                    "codex",
-                )
-                .unwrap();
-            let b = state
-                .manager
-                .spawn_agent(
-                    "b",
-                    &std::env::temp_dir(),
-                    "exec cat",
-                    RunId::generate(),
-                    "codex",
-                )
-                .unwrap();
-            std::env::remove_var("CODEX_BIN");
-            let run_a = state.manager.get(a).unwrap().run_id.as_str().to_string();
-            let out = comms_reply(
-                &mut state,
-                &run_a,
-                "schedule_prompt",
-                r#"{"prompt":"later","delay_seconds":600}"#,
-            );
-            assert!(out.contains("timer_id"), "armed: {out}");
-            state.manager.switch(b);
-            let info = state.sidebar_info();
-            assert!(
-                info.session.expect("detail renders").timers.is_empty(),
-                "focused shows only its own"
-            );
-            assert_eq!(info.other_timers, 1, "background collapses to a count");
-            assert!(state.manager.remove(a));
-            assert!(state.manager.remove(b));
-        }
+    #[test]
+    fn wide_agent_topbar_uses_labeled_icons_from_reference() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
+        assert!(labels[0].starts_with("🤖 "));
+        assert!(labels[1].starts_with("💻 "));
+        assert!(labels[2].starts_with("🔀 "));
+        assert!(labels[3].starts_with("📷 "));
+        assert!(labels[4].starts_with("📖 "));
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn sidebar_shows_timers_only_for_focused_session() {
-            std::env::set_var("CODEX_BIN", "cat");
-            let mut state = AppState::new();
-            let a = state.manager.spawn_agent(
-                "a", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            let b = state.manager.spawn_agent(
-                "b", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            std::env::remove_var("CODEX_BIN");
-            let run_a = state.manager.get(a).unwrap().run_id.as_str().to_string();
-            let out = comms_reply(
-                &mut state, &run_a, "schedule_prompt",
-                r#"{"prompt":"later","delay_seconds":600}"#,
-            );
-            let timer = crate::hooks::policy::json_string_field(out.as_bytes(), &["timer_id"]).unwrap();
-            assert_eq!(state.manager.active(), Some(a));
-            let focused = state.sidebar_info().session.expect("detail renders");
-            assert_eq!(focused.timers.len(), 1, "focused session shows its timer");
-            assert_eq!(focused.timers[0].id, timer);
-            state.manager.switch(b);
-            let other = state.sidebar_info().session.expect("detail renders");
-            assert!(other.timers.is_empty(), "unfocused timers stay hidden");
-            assert!(state.cancel_timer(&timer), "sidebar cancel drops it");
-            assert!(state.broker.timers_for(a).is_empty());
-            assert!(!state.cancel_timer(&timer), "second cancel stays false");
-            assert!(state.manager.remove(a));
-            assert!(state.manager.remove(b));
-        }
+    #[test]
+    fn shrinking_hides_and_closes_extra_view() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        assert!(state.select_top_tab(3));
+        state.apply(AppEvent::Resize(24, 80));
+        assert!(!state.overlay_active());
+        assert_eq!(state.topbar().tabs.len(), 3);
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn sidebar_info_marks_failing_telegram_poll() {
-            let mut state = AppState::new();
-            state.telegram_config.lock().expect("lock").enabled = true;
-            state.telegram_last_poll_failed = true;
-            assert_eq!(state.sidebar_info().telegram, "on · retrying");
-            state.telegram_last_poll_failed = false;
-            assert_eq!(state.sidebar_info().telegram, "on");
-            state.telegram_config.lock().expect("lock").enabled = false;
-            assert_eq!(state.sidebar_info().telegram, "off");
-        }
+    #[test]
+    fn ordinary_wide_terminal_keeps_all_topbar_views_visible() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(30, 120));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        assert_eq!(state.topbar().tabs.len(), 5);
+        let bar = crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
+        assert_eq!(crate::ui::topbar::layout_topbar(bar, &state.topbar().tabs, false).len(), 5);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn sidebar_collapses_background_timers() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let a = state
+            .manager
+            .spawn_agent(
+                "a",
+                &std::env::temp_dir(),
+                "exec cat",
+                RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        let b = state
+            .manager
+            .spawn_agent(
+                "b",
+                &std::env::temp_dir(),
+                "exec cat",
+                RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let run_a = state.manager.get(a).unwrap().run_id.as_str().to_string();
+        let out = comms_reply(
+            &mut state,
+            &run_a,
+            "schedule_prompt",
+            r#"{"prompt":"later","delay_seconds":600}"#,
+        );
+        assert!(out.contains("timer_id"), "armed: {out}");
+        state.manager.switch(b);
+        let info = state.sidebar_info();
+        assert!(
+            info.session.expect("detail renders").timers.is_empty(),
+            "focused shows only its own"
+        );
+        assert_eq!(info.other_timers, 1, "background collapses to a count");
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
+    }
+
+    #[test]
+    fn sidebar_shows_timers_only_for_focused_session() {
+        std::env::set_var("CODEX_BIN", "cat");
+        let mut state = AppState::new();
+        let a = state.manager.spawn_agent(
+            "a", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let b = state.manager.spawn_agent(
+            "b", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let run_a = state.manager.get(a).unwrap().run_id.as_str().to_string();
+        let out = comms_reply(
+            &mut state, &run_a, "schedule_prompt",
+            r#"{"prompt":"later","delay_seconds":600}"#,
+        );
+        let timer = crate::hooks::policy::json_string_field(out.as_bytes(), &["timer_id"]).unwrap();
+        assert_eq!(state.manager.active(), Some(a));
+        let focused = state.sidebar_info().session.expect("detail renders");
+        assert_eq!(focused.timers.len(), 1, "focused session shows its timer");
+        assert_eq!(focused.timers[0].id, timer);
+        state.manager.switch(b);
+        let other = state.sidebar_info().session.expect("detail renders");
+        assert!(other.timers.is_empty(), "unfocused timers stay hidden");
+        assert!(state.cancel_timer(&timer), "sidebar cancel drops it");
+        assert!(state.broker.timers_for(a).is_empty());
+        assert!(!state.cancel_timer(&timer), "second cancel stays false");
+        assert!(state.manager.remove(a));
+        assert!(state.manager.remove(b));
+    }
+
+    #[test]
+    fn sidebar_info_marks_failing_telegram_poll() {
+        let mut state = AppState::new();
+        state.telegram_config.lock().expect("lock").enabled = true;
+        state.telegram_last_poll_failed = true;
+        assert_eq!(state.sidebar_info().telegram, "on · retrying");
+        state.telegram_last_poll_failed = false;
+        assert_eq!(state.sidebar_info().telegram, "on");
+        state.telegram_config.lock().expect("lock").enabled = false;
+        assert_eq!(state.sidebar_info().telegram, "off");
+    }
 }

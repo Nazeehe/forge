@@ -265,111 +265,111 @@ mod tests {
     use super::*;
     use crate::comms::test_support::*;
 
-        #[test]
-        fn forged_run_id_is_rejected() {
-            let mut p = live_pair().grouped();
-            let err = p
-                .call(
-                    &"f".repeat(32),
-                    "ask_session",
-                    r#"{"target":"b","message":"hi"}"#,
-                )
-                .expect_err("forged run ID must fail");
-            assert!(err.contains("run ID"), "err: {err}");
-        }
-
-        #[test]
-        fn no_shared_group_blocks_transfer() {
-            let mut p = live_pair();
-            // a joins alone; b is groupless.
-            p.state.broker.join(&p.state.manager, p.a, "solo").unwrap();
-            let err = p
-                .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"hi"}"#)
-                .expect_err("no shared group must fail");
-            assert!(err.contains("shared group"), "err: {err}");
-            assert!(p.state.broker.take_due(p.b, 10).is_empty());
-        }
-
-        #[test]
-        fn legacy_short_params_still_accepted() {
-            let mut p = live_pair().grouped();
-            // Phase 4a short forms are aliases for the canonical blueprint names.
-            let res = p
-                .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
-                .expect("canonical message validates");
-            let conv = json_field(&res, "conversation").unwrap();
-            p.state.broker.take_due(p.b, 10);
-            p.call(
-                &p.run_b.clone(),
-                "send_response",
-                &format!(r#"{{"conversation_id":"{conv}","message":"a"}}"#),
+    #[test]
+    fn forged_run_id_is_rejected() {
+        let mut p = live_pair().grouped();
+        let err = p
+            .call(
+                &"f".repeat(32),
+                "ask_session",
+                r#"{"target":"b","message":"hi"}"#,
             )
-            .expect("canonical conversation_id validates");
-            // ...and the old shorts keep working.
-            p.call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"old"}"#)
-                .expect("legacy text alias validates");
-            let due = p.state.broker.take_due(p.b, 10);
-            assert_eq!(due.len(), 1);
-            assert_eq!(due[0].text, "old");
-        }
+            .expect_err("forged run ID must fail");
+        assert!(err.contains("run ID"), "err: {err}");
+    }
 
-        #[test]
-        fn ask_returns_an_id_and_queues_target_injection() {
-            let mut p = live_pair().grouped();
-            let res = p
-                .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"ready?"}"#)
-                .expect("ask validates");
-            assert!(res.contains(r#""conversation":""#), "res: {res}");
-            let due = p.state.broker.take_due(p.b, 10);
-            assert_eq!(due.len(), 1);
-            assert_eq!(due[0].text, "ready?");
-            assert!(matches!(due[0].kind, InjectKind::Ask));
-        }
+    #[test]
+    fn no_shared_group_blocks_transfer() {
+        let mut p = live_pair();
+        // a joins alone; b is groupless.
+        p.state.broker.join(&p.state.manager, p.a, "solo").unwrap();
+        let err = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"hi"}"#)
+            .expect_err("no shared group must fail");
+        assert!(err.contains("shared group"), "err: {err}");
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+    }
 
-        #[test]
-        fn list_sessions_reports_live_peers() {
-            let mut p = live_pair().grouped();
-            let res = p
-                .call(&p.run_a.clone(), "list_sessions", "{}")
-                .expect("listing works");
-            assert!(res.contains(r#""name":"a""#), "res: {res}");
-            assert!(res.contains(r#""name":"b""#), "res: {res}");
-            assert!(res.contains(r#""live":true"#), "res: {res}");
-            // The caller sees its own name up front in `you`.
-            assert!(res.starts_with(r#"{"you":"a","#), "res: {res}");
-            let res_b = p
-                .call(&p.run_b.clone(), "list_sessions", "{}")
-                .expect("listing works for b too");
-            assert!(res_b.starts_with(r#"{"you":"b","#), "res: {res_b}");
-        }
+    #[test]
+    fn legacy_short_params_still_accepted() {
+        let mut p = live_pair().grouped();
+        // Phase 4a short forms are aliases for the canonical blueprint names.
+        let res = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
+            .expect("canonical message validates");
+        let conv = json_field(&res, "conversation").unwrap();
+        p.state.broker.take_due(p.b, 10);
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"a"}}"#),
+        )
+        .expect("canonical conversation_id validates");
+        // ...and the old shorts keep working.
+        p.call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"old"}"#)
+            .expect("legacy text alias validates");
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].text, "old");
+    }
 
-        #[test]
-        fn session_list_shows_shared_bots_marked() {
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            p.register_bot("spy", vec!["elsewhere"]);
-            let list = p
-                .call(&p.run_a.clone(), "list_sessions", "{}")
-                .expect("list validates");
-            assert!(list.contains(r#""name":"skippy""#), "list: {list}");
-            assert!(list.contains(r#""bot":true"#), "list: {list}");
-            assert!(!list.contains("spy"), "list: {list}");
-        }
+    #[test]
+    fn ask_returns_an_id_and_queues_target_injection() {
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"ready?"}"#)
+            .expect("ask validates");
+        assert!(res.contains(r#""conversation":""#), "res: {res}");
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].text, "ready?");
+        assert!(matches!(due[0].kind, InjectKind::Ask));
+    }
 
-        #[test]
-        fn bot_control_tools_are_denied_and_unknown_is_not_found() {
-            use crate::comms::bot::ErrorCode;
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            assert_eq!(
-                p.bcall("skippy", "start_session", r#"{"harness":"codex"}"#)
-                    .unwrap_err()
-                    .code,
-                ErrorCode::Unauthorized
-            );
-            assert_eq!(
-                p.bcall("skippy", "frobnicate", "{}").unwrap_err().code,
-                ErrorCode::NotFound
-            );
-        }
+    #[test]
+    fn list_sessions_reports_live_peers() {
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "list_sessions", "{}")
+            .expect("listing works");
+        assert!(res.contains(r#""name":"a""#), "res: {res}");
+        assert!(res.contains(r#""name":"b""#), "res: {res}");
+        assert!(res.contains(r#""live":true"#), "res: {res}");
+        // The caller sees its own name up front in `you`.
+        assert!(res.starts_with(r#"{"you":"a","#), "res: {res}");
+        let res_b = p
+            .call(&p.run_b.clone(), "list_sessions", "{}")
+            .expect("listing works for b too");
+        assert!(res_b.starts_with(r#"{"you":"b","#), "res: {res_b}");
+    }
+
+    #[test]
+    fn session_list_shows_shared_bots_marked() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        p.register_bot("spy", vec!["elsewhere"]);
+        let list = p
+            .call(&p.run_a.clone(), "list_sessions", "{}")
+            .expect("list validates");
+        assert!(list.contains(r#""name":"skippy""#), "list: {list}");
+        assert!(list.contains(r#""bot":true"#), "list: {list}");
+        assert!(!list.contains("spy"), "list: {list}");
+    }
+
+    #[test]
+    fn bot_control_tools_are_denied_and_unknown_is_not_found() {
+        use crate::comms::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        assert_eq!(
+            p.bcall("skippy", "start_session", r#"{"harness":"codex"}"#)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unauthorized
+        );
+        assert_eq!(
+            p.bcall("skippy", "frobnicate", "{}").unwrap_err().code,
+            ErrorCode::NotFound
+        );
+    }
 }

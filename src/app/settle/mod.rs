@@ -229,1077 +229,1019 @@ mod tests {
     use super::*;
     use crate::infra::ids::RunId;
 
-        #[test]
-        fn broker_tick_throttles_but_delivery_stays_per_tick() {
-            // The courtesy/timer sweep is second-scale work on a 16ms loop:
-            // rapid settles must skip it, while queue delivery below stays
-            // per-tick. A delay-0 timer scheduled inside the window proves
-            // the skip (still pending), and one after a lapsed window
-            // proves the sweep resumes.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            assert!(s.manager.set_activity(a, crate::session::Activity::Idle));
-            let schedule = |s: &mut AppState, prompt: &str| {
-                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                    run_id: run_a.to_string(),
-                    tool: "schedule_prompt".to_string(),
-                    args: format!("{{\"prompt\":{prompt:?},\"delay_seconds\":0}}"),
-                    reply: reply_tx,
-                    claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-                }));
-                let line = reply_rx
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .expect("schedule answers at once");
-                assert!(line.contains("\"ok\":true"), "schedule accepted: {line}");
-            };
-            // First settle sweeps: the due timer fires.
-            schedule(&mut s, "tick-one");
-            s.settle_comms();
-            assert!(s.broker.timers_for(a).is_empty(), "first settle sweeps");
-            // A timer scheduled inside the throttle window waits out the
-            // next sweep instead of firing on the very next settle.
-            schedule(&mut s, "tick-two");
-            s.settle_comms();
-            assert_eq!(
-                s.broker.timers_for(a).len(),
-                1,
-                "rapid settle skips the sweep"
-            );
-            // A lapsed window sweeps again: delivery never waited, only
-            // the sweep did.
-            s.last_broker_tick = None;
-            s.settle_comms();
-            assert!(s.broker.timers_for(a).is_empty(), "lapsed window sweeps");
-            assert!(s.manager.remove(a));
-        }
-
-        #[test]
-        fn broker_tick_window_opens_once_per_interval() {
-            use std::time::{Duration, Instant};
-            let window = crate::comms::BROKER_TICK_INTERVAL;
-            let start = Instant::now();
-            // Fresh windows (boot, tests) always sweep at once.
-            assert!(AppState::tick_due(None, start));
-            // Inside the window the sweep waits...
-            assert!(!AppState::tick_due(Some(start), start));
-            assert!(!AppState::tick_due(Some(start), start + window - Duration::from_millis(1)));
-            // ...then opens again once it lapses.
-            assert!(AppState::tick_due(Some(start), start + window));
-        }
-
-        #[test]
-        fn comms_ask_flows_through_apply_and_replies() {
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
+    #[test]
+    fn broker_tick_throttles_but_delivery_stays_per_tick() {
+        // The courtesy/timer sweep is second-scale work on a 16ms loop:
+        // rapid settles must skip it, while queue delivery below stays
+        // per-tick. A delay-0 timer scheduled inside the window proves
+        // the skip (still pending), and one after a lapsed window
+        // proves the sweep resumes.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        assert!(s.manager.set_activity(a, crate::session::Activity::Idle));
+        let schedule = |s: &mut AppState, prompt: &str| {
             let (reply_tx, reply_rx) = std::sync::mpsc::channel();
             s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id: run_a.to_string(),
-                tool: "ask_session".to_string(),
-                args: r#"{"target":"b","message":"ready?"}"#.to_string(),
+                tool: "schedule_prompt".to_string(),
+                args: format!("{{\"prompt\":{prompt:?},\"delay_seconds\":0}}"),
                 reply: reply_tx,
                 claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
             let line = reply_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
-            assert!(line.contains(r#""ok":true"#), "line: {line:?}");
-            assert!(line.contains(r#""conversation":""#), "line: {line:?}");
-            assert!(line.ends_with('\n'));
-            assert_eq!(s.broker.queued(b), 1);
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("schedule answers at once");
+            assert!(line.contains("\"ok\":true"), "schedule accepted: {line}");
+        };
+        // First settle sweeps: the due timer fires.
+        schedule(&mut s, "tick-one");
+        s.settle_comms();
+        assert!(s.broker.timers_for(a).is_empty(), "first settle sweeps");
+        // A timer scheduled inside the throttle window waits out the
+        // next sweep instead of firing on the very next settle.
+        schedule(&mut s, "tick-two");
+        s.settle_comms();
+        assert_eq!(
+            s.broker.timers_for(a).len(),
+            1,
+            "rapid settle skips the sweep"
+        );
+        // A lapsed window sweeps again: delivery never waited, only
+        // the sweep did.
+        s.last_broker_tick = None;
+        s.settle_comms();
+        assert!(s.broker.timers_for(a).is_empty(), "lapsed window sweeps");
+        assert!(s.manager.remove(a));
+    }
 
-        #[test]
-        fn comms_rejections_are_single_line_json() {
-            let mut s = AppState::new();
+    #[test]
+    fn broker_tick_window_opens_once_per_interval() {
+        use std::time::{Duration, Instant};
+        let window = crate::comms::BROKER_TICK_INTERVAL;
+        let start = Instant::now();
+        // Fresh windows (boot, tests) always sweep at once.
+        assert!(AppState::tick_due(None, start));
+        // Inside the window the sweep waits...
+        assert!(!AppState::tick_due(Some(start), start));
+        assert!(!AppState::tick_due(Some(start), start + window - Duration::from_millis(1)));
+        // ...then opens again once it lapses.
+        assert!(AppState::tick_due(Some(start), start + window));
+    }
+
+    #[test]
+    fn comms_ask_flows_through_apply_and_replies() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "ask_session".to_string(),
+            args: r#"{"target":"b","message":"ready?"}"#.to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""ok":true"#), "line: {line:?}");
+        assert!(line.contains(r#""conversation":""#), "line: {line:?}");
+        assert!(line.ends_with('\n'));
+        assert_eq!(s.broker.queued(b), 1);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn comms_rejections_are_single_line_json() {
+        let mut s = AppState::new();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: "f".repeat(32),
+            tool: "ask_session".to_string(),
+            args: "{}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""ok":false"#), "line: {line:?}");
+        assert!(!line.trim_end().contains('\n'), "one line: {line:?}");
+    }
+
+    #[test]
+    fn session_exit_fails_open_conversations() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "ask_session".to_string(),
+            args: r#"{"target":"b","message":"q?"}"#.to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        assert!(s.manager.kill(b));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                s.apply(AppEvent::from_pty(ev.0, ev.2));
+            }
+            let exited = s.manager.get(b).is_none_or(|rec| !rec.state.is_live());
+            if exited || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let due = s.broker.take_due(a, 10);
+        assert_eq!(due.len(), 1, "source learns the failure");
+        assert!(matches!(
+            due[0].kind,
+            crate::comms::InjectKind::Failed
+        ));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn comms_trace_records_send_verdicts() {
+        let dir = std::env::temp_dir().join(format!("forge-comms-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = dir.join("comms.log");
+        let mut s = AppState::new();
+        s.comms_trace = Some(log.clone());
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        let comms = |s: &mut AppState, run_id: String, tool: &str, args: &str| {
+            let (reply_tx, _) = std::sync::mpsc::channel();
+            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+                run_id,
+                tool: tool.to_string(),
+                args: args.to_string(),
+                reply: reply_tx,
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+            }));
+        };
+        // No shared group: the rejection lands in the trace with the cause.
+        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"b\",\"text\":\"hi\"}");
+        // Unknown target: liveness reads false, never a guess.
+        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"ghost\",\"text\":\"hi\"}");
+        // Grouped: the accept lands with its conversation and queue depth.
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"b\",\"text\":\"hello-b\"}");
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].contains("tool=tell_session"), "{}", lines[0]);
+        assert!(lines[0].contains("caller=\"a\""), "{}", lines[0]);
+        assert!(lines[0].contains("-> err"), "{}", lines[0]);
+        assert!(lines[0].contains("no shared group"), "{}", lines[0]);
+        assert!(lines[0].contains("shared_group=false"), "{}", lines[0]);
+        assert!(lines[1].contains("-> err"), "{}", lines[1]);
+        assert!(lines[1].contains("target_live=false"), "{}", lines[1]);
+        assert!(lines[2].contains("-> ok"), "{}", lines[2]);
+        assert!(lines[2].contains("conv="), "{}", lines[2]);
+        assert!(lines[2].contains("to=\"b\""), "{}", lines[2]);
+        assert!(lines[2].contains("queued=1"), "{}", lines[2]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn comms_trace_records_delivery_and_busy_holds() {
+        let dir = std::env::temp_dir().join(format!("forge-comms-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = dir.join("comms.log");
+        let mut s = AppState::new();
+        s.comms_trace = Some(log.clone());
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        // Busy target: the hold names the pane activity, not just silence.
+        assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1);
+        // Idle target: the delivery names conv, kind, and queue remainder.
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("hold"), "{text}");
+        assert!(text.contains("to=\"b\""), "{text}");
+        assert!(text.contains("activity=ToolUse"), "{text}");
+        assert!(text.contains("deliver"), "{text}");
+        assert!(text.contains("queued_left=0"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn comms_trace_records_staged_enters() {
+        let dir = std::env::temp_dir().join(format!("forge-comms-enter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = dir.join("comms.log");
+        let mut s = AppState::new();
+        s.comms_trace = Some(log.clone());
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0);
+        assert!(s.pending_enter.contains_key(&b), "body stages its Enter");
+        s.settle_enters(std::time::Instant::now() + std::time::Duration::from_millis(500));
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("enter"), "{text}");
+        assert!(text.contains("to=\"b\""), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn settle_comms_delivers_to_idle_panes_only() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        // Busy target: the injection waits.
+        assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "busy target waits");
+        // Idle target: delivered into the pane.
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                s.apply(AppEvent::from_pty(ev.0, ev.2));
+            }
+            if s.manager.screen_text(b).is_some_and(|t| t.contains("hello-b")) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "injection never reached the pane"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn reply_round_trip_needs_stop_to_reach_first_session() {
+        // Live shape: both agents have fired hooks, so neither is Idle.
+        // The ask goes out, the target answers, and the reply waits until
+        // the first session's turn ends (Stop parks Stopped). Before the
+        // Stop edge was installed, that wait never ended.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let hook = |s: &mut AppState, hook: &str, run_id: String| {
+            let (reply_tx, _) = std::sync::mpsc::channel();
+            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+                hook: hook.to_string(),
+                body: "{}".to_string(),
+                run_id,
+                sync: false,
+                reply: reply_tx,
+                timed_out: Default::default(),
+            }));
+        };
+        let comms = |s: &mut AppState, run_id: String, tool: &str, args: &str| -> String {
             let (reply_tx, reply_rx) = std::sync::mpsc::channel();
             s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: "f".repeat(32),
-                tool: "ask_session".to_string(),
-                args: "{}".to_string(),
+                run_id,
+                tool: tool.to_string(),
+                args: args.to_string(),
                 reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
-            let line = reply_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
-            assert!(line.contains(r#""ok":false"#), "line: {line:?}");
-            assert!(!line.trim_end().contains('\n'), "one line: {line:?}");
-        }
-
-        #[test]
-        fn session_exit_fails_open_conversations() {
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_a.to_string(),
-                tool: "ask_session".to_string(),
-                args: r#"{"target":"b","message":"q?"}"#.to_string(),
-                reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-            }));
-            assert!(s.manager.kill(b));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    s.apply(AppEvent::from_pty(ev.0, ev.2));
-                }
-                let exited = s.manager.get(b).is_none_or(|rec| !rec.state.is_live());
-                if exited || std::time::Instant::now() > deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            reply_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("broker answers at once")
+        };
+        // Both sessions mid-turn, like live agents that called tools.
+        hook(&mut s, "PreToolUse", run_a.to_string());
+        hook(&mut s, "PreToolUse", run_b.to_string());
+        // A's ask waits while B is busy, then lands when B's turn ends.
+        let ask_line = comms(&mut s, run_a.to_string(), "ask_session", "{\"target\":\"b\",\"message\":\"ready?\"}");
+        assert!(ask_line.contains("\"ok\":true"), "ask accepted: {ask_line}");
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "busy target holds the ask");
+        hook(&mut s, "Stop", run_b.to_string());
+        // The Stop hook stamped hook activity; age it past the debounce
+        // beat so this settle tests activity gating, not hook timing.
+        s.last_hook_activity.insert(
+            b,
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "turn end delivers the ask");
+        // B answers; A is still mid-turn so the reply waits.
+        let conv = crate::hooks::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
+            .expect("ask returns a conversation");
+        let resp_line = comms(
+            &mut s,
+            run_b.to_string(),
+            "send_response",
+            &format!("{{\"conversation_id\":\"{conv}\",\"message\":\"got-it\"}}"),
+        );
+        assert!(resp_line.contains("\"ok\":true"), "reply accepted: {resp_line}");
+        s.settle_comms();
+        assert_eq!(s.broker.queued(a), 1, "reply waits while A works");
+        // A's turn ends: the reply lands in A's pane.
+        hook(&mut s, "Stop", run_a.to_string());
+        s.last_hook_activity.insert(
+            a,
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert_eq!(s.broker.queued(a), 0, "turn end delivers the reply");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                s.apply(AppEvent::from_pty(ev.0, ev.2));
             }
-            let due = s.broker.take_due(a, 10);
-            assert_eq!(due.len(), 1, "source learns the failure");
-            assert!(matches!(
-                due[0].kind,
-                crate::comms::InjectKind::Failed
-            ));
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn comms_trace_records_send_verdicts() {
-            let dir = std::env::temp_dir().join(format!("forge-comms-trace-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            let log = dir.join("comms.log");
-            let mut s = AppState::new();
-            s.comms_trace = Some(log.clone());
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            let comms = |s: &mut AppState, run_id: String, tool: &str, args: &str| {
-                let (reply_tx, _) = std::sync::mpsc::channel();
-                s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                    run_id,
-                    tool: tool.to_string(),
-                    args: args.to_string(),
-                    reply: reply_tx,
-                    claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-                }));
-            };
-            // No shared group: the rejection lands in the trace with the cause.
-            comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"b\",\"text\":\"hi\"}");
-            // Unknown target: liveness reads false, never a guess.
-            comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"ghost\",\"text\":\"hi\"}");
-            // Grouped: the accept lands with its conversation and queue depth.
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"b\",\"text\":\"hello-b\"}");
-            let text = std::fs::read_to_string(&log).unwrap();
-            let lines: Vec<&str> = text.lines().collect();
-            assert_eq!(lines.len(), 3, "{text}");
-            assert!(lines[0].contains("tool=tell_session"), "{}", lines[0]);
-            assert!(lines[0].contains("caller=\"a\""), "{}", lines[0]);
-            assert!(lines[0].contains("-> err"), "{}", lines[0]);
-            assert!(lines[0].contains("no shared group"), "{}", lines[0]);
-            assert!(lines[0].contains("shared_group=false"), "{}", lines[0]);
-            assert!(lines[1].contains("-> err"), "{}", lines[1]);
-            assert!(lines[1].contains("target_live=false"), "{}", lines[1]);
-            assert!(lines[2].contains("-> ok"), "{}", lines[2]);
-            assert!(lines[2].contains("conv="), "{}", lines[2]);
-            assert!(lines[2].contains("to=\"b\""), "{}", lines[2]);
-            assert!(lines[2].contains("queued=1"), "{}", lines[2]);
-            let _ = std::fs::remove_dir_all(&dir);
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn comms_trace_records_delivery_and_busy_holds() {
-            let dir = std::env::temp_dir().join(format!("forge-comms-hold-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            let log = dir.join("comms.log");
-            let mut s = AppState::new();
-            s.comms_trace = Some(log.clone());
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_a.to_string(),
-                tool: "tell_session".to_string(),
-                args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
-                reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-            }));
-            // Busy target: the hold names the pane activity, not just silence.
-            assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 1);
-            // Idle target: the delivery names conv, kind, and queue remainder.
-            assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0);
-            let text = std::fs::read_to_string(&log).unwrap();
-            assert!(text.contains("hold"), "{text}");
-            assert!(text.contains("to=\"b\""), "{text}");
-            assert!(text.contains("activity=ToolUse"), "{text}");
-            assert!(text.contains("deliver"), "{text}");
-            assert!(text.contains("queued_left=0"), "{text}");
-            let _ = std::fs::remove_dir_all(&dir);
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn comms_trace_records_staged_enters() {
-            let dir = std::env::temp_dir().join(format!("forge-comms-enter-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            let log = dir.join("comms.log");
-            let mut s = AppState::new();
-            s.comms_trace = Some(log.clone());
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_a.to_string(),
-                tool: "tell_session".to_string(),
-                args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
-                reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-            }));
-            assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0);
-            assert!(s.pending_enter.contains_key(&b), "body stages its Enter");
-            s.settle_enters(std::time::Instant::now() + std::time::Duration::from_millis(500));
-            let text = std::fs::read_to_string(&log).unwrap();
-            assert!(text.contains("enter"), "{text}");
-            assert!(text.contains("to=\"b\""), "{text}");
-            let _ = std::fs::remove_dir_all(&dir);
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn settle_comms_delivers_to_idle_panes_only() {
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            // Busy target: the injection waits.
-            assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_a.to_string(),
-                tool: "tell_session".to_string(),
-                args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
-                reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-            }));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 1, "busy target waits");
-            // Idle target: delivered into the pane.
-            assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    s.apply(AppEvent::from_pty(ev.0, ev.2));
-                }
-                if s.manager.screen_text(b).is_some_and(|t| t.contains("hello-b")) {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "injection never reached the pane"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            if s.manager.screen_text(a).is_some_and(|t| t.contains("got-it")) {
+                break;
             }
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn reply_round_trip_needs_stop_to_reach_first_session() {
-            // Live shape: both agents have fired hooks, so neither is Idle.
-            // The ask goes out, the target answers, and the reply waits until
-            // the first session's turn ends (Stop parks Stopped). Before the
-            // Stop edge was installed, that wait never ended.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            let hook = |s: &mut AppState, hook: &str, run_id: String| {
-                let (reply_tx, _) = std::sync::mpsc::channel();
-                s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
-                    hook: hook.to_string(),
-                    body: "{}".to_string(),
-                    run_id,
-                    sync: false,
-                    reply: reply_tx,
-                    timed_out: Default::default(),
-                }));
-            };
-            let comms = |s: &mut AppState, run_id: String, tool: &str, args: &str| -> String {
-                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                    run_id,
-                    tool: tool.to_string(),
-                    args: args.to_string(),
-                    reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-                }));
-                reply_rx
-                    .recv_timeout(std::time::Duration::from_secs(5))
-                    .expect("broker answers at once")
-            };
-            // Both sessions mid-turn, like live agents that called tools.
-            hook(&mut s, "PreToolUse", run_a.to_string());
-            hook(&mut s, "PreToolUse", run_b.to_string());
-            // A's ask waits while B is busy, then lands when B's turn ends.
-            let ask_line = comms(&mut s, run_a.to_string(), "ask_session", "{\"target\":\"b\",\"message\":\"ready?\"}");
-            assert!(ask_line.contains("\"ok\":true"), "ask accepted: {ask_line}");
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 1, "busy target holds the ask");
-            hook(&mut s, "Stop", run_b.to_string());
-            // The Stop hook stamped hook activity; age it past the debounce
-            // beat so this settle tests activity gating, not hook timing.
-            s.last_hook_activity.insert(
-                b,
-                std::time::Instant::now()
-                    - crate::comms::INJECT_HOOK_DEBOUNCE
-                    - std::time::Duration::from_millis(100),
-            );
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0, "turn end delivers the ask");
-            // B answers; A is still mid-turn so the reply waits.
-            let conv = crate::hooks::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
-                .expect("ask returns a conversation");
-            let resp_line = comms(
-                &mut s,
-                run_b.to_string(),
-                "send_response",
-                &format!("{{\"conversation_id\":\"{conv}\",\"message\":\"got-it\"}}"),
-            );
-            assert!(resp_line.contains("\"ok\":true"), "reply accepted: {resp_line}");
-            s.settle_comms();
-            assert_eq!(s.broker.queued(a), 1, "reply waits while A works");
-            // A's turn ends: the reply lands in A's pane.
-            hook(&mut s, "Stop", run_a.to_string());
-            s.last_hook_activity.insert(
-                a,
-                std::time::Instant::now()
-                    - crate::comms::INJECT_HOOK_DEBOUNCE
-                    - std::time::Duration::from_millis(100),
-            );
-            s.settle_comms();
-            assert_eq!(s.broker.queued(a), 0, "turn end delivers the reply");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    s.apply(AppEvent::from_pty(ev.0, ev.2));
-                }
-                if s.manager.screen_text(a).is_some_and(|t| t.contains("got-it")) {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "reply never reached the first session"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn prompt_submit_holds_injections_until_stop() {
-            // A freshly prompted session looks settled but its agent is
-            // generating: UserPromptSubmit must hold injections (where Enter
-            // would be eaten and the text left as a draft) until Stop.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            let hook = |s: &mut AppState, hook: &str, run_id: String| {
-                let (reply_tx, _) = std::sync::mpsc::channel();
-                s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
-                    hook: hook.to_string(),
-                    body: "{}".to_string(),
-                    run_id,
-                    sync: false,
-                    reply: reply_tx,
-                    timed_out: Default::default(),
-                }));
-            };
-            // A was parked (Stopped) but just got prompted: generating.
-            hook(&mut s, "Stop", run_a.to_string());
-            hook(&mut s, "UserPromptSubmit", run_a.to_string());
-            assert_eq!(
-                s.manager.get(a).unwrap().activity,
-                crate::session::Activity::Thinking
-            );
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_b.to_string(),
-                tool: "tell_session".to_string(),
-                args: "{\"target\":\"a\",\"text\":\"hold\"}".to_string(),
-                reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-            }));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(a), 1, "generating target waits");
-            hook(&mut s, "Stop", run_a.to_string());
-            // The Stop hook stamped hook activity; age it past the debounce
-            // beat so this settle tests activity gating, not hook timing.
-            s.last_hook_activity.insert(
-                a,
-                std::time::Instant::now()
-                    - crate::comms::INJECT_HOOK_DEBOUNCE
-                    - std::time::Duration::from_millis(100),
-            );
-            s.settle_comms();
-            assert_eq!(s.broker.queued(a), 0, "turn end delivers");
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn settle_comms_stages_enter_beat_after_body() {
-            // Byte-level human parity through a raw-mode slave (no CR/LF
-            // translation anywhere, no echo): the body arrives whole with no
-            // Enter bundled in, and the CR follows as its own input event
-            // after the beat — type text, press Enter, never one burst.
-            use crate::session::pty::PtyEvent;
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn(
-                    "b",
-                    &std::env::temp_dir(),
-                    "stty raw -echo && printf READY || printf STTYFAIL; exec cat",
-                    run_b.clone(),
-                    "shell",
-                )
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            // Wait out the spawn: anything the starting shell echoes (including
-            // canonical-mode translations) predates raw mode and must not
-            // pollute the byte assertions below.
-            let mut raw = Vec::new();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    if ev.0 == b {
-                        if let PtyEvent::Output(bytes) = &ev.2 {
-                            raw.extend_from_slice(bytes);
-                        }
-                    }
-                }
-                if raw.windows(8).any(|w| w == b"STTYFAIL") {
-                    panic!("stty raw failed in the probe session");
-                }
-                if raw.windows(5).any(|w| w == b"READY") {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "probe session never went raw, got: {raw:?}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            raw.clear();
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_a.to_string(),
-                tool: "tell_session".to_string(),
-                args: "{\"target\":\"b\",\"message\":\"ping-body\"}".to_string(),
-                reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-            }));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0, "raw session is idle: body delivered");
-            assert!(s.pending_enter.contains_key(&b), "enter staged, not sent");
-            // Drain raw output until cat echoes the full body back.
-            let body = b"[forge tell_session from a]: ping-body";
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    if ev.0 == b {
-                        if let PtyEvent::Output(bytes) = &ev.2 {
-                            raw.extend_from_slice(bytes);
-                        }
-                    }
-                }
-                if raw.windows(body.len()).any(|w| w == body) {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "body never echoed, got: {raw:?}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            assert!(!raw.contains(&b'\r'), "no Enter bundled with the body");
-            // After the beat the CR goes out as its own event, trailing the body.
-            std::thread::sleep(
-                crate::comms::INJECT_ENTER_DELAY + std::time::Duration::from_millis(100),
-            );
-            s.settle_comms();
-            assert!(!s.pending_enter.contains_key(&b), "enter sent");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    if ev.0 == b {
-                        if let PtyEvent::Output(bytes) = &ev.2 {
-                            raw.extend_from_slice(bytes);
-                        }
-                    }
-                }
-                if raw.contains(&b'\r') {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "staged enter never arrived, got: {raw:?}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            let pos = raw
-                .windows(body.len())
-                .position(|w| w == body)
-                .expect("body present");
             assert!(
-                raw[pos + body.len()..].contains(&b'\r'),
-                "enter trails the body: {raw:?}"
+                std::time::Instant::now() < deadline,
+                "reply never reached the first session"
             );
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn settle_comms_delivers_one_body_per_enter() {
-            // Two queued tells must not merge into one submission: the first
-            // settle writes only the head body and stages its Enter; the
-            // second body waits for its own Enter after the first CR lands.
-            use crate::session::pty::PtyEvent;
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn(
-                    "b",
-                    &std::env::temp_dir(),
-                    "stty raw -echo && printf READY || printf STTYFAIL; exec cat",
-                    run_b.clone(),
-                    "shell",
-                )
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
-            let mut raw = Vec::new();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    if ev.0 == b {
-                        if let PtyEvent::Output(bytes) = &ev.2 {
-                            raw.extend_from_slice(bytes);
-                        }
+    #[test]
+    fn prompt_submit_holds_injections_until_stop() {
+        // A freshly prompted session looks settled but its agent is
+        // generating: UserPromptSubmit must hold injections (where Enter
+        // would be eaten and the text left as a draft) until Stop.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let hook = |s: &mut AppState, hook: &str, run_id: String| {
+            let (reply_tx, _) = std::sync::mpsc::channel();
+            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+                hook: hook.to_string(),
+                body: "{}".to_string(),
+                run_id,
+                sync: false,
+                reply: reply_tx,
+                timed_out: Default::default(),
+            }));
+        };
+        // A was parked (Stopped) but just got prompted: generating.
+        hook(&mut s, "Stop", run_a.to_string());
+        hook(&mut s, "UserPromptSubmit", run_a.to_string());
+        assert_eq!(
+            s.manager.get(a).unwrap().activity,
+            crate::session::Activity::Thinking
+        );
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_b.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"a\",\"text\":\"hold\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(a), 1, "generating target waits");
+        hook(&mut s, "Stop", run_a.to_string());
+        // The Stop hook stamped hook activity; age it past the debounce
+        // beat so this settle tests activity gating, not hook timing.
+        s.last_hook_activity.insert(
+            a,
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert_eq!(s.broker.queued(a), 0, "turn end delivers");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn settle_comms_stages_enter_beat_after_body() {
+        // Byte-level human parity through a raw-mode slave (no CR/LF
+        // translation anywhere, no echo): the body arrives whole with no
+        // Enter bundled in, and the CR follows as its own input event
+        // after the beat — type text, press Enter, never one burst.
+        use crate::session::pty::PtyEvent;
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn(
+                "b",
+                &std::env::temp_dir(),
+                "stty raw -echo && printf READY || printf STTYFAIL; exec cat",
+                run_b.clone(),
+                "shell",
+            )
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        // Wait out the spawn: anything the starting shell echoes (including
+        // canonical-mode translations) predates raw mode and must not
+        // pollute the byte assertions below.
+        let mut raw = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                if ev.0 == b {
+                    if let PtyEvent::Output(bytes) = &ev.2 {
+                        raw.extend_from_slice(bytes);
                     }
                 }
-                if raw.windows(5).any(|w| w == b"READY") {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "probe session never went raw, got: {raw:?}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            raw.clear();
-            let tell = |s: &mut AppState, text: &str| {
-                let (reply_tx, _) = std::sync::mpsc::channel();
-                s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                    run_id: run_a.to_string(),
-                    tool: "tell_session".to_string(),
-                    args: format!("{{\"target\":\"b\",\"text\":{text:?}}}"),
-                    reply: reply_tx,
-                    claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-                }));
-            };
-            tell(&mut s, "first-one");
-            tell(&mut s, "second-two");
-            // Only the head body goes out; the second waits in queue.
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 1, "second body waits for its own enter");
-            assert!(s.pending_enter.contains_key(&b), "enter staged, not sent");
-            // Past the beat the first CR lands while the second body is
-            // still queued — never in the same burst.
-            std::thread::sleep(
-                crate::comms::INJECT_ENTER_DELAY + std::time::Duration::from_millis(100),
+            if raw.windows(8).any(|w| w == b"STTYFAIL") {
+                panic!("stty raw failed in the probe session");
+            }
+            if raw.windows(5).any(|w| w == b"READY") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "probe session never went raw, got: {raw:?}"
             );
-            s.settle_comms();
-            assert!(!s.pending_enter.contains_key(&b), "first enter sent");
-            assert_eq!(s.broker.queued(b), 1, "second body still queued");
-            // The next settle writes the second body and stages its Enter.
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0, "second body delivered");
-            assert!(s.pending_enter.contains_key(&b), "second enter staged");
-            // Byte order on the wire: body1, CR, body2, CR — the second
-            // body never appears before the first Enter.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    if ev.0 == b {
-                        if let PtyEvent::Output(bytes) = &ev.2 {
-                            raw.extend_from_slice(bytes);
-                        }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        raw.clear();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"b\",\"message\":\"ping-body\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "raw session is idle: body delivered");
+        assert!(s.pending_enter.contains_key(&b), "enter staged, not sent");
+        // Drain raw output until cat echoes the full body back.
+        let body = b"[forge tell_session from a]: ping-body";
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                if ev.0 == b {
+                    if let PtyEvent::Output(bytes) = &ev.2 {
+                        raw.extend_from_slice(bytes);
                     }
                 }
-                if raw.windows(b"second-two".len()).any(|w| w == b"second-two") {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "second body never arrived, got: {raw:?}"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            let first_cr = raw.iter().position(|&byte| byte == b'\r').expect("CR sent");
-            let second_at = raw
-                .windows(b"second-two".len())
-                .position(|w| w == b"second-two")
-                .expect("second body present");
+            if raw.windows(body.len()).any(|w| w == body) {
+                break;
+            }
             assert!(
-                second_at > first_cr,
-                "second body follows the first enter: {raw:?}"
+                std::time::Instant::now() < deadline,
+                "body never echoed, got: {raw:?}"
             );
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert!(!raw.contains(&b'\r'), "no Enter bundled with the body");
+        // After the beat the CR goes out as its own event, trailing the body.
+        std::thread::sleep(
+            crate::comms::INJECT_ENTER_DELAY + std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert!(!s.pending_enter.contains_key(&b), "enter sent");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                if ev.0 == b {
+                    if let PtyEvent::Output(bytes) = &ev.2 {
+                        raw.extend_from_slice(bytes);
+                    }
+                }
+            }
+            if raw.contains(&b'\r') {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "staged enter never arrived, got: {raw:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pos = raw
+            .windows(body.len())
+            .position(|w| w == body)
+            .expect("body present");
+        assert!(
+            raw[pos + body.len()..].contains(&b'\r'),
+            "enter trails the body: {raw:?}"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn failed_body_write_keeps_message_queued() {
-            // Popping is not delivery: if the bytes never reach the pane,
-            // the message must stay queued for the next settle instead of
-            // vanishing with its pressure already moved.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+    #[test]
+    fn settle_comms_delivers_one_body_per_enter() {
+        // Two queued tells must not merge into one submission: the first
+        // settle writes only the head body and stages its Enter; the
+        // second body waits for its own Enter after the first CR lands.
+        use crate::session::pty::PtyEvent;
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn(
+                "b",
+                &std::env::temp_dir(),
+                "stty raw -echo && printf READY || printf STTYFAIL; exec cat",
+                run_b.clone(),
+                "shell",
+            )
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let mut raw = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                if ev.0 == b {
+                    if let PtyEvent::Output(bytes) = &ev.2 {
+                        raw.extend_from_slice(bytes);
+                    }
+                }
+            }
+            if raw.windows(5).any(|w| w == b"READY") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "probe session never went raw, got: {raw:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        raw.clear();
+        let tell = |s: &mut AppState, text: &str| {
             let (reply_tx, _) = std::sync::mpsc::channel();
             s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id: run_a.to_string(),
                 tool: "tell_session".to_string(),
-                args: r#"{"target":"b","text":"held"}"#.to_string(),
+                args: format!("{{\"target\":\"b\",\"text\":{text:?}}}"),
                 reply: reply_tx,
                 claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
-            // Kill the writer while the record stays idle (exit undrained):
-            // every write now fails deterministically.
-            s.manager.active_pane_mut(b).expect("live pane").close();
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 1, "failed write retries, never drops");
+        };
+        tell(&mut s, "first-one");
+        tell(&mut s, "second-two");
+        // Only the head body goes out; the second waits in queue.
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "second body waits for its own enter");
+        assert!(s.pending_enter.contains_key(&b), "enter staged, not sent");
+        // Past the beat the first CR lands while the second body is
+        // still queued — never in the same burst.
+        std::thread::sleep(
+            crate::comms::INJECT_ENTER_DELAY + std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert!(!s.pending_enter.contains_key(&b), "first enter sent");
+        assert_eq!(s.broker.queued(b), 1, "second body still queued");
+        // The next settle writes the second body and stages its Enter.
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "second body delivered");
+        assert!(s.pending_enter.contains_key(&b), "second enter staged");
+        // Byte order on the wire: body1, CR, body2, CR — the second
+        // body never appears before the first Enter.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                if ev.0 == b {
+                    if let PtyEvent::Output(bytes) = &ev.2 {
+                        raw.extend_from_slice(bytes);
+                    }
+                }
+            }
+            if raw.windows(b"second-two".len()).any(|w| w == b"second-two") {
+                break;
+            }
             assert!(
-                !s.pending_enter.contains_key(&b),
-                "no enter staged without a body"
+                std::time::Instant::now() < deadline,
+                "second body never arrived, got: {raw:?}"
             );
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        let first_cr = raw.iter().position(|&byte| byte == b'\r').expect("CR sent");
+        let second_at = raw
+            .windows(b"second-two".len())
+            .position(|w| w == b"second-two")
+            .expect("second body present");
+        assert!(
+            second_at > first_cr,
+            "second body follows the first enter: {raw:?}"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn failed_enter_write_stays_staged() {
-            // A CR that never reaches the pane must be retried, not
-            // forgotten: removing it strands an unsubmitted body.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_a.to_string(),
-                tool: "tell_session".to_string(),
-                args: r#"{"target":"b","text":"held"}"#.to_string(),
-                reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-            }));
-            s.settle_comms();
-            assert!(s.pending_enter.contains_key(&b), "enter staged");
-            // Kill the writer with the CR still staged, then age past the beat.
-            s.manager.active_pane_mut(b).expect("live pane").close();
-            s.pending_enter.insert(
-                b,
-                (std::time::Instant::now()
-                    - crate::comms::INJECT_ENTER_DELAY
-                    - std::time::Duration::from_millis(100),
-                None),
-            );
-            s.settle_comms();
-            assert!(
-                s.pending_enter.contains_key(&b),
-                "failed enter stays staged for retry"
-            );
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+    #[test]
+    fn failed_body_write_keeps_message_queued() {
+        // Popping is not delivery: if the bytes never reach the pane,
+        // the message must stay queued for the next settle instead of
+        // vanishing with its pressure already moved.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","text":"held"}"#.to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        // Kill the writer while the record stays idle (exit undrained):
+        // every write now fails deterministically.
+        s.manager.active_pane_mut(b).expect("live pane").close();
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "failed write retries, never drops");
+        assert!(
+            !s.pending_enter.contains_key(&b),
+            "no enter staged without a body"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn settle_comms_holds_during_human_typing() {
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_a.to_string(),
-                tool: "tell_session".to_string(),
-                args: r#"{"target":"b","message":"wait"}"#.to_string(),
-                reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-            }));
-            // Typing debounces the typed-in pane only (never its neighbors).
-            s.note_human_input(b);
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 1, "fresh typing debounces delivery");
-            // Human input also drops a staged Enter for that session: our CR
-            // must never submit the human's draft.
-            s.pending_enter.insert(b, (std::time::Instant::now(), None));
-            s.note_human_input(b);
-            assert!(!s.pending_enter.contains_key(&b), "human owns the prompt");
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+    #[test]
+    fn failed_enter_write_stays_staged() {
+        // A CR that never reaches the pane must be retried, not
+        // forgotten: removing it strands an unsubmitted body.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","text":"held"}"#.to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        s.settle_comms();
+        assert!(s.pending_enter.contains_key(&b), "enter staged");
+        // Kill the writer with the CR still staged, then age past the beat.
+        s.manager.active_pane_mut(b).expect("live pane").close();
+        s.pending_enter.insert(
+            b,
+            (std::time::Instant::now()
+                - crate::comms::INJECT_ENTER_DELAY
+                - std::time::Duration::from_millis(100),
+            None),
+        );
+        s.settle_comms();
+        assert!(
+            s.pending_enter.contains_key(&b),
+            "failed enter stays staged for retry"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn typed_over_tell_notifies_the_source() {
-            // The tell body reached B's prompt with its Enter staged;
-            // B types first, so the staged submit dies to protect the
-            // draft. The body may have mixed or been discarded, so A is
-            // told loudly instead of assuming it landed cleanly.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            let (reply_tx, _) = std::sync::mpsc::channel();
+    #[test]
+    fn settle_comms_holds_during_human_typing() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","message":"wait"}"#.to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        // Typing debounces the typed-in pane only (never its neighbors).
+        s.note_human_input(b);
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "fresh typing debounces delivery");
+        // Human input also drops a staged Enter for that session: our CR
+        // must never submit the human's draft.
+        s.pending_enter.insert(b, (std::time::Instant::now(), None));
+        s.note_human_input(b);
+        assert!(!s.pending_enter.contains_key(&b), "human owns the prompt");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn typed_over_tell_notifies_the_source() {
+        // The tell body reached B's prompt with its Enter staged;
+        // B types first, so the staged submit dies to protect the
+        // draft. The body may have mixed or been discarded, so A is
+        // told loudly instead of assuming it landed cleanly.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","message":"wait"}"#.to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                crate::ipc::listener::CLAIM_PENDING,
+            )),
+        }));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "body delivered");
+        assert!(s.pending_enter.contains_key(&b), "enter staged");
+        s.note_human_input(b);
+        let due = s.broker.take_due(a, 10);
+        assert_eq!(due.len(), 1, "source hears the clobber");
+        assert!(matches!(due[0].kind, crate::comms::InjectKind::Failed));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn typed_over_response_notifies_the_answerer() {
+        // B's answer sits in A's prompt awaiting its staged Enter;
+        // A types first. The answerer (not the asker) is told.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let mut converse = |run: &str, tool: &str, args: String| {
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
             s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                run_id: run_a.to_string(),
-                tool: "tell_session".to_string(),
-                args: r#"{"target":"b","message":"wait"}"#.to_string(),
+                run_id: run.to_string(),
+                tool: tool.to_string(),
+                args,
                 reply: reply_tx,
                 claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
                     crate::ipc::listener::CLAIM_PENDING,
                 )),
             }));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0, "body delivered");
-            assert!(s.pending_enter.contains_key(&b), "enter staged");
-            s.note_human_input(b);
-            let due = s.broker.take_due(a, 10);
-            assert_eq!(due.len(), 1, "source hears the clobber");
-            assert!(matches!(due[0].kind, crate::comms::InjectKind::Failed));
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+            reply_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("verdict arrives")
+        };
+        let ask_line = converse(
+            &run_a.to_string(),
+            "ask_session",
+            r#"{"target":"b","message":"q?"}"#.to_string(),
+        );
+        assert!(ask_line.contains(r#""ok":true"#), "ask accepted: {ask_line}");
+        let conv = crate::hooks::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
+            .expect("conversation id");
+        let resp_line = converse(
+            &run_b.to_string(),
+            "send_response",
+            format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        );
+        assert!(resp_line.contains(r#""ok":true"#), "answer accepted: {resp_line}");
+        s.settle_comms();
+        assert!(s.pending_enter.contains_key(&a), "enter staged");
+        s.note_human_input(a);
+        let due = s.broker.take_due(b, 10);
+        assert_eq!(due.len(), 1, "answerer hears the clobber");
+        assert!(matches!(due[0].kind, crate::comms::InjectKind::Failed));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 
-        #[test]
-        fn typed_over_response_notifies_the_answerer() {
-            // B's answer sits in A's prompt awaiting its staged Enter;
-            // A types first. The answerer (not the asker) is told.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            let mut converse = |run: &str, tool: &str, args: String| {
-                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                    run_id: run.to_string(),
-                    tool: tool.to_string(),
-                    args,
-                    reply: reply_tx,
-                    claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
-                        crate::ipc::listener::CLAIM_PENDING,
-                    )),
-                }));
-                reply_rx
-                    .recv_timeout(std::time::Duration::from_secs(2))
-                    .expect("verdict arrives")
-            };
-            let ask_line = converse(
-                &run_a.to_string(),
-                "ask_session",
-                r#"{"target":"b","message":"q?"}"#.to_string(),
-            );
-            assert!(ask_line.contains(r#""ok":true"#), "ask accepted: {ask_line}");
-            let conv = crate::hooks::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
-                .expect("conversation id");
-            let resp_line = converse(
-                &run_b.to_string(),
-                "send_response",
-                format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
-            );
-            assert!(resp_line.contains(r#""ok":true"#), "answer accepted: {resp_line}");
-            s.settle_comms();
-            assert!(s.pending_enter.contains_key(&a), "enter staged");
-            s.note_human_input(a);
-            let due = s.broker.take_due(b, 10);
-            assert_eq!(due.len(), 1, "answerer hears the clobber");
-            assert!(matches!(due[0].kind, crate::comms::InjectKind::Failed));
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn staged_enter_prunes_exited_records() {
-            // A naturally exited session keeps its record (marked not
-            // live); its staged Enter must still go, or the map — and
-            // futile pane retries — survive forever.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            assert!(s.manager.kill(a));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in s.manager.drain_pty_max(100) {
-                    s.apply(AppEvent::from_pty(ev.0, ev.2));
-                }
-                let exited = s.manager.get(a).is_none_or(|rec| !rec.state.is_live());
-                if exited || std::time::Instant::now() > deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
+    #[test]
+    fn staged_enter_prunes_exited_records() {
+        // A naturally exited session keeps its record (marked not
+        // live); its staged Enter must still go, or the map — and
+        // futile pane retries — survive forever.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        assert!(s.manager.kill(a));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in s.manager.drain_pty_max(100) {
+                s.apply(AppEvent::from_pty(ev.0, ev.2));
             }
-            assert!(s.manager.get(a).is_some(), "record retained");
-            assert!(!s.manager.get(a).unwrap().state.is_live(), "marked exited");
-            s.pending_enter.insert(
-                a,
-                (std::time::Instant::now()
-                    - crate::comms::INJECT_ENTER_DELAY
-                    - std::time::Duration::from_millis(100),
-                None),
-            );
-            s.settle_comms();
-            assert!(!s.pending_enter.contains_key(&a), "exited entry pruned");
+            let exited = s.manager.get(a).is_none_or(|rec| !rec.state.is_live());
+            if exited || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert!(s.manager.get(a).is_some(), "record retained");
+        assert!(!s.manager.get(a).unwrap().state.is_live(), "marked exited");
+        s.pending_enter.insert(
+            a,
+            (std::time::Instant::now()
+                - crate::comms::INJECT_ENTER_DELAY
+                - std::time::Duration::from_millis(100),
+            None),
+        );
+        s.settle_comms();
+        assert!(!s.pending_enter.contains_key(&a), "exited entry pruned");
+    }
 
-        #[test]
-        fn activity_in_one_pane_never_holds_another() {
-            // Typing in A and hook traffic from A must not starve idle B:
-            // debounce gates delivery per target, never app-wide.
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            assert!(s.manager.set_activity(a, crate::session::Activity::Idle));
-            assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
-            let tell = |s: &mut AppState| {
-                let (reply_tx, _) = std::sync::mpsc::channel();
-                s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-                    run_id: run_a.to_string(),
-                    tool: "tell_session".to_string(),
-                    args: r#"{"target":"b","message":"wait"}"#.to_string(),
-                    reply: reply_tx,
-                    claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-                }));
-            };
-            // Human typing in A leaves B's delivery alone.
-            tell(&mut s);
-            s.note_human_input(a);
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0, "A typing holds only A");
-            // Flush the staged Enter so the second half tests the hook
-            // gate, not one-body-per-Enter staging.
-            s.pending_enter.insert(
-                b,
-                (std::time::Instant::now()
-                    - crate::comms::INJECT_ENTER_DELAY
-                    - std::time::Duration::from_millis(100),
-                None),
-            );
-            s.settle_comms();
-            assert!(!s.pending_enter.contains_key(&b), "enter flushed");
-            // Hook traffic attributed to A leaves B's delivery alone.
-            tell(&mut s);
-            let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
-                hook: "PreToolUse".to_string(),
-                body: "{}".to_string(),
-                run_id: run_a.to_string(),
-                sync: false,
-                reply: reply_tx,
-                timed_out: Default::default(),
-            }));
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0, "A hooks hold only A");
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
-
-        #[test]
-        fn settle_comms_holds_after_hook_activity() {
-            let mut s = AppState::new();
-            let run_a = RunId::generate();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
-                .unwrap();
-            let run_b = RunId::generate();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
-                .unwrap();
-            s.broker.join(&s.manager, a, "peers").unwrap();
-            s.broker.join(&s.manager, b, "peers").unwrap();
-            assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+    #[test]
+    fn activity_in_one_pane_never_holds_another() {
+        // Typing in A and hook traffic from A must not starve idle B:
+        // debounce gates delivery per target, never app-wide.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(a, crate::session::Activity::Idle));
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let tell = |s: &mut AppState| {
             let (reply_tx, _) = std::sync::mpsc::channel();
             s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id: run_a.to_string(),
@@ -1308,20 +1250,78 @@ mod tests {
                 reply: reply_tx,
                 claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
-            // Fresh hook activity holds delivery even to an idle target.
-            s.last_hook_activity.insert(b, std::time::Instant::now());
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 1, "hook debounce holds delivery");
-            // Past the beat the same settle delivers.
-            s.last_hook_activity.insert(
-                b,
-                std::time::Instant::now()
-                    - crate::comms::INJECT_HOOK_DEBOUNCE
-                    - std::time::Duration::from_millis(100),
-            );
-            s.settle_comms();
-            assert_eq!(s.broker.queued(b), 0);
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-        }
+        };
+        // Human typing in A leaves B's delivery alone.
+        tell(&mut s);
+        s.note_human_input(a);
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "A typing holds only A");
+        // Flush the staged Enter so the second half tests the hook
+        // gate, not one-body-per-Enter staging.
+        s.pending_enter.insert(
+            b,
+            (std::time::Instant::now()
+                - crate::comms::INJECT_ENTER_DELAY
+                - std::time::Duration::from_millis(100),
+            None),
+        );
+        s.settle_comms();
+        assert!(!s.pending_enter.contains_key(&b), "enter flushed");
+        // Hook traffic attributed to A leaves B's delivery alone.
+        tell(&mut s);
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: "{}".to_string(),
+            run_id: run_a.to_string(),
+            sync: false,
+            reply: reply_tx,
+            timed_out: Default::default(),
+        }));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0, "A hooks hold only A");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn settle_comms_holds_after_hook_activity() {
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: r#"{"target":"b","message":"wait"}"#.to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        // Fresh hook activity holds delivery even to an idle target.
+        s.last_hook_activity.insert(b, std::time::Instant::now());
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1, "hook debounce holds delivery");
+        // Past the beat the same settle delivers.
+        s.last_hook_activity.insert(
+            b,
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
 }

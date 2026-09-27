@@ -205,149 +205,149 @@ mod tests {
     use super::*;
     use crate::app::test_support::*;
 
-        #[test]
-        fn walkthrough_empty_state_describes_tab_and_invocation() {
-            let mut state = AppState::new();
-            state.term_size = (40, 180);
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            let view = state.walkthrough_view(id);
-            let text: String = view.lines.iter().flatten().map(|span| span.text.as_str()).collect::<Vec<_>>().join("\n");
-            assert!(text.contains("step-by-step"), "describes the tab: {text:?}");
-            assert!(text.contains("walk me through"), "shows how to invoke it: {text:?}");
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn walkthrough_empty_state_describes_tab_and_invocation() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let view = state.walkthrough_view(id);
+        let text: String = view.lines.iter().flatten().map(|span| span.text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("step-by-step"), "describes the tab: {text:?}");
+        assert!(text.contains("walk me through"), "shows how to invoke it: {text:?}");
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn walkthrough_tools_drive_tour_lifecycle() {
-            let mut state = AppState::new();
-            state.term_size = (40, 180);
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            // The fake harness calls with the record's own run ID.
-            let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
-            let path = std::env::temp_dir().join(format!("forge-walk-test-{}", std::process::id()));
-            std::fs::write(
-                &path,
-                (1..=10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
-            ).unwrap();
-            let args = format!(
-                r#"{{"file":{},"steps":"1:3:first\n5:5:second"}}"#,
-                crate::ipc::mcp::escape_json(&path.to_string_lossy()),
-            );
-            let started = comms_reply(&mut state, &live_run, "walkthrough_start", &args);
-            assert!(started.contains(r#""ok":true"#), "started: {started}");
-            assert!(started.contains(r#""steps":2"#), "started: {started}");
-            assert!(state.walkthrough_overlay_active());
-            assert_eq!(state.walkthrough_overlay().unwrap().title, path.to_string_lossy());
-            // Answering with nothing waiting fails instead of inventing Q&A.
-            let early = comms_reply(&mut state, &live_run, "walkthrough_answer", r#"{"answer":"x"}"#);
-            assert!(early.contains("no walkthrough question waiting"), "early: {early}");
-            // Ask through the overlay: the draft submits, the markup stages
-            // an Enter, and the question waits for the agent.
-            state.walkthrough_overlay_mut().unwrap().input = Some("why three?".to_string());
-            assert!(state.submit_walkthrough_question(id));
-            assert!(state.pending_enter.contains_key(&id));
-            let tour = state.walkthrough_overlay().unwrap();
-            assert_eq!(tour.questions.len(), 1);
-            assert_eq!(tour.questions[0].question, "why three?");
-            assert!(tour.questions[0].answer.is_none());
-            assert!(tour.input.is_none());
-            let answered = comms_reply(&mut state, &live_run, "walkthrough_answer", r#"{"answer":"because"}"#);
-            assert!(answered.contains(r#""answered":true"#), "answered: {answered}");
-            assert_eq!(
-                state.walkthrough_overlay().unwrap().questions[0].answer.as_deref(),
-                Some("because")
-            );
-            let ended = comms_reply(&mut state, &live_run, "walkthrough_end", r#"{"summary":"done"}"#);
-            assert!(ended.contains(r#""ended":true"#), "ended: {ended}");
-            assert!(state.walkthrough_overlay().unwrap().completed);
-            std::fs::remove_file(&path).ok();
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn walkthrough_tools_drive_tour_lifecycle() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        // The fake harness calls with the record's own run ID.
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let path = std::env::temp_dir().join(format!("forge-walk-test-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            (1..=10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+        ).unwrap();
+        let args = format!(
+            r#"{{"file":{},"steps":"1:3:first\n5:5:second"}}"#,
+            crate::ipc::mcp::escape_json(&path.to_string_lossy()),
+        );
+        let started = comms_reply(&mut state, &live_run, "walkthrough_start", &args);
+        assert!(started.contains(r#""ok":true"#), "started: {started}");
+        assert!(started.contains(r#""steps":2"#), "started: {started}");
+        assert!(state.walkthrough_overlay_active());
+        assert_eq!(state.walkthrough_overlay().unwrap().title, path.to_string_lossy());
+        // Answering with nothing waiting fails instead of inventing Q&A.
+        let early = comms_reply(&mut state, &live_run, "walkthrough_answer", r#"{"answer":"x"}"#);
+        assert!(early.contains("no walkthrough question waiting"), "early: {early}");
+        // Ask through the overlay: the draft submits, the markup stages
+        // an Enter, and the question waits for the agent.
+        state.walkthrough_overlay_mut().unwrap().input = Some("why three?".to_string());
+        assert!(state.submit_walkthrough_question(id));
+        assert!(state.pending_enter.contains_key(&id));
+        let tour = state.walkthrough_overlay().unwrap();
+        assert_eq!(tour.questions.len(), 1);
+        assert_eq!(tour.questions[0].question, "why three?");
+        assert!(tour.questions[0].answer.is_none());
+        assert!(tour.input.is_none());
+        let answered = comms_reply(&mut state, &live_run, "walkthrough_answer", r#"{"answer":"because"}"#);
+        assert!(answered.contains(r#""answered":true"#), "answered: {answered}");
+        assert_eq!(
+            state.walkthrough_overlay().unwrap().questions[0].answer.as_deref(),
+            Some("because")
+        );
+        let ended = comms_reply(&mut state, &live_run, "walkthrough_end", r#"{"summary":"done"}"#);
+        assert!(ended.contains(r#""ended":true"#), "ended: {ended}");
+        assert!(state.walkthrough_overlay().unwrap().completed);
+        std::fs::remove_file(&path).ok();
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn walkthrough_start_rejects_bad_calls() {
-            let mut state = AppState::new();
-            state.term_size = (40, 180);
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
-            let missing = comms_reply(
-                &mut state, &live_run, "walkthrough_start",
-                r#"{"file":"/no/such/forge-walk-missing.rs","steps":"1:1:x"}"#,
-            );
-            assert!(missing.contains(r#""ok":false"#), "missing: {missing}");
-            assert!(missing.contains("cannot read"), "missing: {missing}");
-            assert!(!state.walkthrough_overlay_active());
-            let stale = comms_reply(&mut state, "bogus-run", "walkthrough_answer", r#"{"answer":"x"}"#);
-            assert!(stale.contains("unknown or stale run ID"), "stale: {stale}");
-            let no_tour = comms_reply(&mut state, &live_run, "walkthrough_end", "{}");
-            assert!(no_tour.contains("no walkthrough for this session"), "no_tour: {no_tour}");
-            assert!(state.manager.remove(id));
-        }
+    #[test]
+    fn walkthrough_start_rejects_bad_calls() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let missing = comms_reply(
+            &mut state, &live_run, "walkthrough_start",
+            r#"{"file":"/no/such/forge-walk-missing.rs","steps":"1:1:x"}"#,
+        );
+        assert!(missing.contains(r#""ok":false"#), "missing: {missing}");
+        assert!(missing.contains("cannot read"), "missing: {missing}");
+        assert!(!state.walkthrough_overlay_active());
+        let stale = comms_reply(&mut state, "bogus-run", "walkthrough_answer", r#"{"answer":"x"}"#);
+        assert!(stale.contains("unknown or stale run ID"), "stale: {stale}");
+        let no_tour = comms_reply(&mut state, &live_run, "walkthrough_end", "{}");
+        assert!(no_tour.contains("no walkthrough for this session"), "no_tour: {no_tour}");
+        assert!(state.manager.remove(id));
+    }
 
-        #[test]
-        fn walkthrough_add_and_update_steps() {
-            let mut state = AppState::new();
-            state.term_size = (40, 180);
-            std::env::set_var("CODEX_BIN", "cat");
-            let id = state.manager.spawn_agent(
-                "agent", &std::env::temp_dir(), "exec cat",
-                crate::infra::ids::RunId::generate(), "codex",
-            ).unwrap();
-            std::env::remove_var("CODEX_BIN");
-            let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
-            let path = std::env::temp_dir().join(format!("forge-walk-steps-{}", std::process::id()));
-            std::fs::write(
-                &path,
-                (1..=10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
-            ).unwrap();
-            let start = format!(
-                r#"{{"file":{},"steps":"1:3:first\n5:5:second"}}"#,
-                crate::ipc::mcp::escape_json(&path.to_string_lossy()),
-            );
-            comms_reply(&mut state, &live_run, "walkthrough_start", &start);
-            let added = comms_reply(
-                &mut state, &live_run, "walkthrough_add_step",
-                r#"{"start_line":7,"end_line":8,"explanation":"new"}"#,
-            );
-            assert!(added.contains(r#""added":true"#), "added: {added}");
-            assert!(added.contains(r#""steps":3"#), "added: {added}");
-            let first = comms_reply(
-                &mut state, &live_run, "walkthrough_add_step",
-                r#"{"start_line":9,"end_line":9,"explanation":"top","position":1}"#,
-            );
-            assert!(first.contains(r#""steps":4"#), "first: {first}");
-            let tour = state.walkthrough_overlay().unwrap();
-            assert_eq!(tour.steps[0].explanation, "top");
-            assert_eq!(tour.index, 1, "insert before current shifts it");
-            let wrong_file = comms_reply(
-                &mut state, &live_run, "walkthrough_add_step",
-                r#"{"start_line":1,"end_line":1,"explanation":"x","file_path":"other.rs"}"#,
-            );
-            assert!(wrong_file.contains("open tour file only"), "wrong_file: {wrong_file}");
-            let updated = comms_reply(
-                &mut state, &live_run, "walkthrough_update",
-                r#"{"step_index":1,"explanation":"revised"}"#,
-            );
-            assert!(updated.contains(r#""updated":true"#), "updated: {updated}");
-            assert_eq!(state.walkthrough_overlay().unwrap().steps[0].explanation, "revised");
-            for (args, needle) in [
-                (r#"{"step_index":0}"#, "starts at 1"),
-                (r#"{"step_index":99}"#, "no walkthrough step"),
-                (r#"{"step_index":1,"start_line":9,"end_line":2}"#, "bad walkthrough range"),
-            ] {
-                let err = comms_reply(&mut state, &live_run, "walkthrough_update", args);
-                assert!(err.contains(needle), "args {args}: {err}");
-            }
-            std::fs::remove_file(&path).ok();
-            assert!(state.manager.remove(id));
+    #[test]
+    fn walkthrough_add_and_update_steps() {
+        let mut state = AppState::new();
+        state.term_size = (40, 180);
+        std::env::set_var("CODEX_BIN", "cat");
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        std::env::remove_var("CODEX_BIN");
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        let path = std::env::temp_dir().join(format!("forge-walk-steps-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            (1..=10).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"),
+        ).unwrap();
+        let start = format!(
+            r#"{{"file":{},"steps":"1:3:first\n5:5:second"}}"#,
+            crate::ipc::mcp::escape_json(&path.to_string_lossy()),
+        );
+        comms_reply(&mut state, &live_run, "walkthrough_start", &start);
+        let added = comms_reply(
+            &mut state, &live_run, "walkthrough_add_step",
+            r#"{"start_line":7,"end_line":8,"explanation":"new"}"#,
+        );
+        assert!(added.contains(r#""added":true"#), "added: {added}");
+        assert!(added.contains(r#""steps":3"#), "added: {added}");
+        let first = comms_reply(
+            &mut state, &live_run, "walkthrough_add_step",
+            r#"{"start_line":9,"end_line":9,"explanation":"top","position":1}"#,
+        );
+        assert!(first.contains(r#""steps":4"#), "first: {first}");
+        let tour = state.walkthrough_overlay().unwrap();
+        assert_eq!(tour.steps[0].explanation, "top");
+        assert_eq!(tour.index, 1, "insert before current shifts it");
+        let wrong_file = comms_reply(
+            &mut state, &live_run, "walkthrough_add_step",
+            r#"{"start_line":1,"end_line":1,"explanation":"x","file_path":"other.rs"}"#,
+        );
+        assert!(wrong_file.contains("open tour file only"), "wrong_file: {wrong_file}");
+        let updated = comms_reply(
+            &mut state, &live_run, "walkthrough_update",
+            r#"{"step_index":1,"explanation":"revised"}"#,
+        );
+        assert!(updated.contains(r#""updated":true"#), "updated: {updated}");
+        assert_eq!(state.walkthrough_overlay().unwrap().steps[0].explanation, "revised");
+        for (args, needle) in [
+            (r#"{"step_index":0}"#, "starts at 1"),
+            (r#"{"step_index":99}"#, "no walkthrough step"),
+            (r#"{"step_index":1,"start_line":9,"end_line":2}"#, "bad walkthrough range"),
+        ] {
+            let err = comms_reply(&mut state, &live_run, "walkthrough_update", args);
+            assert!(err.contains(needle), "args {args}: {err}");
         }
+        std::fs::remove_file(&path).ok();
+        assert!(state.manager.remove(id));
+    }
 }

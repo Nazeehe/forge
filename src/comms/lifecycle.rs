@@ -531,155 +531,155 @@ mod tests {
     use crate::comms::test_support::*;
     use crate::infra::event::AppEvent;
 
-        #[test]
-        fn exit_failure_notice_retries_a_full_inbox() {
-            // Same ordering for exit notices: a full inbox must hold the
-            // conversation Open (retry on later sweeps), never mark Failed
-            // while the notice is lost.
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .bcall("skippy", "tell_session", r#"{"target":"b","text":"hi"}"#)
-                .expect("client tells");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            fill_inbox(&mut p, "skippy");
-            p.state.broker.target_exited(&p.state.manager, p.b);
-            assert_eq!(
-                p.state.broker.bot_convs.get(&conv).expect("conv").state,
-                crate::comms::bot::BotConvState::Open,
-                "unsent failure notice holds the conv open"
-            );
-            // Room opens: the next sweep delivers the failure and closes.
-            drain_inbox(&mut p, "skippy");
-            p.state.broker.tick(std::time::Instant::now());
-            assert_eq!(
-                p.state.broker.bot_convs.get(&conv).expect("conv").state,
-                crate::comms::bot::BotConvState::Failed
-            );
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(poll.contains(&conv), "poll: {poll}");
-            assert_eq!(poll.matches(r#""kind":"failed""#).count(), 1, "poll: {poll}");
-        }
+    #[test]
+    fn exit_failure_notice_retries_a_full_inbox() {
+        // Same ordering for exit notices: a full inbox must hold the
+        // conversation Open (retry on later sweeps), never mark Failed
+        // while the notice is lost.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "tell_session", r#"{"target":"b","text":"hi"}"#)
+            .expect("client tells");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        fill_inbox(&mut p, "skippy");
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        assert_eq!(
+            p.state.broker.bot_convs.get(&conv).expect("conv").state,
+            crate::comms::bot::BotConvState::Open,
+            "unsent failure notice holds the conv open"
+        );
+        // Room opens: the next sweep delivers the failure and closes.
+        drain_inbox(&mut p, "skippy");
+        p.state.broker.tick(std::time::Instant::now());
+        assert_eq!(
+            p.state.broker.bot_convs.get(&conv).expect("conv").state,
+            crate::comms::bot::BotConvState::Failed
+        );
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert_eq!(poll.matches(r#""kind":"failed""#).count(), 1, "poll: {poll}");
+    }
 
-        #[test]
-        fn full_inbox_parks_bot_exit_notice_for_retry() {
-            // The inbox is full when the session exits: the failure
-            // notice parks instead of dropping, and the next sweep
-            // delivers it once space frees.
-            use crate::comms::bot::{BotKind, INBOX_CAP};
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .call(
-                    &p.run_a.clone(),
-                    "ask_session",
-                    r#"{"target":"skippy","message":"are you there?"}"#,
-                )
-                .expect("session asks client");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            p.bcall(
-                "skippy",
-                "send_response",
-                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+    #[test]
+    fn full_inbox_parks_bot_exit_notice_for_retry() {
+        // The inbox is full when the session exits: the failure
+        // notice parks instead of dropping, and the next sweep
+        // delivers it once space frees.
+        use crate::comms::bot::{BotKind, INBOX_CAP};
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_a.clone(),
+                "ask_session",
+                r#"{"target":"skippy","message":"are you there?"}"#,
             )
-            .expect("client answers");
-            // Receive and ack the ask so the pads below start past it;
-            // the epoch rides along for the later cursor polls and acks.
-            let poll1 = p.bcall("skippy", "bot_poll", "{}").expect("poll receives");
-            let epoch = crate::ipc::mcp::top_raw(&poll1, "epoch").expect("epoch echoed");
-            p.bcall("skippy", "bot_ack", &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#))
-                .expect("ack advances");
-            // Fill the inbox to the cap: the exit notice must park.
-            {
-                let client = p
-                    .state
-                    .broker
-                    .clients
-                    .get_mut("skippy")
-                    .expect("client registered");
-                for n in 0..INBOX_CAP {
-                    let _ = client.deposit(
-                        BotKind::Tell,
-                        "pad",
-                        "s",
-                        "a",
-                        &n.to_string(),
-                        1,
-                    );
-                }
+            .expect("session asks client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall(
+            "skippy",
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("client answers");
+        // Receive and ack the ask so the pads below start past it;
+        // the epoch rides along for the later cursor polls and acks.
+        let poll1 = p.bcall("skippy", "bot_poll", "{}").expect("poll receives");
+        let epoch = crate::ipc::mcp::top_raw(&poll1, "epoch").expect("epoch echoed");
+        p.bcall("skippy", "bot_ack", &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#))
+            .expect("ack advances");
+        // Fill the inbox to the cap: the exit notice must park.
+        {
+            let client = p
+                .state
+                .broker
+                .clients
+                .get_mut("skippy")
+                .expect("client registered");
+            for n in 0..INBOX_CAP {
+                let _ = client.deposit(
+                    BotKind::Tell,
+                    "pad",
+                    "s",
+                    "a",
+                    &n.to_string(),
+                    1,
+                );
             }
-            p.state.broker.target_exited(&p.state.manager, p.a);
-            assert_eq!(
-                p.state.broker.pending_failures.len(),
-                1,
-                "full inbox parks the notice"
-            );
-            // Free one page: receive 2..21, ack through it.
-            p.bcall("skippy", "bot_poll", "{}").expect("poll receives");
-            p.bcall(
+        }
+        p.state.broker.target_exited(&p.state.manager, p.a);
+        assert_eq!(
+            p.state.broker.pending_failures.len(),
+            1,
+            "full inbox parks the notice"
+        );
+        // Free one page: receive 2..21, ack through it.
+        p.bcall("skippy", "bot_poll", "{}").expect("poll receives");
+        p.bcall(
+            "skippy",
+            "bot_ack",
+            &format!(r#"{{"cursor":21,"epoch":{epoch}}}"#),
+        )
+        .expect("ack frees space");
+        p.state.broker.tick(std::time::Instant::now());
+        assert!(
+            p.state.broker.pending_failures.is_empty(),
+            "retry delivers"
+        );
+        let poll = p
+            .bcall(
                 "skippy",
-                "bot_ack",
-                &format!(r#"{{"cursor":21,"epoch":{epoch}}}"#),
+                "bot_poll",
+                &format!(r#"{{"cursor":240,"epoch":{epoch}}}"#),
             )
-            .expect("ack frees space");
-            p.state.broker.tick(std::time::Instant::now());
-            assert!(
-                p.state.broker.pending_failures.is_empty(),
-                "retry delivers"
-            );
-            let poll = p
-                .bcall(
-                    "skippy",
-                    "bot_poll",
-                    &format!(r#"{{"cursor":240,"epoch":{epoch}}}"#),
-                )
-                .expect("poll validates");
-            assert!(poll.contains(&conv), "poll names the conv: {poll}");
-            assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
-        }
+            .expect("poll validates");
+        assert!(poll.contains(&conv), "poll names the conv: {poll}");
+        assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
+    }
 
-        #[test]
-        fn target_exit_fails_the_conversation() {
-            let mut p = live_pair().grouped();
-            p.call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q?"}"#)
-                .unwrap();
-            p.state.broker.take_due(p.b, 10);
-            p.state.broker.target_exited(&p.state.manager, p.b);
-            let due = p.state.broker.take_due(p.a, 10);
-            assert_eq!(due.len(), 1);
-            assert!(matches!(due[0].kind, InjectKind::Failed));
-            // The dead target keeps no letters.
-            assert!(p.state.broker.take_due(p.b, 10).is_empty());
-        }
+    #[test]
+    fn target_exit_fails_the_conversation() {
+        let mut p = live_pair().grouped();
+        p.call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q?"}"#)
+            .unwrap();
+        p.state.broker.take_due(p.b, 10);
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::Failed));
+        // The dead target keeps no letters.
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+    }
 
-        #[test]
-        fn stale_run_id_after_exit_is_rejected() {
-            let mut p = live_pair().grouped();
-            assert!(p.state.manager.kill(p.b));
-            // The reader thread reports the exit asynchronously; poll for it.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                for ev in p.state.manager.drain_pty_max(100) {
-                    p.state.apply(AppEvent::from_pty(ev.0, ev.2));
-                }
-                let exited = p
-                    .state
-                    .manager
-                    .get(p.b)
-                    .is_none_or(|rec| !rec.state.is_live());
-                if exited || std::time::Instant::now() > deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
+    #[test]
+    fn stale_run_id_after_exit_is_rejected() {
+        let mut p = live_pair().grouped();
+        assert!(p.state.manager.kill(p.b));
+        // The reader thread reports the exit asynchronously; poll for it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            for ev in p.state.manager.drain_pty_max(100) {
+                p.state.apply(AppEvent::from_pty(ev.0, ev.2));
             }
-            assert!(
-                p.state.manager.get(p.b).is_none_or(|rec| !rec.state.is_live()),
-                "b exited"
-            );
-            p.state.broker.target_exited(&p.state.manager, p.b);
-            let err = p
-                .call(&p.run_b.clone(), "list_sessions", "{}")
-                .expect_err("exited run ID is stale");
-            assert!(err.contains("run ID"), "err: {err}");
+            let exited = p
+                .state
+                .manager
+                .get(p.b)
+                .is_none_or(|rec| !rec.state.is_live());
+            if exited || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        assert!(
+            p.state.manager.get(p.b).is_none_or(|rec| !rec.state.is_live()),
+            "b exited"
+        );
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        let err = p
+            .call(&p.run_b.clone(), "list_sessions", "{}")
+            .expect_err("exited run ID is stale");
+        assert!(err.contains("run ID"), "err: {err}");
+    }
 }

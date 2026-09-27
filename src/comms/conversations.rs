@@ -542,577 +542,577 @@ mod tests {
     use super::*;
     use crate::comms::test_support::*;
 
-        #[test]
-        fn bot_ask_response_roundtrip_never_touches_a_pane() {
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .bcall("skippy", "ask_session", r#"{"target":"b","message":"ready?"}"#)
-                .expect("ask validates");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            assert!(res.contains("\"epoch\""), "res: {res}");
-            // The question reaches the session pane, never the client inbox.
-            assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
-            assert!(p
-                .bcall("skippy", "bot_poll", "{}")
-                .unwrap()
-                .contains("\"events\":[]"));
-            // The session answers through its own tool; the answer lands in
-            // the inbox and nowhere else.
-            p.call(
-                &p.run_b.clone(),
-                "send_response",
-                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
-            )
-            .expect("target answers");
-            assert!(p.state.broker.take_due(p.a, 10).is_empty());
-            assert!(p.state.broker.take_due(p.b, 10).is_empty());
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(poll.contains(&conv), "poll: {poll}");
-            assert!(poll.contains(r#""kind":"response""#), "poll: {poll}");
-            let epoch = crate::ipc::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
-            p.bcall(
-                "skippy",
-                "bot_ack",
-                &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#),
-            )
-            .expect("ack validates");
-            assert!(p
-                .bcall("skippy", "bot_poll", "{}")
-                .unwrap()
-                .contains("\"events\":[]"));
-        }
+    #[test]
+    fn bot_ask_response_roundtrip_never_touches_a_pane() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "ask_session", r#"{"target":"b","message":"ready?"}"#)
+            .expect("ask validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        assert!(res.contains("\"epoch\""), "res: {res}");
+        // The question reaches the session pane, never the client inbox.
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
+        assert!(p
+            .bcall("skippy", "bot_poll", "{}")
+            .unwrap()
+            .contains("\"events\":[]"));
+        // The session answers through its own tool; the answer lands in
+        // the inbox and nowhere else.
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("target answers");
+        assert!(p.state.broker.take_due(p.a, 10).is_empty());
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert!(poll.contains(r#""kind":"response""#), "poll: {poll}");
+        let epoch = crate::ipc::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
+        p.bcall(
+            "skippy",
+            "bot_ack",
+            &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#),
+        )
+        .expect("ack validates");
+        assert!(p
+            .bcall("skippy", "bot_poll", "{}")
+            .unwrap()
+            .contains("\"events\":[]"));
+    }
 
-        #[test]
-        fn session_ask_client_roundtrip_flows_through_the_inbox() {
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .call(&p.run_a.clone(), "ask_session", r#"{"target":"skippy","message":"are you there?"}"#)
-                .expect("session asks client");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            // No pane anywhere holds the question.
-            assert!(p.state.broker.take_due(p.a, 10).is_empty());
-            assert!(p.state.broker.take_due(p.b, 10).is_empty());
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(poll.contains(&conv), "poll: {poll}");
-            assert!(poll.contains(r#""kind":"ask""#), "poll: {poll}");
-            let epoch = crate::ipc::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
-            p.bcall(
-                "skippy",
-                "bot_ack",
-                &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#),
+    #[test]
+    fn session_ask_client_roundtrip_flows_through_the_inbox() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"skippy","message":"are you there?"}"#)
+            .expect("session asks client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        // No pane anywhere holds the question.
+        assert!(p.state.broker.take_due(p.a, 10).is_empty());
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert!(poll.contains(r#""kind":"ask""#), "poll: {poll}");
+        let epoch = crate::ipc::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
+        p.bcall(
+            "skippy",
+            "bot_ack",
+            &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#),
+        )
+        .unwrap();
+        p.bcall(
+            "skippy",
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("client answers");
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::Response));
+    }
+
+    #[test]
+    fn bot_tell_ack_roundtrip_confirms_receipt_not_work() {
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "tell_session", r#"{"target":"b","message":"deploy at dawn"}"#)
+            .expect("tell validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::Tell));
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("target acks");
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll: {poll}");
+        assert!(poll.contains(r#""kind":"ack""#), "poll: {poll}");
+    }
+
+    #[test]
+    fn tell_target_can_follow_up_back_to_source() {
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
+            .unwrap();
+        let conv = json_field(&res, "conversation").unwrap();
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
+        // The receiver talks back on the same conversation by naming the
+        // source as target; the injection lands at the source, from b.
+        let r = p
+            .call(
+                &p.run_b.clone(),
+                "tell_session",
+                &format!(r#"{{"target":"a","message":"back","conversation_id":"{conv}"}}"#),
+            )
+            .expect("target follows up");
+        assert!(r.contains("followup"), "res: {r}");
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::FollowUp));
+        assert_eq!(due[0].from, "b");
+        assert_eq!(due[0].conv, conv);
+        // Rendered guidance points back at b with the same conversation.
+        let bytes = due[0].render();
+        assert!(
+            bytes.windows(9).any(|w| w == b"target b "),
+            "guidance: {bytes:?}"
+        );
+        assert!(bytes.ends_with(b"\r"), "enter: {bytes:?}");
+        // Outsiders still cannot ride the conversation, even in-group.
+        let c = p
+            .state
+            .manager
+            .spawn(
+                "c",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                crate::infra::ids::RunId::generate(),
+                "shell",
             )
             .unwrap();
-            p.bcall(
-                "skippy",
-                "send_response",
-                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        p.state.broker.join(&p.state.manager, c, "peers").unwrap();
+        let run_c = p.state.manager.get(c).unwrap().run_id.to_string();
+        let err = p
+            .call(
+                &run_c,
+                "tell_session",
+                &format!(r#"{{"target":"a","message":"hijack","conversation_id":"{conv}"}}"#),
             )
-            .expect("client answers");
-            let due = p.state.broker.take_due(p.a, 10);
-            assert_eq!(due.len(), 1);
-            assert!(matches!(due[0].kind, InjectKind::Response));
-        }
+            .expect_err("outsider follow-up rejected");
+        assert!(err.contains("parties"), "err: {err}");
+    }
 
-        #[test]
-        fn bot_tell_ack_roundtrip_confirms_receipt_not_work() {
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .bcall("skippy", "tell_session", r#"{"target":"b","message":"deploy at dawn"}"#)
-                .expect("tell validates");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            let due = p.state.broker.take_due(p.b, 10);
-            assert_eq!(due.len(), 1);
-            assert!(matches!(due[0].kind, InjectKind::Tell));
-            p.call(
+    #[test]
+    fn tell_followed_by_ack_notifies_source() {
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
+            .expect("tell validates");
+        let conv = json_field(&res, "conversation").unwrap();
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::Tell));
+        // Delivered tells no longer count toward pressure.
+        assert_eq!(p.state.broker.pressure(&p.state.manager, p.b), 0);
+        let r = p
+            .call(
                 &p.run_b.clone(),
                 "ack_message",
                 &format!(r#"{{"conversation_id":"{conv}"}}"#),
             )
             .expect("target acks");
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(poll.contains(&conv), "poll: {poll}");
-            assert!(poll.contains(r#""kind":"ack""#), "poll: {poll}");
-        }
+        assert!(r.contains(&conv), "res: {r}");
+        let due = p.state.broker.take_due(p.a, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::Ack));
+    }
 
-        #[test]
-        fn tell_target_can_follow_up_back_to_source() {
-            let mut p = live_pair().grouped();
-            let res = p
-                .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
-                .unwrap();
-            let conv = json_field(&res, "conversation").unwrap();
-            assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
-            // The receiver talks back on the same conversation by naming the
-            // source as target; the injection lands at the source, from b.
-            let r = p
-                .call(
-                    &p.run_b.clone(),
-                    "tell_session",
-                    &format!(r#"{{"target":"a","message":"back","conversation_id":"{conv}"}}"#),
-                )
-                .expect("target follows up");
-            assert!(r.contains("followup"), "res: {r}");
-            let due = p.state.broker.take_due(p.a, 10);
-            assert_eq!(due.len(), 1);
-            assert!(matches!(due[0].kind, InjectKind::FollowUp));
-            assert_eq!(due[0].from, "b");
-            assert_eq!(due[0].conv, conv);
-            // Rendered guidance points back at b with the same conversation.
-            let bytes = due[0].render();
-            assert!(
-                bytes.windows(9).any(|w| w == b"target b "),
-                "guidance: {bytes:?}"
-            );
-            assert!(bytes.ends_with(b"\r"), "enter: {bytes:?}");
-            // Outsiders still cannot ride the conversation, even in-group.
-            let c = p
-                .state
-                .manager
-                .spawn(
-                    "c",
-                    &std::env::temp_dir(),
-                    "exec sleep 30",
-                    crate::infra::ids::RunId::generate(),
-                    "shell",
-                )
-                .unwrap();
-            p.state.broker.join(&p.state.manager, c, "peers").unwrap();
-            let run_c = p.state.manager.get(c).unwrap().run_id.to_string();
-            let err = p
-                .call(
-                    &run_c,
-                    "tell_session",
-                    &format!(r#"{{"target":"a","message":"hijack","conversation_id":"{conv}"}}"#),
-                )
-                .expect_err("outsider follow-up rejected");
-            assert!(err.contains("parties"), "err: {err}");
-        }
-
-        #[test]
-        fn tell_followed_by_ack_notifies_source() {
-            let mut p = live_pair().grouped();
-            let res = p
-                .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
-                .expect("tell validates");
-            let conv = json_field(&res, "conversation").unwrap();
-            let due = p.state.broker.take_due(p.b, 10);
-            assert_eq!(due.len(), 1);
-            assert!(matches!(due[0].kind, InjectKind::Tell));
-            // Delivered tells no longer count toward pressure.
-            assert_eq!(p.state.broker.pressure(&p.state.manager, p.b), 0);
-            let r = p
-                .call(
-                    &p.run_b.clone(),
-                    "ack_message",
-                    &format!(r#"{{"conversation_id":"{conv}"}}"#),
-                )
-                .expect("target acks");
-            assert!(r.contains(&conv), "res: {r}");
-            let due = p.state.broker.take_due(p.a, 10);
-            assert_eq!(due.len(), 1);
-            assert!(matches!(due[0].kind, InjectKind::Ack));
-        }
-
-        #[test]
-        fn tell_with_existing_conversation_needs_no_new_ack() {
-            let mut p = live_pair().grouped();
-            let res = p
-                .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
-                .unwrap();
-            let conv = json_field(&res, "conversation").unwrap();
-            // b reads the tell, then acks; the ack goes back to a.
-            assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
-            p.call(
-                &p.run_b.clone(),
-                "ack_message",
-                &format!(r#"{{"conversation_id":"{conv}"}}"#),
-            )
+    #[test]
+    fn tell_with_existing_conversation_needs_no_new_ack() {
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
             .unwrap();
-            p.state.broker.take_due(p.a, 10);
-            // Follow-up on the same conversation: delivered, no ack expected.
+        let conv = json_field(&res, "conversation").unwrap();
+        // b reads the tell, then acks; the ack goes back to a.
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1);
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .unwrap();
+        p.state.broker.take_due(p.a, 10);
+        // Follow-up on the same conversation: delivered, no ack expected.
+        p.call(
+            &p.run_a.clone(),
+            "tell_session",
+            &format!(r#"{{"target":"b","message":"more","conversation_id":"{conv}"}}"#),
+        )
+        .expect("follow-up validates");
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::FollowUp));
+        assert!(p.state.broker.take_due(p.a, 10).is_empty());
+    }
+
+    #[test]
+    fn dropped_response_on_source_exit_notifies_responder() {
+        // B answers, gets success, and A's queue still holds the
+        // response when A exits: deleting it silently would leave B
+        // believing it was read. B must hear the loss loudly.
+        let mut p = live_pair().grouped();
+        let ask = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
+            .expect("ask validates");
+        let conv = json_field(&ask, "conversation").expect("conversation id");
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the ask");
+        p.call(
+            &p.run_b.clone(),
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("target answers");
+        assert_eq!(p.state.broker.queued(p.a), 1);
+        p.state.broker.target_exited(&p.state.manager, p.a);
+        assert_eq!(p.state.broker.queued(p.a), 0, "exited queue is gone");
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1, "responder hears the loss");
+        assert!(matches!(due[0].kind, InjectKind::Failed));
+        assert_eq!(due[0].conv, conv);
+    }
+
+    #[test]
+    fn dropped_ack_on_source_exit_notifies_acker() {
+        // Same window for acks: the teller exits before reading the
+        // ack, so the acker must hear it instead of assuming receipt.
+        let mut p = live_pair().grouped();
+        let tell = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"hi"}"#)
+            .expect("tell validates");
+        let conv = json_field(&tell, "conversation").expect("conversation id");
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the tell");
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("target acks");
+        assert_eq!(p.state.broker.queued(p.a), 1);
+        p.state.broker.target_exited(&p.state.manager, p.a);
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1, "acker hears the loss");
+        assert!(matches!(due[0].kind, InjectKind::Failed));
+        assert_eq!(due[0].conv, conv);
+    }
+
+    #[test]
+    fn dropped_bot_response_on_source_exit_notifies_client() {
+        // The session asked the client, the client answered (got
+        // completed:true), and the session exits with the response
+        // still queued: the client must hear the loss loudly through
+        // its inbox, not lose it silently.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_a.clone(),
+                "ask_session",
+                r#"{"target":"skippy","message":"are you there?"}"#,
+            )
+            .expect("session asks client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall(
+            "skippy",
+            "send_response",
+            &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
+        )
+        .expect("client answers");
+        p.state.broker.target_exited(&p.state.manager, p.a);
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll names the conv: {poll}");
+        assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
+    }
+
+    #[test]
+    fn dropped_bot_ack_on_source_exit_notifies_client() {
+        // The client acked a session tell (got acknowledged:true) and
+        // the session exits with the Ack still queued: the client is
+        // told, and the record closes instead of lingering Open.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_a.clone(),
+                "tell_session",
+                r#"{"target":"skippy","message":"hi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall("skippy", "ack_message", &format!(r#"{{"conversation_id":"{conv}"}}"#))
+            .expect("client acks");
+        p.state.broker.target_exited(&p.state.manager, p.a);
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll names the conv: {poll}");
+        assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
+    }
+
+    #[test]
+    fn typed_over_bot_ack_notifies_the_inbox() {
+        // The client's ack reached A's prompt with its Enter staged;
+        // A types first, so the submit dies and the client is told
+        // through its inbox instead of assuming clean delivery.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_a.clone(),
+                "tell_session",
+                r#"{"target":"skippy","message":"hi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall(
+            "skippy",
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("client acks");
+        p.state.settle_comms();
+        assert!(p.state.pending_enter.contains_key(&p.a), "enter staged");
+        p.state.note_human_input(p.a);
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains(&conv), "poll names the conv: {poll}");
+        assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
+    }
+
+    #[test]
+    fn courtesy_reminder_fires_once_after_grace() {
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
+            .unwrap();
+        let conv = json_field(&res, "conversation").unwrap();
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .unwrap();
+        p.state.broker.take_due(p.a, 10);
+        p.state.broker.take_due(p.b, 10);
+        // Inside the grace period: silence.
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+        // Past it: exactly one reminder to the target, never repeated.
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(31));
+        let due = p.state.broker.take_due(p.b, 10);
+        assert_eq!(due.len(), 1);
+        assert!(matches!(due[0].kind, InjectKind::Reminder));
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+    }
+
+    #[test]
+    fn bot_courtesy_reminder_retries_a_full_inbox() {
+        // A reminder that cannot be deposited must not count as sent:
+        // the conversation stays un-reminded and the next sweep retries
+        // once the client makes room. Session-originated tell, so the
+        // reminder travels client-ward into the (possibly full) inbox.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_b.clone(),
+                "tell_session",
+                r#"{"target":"skippy","text":"hi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall(
+            "skippy",
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("client acks");
+        assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the ack");
+        fill_inbox(&mut p, "skippy");
+        // Past grace with nowhere to put the reminder: still pending.
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(31));
+        assert!(
+            !p.state.broker.bot_convs.get(&conv).expect("conv").reminded,
+            "undelivered reminder stays un-reminded"
+        );
+        // Room opens: the next sweep delivers exactly one reminder.
+        drain_inbox(&mut p, "skippy");
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert!(p.state.broker.bot_convs.get(&conv).expect("conv").reminded);
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert_eq!(poll.matches(r#""kind":"reminder""#).count(), 1, "poll: {poll}");
+        assert!(poll.contains(&conv), "poll: {poll}");
+    }
+
+    #[test]
+    fn target_followup_suppresses_the_courtesy_reminder() {
+        // The courtesy obligation ends when the owing party updates:
+        // b acked and then sent the update itself, so no reminder may
+        // fire — not now, not after more silence. The source's own
+        // follow-ups merely restart grace (see the back-to-source test).
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
+            .unwrap();
+        let conv = json_field(&res, "conversation").unwrap();
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .unwrap();
+        p.call(
+            &p.run_b.clone(),
+            "tell_session",
+            &format!(r#"{{"target":"a","message":"on it","conversation_id":"{conv}"}}"#),
+        )
+        .expect("target follows up");
+        p.state.broker.take_due(p.a, 10);
+        p.state.broker.take_due(p.b, 10);
+        // Past grace and far past it: silence, forever.
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(31));
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert!(p.state.broker.take_due(p.b, 10).is_empty());
+    }
+
+    #[test]
+    fn client_followup_suppresses_the_courtesy_reminder() {
+        // Same rule client-ward: the session told the client, the
+        // client acked and followed up, so the inbox stays quiet.
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .call(
+                &p.run_b.clone(),
+                "tell_session",
+                r#"{"target":"skippy","text":"fyi"}"#,
+            )
+            .expect("session tells client");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.bcall(
+            "skippy",
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("client acks");
+        p.bcall(
+            "skippy",
+            "tell_session",
+            &format!(r#"{{"target":"b","text":"on it","conversation_id":"{conv}"}}"#),
+        )
+        .expect("client follows up");
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(!poll.contains(r#""kind":"reminder""#), "poll: {poll}");
+    }
+
+    #[test]
+    fn courtesy_skips_dead_sessions() {
+        // A bot tell was acked, the session exits with a full inbox
+        // (failure retry pending): the courtesy sweep must not push
+        // a Reminder to the removed queue — nobody will drain it.
+        use crate::comms::bot::{BotKind, INBOX_CAP};
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        let res = p
+            .bcall("skippy", "tell_session", r#"{"target":"b","message":"hi"}"#)
+            .expect("tell validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        p.call(
+            &p.run_b.clone(),
+            "ack_message",
+            &format!(r#"{{"conversation_id":"{conv}"}}"#),
+        )
+        .expect("session acks");
+        {
+            let client = p
+                .state
+                .broker
+                .clients
+                .get_mut("skippy")
+                .expect("client registered");
+            for n in 0..INBOX_CAP {
+                let _ = client.deposit(BotKind::Tell, "pad", "s", "a", &n.to_string(), 1);
+            }
+        }
+        p.state.broker.target_exited(&p.state.manager, p.b);
+        assert!(p.state.broker.dead_sessions.contains(&p.b), "retry pending");
+        p.state
+            .broker
+            .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
+        assert_eq!(
+            p.state.broker.queued(p.b),
+            0,
+            "no reminder to a dead session"
+        );
+        assert!(
+            p.state.broker.dead_sessions.contains(&p.b),
+            "failure retry still pending"
+        );
+    }
+
+    #[test]
+    fn repeat_ack_replays_without_dup() {
+        // A retried acknowledgement (lost verdict, impatient
+        // harness) returns success again but queues no second Ack
+        // and stops touching the courtesy clock.
+        let mut p = live_pair().grouped();
+        let res = p
+            .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"hi"}"#)
+            .expect("tell validates");
+        let conv = json_field(&res, "conversation").expect("conversation id");
+        let ack = format!(r#"{{"conversation_id":"{conv}"}}"#);
+        p.call(&p.run_b.clone(), "ack_message", &ack)
+            .expect("ack validates");
+        assert_eq!(p.state.broker.take_due(p.a, 10).len(), 1);
+        let again = p
+            .call(&p.run_b.clone(), "ack_message", &ack)
+            .expect("retry still acknowledges");
+        assert!(again.contains(r#""acknowledged":true"#), "again: {again}");
+        assert_eq!(
+            p.state.broker.take_due(p.a, 10).len(),
+            0,
+            "no duplicate Ack queued"
+        );
+    }
+
+    #[test]
+    fn epochless_nonzero_ack_conflicts() {
+        // Like polls, a nonzero ack without the epoch may be a stale
+        // pre-restart retry: accepting it would advance (and delete)
+        // a fresh epoch's received prefix.
+        use crate::comms::bot::ErrorCode;
+        let mut p = live_pair().grouped();
+        p.register_bot("skippy", vec!["peers"]);
+        for n in 0..3 {
             p.call(
                 &p.run_a.clone(),
                 "tell_session",
-                &format!(r#"{{"target":"b","message":"more","conversation_id":"{conv}"}}"#),
+                &format!(r#"{{"target":"skippy","message":"m{n}"}}"#),
             )
-            .expect("follow-up validates");
-            let due = p.state.broker.take_due(p.b, 10);
-            assert_eq!(due.len(), 1);
-            assert!(matches!(due[0].kind, InjectKind::FollowUp));
-            assert!(p.state.broker.take_due(p.a, 10).is_empty());
+            .expect("tell validates");
         }
-
-        #[test]
-        fn dropped_response_on_source_exit_notifies_responder() {
-            // B answers, gets success, and A's queue still holds the
-            // response when A exits: deleting it silently would leave B
-            // believing it was read. B must hear the loss loudly.
-            let mut p = live_pair().grouped();
-            let ask = p
-                .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"q"}"#)
-                .expect("ask validates");
-            let conv = json_field(&ask, "conversation").expect("conversation id");
-            assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the ask");
-            p.call(
-                &p.run_b.clone(),
-                "send_response",
-                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
-            )
-            .expect("target answers");
-            assert_eq!(p.state.broker.queued(p.a), 1);
-            p.state.broker.target_exited(&p.state.manager, p.a);
-            assert_eq!(p.state.broker.queued(p.a), 0, "exited queue is gone");
-            let due = p.state.broker.take_due(p.b, 10);
-            assert_eq!(due.len(), 1, "responder hears the loss");
-            assert!(matches!(due[0].kind, InjectKind::Failed));
-            assert_eq!(due[0].conv, conv);
-        }
-
-        #[test]
-        fn dropped_ack_on_source_exit_notifies_acker() {
-            // Same window for acks: the teller exits before reading the
-            // ack, so the acker must hear it instead of assuming receipt.
-            let mut p = live_pair().grouped();
-            let tell = p
-                .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","text":"hi"}"#)
-                .expect("tell validates");
-            let conv = json_field(&tell, "conversation").expect("conversation id");
-            assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the tell");
-            p.call(
-                &p.run_b.clone(),
-                "ack_message",
-                &format!(r#"{{"conversation_id":"{conv}"}}"#),
-            )
-            .expect("target acks");
-            assert_eq!(p.state.broker.queued(p.a), 1);
-            p.state.broker.target_exited(&p.state.manager, p.a);
-            let due = p.state.broker.take_due(p.b, 10);
-            assert_eq!(due.len(), 1, "acker hears the loss");
-            assert!(matches!(due[0].kind, InjectKind::Failed));
-            assert_eq!(due[0].conv, conv);
-        }
-
-        #[test]
-        fn dropped_bot_response_on_source_exit_notifies_client() {
-            // The session asked the client, the client answered (got
-            // completed:true), and the session exits with the response
-            // still queued: the client must hear the loss loudly through
-            // its inbox, not lose it silently.
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .call(
-                    &p.run_a.clone(),
-                    "ask_session",
-                    r#"{"target":"skippy","message":"are you there?"}"#,
-                )
-                .expect("session asks client");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            p.bcall(
-                "skippy",
-                "send_response",
-                &format!(r#"{{"conversation_id":"{conv}","message":"yes"}}"#),
-            )
-            .expect("client answers");
-            p.state.broker.target_exited(&p.state.manager, p.a);
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(poll.contains(&conv), "poll names the conv: {poll}");
-            assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
-        }
-
-        #[test]
-        fn dropped_bot_ack_on_source_exit_notifies_client() {
-            // The client acked a session tell (got acknowledged:true) and
-            // the session exits with the Ack still queued: the client is
-            // told, and the record closes instead of lingering Open.
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .call(
-                    &p.run_a.clone(),
-                    "tell_session",
-                    r#"{"target":"skippy","message":"hi"}"#,
-                )
-                .expect("session tells client");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            p.bcall("skippy", "ack_message", &format!(r#"{{"conversation_id":"{conv}"}}"#))
-                .expect("client acks");
-            p.state.broker.target_exited(&p.state.manager, p.a);
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(poll.contains(&conv), "poll names the conv: {poll}");
-            assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
-        }
-
-        #[test]
-        fn typed_over_bot_ack_notifies_the_inbox() {
-            // The client's ack reached A's prompt with its Enter staged;
-            // A types first, so the submit dies and the client is told
-            // through its inbox instead of assuming clean delivery.
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .call(
-                    &p.run_a.clone(),
-                    "tell_session",
-                    r#"{"target":"skippy","message":"hi"}"#,
-                )
-                .expect("session tells client");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            p.bcall(
-                "skippy",
-                "ack_message",
-                &format!(r#"{{"conversation_id":"{conv}"}}"#),
-            )
-            .expect("client acks");
-            p.state.settle_comms();
-            assert!(p.state.pending_enter.contains_key(&p.a), "enter staged");
-            p.state.note_human_input(p.a);
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(poll.contains(&conv), "poll names the conv: {poll}");
-            assert!(poll.contains(r#""kind":"failed""#), "failure lands: {poll}");
-        }
-
-        #[test]
-        fn courtesy_reminder_fires_once_after_grace() {
-            let mut p = live_pair().grouped();
-            let res = p
-                .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
-                .unwrap();
-            let conv = json_field(&res, "conversation").unwrap();
-            p.call(
-                &p.run_b.clone(),
-                "ack_message",
-                &format!(r#"{{"conversation_id":"{conv}"}}"#),
-            )
-            .unwrap();
-            p.state.broker.take_due(p.a, 10);
-            p.state.broker.take_due(p.b, 10);
-            // Inside the grace period: silence.
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(10));
-            assert!(p.state.broker.take_due(p.b, 10).is_empty());
-            // Past it: exactly one reminder to the target, never repeated.
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(31));
-            let due = p.state.broker.take_due(p.b, 10);
-            assert_eq!(due.len(), 1);
-            assert!(matches!(due[0].kind, InjectKind::Reminder));
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
-            assert!(p.state.broker.take_due(p.b, 10).is_empty());
-        }
-
-        #[test]
-        fn bot_courtesy_reminder_retries_a_full_inbox() {
-            // A reminder that cannot be deposited must not count as sent:
-            // the conversation stays un-reminded and the next sweep retries
-            // once the client makes room. Session-originated tell, so the
-            // reminder travels client-ward into the (possibly full) inbox.
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .call(
-                    &p.run_b.clone(),
-                    "tell_session",
-                    r#"{"target":"skippy","text":"hi"}"#,
-                )
-                .expect("session tells client");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            p.bcall(
-                "skippy",
-                "ack_message",
-                &format!(r#"{{"conversation_id":"{conv}"}}"#),
-            )
-            .expect("client acks");
-            assert_eq!(p.state.broker.take_due(p.b, 10).len(), 1, "b reads the ack");
-            fill_inbox(&mut p, "skippy");
-            // Past grace with nowhere to put the reminder: still pending.
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(31));
-            assert!(
-                !p.state.broker.bot_convs.get(&conv).expect("conv").reminded,
-                "undelivered reminder stays un-reminded"
-            );
-            // Room opens: the next sweep delivers exactly one reminder.
-            drain_inbox(&mut p, "skippy");
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
-            assert!(p.state.broker.bot_convs.get(&conv).expect("conv").reminded);
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert_eq!(poll.matches(r#""kind":"reminder""#).count(), 1, "poll: {poll}");
-            assert!(poll.contains(&conv), "poll: {poll}");
-        }
-
-        #[test]
-        fn target_followup_suppresses_the_courtesy_reminder() {
-            // The courtesy obligation ends when the owing party updates:
-            // b acked and then sent the update itself, so no reminder may
-            // fire — not now, not after more silence. The source's own
-            // follow-ups merely restart grace (see the back-to-source test).
-            let mut p = live_pair().grouped();
-            let res = p
-                .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"fyi"}"#)
-                .unwrap();
-            let conv = json_field(&res, "conversation").unwrap();
-            p.call(
-                &p.run_b.clone(),
-                "ack_message",
-                &format!(r#"{{"conversation_id":"{conv}"}}"#),
-            )
-            .unwrap();
-            p.call(
-                &p.run_b.clone(),
-                "tell_session",
-                &format!(r#"{{"target":"a","message":"on it","conversation_id":"{conv}"}}"#),
-            )
-            .expect("target follows up");
-            p.state.broker.take_due(p.a, 10);
-            p.state.broker.take_due(p.b, 10);
-            // Past grace and far past it: silence, forever.
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(31));
-            assert!(p.state.broker.take_due(p.b, 10).is_empty());
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
-            assert!(p.state.broker.take_due(p.b, 10).is_empty());
-        }
-
-        #[test]
-        fn client_followup_suppresses_the_courtesy_reminder() {
-            // Same rule client-ward: the session told the client, the
-            // client acked and followed up, so the inbox stays quiet.
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .call(
-                    &p.run_b.clone(),
-                    "tell_session",
-                    r#"{"target":"skippy","text":"fyi"}"#,
-                )
-                .expect("session tells client");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            p.bcall(
-                "skippy",
-                "ack_message",
-                &format!(r#"{{"conversation_id":"{conv}"}}"#),
-            )
-            .expect("client acks");
-            p.bcall(
-                "skippy",
-                "tell_session",
-                &format!(r#"{{"target":"b","text":"on it","conversation_id":"{conv}"}}"#),
-            )
-            .expect("client follows up");
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(!poll.contains(r#""kind":"reminder""#), "poll: {poll}");
-        }
-
-        #[test]
-        fn courtesy_skips_dead_sessions() {
-            // A bot tell was acked, the session exits with a full inbox
-            // (failure retry pending): the courtesy sweep must not push
-            // a Reminder to the removed queue — nobody will drain it.
-            use crate::comms::bot::{BotKind, INBOX_CAP};
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            let res = p
-                .bcall("skippy", "tell_session", r#"{"target":"b","message":"hi"}"#)
-                .expect("tell validates");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            p.call(
-                &p.run_b.clone(),
-                "ack_message",
-                &format!(r#"{{"conversation_id":"{conv}"}}"#),
-            )
-            .expect("session acks");
-            {
-                let client = p
-                    .state
-                    .broker
-                    .clients
-                    .get_mut("skippy")
-                    .expect("client registered");
-                for n in 0..INBOX_CAP {
-                    let _ = client.deposit(BotKind::Tell, "pad", "s", "a", &n.to_string(), 1);
-                }
-            }
-            p.state.broker.target_exited(&p.state.manager, p.b);
-            assert!(p.state.broker.dead_sessions.contains(&p.b), "retry pending");
-            p.state
-                .broker
-                .tick(std::time::Instant::now() + std::time::Duration::from_secs(3600));
-            assert_eq!(
-                p.state.broker.queued(p.b),
-                0,
-                "no reminder to a dead session"
-            );
-            assert!(
-                p.state.broker.dead_sessions.contains(&p.b),
-                "failure retry still pending"
-            );
-        }
-
-        #[test]
-        fn repeat_ack_replays_without_dup() {
-            // A retried acknowledgement (lost verdict, impatient
-            // harness) returns success again but queues no second Ack
-            // and stops touching the courtesy clock.
-            let mut p = live_pair().grouped();
-            let res = p
-                .call(&p.run_a.clone(), "tell_session", r#"{"target":"b","message":"hi"}"#)
-                .expect("tell validates");
-            let conv = json_field(&res, "conversation").expect("conversation id");
-            let ack = format!(r#"{{"conversation_id":"{conv}"}}"#);
-            p.call(&p.run_b.clone(), "ack_message", &ack)
-                .expect("ack validates");
-            assert_eq!(p.state.broker.take_due(p.a, 10).len(), 1);
-            let again = p
-                .call(&p.run_b.clone(), "ack_message", &ack)
-                .expect("retry still acknowledges");
-            assert!(again.contains(r#""acknowledged":true"#), "again: {again}");
-            assert_eq!(
-                p.state.broker.take_due(p.a, 10).len(),
-                0,
-                "no duplicate Ack queued"
-            );
-        }
-
-        #[test]
-        fn epochless_nonzero_ack_conflicts() {
-            // Like polls, a nonzero ack without the epoch may be a stale
-            // pre-restart retry: accepting it would advance (and delete)
-            // a fresh epoch's received prefix.
-            use crate::comms::bot::ErrorCode;
-            let mut p = live_pair().grouped();
-            p.register_bot("skippy", vec!["peers"]);
-            for n in 0..3 {
-                p.call(
-                    &p.run_a.clone(),
-                    "tell_session",
-                    &format!(r#"{{"target":"skippy","message":"m{n}"}}"#),
-                )
-                .expect("tell validates");
-            }
-            p.bcall("skippy", "bot_poll", "{}").expect("poll receives");
-            let err = p
-                .bcall("skippy", "bot_ack", r#"{"cursor":2}"#)
-                .expect_err("epochless nonzero ack conflicts");
-            assert_eq!(err.code, ErrorCode::Conflict);
-            // Nothing was deleted: the fresh prefix still polls.
-            let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-            assert!(poll.contains("m0"), "fresh events intact: {poll}");
-        }
+        p.bcall("skippy", "bot_poll", "{}").expect("poll receives");
+        let err = p
+            .bcall("skippy", "bot_ack", r#"{"cursor":2}"#)
+            .expect_err("epochless nonzero ack conflicts");
+        assert_eq!(err.code, ErrorCode::Conflict);
+        // Nothing was deleted: the fresh prefix still polls.
+        let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
+        assert!(poll.contains("m0"), "fresh events intact: {poll}");
+    }
 }

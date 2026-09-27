@@ -187,140 +187,140 @@ mod tests {
     use super::*;
     use crate::infra::ids::RunId;
 
-        #[test]
-        fn permission_mode_toggle_spans_off_and_yolo() {
-            let mut s = AppState::new();
-            assert_eq!(s.permission_mode, crate::infra::config::PermissionMode::Yolo);
-            s.dirty = false;
-            assert!(s.toggle_permission_mode());
-            assert_eq!(s.permission_mode, crate::infra::config::PermissionMode::Off);
-            assert!(s.dirty);
-            assert!(!s.set_permission_mode(crate::infra::config::PermissionMode::Off));
-            assert!(s.toggle_permission_mode());
-            assert_eq!(s.permission_mode, crate::infra::config::PermissionMode::Yolo);
-            // Foreign modes collapse to Yolo, never back through the toggle.
-            assert!(s.set_permission_mode(crate::infra::config::PermissionMode::SafeOnly));
-            assert!(s.toggle_permission_mode());
-            assert_eq!(s.permission_mode, crate::infra::config::PermissionMode::Yolo);
-        }
+    #[test]
+    fn permission_mode_toggle_spans_off_and_yolo() {
+        let mut s = AppState::new();
+        assert_eq!(s.permission_mode, crate::infra::config::PermissionMode::Yolo);
+        s.dirty = false;
+        assert!(s.toggle_permission_mode());
+        assert_eq!(s.permission_mode, crate::infra::config::PermissionMode::Off);
+        assert!(s.dirty);
+        assert!(!s.set_permission_mode(crate::infra::config::PermissionMode::Off));
+        assert!(s.toggle_permission_mode());
+        assert_eq!(s.permission_mode, crate::infra::config::PermissionMode::Yolo);
+        // Foreign modes collapse to Yolo, never back through the toggle.
+        assert!(s.set_permission_mode(crate::infra::config::PermissionMode::SafeOnly));
+        assert!(s.toggle_permission_mode());
+        assert_eq!(s.permission_mode, crate::infra::config::PermissionMode::Yolo);
+    }
 
-        #[test]
-        fn codex_permission_request_allow_skips_prompt_ask_defers() {
-            use crate::infra::config::PermissionMode;
-            let audit = std::env::temp_dir().join(format!(
-                "forge-codex-preq-test-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&audit);
-            let mut s = AppState::new();
-            let run = RunId::generate();
-            let id = s
-                .manager
-                .spawn_agent(
-                    "cx",
-                    &std::env::temp_dir(),
-                    "exec sleep 30",
-                    run.clone(),
-                    "codex",
-                )
-                .unwrap();
-            // YOLO allow must arrive as the behavior envelope Codex accepts.
-            let mut yolo =
-                crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
-            let (allow_tx, allow_rx) = std::sync::mpsc::channel();
-            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
-                hook: "PermissionRequest".to_string(),
-                body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
-                run_id: run.to_string(),
-                sync: true,
-                reply: allow_tx,
-                timed_out: Default::default(),
-            }));
-            s.settle_hooks(&mut yolo, &audit);
-            let line = allow_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
-            let v: serde_json::Value = serde_json::from_str(line.trim()).expect("reply is JSON");
-            assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
-            assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
-            // Off ask declines to decide so the native prompt continues.
-            let mut off = crate::hooks::policy::Policy::new(PermissionMode::Off, &[], &[]).unwrap();
-            let (ask_tx, ask_rx) = std::sync::mpsc::channel();
-            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
-                hook: "PermissionRequest".to_string(),
-                body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
-                run_id: run.to_string(),
-                sync: true,
-                reply: ask_tx,
-                timed_out: Default::default(),
-            }));
-            s.settle_hooks(&mut off, &audit);
-            let line = ask_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
-            assert!(line.is_empty(), "ask defers silently: {line:?}");
-            assert!(s.manager.remove(id));
-            let _ = std::fs::remove_file(&audit);
-        }
-
-        #[test]
-        fn adding_to_group_clusters_member_buttons() {
-            let mut s = AppState::new();
-            let a = s
-                .manager
-                .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            let b = s
-                .manager
-                .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            let c = s
-                .manager
-                .spawn("c", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
-                .unwrap();
-            assert_eq!(s.manager.order(), &[a, b, c]);
-            s.apply_group(crate::ui::dialogs::groups::GroupOutcome::SetMembers {
-                group: "peers".to_string(),
-                members: vec![a, c],
-            });
-            assert_eq!(s.manager.order(), &[a, c, b], "c clusters right of a");
-            assert!(s.manager.remove(a));
-            assert!(s.manager.remove(b));
-            assert!(s.manager.remove(c));
-        }
-
-        #[test]
-        fn safe_only_blocks_still_deny_without_a_modal() {
-            use crate::infra::config::PermissionMode;
-            let audit = std::env::temp_dir().join(format!(
-                "forge-block-test-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&audit);
-            let mut policy = crate::hooks::policy::Policy::new(
-                PermissionMode::SafeOnly,
-                &[],
-                &["doom".to_string()],
+    #[test]
+    fn codex_permission_request_allow_skips_prompt_ask_defers() {
+        use crate::infra::config::PermissionMode;
+        let audit = std::env::temp_dir().join(format!(
+            "forge-codex-preq-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut s = AppState::new();
+        let run = RunId::generate();
+        let id = s
+            .manager
+            .spawn_agent(
+                "cx",
+                &std::env::temp_dir(),
+                "exec sleep 30",
+                run.clone(),
+                "codex",
             )
             .unwrap();
-            let mut s = AppState::new();
-            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
-                hook: "PreToolUse".to_string(),
-                body: r#"{"tool_name":"Bash","tool_input":{"command":"doom"}}"#.to_string(),
-                run_id: String::new(),
-                sync: true,
-                reply: reply_tx,
-                timed_out: Default::default(),
-            }));
-            s.settle_hooks(&mut policy, &audit);
-            assert!(s.pending_hooks.is_empty());
-            let line = reply_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap();
-            assert!(line.contains(r#""permissionDecision":"deny""#), "line: {line:?}");
-            let logged = std::fs::read_to_string(&audit).unwrap();
-            assert_eq!(logged.lines().count(), 1, "audit: {logged:?}");
-            let _ = std::fs::remove_file(&audit);
-        }
+        // YOLO allow must arrive as the behavior envelope Codex accepts.
+        let mut yolo =
+            crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+        let (allow_tx, allow_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+            hook: "PermissionRequest".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
+            run_id: run.to_string(),
+            sync: true,
+            reply: allow_tx,
+            timed_out: Default::default(),
+        }));
+        s.settle_hooks(&mut yolo, &audit);
+        let line = allow_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(line.trim()).expect("reply is JSON");
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        // Off ask declines to decide so the native prompt continues.
+        let mut off = crate::hooks::policy::Policy::new(PermissionMode::Off, &[], &[]).unwrap();
+        let (ask_tx, ask_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+            hook: "PermissionRequest".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
+            run_id: run.to_string(),
+            sync: true,
+            reply: ask_tx,
+            timed_out: Default::default(),
+        }));
+        s.settle_hooks(&mut off, &audit);
+        let line = ask_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.is_empty(), "ask defers silently: {line:?}");
+        assert!(s.manager.remove(id));
+        let _ = std::fs::remove_file(&audit);
+    }
+
+    #[test]
+    fn adding_to_group_clusters_member_buttons() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let c = s
+            .manager
+            .spawn("c", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        assert_eq!(s.manager.order(), &[a, b, c]);
+        s.apply_group(crate::ui::dialogs::groups::GroupOutcome::SetMembers {
+            group: "peers".to_string(),
+            members: vec![a, c],
+        });
+        assert_eq!(s.manager.order(), &[a, c, b], "c clusters right of a");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+        assert!(s.manager.remove(c));
+    }
+
+    #[test]
+    fn safe_only_blocks_still_deny_without_a_modal() {
+        use crate::infra::config::PermissionMode;
+        let audit = std::env::temp_dir().join(format!(
+            "forge-block-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&audit);
+        let mut policy = crate::hooks::policy::Policy::new(
+            PermissionMode::SafeOnly,
+            &[],
+            &["doom".to_string()],
+        )
+        .unwrap();
+        let mut s = AppState::new();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+            hook: "PreToolUse".to_string(),
+            body: r#"{"tool_name":"Bash","tool_input":{"command":"doom"}}"#.to_string(),
+            run_id: String::new(),
+            sync: true,
+            reply: reply_tx,
+            timed_out: Default::default(),
+        }));
+        s.settle_hooks(&mut policy, &audit);
+        assert!(s.pending_hooks.is_empty());
+        let line = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(line.contains(r#""permissionDecision":"deny""#), "line: {line:?}");
+        let logged = std::fs::read_to_string(&audit).unwrap();
+        assert_eq!(logged.lines().count(), 1, "audit: {logged:?}");
+        let _ = std::fs::remove_file(&audit);
+    }
 }
