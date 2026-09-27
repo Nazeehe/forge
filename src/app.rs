@@ -2838,7 +2838,7 @@ impl AppState {
             None => return Err("screenshot needs an app name".to_string()),
         };
         let focus = Self::tool_bool(args, "focus").unwrap_or(false);
-        match crate::screenshot::capture(&app, focus) {
+        match crate::visual::screenshot::capture(&app, focus) {
             Ok(shot) => Ok(format!(
                 "{{\"path\":{},\"app\":{},\"width\":{},\"height\":{}}}",
                 crate::ipc::mcp::escape_json(&shot.path),

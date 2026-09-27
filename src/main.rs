@@ -22,8 +22,6 @@ mod telegram;
 mod telegram_dialog;
 mod tetris;
 mod theme_dialog;
-#[cfg(all(target_os = "linux", feature = "visual"))]
-mod screenshot;
 mod session;
 mod theme;
 mod tui;

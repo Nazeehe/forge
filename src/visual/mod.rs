@@ -1,5 +1,10 @@
+//! Visual: Mermaid diagrams and window screenshots for the Visual tab.
+//!
 //! Mermaid diagrams for the Visual tab (U1 spike): flowchart source in,
 //! PNG bytes out. No terminal, no state, no wiring yet.
+
+#[cfg(all(target_os = "linux", feature = "visual"))]
+pub mod screenshot;
 
 static SPIKE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
