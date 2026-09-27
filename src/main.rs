@@ -159,6 +159,7 @@ fn startup(force_oobe: bool) -> i32 {
             return 1;
         }
     }
+    branding::migrate_sessions_file(&home);
     let mut loaded = match config::LoadedConfig::load_home(&home) {
         Ok(l) => l,
         Err(e) => {

@@ -66,9 +66,19 @@ pub fn guide_file(home: &Path) -> PathBuf {
     config_dir(home).join("AGENTS.md")
 }
 
-/// `~/.forge/sessions`: saved session snapshots, newest last.
+/// `~/.forge/sessions.json`: saved session snapshots, newest last.
 pub fn sessions_file(home: &Path) -> PathBuf {
-    config_dir(home).join("sessions")
+    config_dir(home).join("sessions.json")
+}
+
+/// Move the pre-`.json` `~/.forge/sessions` into place. Never clobbers an
+/// existing `sessions.json`; failures leave both files as they were.
+pub fn migrate_sessions_file(home: &Path) {
+    let legacy = config_dir(home).join("sessions");
+    let current = sessions_file(home);
+    if legacy.is_file() && !current.exists() {
+        let _ = std::fs::rename(&legacy, &current);
+    }
 }
 
 /// `~/.forge/themes`: external `theme.json` files (one `*.json` per
@@ -144,5 +154,30 @@ mod tests {
             kanban_file(home),
             PathBuf::from("/home/tester/.forge/kanban.json")
         );
+        assert_eq!(
+            sessions_file(home),
+            PathBuf::from("/home/tester/.forge/sessions.json")
+        );
+    }
+
+    #[test]
+    fn extensionless_sessions_file_moves_to_json() {
+        let home = std::env::temp_dir().join(format!(
+            "forge-branding-sessions-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(config_dir(&home)).unwrap();
+        let legacy = config_dir(&home).join("sessions");
+        std::fs::write(&legacy, b"old").unwrap();
+        migrate_sessions_file(&home);
+        assert!(!legacy.exists(), "old name moved away");
+        assert_eq!(std::fs::read(sessions_file(&home)).unwrap(), b"old");
+        // An existing new file is never clobbered by a stale old one.
+        std::fs::write(&legacy, b"stale").unwrap();
+        migrate_sessions_file(&home);
+        assert_eq!(std::fs::read(sessions_file(&home)).unwrap(), b"old");
+        assert!(legacy.exists(), "old file left intact on collision");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

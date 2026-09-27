@@ -1,4 +1,4 @@
-//! Saved session snapshots (`~/.forge/sessions`): quitting forge
+//! Saved session snapshots (`~/.forge/sessions.json`): quitting forge
 //! serializes every live agent session, and startup offers the saved
 //! entries back through a picker (or a fresh instance). Plain JSON via
 //! `serde_json::Value` — no derive macros — written atomically; a
