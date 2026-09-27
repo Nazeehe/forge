@@ -652,6 +652,22 @@ pub fn uninstall_one_hooks(home: &std::path::Path, harness: &str) -> Outcome {
     }
 }
 
+/// Drop forge from muse 1.2.1's `mcp_servers` block (and the block itself
+/// once empty): muse 1.4 rejects the key. True when anything was removed.
+fn remove_stale_muse_mcp(v: &mut serde_json::Value) -> bool {
+    let Some(root) = v.as_object_mut() else {
+        return false;
+    };
+    let Some(servers) = root.get_mut("mcp_servers").and_then(|m| m.as_object_mut()) else {
+        return false;
+    };
+    let removed = servers.remove("forge").is_some();
+    if servers.is_empty() {
+        root.remove("mcp_servers");
+    }
+    removed
+}
+
 /// Register the forge MCP server for one harness.
 pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -> Outcome {
     match harness {
@@ -698,9 +714,10 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
                 ),
             }
         }
-        // Grounded in muse 1.2.1, verified live: the `mcp_servers`
-        // block in ~/.config/muse/settings.json takes stdio entries
-        // {transport, command, args, env} plus `enabled` and `mode`.
+        // Grounded in muse 1.4.0, verified live: the `mcpServers` block in
+        // ~/.config/muse/settings.json takes stdio entries {transport,
+        // command, args, env, mode}. 1.4 rejects 1.2.1's `mcp_servers` key
+        // and disables MCP entirely, so a stale forge entry there goes.
         // MCP children inherit only PATH+PWD plus the static `env` map,
         // but ${VAR} entries expand from the parent process (verified),
         // so the endpoint and run ride through from forge-spawned panes.
@@ -712,7 +729,8 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
                 Ok(v) => v,
                 Err(e) => return Outcome::error(harness, e),
             };
-            obj_mut(&mut v, "mcp_servers").insert(
+            remove_stale_muse_mcp(&mut v);
+            obj_mut(&mut v, "mcpServers").insert(
                 "forge".to_string(),
                 serde_json::json!({
                     "transport": "stdio",
@@ -722,7 +740,6 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
                         "FORGE_IPC_ENDPOINT": "${FORGE_IPC_ENDPOINT}",
                         "FORGE_RUN_ID": "${FORGE_RUN_ID}",
                     },
-                    "enabled": true,
                     "mode": "optional",
                 }),
             );
@@ -856,11 +873,12 @@ pub fn uninstall_one_mcp(home: &std::path::Path, harness: &str) -> Outcome {
                 Ok(v) => v,
                 Err(e) => return Outcome::error(harness, e),
             };
+            let stale = remove_stale_muse_mcp(&mut v);
             let gone = v
-                .get_mut("mcp_servers")
+                .get_mut("mcpServers")
                 .and_then(|m| m.as_object_mut())
                 .is_some_and(|m| m.remove("forge").is_some());
-            if !gone {
+            if !gone && !stale {
                 return Outcome::unchanged(harness, "nothing to remove".to_string());
             }
             match write_json(&path, &v) {
@@ -1355,13 +1373,23 @@ mod tests {
 
     #[test]
     fn muse_mcp_writes_verified_schema() {
+        // Grounded in muse 1.4.0: it reads `mcpServers` and rejects the old
+        // 1.2.1 `mcp_servers` key ("MCP configuration error ... MCP is
+        // disabled for this runtime"), so a stale entry must be migrated away.
         let home = scratch_home();
+        std::fs::create_dir_all(home.join(".config/muse")).unwrap();
+        std::fs::write(
+            home.join(".config/muse/settings.json"),
+            r#"{"mcp_servers": {"forge": {"command": "/old/forge", "args": ["mcp-serve"]}}}"#,
+        )
+        .unwrap();
         let out = install_one_mcp(&home, "muse", FORGE_BIN);
         assert!(out.installed, "out: {out:?}");
         let text =
             std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let srv = &v["mcp_servers"]["forge"];
+        assert!(v.get("mcp_servers").is_none(), "1.2.1 key migrated away: {text}");
+        let srv = &v["mcpServers"]["forge"];
         assert_eq!(srv["transport"], serde_json::Value::String("stdio".to_string()));
         assert_eq!(srv["command"], serde_json::Value::String(FORGE_BIN.to_string()));
         assert_eq!(srv["args"][0], serde_json::Value::String("mcp-serve".to_string()));
@@ -1375,21 +1403,33 @@ mod tests {
             srv["env"]["FORGE_RUN_ID"],
             serde_json::Value::String("${FORGE_RUN_ID}".to_string())
         );
-        assert_eq!(srv["enabled"], serde_json::Value::Bool(true));
+        assert!(srv.get("enabled").is_none(), "not part of the 1.4 entry: {text}");
         assert_eq!(srv["mode"], serde_json::Value::String("optional".to_string()));
         // Hooks and MCP share the file: installing both keeps both.
         install_one_hooks(&home, "muse", FORGE_BIN);
         let text =
             std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
-        assert!(text.contains("mcp_servers"), "mcp kept: {text}");
+        assert!(text.contains("mcpServers"), "mcp kept: {text}");
         assert!(text.contains("hook-relay"), "hooks kept: {text}");
         let out = uninstall_one_mcp(&home, "muse");
         assert!(out.removed, "out: {out:?}");
         let text =
             std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert!(v["mcp_servers"].get("forge").is_none(), "gone: {text}");
+        assert!(v["mcpServers"].get("forge").is_none(), "gone: {text}");
         assert!(text.contains("hook-relay"), "hooks kept: {text}");
+        // Uninstall also clears a stale 1.2.1 entry on its own.
+        std::fs::write(
+            home.join(".config/muse/settings.json"),
+            r#"{"mcp_servers": {"forge": {"command": "/old/forge"}, "other": {}}}"#,
+        )
+        .unwrap();
+        assert!(uninstall_one_mcp(&home, "muse").removed);
+        let text =
+            std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(v["mcp_servers"].get("forge").is_none(), "stale gone: {text}");
+        assert!(v["mcp_servers"].get("other").is_some(), "others kept: {text}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
