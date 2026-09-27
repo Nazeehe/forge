@@ -1,3 +1,5 @@
+//! Telegram: mobile transport to the operator's phone.
+//!
 //! Telegram mobile transport: bounded `getUpdates` polling plus an
 //! independently wakeable `sendMessage` worker. The token itself is never
 //! stored here or logged; [`read_token`] loads it from a private file on each
