@@ -5,19 +5,10 @@
 //! starts red by deleting that step's entries, then goes green after
 //! the move.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
 const MAX_FILE_LINES: usize = 1500;
-
-/// Flat `src/*.rs` files (besides `main.rs`) still allowed at the top level.
-/// Emptied as feature folders take their files.
-const FLAT_ALLOWED: &[&str] = &["app.rs"];
-
-/// `.rs` files under `src/` (paths relative to `src/`) allowed to exceed
-/// [`MAX_FILE_LINES`]. Emptied as the oversized files are split.
-const OVERSIZE_ALLOWED: &[&str] = &["app.rs"];
 
 fn src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -67,47 +58,22 @@ fn all_rs_files() -> Vec<(String, usize)> {
 
 #[test]
 fn flat_src_is_only_main() {
-    let allowed: BTreeSet<&str> = FLAT_ALLOWED.iter().copied().collect();
-    let mut unexpected = Vec::new();
-    for name in flat_rs_files() {
-        if !allowed.contains(name.as_str()) {
-            unexpected.push(name);
-        }
-    }
+    let unexpected = flat_rs_files();
     assert!(
         unexpected.is_empty(),
-        "flat src/*.rs files not in FLAT_ALLOWED (move them or allow-list them): {unexpected:?}"
+        "flat src/*.rs files must move into feature folders: {unexpected:?}"
     );
 }
 
 #[test]
 fn no_file_exceeds_1500_lines() {
-    let allowed: BTreeSet<&str> = OVERSIZE_ALLOWED.iter().copied().collect();
-    let mut oversize = Vec::new();
-    for (rel, lines) in all_rs_files() {
-        if lines > MAX_FILE_LINES && !allowed.contains(rel.as_str()) {
-            oversize.push(format!("{rel} ({lines} lines)"));
-        }
-    }
+    let oversize: Vec<String> = all_rs_files()
+        .into_iter()
+        .filter(|(_, lines)| *lines > MAX_FILE_LINES)
+        .map(|(rel, lines)| format!("{rel} ({lines} lines)"))
+        .collect();
     assert!(
         oversize.is_empty(),
-        "files over {MAX_FILE_LINES} lines not in OVERSIZE_ALLOWED: {oversize:?}"
+        "files over {MAX_FILE_LINES} lines must split: {oversize:?}"
     );
-}
-
-#[test]
-fn allow_lists_have_no_stale_entries() {
-    let root = src_dir();
-    let mut stale = Vec::new();
-    for entry in FLAT_ALLOWED {
-        if !root.join(entry).is_file() {
-            stale.push(format!("FLAT_ALLOWED: {entry}"));
-        }
-    }
-    for entry in OVERSIZE_ALLOWED {
-        if !root.join(entry).is_file() {
-            stale.push(format!("OVERSIZE_ALLOWED: {entry}"));
-        }
-    }
-    assert!(stale.is_empty(), "stale allow-list entries: {stale:?}");
 }
