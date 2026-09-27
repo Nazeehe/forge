@@ -635,7 +635,16 @@ fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> bool {
         return true;
     };
     let (area_cols, area_rows) = (chrome.image.width, chrome.image.height);
-    if key.modifiers != KeyModifiers::NONE {
+    let mods = key.modifiers;
+    // Ctrl/Alt chords still reach the router, so prefixes keep
+    // working with a diagram open.
+    if mods.contains(
+        KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::SUPER
+            | KeyModifiers::HYPER
+            | KeyModifiers::META,
+    ) {
         return false;
     }
     // Input mode owns the editing keys so `+`/`-` type instead of
@@ -643,7 +652,7 @@ fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> bool {
     // tab swallows the key and the agent pane never sees it.
     if state.visual_slots.get(&id).is_some_and(|s| s.input_active) {
         match key.code {
-            KeyCode::Enter => {
+            KeyCode::Enter if mods.is_empty() => {
                 let ready = state
                     .visual_slots
                     .get(&id)
@@ -655,13 +664,13 @@ fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> bool {
                     state.dirty = true;
                 }
             }
-            KeyCode::Esc => {
+            KeyCode::Esc if mods.is_empty() => {
                 if let Some(slot) = state.visual_slots.get_mut(&id) {
                     slot.input_active = false;
                     state.dirty = true;
                 }
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if mods.is_empty() => {
                 if let Some(slot) = state.visual_slots.get_mut(&id) {
                     if let Some(draft) = slot.draft.as_mut() {
                         draft.pop();
@@ -669,7 +678,7 @@ fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> bool {
                     state.dirty = true;
                 }
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
                 if let Some(slot) = state.visual_slots.get_mut(&id) {
                     let draft = slot.draft.get_or_insert_with(String::new);
                     if draft.chars().count() < crate::walkthrough::MAX_INPUT_CHARS {
@@ -678,9 +687,15 @@ fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> bool {
                     state.dirty = true;
                 }
             }
-            _ => {}
+            _ if mods.is_empty() => {}
+            // Shifted non-text keys (and any other modifier) keep the
+            // old passthrough behavior so nothing else is swallowed.
+            _ => return false,
         }
         return true;
+    }
+    if mods != KeyModifiers::NONE {
+        return false;
     }
     match key.code {
         KeyCode::Left => {
@@ -2339,6 +2354,35 @@ mod tests {
         assert_eq!(
             state.visual_slots.get(&id).unwrap().draft.as_deref(),
             Some("c")
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_shift_char_types_uppercase_in_input() {
+        // Shift+F arrives as Char('F') with SHIFT held: input mode
+        // must type it, not drop it to the agent pane.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(40, 180));
+        let id = open_visual_overlay(&mut state);
+        let mut router = InputRouter::new();
+        {
+            let slot = state.visual_slots.get_mut(&id).unwrap();
+            slot.selected = Some(0);
+            slot.input_active = true;
+            slot.draft = Some(String::new());
+        }
+        handle_key(
+            &mut state,
+            &mut router,
+            KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(
+            state.visual_slots.get(&id).unwrap().draft.as_deref(),
+            Some("F"),
+            "Shift+F types F in chat input"
         );
         assert!(state.manager.remove(id));
     }

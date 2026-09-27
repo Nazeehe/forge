@@ -1427,7 +1427,8 @@ impl AppState {
 
     /// All chat history rows for one slot, oldest first: one wrapped
     /// question row plus markdown answer rows (or the waiting marker)
-    /// per pair. The viewport shows the tail of these.
+    /// per pair, with one blank row between pairs like the
+    /// walkthrough Q&A log. The viewport shows the tail of these.
     #[cfg(feature = "visual")]
     fn visual_chat_history_lines(&self, slot: &VisualSlot) -> Vec<Vec<crate::ui::SpanView>> {
         use crate::theme::{style, Role};
@@ -1435,7 +1436,10 @@ impl AppState {
         let text = style(Role::Text);
         let muted = style(Role::Muted);
         let mut rows = Vec::new();
-        for q in &slot.questions {
+        for (n, q) in slot.questions.iter().enumerate() {
+            if n > 0 {
+                rows.push(Vec::new());
+            }
             rows.extend(crate::ui::wrap_spans(
                 vec![crate::ui::SpanView {
                     text: format!(
@@ -8775,6 +8779,65 @@ mod tests {
                 s.style.add_modifier.contains(ratatui::style::Modifier::BOLD)
             }),
             "markdown skin, not plain text"
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[cfg(feature = "visual")]
+    #[test]
+    fn visual_chat_history_separates_entries_with_blank_row() {
+        // A second question must not sit directly under the previous
+        // answer: entries are separated by one blank row, like the
+        // walkthrough Q&A log.
+        let mut state = AppState::new();
+        state.term_size = (40, 100);
+        let (id, _) = spawn_visual_agent(&mut state, "agent");
+        state.visual_slots.insert(id, crate::app::VisualSlot {
+            generation: 1,
+            png: Vec::new(),
+            rgba: Vec::new(),
+            width: 8,
+            height: 8,
+            title: String::new(),
+            alt: String::new(),
+            zoom: 1.0,
+            scroll_x: 0,
+            scroll_y: 0,
+            selected: None,
+            draft: None,
+            input_active: false,
+            chat_open: true,
+            chat_scroll: 0,
+            questions: vec![
+                crate::visual::VisualQuestion {
+                    shape_id: "A".to_string(),
+                    shape_label: "S".to_string(),
+                    question: "q1".to_string(),
+                    answer: Some("a1".to_string()),
+                },
+                crate::visual::VisualQuestion {
+                    shape_id: "A".to_string(),
+                    shape_label: "S".to_string(),
+                    question: "q2".to_string(),
+                    answer: Some("a2".to_string()),
+                },
+            ],
+            shapes: Vec::new(),
+            vb: [0.0, 0.0, 8.0, 8.0],
+        });
+        let slot = state.visual_slots.get(&id).unwrap();
+        let rows = state.visual_chat_history_lines(slot);
+        let text: Vec<String> = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        let second_q = text
+            .iter()
+            .position(|r| r.contains("q2"))
+            .expect("second question renders");
+        assert!(
+            second_q > 0 && text[second_q - 1].is_empty(),
+            "blank row before second question: {text:?}"
         );
         assert!(state.manager.remove(id));
     }
