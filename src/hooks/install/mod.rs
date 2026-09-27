@@ -1,0 +1,366 @@
+//! Harness installers (Phase 5b): register forge hooks, MCP servers, and
+//! skills with each agent CLI. Everything operates on an explicit home
+//! directory so tests run on scratch dirs, never the developer's real
+//! config. Codex MCP goes through the `codex` binary itself so user
+//! `config.toml` comments survive; everything else is direct file surgery
+//! in schemas observed live (see each function).
+
+pub mod hooks;
+pub mod mcp;
+pub mod skills;
+#[cfg(test)]
+mod test_support;
+
+pub use hooks::{install_one_hooks, uninstall_one_hooks};
+use mcp::{install_one_mcp, uninstall_one_mcp};
+use skills::{install_one_skills, uninstall_one_skills};
+
+/// One harness result. Skips (unsupported) are not errors; only `error`
+/// fails the subcommand.
+#[derive(Debug)]
+pub struct Outcome {
+    pub harness: String,
+    pub installed: bool,
+    pub removed: bool,
+    pub skipped: bool,
+    pub error: Option<String>,
+    pub detail: String,
+}
+
+impl Outcome {
+    fn installed(harness: &str, detail: String) -> Self {
+        Outcome {
+            harness: harness.to_string(),
+            installed: true,
+            removed: false,
+            skipped: false,
+            error: None,
+            detail,
+        }
+    }
+
+    fn removed(harness: &str, detail: String) -> Self {
+        Outcome {
+            harness: harness.to_string(),
+            installed: false,
+            removed: true,
+            skipped: false,
+            error: None,
+            detail,
+        }
+    }
+
+    fn skipped(harness: &str, detail: String) -> Self {
+        Outcome {
+            harness: harness.to_string(),
+            installed: false,
+            removed: false,
+            skipped: true,
+            error: None,
+            detail,
+        }
+    }
+
+    fn error(harness: &str, error: String) -> Self {
+        Outcome {
+            harness: harness.to_string(),
+            installed: false,
+            removed: false,
+            skipped: false,
+            error: Some(error),
+            detail: String::new(),
+        }
+    }
+
+    fn unchanged(harness: &str, detail: String) -> Self {
+        Outcome {
+            harness: harness.to_string(),
+            installed: false,
+            removed: false,
+            skipped: false,
+            error: None,
+            detail,
+        }
+    }
+}
+
+fn hook_command(forge_bin: &str) -> String {
+    format!("{forge_bin} hook-relay")
+}
+
+/// Codex reads CODEX_HOME, defaulting to ~/.codex. Hooks must land where
+/// the MCP subprocess looks, so both consult this.
+fn codex_home(home: &std::path::Path) -> std::path::PathBuf {
+    std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"))
+}
+
+/// Copilot reads COPILOT_HOME for its user hooks directory, defaulting
+/// to ~/.copilot (official hooks reference). The MCP user config path
+/// is documented at ~/.copilot unconditionally, so only hooks consult
+/// this.
+fn copilot_home(home: &std::path::Path) -> std::path::PathBuf {
+    std::env::var("COPILOT_HOME")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".copilot"))
+}
+
+fn is_ours(cmd: &str) -> bool {
+    cmd.contains("hook-relay")
+}
+
+/// Read JSON, preserving everything we do not touch. Missing file is an
+/// empty object; corrupt files are an error and are never clobbered.
+fn read_json(path: &std::path::Path) -> Result<serde_json::Value, String> {
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(serde_json::Value::Object(Default::default()))
+        }
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("cannot parse {}: {e}", path.display())),
+    }
+}
+
+fn write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("cannot encode {}: {e}", path.display()))?;
+    crate::infra::fs_atomic::write_atomic(path, text.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+fn obj_mut<'v>(
+    value: &'v mut serde_json::Value,
+    key: &str,
+) -> &'v mut serde_json::Map<String, serde_json::Value> {
+    if !value.get(key).is_some_and(|v| v.is_object()) {
+        value[key] = serde_json::Value::Object(Default::default());
+    }
+    value[key].as_object_mut().expect("just ensured object")
+}
+
+/// Merge forge hook-relay groups into a Claude-style settings document:
+/// top-level `hooks` object keyed by event, each an array of
+/// `{matcher, hooks: [...]}` groups. Everything else is preserved.
+/// Returns the number of events gained an entry.
+fn merge_hook_groups(
+    v: &mut serde_json::Value,
+    path: &std::path::Path,
+    events: &[&str],
+    handler: &serde_json::Value,
+    forge_bin: &str,
+) -> Result<usize, String> {
+    let ours = hook_command(forge_bin);
+    let mut added = 0;
+    for event in events {
+        let hooks = obj_mut(v, "hooks");
+        let slot = hooks
+            .entry(event.to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if !slot.is_array() {
+            return Err(format!("{event} is not an array in {}", path.display()));
+        }
+        let arr = slot.as_array_mut().expect("just checked array");
+        let present = arr.iter().any(|e| {
+            e.get("hooks").and_then(|h| h.as_array()).is_some_and(|hs| {
+                hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(&ours))
+            })
+        });
+        if !present {
+            arr.push(serde_json::json!({
+                "matcher": "",
+                "hooks": [handler],
+            }));
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
+/// Drop every hook group that invokes this installer's relay, across all
+/// events. Foreign entries are kept. Returns the drop count.
+fn drop_hook_groups(v: &mut serde_json::Value) -> usize {
+    let mut dropped = 0;
+    if let Some(hooks) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        for arr in hooks.values_mut().filter_map(|v| v.as_array_mut()) {
+            let before = arr.len();
+            arr.retain(|e| {
+                !e.get("hooks")
+                    .and_then(|h| h.as_array())
+                    .is_some_and(|hs| {
+                        hs.iter().any(|h| {
+                            h.get("command").and_then(|c| c.as_str()).is_some_and(is_ours)
+                        })
+                    })
+            });
+            dropped += before - arr.len();
+        }
+    }
+    dropped
+}
+
+/// Cross-harness aggregates in registry order.
+pub fn install_hooks(home: &std::path::Path, forge_bin: &str) -> Vec<Outcome> {
+    ["claude", "codex", "muse"]
+        .into_iter()
+        .map(|h| install_one_hooks(home, h, forge_bin))
+        .collect()
+}
+
+pub fn uninstall_hooks(home: &std::path::Path) -> Vec<Outcome> {
+    ["claude", "codex", "muse"]
+        .into_iter()
+        .map(|h| uninstall_one_hooks(home, h))
+        .collect()
+}
+
+pub fn install_mcp(home: &std::path::Path, forge_bin: &str) -> Vec<Outcome> {
+    ["claude", "codex", "muse"]
+        .into_iter()
+        .map(|h| install_one_mcp(home, h, forge_bin))
+        .collect()
+}
+
+pub fn uninstall_mcp(home: &std::path::Path) -> Vec<Outcome> {
+    ["claude", "codex", "muse"]
+        .into_iter()
+        .map(|h| uninstall_one_mcp(home, h))
+        .collect()
+}
+
+pub fn install_skills(home: &std::path::Path) -> Vec<Outcome> {
+    ["claude", "codex", "muse"]
+        .into_iter()
+        .map(|h| install_one_skills(home, h))
+        .collect()
+}
+
+pub fn uninstall_skills(home: &std::path::Path) -> Vec<Outcome> {
+    ["claude", "codex", "muse"]
+        .into_iter()
+        .map(|h| uninstall_one_skills(home, h))
+        .collect()
+}
+
+/// Map a per-harness subcommand name to installer keys. `metamate` is the
+/// blueprint name for the muse CLI.
+fn keys_for(harness: &str) -> Option<&'static str> {
+    match harness {
+        "codex" => Some("codex"),
+        "gemini" => Some("gemini"),
+        "copilot" => Some("copilot"),
+        "pi" => Some("pi"),
+        "metamate" | "muse" => Some("muse"),
+        "claude" => Some("claude"),
+        _ => None,
+    }
+}
+
+/// Full per-harness install for `install-codex` and friends.
+pub fn install_one(
+    home: &std::path::Path,
+    harness: &str,
+    forge_bin: &str,
+) -> Vec<Outcome> {
+    let Some(key) = keys_for(harness) else {
+        return vec![Outcome::error(harness, format!("unknown harness {harness:?}"))];
+    };
+    vec![
+        install_one_hooks(home, key, forge_bin),
+        install_one_mcp(home, key, forge_bin),
+        install_one_skills(home, key),
+    ]
+}
+
+pub fn uninstall_one(home: &std::path::Path, harness: &str) -> Vec<Outcome> {
+    let Some(key) = keys_for(harness) else {
+        return vec![Outcome::error(harness, format!("unknown harness {harness:?}"))];
+    };
+    vec![
+        uninstall_one_hooks(home, key),
+        uninstall_one_mcp(home, key),
+        uninstall_one_skills(home, key),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::test_support::*;
+
+    #[test]
+    fn pi_hooks_mcp_and_skills_skip() {
+        // Pi (pi-mono) exposes no native hook or MCP surface (only
+        // extension-bus events), so every installer reports skipped and
+        // writes nothing. Skips are not errors.
+        let home = scratch_home();
+        for out in install_one(&home, "pi", FORGE_BIN) {
+            assert!(out.skipped, "out: {out:?}");
+            assert!(out.error.is_none(), "skip is not failure: {out:?}");
+        }
+        assert!(!home.join(".pi").exists(), "nothing written");
+        for out in uninstall_one(&home, "pi") {
+            assert!(out.error.is_none(), "out: {out:?}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn per_harness_installer_composes_all_three() {
+        let _pin = ClearCodexHome::pin();
+        let home = scratch_home();
+        // codex MCP shells out; point it at a fake binary. The fake mimics
+        // `mcp add` by writing the section; the installer must then patch
+        // the env passthrough into it.
+        let fake = home.join("codex");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nmkdir -p \"$CODEX_HOME\"\nprintf '[mcp_servers.forge]\\ncommand = \"fake\"\\nargs = [\"mcp-serve\"]\\n' >> \"$CODEX_HOME/config.toml\"\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake, perms).unwrap();
+        }
+        let codex_dir = home.join(".codex");
+        std::env::set_var("CODEX_HOME", &codex_dir);
+        std::env::set_var("CODEX_BIN", &fake);
+        let outs = install_one(&home, "codex", FORGE_BIN);
+        std::env::remove_var("CODEX_BIN");
+        std::env::remove_var("CODEX_HOME");
+        assert_eq!(outs.len(), 3);
+        assert!(outs.iter().all(|o| o.error.is_none()), "outs: {outs:?}");
+        let text = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+        assert!(text.contains("env_vars"), "passthrough patched: {text}");
+        let outs = install_one(&home, "metamate", FORGE_BIN);
+        assert_eq!(outs.len(), 3);
+        assert!(outs.iter().all(|o| o.error.is_none()), "outs: {outs:?}");
+        let outs = install_one(&home, "bogus", FORGE_BIN);
+        assert!(outs.iter().all(|o| o.error.is_some()));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn full_install_reports_every_harness() {
+        let _pin = ClearCodexHome::pin();
+        let home = scratch_home();
+        let outs = install_hooks(&home, FORGE_BIN);
+        assert_eq!(outs.len(), 3);
+        assert!(outs.iter().any(|o| o.harness == "claude" && o.installed));
+        assert!(outs.iter().any(|o| o.harness == "codex" && o.installed));
+        assert!(outs.iter().any(|o| o.harness == "muse" && o.installed));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
