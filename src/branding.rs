@@ -76,6 +76,13 @@ pub fn hooks_log(home: &Path) -> PathBuf {
     config_dir(home).join("hooks.log")
 }
 
+/// `~/.forge/comms.log`: bounded cross-session message trace (sends,
+/// verdicts, deliveries, holds, drops). Debug aid for lost messages;
+/// never blocks or fails a send.
+pub fn comms_log(home: &Path) -> PathBuf {
+    config_dir(home).join("comms.log")
+}
+
 /// Move the pre-`.json` `~/.forge/sessions` into place. Never clobbers an
 /// existing `sessions.json`; failures leave both files as they were.
 pub fn migrate_sessions_file(home: &Path) {
@@ -166,6 +173,19 @@ mod tests {
         assert_eq!(
             hooks_log(home),
             PathBuf::from("/home/tester/.forge/hooks.log")
+        );
+        assert_eq!(
+            comms_log(home),
+            PathBuf::from("/home/tester/.forge/comms.log")
+        );
+    }
+
+    #[test]
+    fn comms_log_joins_home() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            comms_log(home),
+            PathBuf::from("/home/tester/.forge/comms.log")
         );
     }
 

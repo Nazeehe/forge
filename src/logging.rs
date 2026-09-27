@@ -85,6 +85,63 @@ pub fn hook_trace_global(line: &str) {
     }
 }
 
+static COMMS_TRACE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Turn on comms tracing process-wide (TUI boot and each comms relay).
+/// Never set under test, so tests never touch the real `~/.forge/comms.log`.
+pub fn set_comms_trace_path(path: PathBuf) {
+    let _ = COMMS_TRACE.set(path);
+}
+
+pub fn comms_trace_path() -> Option<PathBuf> {
+    COMMS_TRACE.get().cloned()
+}
+
+/// Append `<secs>.<millis> <line>` to the bounded comms trace.
+/// Best-effort: broker calls and delivery ticks both write here, and
+/// tracing must never fail or block a send. Lines are sanitized on
+/// write (see [`FileLogger::append`]); keep each call to one line and
+/// pre-truncate message bodies with [`truncate`].
+pub fn comms_trace(path: &Path, line: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    if let Ok(mut log) = FileLogger::open(path, DEFAULT_MAX_BYTES) {
+        let _ = log.append(&format!(
+            "{}.{:03} {line}",
+            now.as_secs(),
+            now.subsec_millis()
+        ));
+    }
+}
+
+/// Trace to the process-wide comms log, when one is set.
+pub fn comms_trace_global(line: &str) {
+    if let Some(path) = COMMS_TRACE.get() {
+        comms_trace(path, line);
+    }
+}
+
+/// Shorten `s` to at most `max_chars` characters at a char boundary,
+/// marking the cut so a truncated preview never reads as the full
+/// text. Multi-byte chars count as one and never split.
+pub fn truncate(s: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0usize;
+    for c in s.chars() {
+        if count >= max_chars {
+            break;
+        }
+        out.push(c);
+        count += 1;
+    }
+    let total: usize = s.chars().count();
+    if total > max_chars {
+        out.push_str(&format!("...+{}more", total - max_chars));
+    }
+    out
+}
+
 /// Strip control characters and anything that could drive a terminal when
 /// the log is tailed. Newlines become spaces; other C0/C1 controls are
 /// dropped; DEL is dropped.
@@ -162,5 +219,31 @@ mod tests {
         assert_eq!(sanitize("a\nb\rc\td"), "a b c d");
         assert_eq!(sanitize("x\x00y\x1bz"), "xyz");
         assert_eq!(sanitize("ok ✓"), "ok ✓");
+    }
+
+    #[test]
+    fn comms_trace_appends_timestamped_lines() {
+        let path = scratch();
+        comms_trace(&path, "comms tool=tell_session -> ok");
+        comms_trace(&path, "comms tool=ask_session -> err");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        let (ts, rest) = lines[0].split_once(' ').unwrap();
+        let (secs, millis) = ts.split_once('.').expect("secs.millis stamp");
+        assert!(secs.parse::<u64>().unwrap() > 1_700_000_000, "{ts}");
+        assert_eq!(millis.len(), 3, "{ts}");
+        assert_eq!(rest, "comms tool=tell_session -> ok");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn truncate_bounds_at_char_boundary_with_marker() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello", 5), "hello");
+        assert_eq!(truncate("hello world", 5), "hello...+6more");
+        assert_eq!(truncate("", 5), "");
+        // Multi-byte chars count as one char and never split.
+        assert_eq!(truncate("ok ✓✓✓", 4), "ok ✓...+2more");
     }
 }

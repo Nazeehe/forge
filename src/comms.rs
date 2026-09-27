@@ -64,6 +64,109 @@ pub const INJECT_ENTER_DELAY: Duration = Duration::from_millis(300);
 pub const INJECT_HOOK_DEBOUNCE: Duration = Duration::from_millis(500);
 /// The staged Enter byte.
 pub const INJECT_ENTER_CR: u8 = b'\r';
+/// Bound on a logged message-text preview: the trace names the exact
+/// length plus this many leading characters. The queue keeps the full
+/// text; the log never does.
+pub const COMMS_LOG_TEXT_PREVIEW: usize = 200;
+
+/// Quote one log field: backslashes and double quotes escape so the
+/// `name="value"` shape survives hostile text. Control characters are
+/// stripped later at write time (see [`crate::logging::FileLogger`]).
+pub(crate) fn log_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `name="value"` when present, `name=absent` when missing.
+fn log_field(name: &str, value: Option<String>) -> String {
+    match value {
+        Some(v) => format!("{name}={}", log_quote(&v)),
+        None => format!("{name}=absent"),
+    }
+}
+
+/// `text_len=N text="preview"` for a message body, `text=absent` when
+/// missing. The preview truncates at [`COMMS_LOG_TEXT_PREVIEW`]
+/// characters with a cut marker; the length is always exact.
+fn log_text_part(text: Option<String>) -> String {
+    match text {
+        Some(t) => {
+            let len: usize = t.chars().count();
+            format!(
+                "text_len={len} text={}",
+                log_quote(&crate::logging::truncate(&t, COMMS_LOG_TEXT_PREVIEW))
+            )
+        }
+        None => "text=absent".to_string(),
+    }
+}
+
+/// Log-safe one-line summary of a comms tool call's arguments: target,
+/// conversation/timer ids, numeric options, and text length plus a
+/// truncated preview. Idempotency keys and anything credential-shaped
+/// never ride this summary; unknown tools report only the arg length.
+pub fn summarize_call(tool: &str, args: &str) -> String {
+    let field = |names: &[&str]| crate::policy::json_string_field(args.as_bytes(), names);
+    let text = || field(&["message", "text", "prompt"]);
+    let conv = || field(&["conversation_id", "conversation"]);
+    match tool {
+        "ask_session" | "tell_session" => {
+            let mut out = log_field("target", field(&["target"]));
+            if let Some(c) = conv() {
+                out.push_str(&format!(" conv={}", log_quote(&c)));
+            }
+            out.push(' ');
+            out.push_str(&log_text_part(text()));
+            out
+        }
+        "send_response" => format!("{} {}", log_field("conv", conv()), log_text_part(text())),
+        "ack_message" => log_field("conv", conv()),
+        "compact_session" => match field(&["target"]) {
+            Some(t) => format!("target={}", log_quote(&t)),
+            None => "target=self".to_string(),
+        },
+        "schedule_prompt" => {
+            let mut out = log_text_part(text());
+            if let Some(raw) = crate::mcp::top_raw(args, "delay_seconds") {
+                out.push_str(&format!(" delay={}", crate::logging::truncate(raw.trim(), 32)));
+            }
+            if let Some(raw) = crate::mcp::top_raw(args, "clear_context") {
+                out.push_str(&format!(" clear={}", crate::logging::truncate(raw.trim(), 8)));
+            }
+            out
+        }
+        "cancel_scheduled_prompt" => log_field("timer", field(&["timer_id"])),
+        _ => format!("args_len={}", args.len()),
+    }
+}
+
+/// One-line delivery-hold reason for a session with a non-empty queue:
+/// pane activity, queued depth, staged-Enter state, and ms since the
+/// last human/hook activity (`none` when no record). The caller gates
+/// logging (see `settle_comms`) so a stuck message cannot flood the log.
+pub fn hold_summary(
+    activity: &str,
+    queued: usize,
+    pending_enter: bool,
+    human_ms_ago: Option<u64>,
+    hook_ms_ago: Option<u64>,
+) -> String {
+    let age = |ms: Option<u64>| ms.map_or_else(|| "none".to_string(), |ms| ms.to_string());
+    format!(
+        "activity={activity} queued={queued} pending_enter={pending_enter} human_ms_ago={} hook_ms_ago={}",
+        age(human_ms_ago),
+        age(hook_ms_ago),
+    )
+}
 
 /// What a queued injection is. Decided clicks/keys elsewhere consume these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -455,6 +558,12 @@ impl Broker {
         true
     }
 
+    /// Read-only shared-group check for the comms trace: a rejection
+    /// names the membership fact instead of leaving it to guesswork.
+    pub(crate) fn shares_group(&self, a: SessionId, b: SessionId) -> bool {
+        self.shared_group(a, b)
+    }
+
     fn shared_group(&self, a: SessionId, b: SessionId) -> bool {
         let Some(mine) = self.membership.get(&a) else {
             return false;
@@ -602,7 +711,9 @@ impl Broker {
     }
 
     /// Human activity label for list output (sessions and bots share it).
-    fn activity_label(activity: crate::session::Activity) -> &'static str {
+    /// Also feeds the delivery-hold trace, so a stuck message names the
+    /// pane state that holds it.
+    pub(crate) fn activity_label(activity: crate::session::Activity) -> &'static str {
         match activity {
             crate::session::Activity::Idle => "Idle",
             crate::session::Activity::Thinking => "Thinking",
@@ -3638,6 +3749,45 @@ mod tests {
             "no inner terminator: {inner:?}"
         );
         assert!(inner.windows(8).any(|w| w == b"; rm -rf"), "tail kept, only the break removed");
+    }
+
+    #[test]
+    fn summarize_call_names_target_and_truncates_text() {
+        let s = summarize_call("tell_session", r#"{"target":"mu_2","text":"hello"}"#);
+        assert!(s.contains(r#"target="mu_2""#), "{s}");
+        assert!(s.contains("text_len=5"), "{s}");
+        assert!(s.contains(r#"text="hello""#), "{s}");
+        // Long bodies truncate with a marker; the length stays exact.
+        let big = "x".repeat(300);
+        let s = summarize_call("ask_session", &format!(r#"{{"target":"b","message":"{big}"}}"#));
+        assert!(s.contains("text_len=300"), "{s}");
+        assert!(s.contains("..."), "{s}");
+        assert!(!s.contains(&big), "full body must not land in the log");
+        // Follow-ups name the conversation too.
+        let s = summarize_call(
+            "tell_session",
+            r#"{"target":"b","text":"hi","conversation_id":"conv-9"}"#,
+        );
+        assert!(s.contains(r#"conv="conv-9""#), "{s}");
+        // Missing fields read as absent, never as empty quotes.
+        let s = summarize_call("ask_session", r#"{"target":"b"}"#);
+        assert!(s.contains("text=absent"), "{s}");
+        // Credentials never ride the summary, even if present.
+        let s = summarize_call("tell_session", r#"{"target":"b","text":"hi","token":"tok-1"}"#);
+        assert!(!s.contains("tok-1"), "{s}");
+    }
+
+    #[test]
+    fn hold_summary_names_activity_and_debounce_ages() {
+        let s = hold_summary("Thinking", 2, false, Some(120), None);
+        assert!(s.contains("activity=Thinking"), "{s}");
+        assert!(s.contains("queued=2"), "{s}");
+        assert!(s.contains("pending_enter=false"), "{s}");
+        assert!(s.contains("human_ms_ago=120"), "{s}");
+        assert!(s.contains("hook_ms_ago=none"), "{s}");
+        let s = hold_summary("Idle", 1, true, None, Some(5));
+        assert!(s.contains("pending_enter=true"), "{s}");
+        assert!(s.contains("hook_ms_ago=5"), "{s}");
     }
 
     #[test]

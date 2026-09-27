@@ -227,11 +227,13 @@ fn startup(force_oobe: bool) -> i32 {
         ));
     }
     logging::set_hook_trace_path(branding::hooks_log(&home));
+    logging::set_comms_trace_path(branding::comms_log(&home));
     logging::hook_trace_global(&format!(
         "tui start pid={} run={run} exe={}",
         std::process::id(),
         std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()
     ));
+    logging::comms_trace_global(&format!("comms start pid={} run={run}", std::process::id()));
     let mut state = app::AppState::new();
     // Greet a fresh owner before anything else: the dialog offers
     // every known CLI (all checked) and installs hooks for the pick.

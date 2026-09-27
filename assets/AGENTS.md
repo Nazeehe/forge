@@ -14,7 +14,7 @@ files fail startup on invalid content rather than guessing.
 | `agents.json` | Agent CLI definitions (below) | Startup error |
 | `AGENTS.md` | This guide | Ignored (docs only) |
 | `sessions.json` | Auto-managed restore snapshots | Leave alone; forge dedupes and prunes these itself |
-| `audit.log`, `forge.log` | Logs | Never edit |
+| `audit.log`, `forge.log`, `hooks.log`, `comms.log` | Logs | Never edit |
 | `endpoint.json` | Live IPC endpoint (hook relays reach the TUI through it) | Never touch; removed at shutdown |
 
 `config.toml` preserves unknown sections across saves; `agents.json`

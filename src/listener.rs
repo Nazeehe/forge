@@ -453,8 +453,25 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
     }
 }
 
+/// One comms-trace line for a record the listener accepted, dropped,
+/// or timed out on. `tool`/`run_id` read `absent`/`empty` when the
+/// envelope never carried them, so malformed records still trace.
+fn comms_record_trace(tool: &str, run_id: &str, verdict: &str) -> String {
+    format!(
+        "listener comms tool={} run_id={} -> {verdict}",
+        if tool.is_empty() {
+            "absent".to_string()
+        } else {
+            tool.to_string()
+        },
+        if run_id.is_empty() { "empty" } else { "set" },
+    )
+}
+
 /// Deliver one comms call to the broker and relay its one-line verdict.
-/// Malformed records are dropped: the caller's own timeout reports them.
+/// Drops and timeouts trace to the comms log: without them a send that
+/// never reaches the loop is invisible on both ends (the caller's own
+/// timeout is its only signal).
 fn handle_comms<S: std::io::Read + std::io::Write>(
     mut conn: S,
     line: &[u8],
@@ -468,6 +485,11 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
         crate::mcp::top_str(&text, "run_id"),
         crate::mcp::top_str(&text, "tool"),
     ) else {
+        crate::logging::comms_trace_global(&comms_record_trace(
+            &crate::mcp::top_str(&text, "tool").unwrap_or_default(),
+            &crate::mcp::top_str(&text, "run_id").unwrap_or_default(),
+            "malformed: missing run_id/tool",
+        ));
         return;
     };
     let args = crate::mcp::top_raw(&text, "args").unwrap_or("{}").to_string();
@@ -475,14 +497,19 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
     let claim = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CLAIM_PENDING));
     if tx
         .try_send(crate::event::AppEvent::CommsRequest(CommsRequest {
-            run_id,
-            tool,
+            run_id: run_id.clone(),
+            tool: tool.clone(),
             args,
             reply: reply_tx,
             claim: std::sync::Arc::clone(&claim),
         }))
         .is_err()
     {
+        crate::logging::comms_trace_global(&comms_record_trace(
+            &tool,
+            &run_id,
+            "dropped: event queue full or closed",
+        ));
         return;
     }
     if let Ok(verdict) = reply_rx.recv_timeout(REPLY_WAIT) {
@@ -496,6 +523,11 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
         // TimedOut so a late `apply` (even one stalled past the
         // deadline) skips the send. When the owner already claimed
         // it, the mutation commits and the caller's retry replays.
+        crate::logging::comms_trace_global(&comms_record_trace(
+            &tool,
+            &run_id,
+            "timeout: loop gave no verdict in time",
+        ));
         claim_timeout(&claim);
     }
 }
@@ -939,6 +971,22 @@ mod tests {
             "source_sid=7",
             "-> dropped: forge_pid 42 is another instance",
         ] {
+            assert!(t.contains(needle), "{needle} missing: {t}");
+        }
+    }
+
+    #[test]
+    fn comms_record_trace_names_tool_and_verdict() {
+        let t = comms_record_trace("tell_session", "abc", "dropped: event queue full or closed");
+        for needle in [
+            "listener comms tool=tell_session",
+            "run_id=set",
+            "-> dropped: event queue full or closed",
+        ] {
+            assert!(t.contains(needle), "{needle} missing: {t}");
+        }
+        let t = comms_record_trace("", "", "malformed: missing run_id/tool");
+        for needle in ["tool=absent", "run_id=empty", "-> malformed"] {
             assert!(t.contains(needle), "{needle} missing: {t}");
         }
     }

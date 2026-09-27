@@ -148,6 +148,10 @@ pub struct AppState {
     pub last_hook_activity: std::collections::HashMap<crate::session::SessionId, std::time::Instant>,
     /// `~/.forge/hooks.log` when hook tracing is on; None in tests.
     pub hook_trace: Option<std::path::PathBuf>,
+    /// `~/.forge/comms.log` when comms tracing is on; None in tests.
+    /// Every send verdict, delivery, hold, and drop lands here so a
+    /// message that never arrives can be debugged after the fact.
+    pub comms_trace: Option<std::path::PathBuf>,
     /// Sessions owed a staged Enter: an injection body went out and its CR
     /// follows after [`crate::comms::INJECT_ENTER_DELAY`], one entry per
     /// session. Later bodies stay queued until the staged CR lands, so
@@ -406,6 +410,7 @@ impl AppState {
             last_broker_tick: None,
             last_hook_activity: std::collections::HashMap::new(),
             hook_trace: crate::logging::hook_trace_path(),
+            comms_trace: crate::logging::comms_trace_path(),
             pending_enter: std::collections::HashMap::new(),
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
@@ -4121,6 +4126,119 @@ impl AppState {
         crate::logging::hook_trace(path, &format!("tui snapshot {reason}: {}", sessions.join(" ")));
     }
 
+    /// Append one line to the comms trace, when on. Best-effort:
+    /// tracing never fails or blocks the send or delivery it describes.
+    fn trace_comms(&self, line: &str) {
+        if let Some(path) = self.comms_trace.as_deref() {
+            crate::logging::comms_trace(path, line);
+        }
+    }
+
+    /// Caller display for the comms trace: `caller="name"` when the run
+    /// ID resolves to a live session, `caller=unknown-run` otherwise
+    /// (stale or forged run IDs fail exactly here).
+    fn comms_caller(&self, run_id: &str) -> String {
+        match self
+            .manager
+            .lookup_run(run_id)
+            .and_then(|id| self.manager.get(id))
+        {
+            Some(rec) => format!("caller={}", crate::comms::log_quote(&rec.name)),
+            None => "caller=unknown-run".to_string(),
+        }
+    }
+
+    /// Routing facts for the args' named target: liveness, shared group
+    /// with the caller, pressure, and queue depth. Empty when the call
+    /// names no session target (responses, acks, self-schedules); a bot
+    /// peer reads `target_live=false` since it owns no pane.
+    fn comms_target_state(
+        &self,
+        caller: Option<crate::session::SessionId>,
+        args: &str,
+    ) -> String {
+        let Some(target_name) =
+            crate::policy::json_string_field(args.as_bytes(), &["target"])
+                .filter(|s| !s.is_empty())
+        else {
+            return String::new();
+        };
+        let quoted = crate::comms::log_quote(&target_name);
+        let mut live_id = None;
+        let mut ambiguous = false;
+        for &id in self.manager.order() {
+            let live = self.manager.get(id).is_some_and(|rec| {
+                rec.name == target_name && rec.state.is_live()
+            });
+            if live {
+                if live_id.is_some() {
+                    ambiguous = true;
+                }
+                live_id = Some(id);
+            }
+        }
+        if ambiguous {
+            return format!(" to={quoted} target_live=ambiguous");
+        }
+        let Some(tid) = live_id else {
+            return format!(" to={quoted} target_live=false");
+        };
+        let shared = caller.is_some_and(|c| self.broker.shares_group(c, tid));
+        let pressure = self.broker.pressure(&self.manager, tid);
+        let queued = self.broker.queued(tid);
+        format!(" to={quoted} target_live=true shared_group={shared} pressure={pressure} queued={queued}")
+    }
+
+    /// One trace line per comms tool verdict: the call summary plus the
+    /// outcome and the routing facts that explain it. Read-only:
+    /// tracing never changes the verdict it describes.
+    fn trace_comms_verdict(
+        &self,
+        tool: &str,
+        run_id: &str,
+        args: &str,
+        verdict: &Result<String, String>,
+    ) {
+        if self.comms_trace.is_none() {
+            return;
+        }
+        let caller_id = self.manager.lookup_run(run_id);
+        let caller = self.comms_caller(run_id);
+        let summary = crate::comms::summarize_call(tool, args);
+        let target_state = self.comms_target_state(caller_id, args);
+        let line = match verdict {
+            Ok(result) => {
+                let conv =
+                    crate::policy::json_string_field(result.as_bytes(), &["conversation", "timer_id"])
+                        .map(|c| format!(" conv={}", crate::comms::log_quote(&c)))
+                        .unwrap_or_default();
+                format!("comms tool={tool} {caller} {summary} -> ok{conv}{target_state}")
+            }
+            Err(e) => {
+                let reason = crate::logging::truncate(e, 200);
+                let caller_queued = match caller_id {
+                    Some(id) => format!(" caller_queued={}", self.broker.queued(id)),
+                    None => String::new(),
+                };
+                format!(
+                    "comms tool={tool} {caller} {summary} -> err reason={}{caller_queued}{target_state}",
+                    crate::comms::log_quote(&reason)
+                )
+            }
+        };
+        self.trace_comms(&line);
+    }
+
+    /// ms since `at`, saturating clock skew to zero (a future stamp
+    /// reads as just-active). `None` when no record exists.
+    fn ms_ago(now: std::time::Instant, at: Option<&std::time::Instant>) -> Option<u64> {
+        at.map(|t| {
+            now.checked_duration_since(*t)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        })
+    }
+
     /// Live agent sessions as restorable records, in bar order. Shells
     /// have no resume form and exited sessions are gone, so both are
     /// left out; groups ride along for exact rejoins.
@@ -4296,7 +4414,10 @@ impl AppState {
         // Second-scale sweep on a 16ms loop: skip inside the window.
         // Everything below (debounce gates, queue delivery, staged
         // Enters) stays per-tick, so injections never wait on this.
-        if Self::tick_due(self.last_broker_tick, now) {
+        // Hold logging rides the sweep flag: a stuck message logs its
+        // reason at most once a second per session, never per tick.
+        let swept = Self::tick_due(self.last_broker_tick, now);
+        if swept {
             self.broker.tick(now);
             self.last_broker_tick = Some(now);
         }
@@ -4308,17 +4429,37 @@ impl AppState {
             let idle = self.manager.get(id).is_some_and(|rec| {
                 matches!(rec.activity, Activity::Idle | Activity::Stopped)
             });
-            if !idle {
-                continue;
-            }
-            if !self.injection_settled_for(id, now) {
-                continue;
-            }
-            // One body per Enter: a staged CR means the previous body
-            // is still awaiting submission, so later bodies stay queued
-            // instead of merging into the same burst. Each body gets
-            // its own staged Enter below.
-            if self.pending_enter.contains_key(&id) {
+            let settled = self.injection_settled_for(id, now);
+            let enter_pending = self.pending_enter.contains_key(&id);
+            if !idle || !settled || enter_pending {
+                if swept {
+                    if let Some(head) = self.broker.peek_due(id) {
+                        let to = self
+                            .manager
+                            .get(id)
+                            .map(|rec| rec.name.clone())
+                            .unwrap_or_default();
+                        let activity = self
+                            .manager
+                            .get(id)
+                            .map(|rec| crate::comms::Broker::activity_label(rec.activity))
+                            .unwrap_or("gone");
+                        let summary = crate::comms::hold_summary(
+                            activity,
+                            self.broker.queued(id),
+                            enter_pending,
+                            Self::ms_ago(now, self.last_human_input.get(&id)),
+                            Self::ms_ago(now, self.last_hook_activity.get(&id)),
+                        );
+                        self.trace_comms(&format!(
+                            "hold to={} conv={} kind={} from={} {summary}",
+                            crate::comms::log_quote(&to),
+                            crate::comms::log_quote(&head.conv),
+                            head.kind.label(),
+                            crate::comms::log_quote(&head.from),
+                        ));
+                    }
+                }
                 continue;
             }
             // Peek before pop: the message leaves the queue only after
@@ -4332,18 +4473,53 @@ impl AppState {
             // whole payload as one bracketed-paste transaction; the rest
             // take it raw, exactly as before.
             let bracketed = self.manager.bracketed_paste(id);
-            if self.manager.inject_write(id, &head.render_framed(bracketed)).is_ok() {
-                let taken = self.broker.take_due(id, 1);
-                debug_assert!(taken.first().map(|t| &t.conv) == Some(&head.conv));
-                // Arm the staged Enter: the CR goes out on a later tick,
-                // never in the same burst as the text. Remember what
-                // went out, so human input that kills the submit can
-                // tell the sender.
-                self.pending_enter.insert(
-                    id,
-                    (now, Some((head.conv.clone(), head.kind))),
-                );
-                self.dirty = true;
+            let bytes = head.render_framed(bracketed);
+            match self.manager.inject_write(id, &bytes) {
+                Ok(()) => {
+                    let taken = self.broker.take_due(id, 1);
+                    debug_assert!(taken.first().map(|t| &t.conv) == Some(&head.conv));
+                    // Arm the staged Enter: the CR goes out on a later tick,
+                    // never in the same burst as the text. Remember what
+                    // went out, so human input that kills the submit can
+                    // tell the sender.
+                    self.pending_enter.insert(
+                        id,
+                        (now, Some((head.conv.clone(), head.kind))),
+                    );
+                    let to = self
+                        .manager
+                        .get(id)
+                        .map(|rec| rec.name.clone())
+                        .unwrap_or_default();
+                    let left = self.broker.queued(id);
+                    self.trace_comms(&format!(
+                        "deliver to={} conv={} kind={} from={} bytes={} queued_left={left}",
+                        crate::comms::log_quote(&to),
+                        crate::comms::log_quote(&head.conv),
+                        head.kind.label(),
+                        crate::comms::log_quote(&head.from),
+                        bytes.len(),
+                    ));
+                    self.dirty = true;
+                }
+                Err(e) => {
+                    let to = self
+                        .manager
+                        .get(id)
+                        .map(|rec| rec.name.clone())
+                        .unwrap_or_default();
+                    self.trace_comms(&format!(
+                        "deliver-fail to={} conv={} kind={} from={} err={}",
+                        crate::comms::log_quote(&to),
+                        crate::comms::log_quote(&head.conv),
+                        head.kind.label(),
+                        crate::comms::log_quote(&head.from),
+                        crate::comms::log_quote(&crate::logging::truncate(
+                            &e.to_string(),
+                            200
+                        )),
+                    ));
+                }
             }
         }
         self.settle_enters(now);
@@ -4371,9 +4547,43 @@ impl AppState {
             // A CR that never reaches the pane stays staged for retry:
             // removing it would strand an unsubmitted body. Exited
             // sessions are pruned below, so a dead pane stops here.
-            if self.manager.inject_write(id, &[crate::comms::INJECT_ENTER_CR]).is_ok() {
-                self.pending_enter.remove(&id);
-                self.dirty = true;
+            // Either outcome is traced: a missing Enter is the classic
+            // "body arrived but never submitted" mystery.
+            let staged = self.pending_enter.get(&id).and_then(|(_, what)| what.clone());
+            match self.manager.inject_write(id, &[crate::comms::INJECT_ENTER_CR]) {
+                Ok(()) => {
+                    self.pending_enter.remove(&id);
+                    let to = self
+                        .manager
+                        .get(id)
+                        .map(|rec| rec.name.clone())
+                        .unwrap_or_default();
+                    match staged {
+                        Some((conv, kind)) => self.trace_comms(&format!(
+                            "enter to={} conv={} kind={}",
+                            crate::comms::log_quote(&to),
+                            crate::comms::log_quote(&conv),
+                            kind.label(),
+                        )),
+                        None => self.trace_comms(&format!(
+                            "enter to={} conv=none kind=command",
+                            crate::comms::log_quote(&to),
+                        )),
+                    }
+                    self.dirty = true;
+                }
+                Err(e) => {
+                    let to = self
+                        .manager
+                        .get(id)
+                        .map(|rec| rec.name.clone())
+                        .unwrap_or_default();
+                    self.trace_comms(&format!(
+                        "enter-fail to={} err={}",
+                        crate::comms::log_quote(&to),
+                        crate::comms::log_quote(&crate::logging::truncate(&e.to_string(), 200)),
+                    ));
+                }
             }
         }
         // Records outlive their sessions (a natural exit marks the
@@ -4815,8 +5025,20 @@ impl AppState {
                 // An exit fails every conversation touching it; sources of
                 // open asks/tells are notified through the broker queue.
                 // Its debounce entries go too, so the maps stay
-                // bounded over session churn.
+                // bounded over session churn. The dropped queue depth is
+                // traced: an exit between queue and delivery is the other
+                // classic "sent but never received".
+                let name = self
+                    .manager
+                    .get(id)
+                    .map(|rec| rec.name.clone())
+                    .unwrap_or_default();
+                let dropped = self.broker.queued(id);
                 self.broker.target_exited(&self.manager, id);
+                self.trace_comms(&format!(
+                    "exit name={} dropped_queue={dropped}",
+                    crate::comms::log_quote(&name),
+                ));
                 self.last_human_input.remove(&id);
                 self.last_hook_activity.remove(&id);
                 self.attention_flags.remove(&id);
@@ -4830,6 +5052,12 @@ impl AppState {
                 // out, so the send is skipped and the retry guidance
                 // goes on the reply instead of a stale ok.
                 if !crate::listener::claim_execute(&req.claim) {
+                    self.trace_comms(&format!(
+                        "comms tool={} {} {} -> dropped reason=\"caller timed out; retry with the same idempotency_key\"",
+                        req.tool,
+                        self.comms_caller(&req.run_id),
+                        crate::comms::summarize_call(&req.tool, &req.args),
+                    ));
                     let _ = req.reply.send(
                         "{\"ok\":false,\"error\":\"caller timed out; retry with the same idempotency_key\"}\n"
                             .to_string(),
@@ -4856,6 +5084,7 @@ impl AppState {
                         },
                     },
                 };
+                self.trace_comms_verdict(&req.tool, &req.run_id, &req.args, &verdict);
                 let line = match verdict {
                     Ok(result) => format!("{{\"ok\":true,\"result\":{result}}}\n"),
                     Err(e) => format!(
@@ -6045,6 +6274,146 @@ mod tests {
             due[0].kind,
             crate::comms::InjectKind::Failed
         ));
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn comms_trace_records_send_verdicts() {
+        let dir = std::env::temp_dir().join(format!("forge-comms-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = dir.join("comms.log");
+        let mut s = AppState::new();
+        s.comms_trace = Some(log.clone());
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        let comms = |s: &mut AppState, run_id: String, tool: &str, args: &str| {
+            let (reply_tx, _) = std::sync::mpsc::channel();
+            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+                run_id,
+                tool: tool.to_string(),
+                args: args.to_string(),
+                reply: reply_tx,
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            }));
+        };
+        // No shared group: the rejection lands in the trace with the cause.
+        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"b\",\"text\":\"hi\"}");
+        // Unknown target: liveness reads false, never a guess.
+        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"ghost\",\"text\":\"hi\"}");
+        // Grouped: the accept lands with its conversation and queue depth.
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        comms(&mut s, run_a.to_string(), "tell_session", "{\"target\":\"b\",\"text\":\"hello-b\"}");
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].contains("tool=tell_session"), "{}", lines[0]);
+        assert!(lines[0].contains("caller=\"a\""), "{}", lines[0]);
+        assert!(lines[0].contains("-> err"), "{}", lines[0]);
+        assert!(lines[0].contains("no shared group"), "{}", lines[0]);
+        assert!(lines[0].contains("shared_group=false"), "{}", lines[0]);
+        assert!(lines[1].contains("-> err"), "{}", lines[1]);
+        assert!(lines[1].contains("target_live=false"), "{}", lines[1]);
+        assert!(lines[2].contains("-> ok"), "{}", lines[2]);
+        assert!(lines[2].contains("conv="), "{}", lines[2]);
+        assert!(lines[2].contains("to=\"b\""), "{}", lines[2]);
+        assert!(lines[2].contains("queued=1"), "{}", lines[2]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn comms_trace_records_delivery_and_busy_holds() {
+        let dir = std::env::temp_dir().join(format!("forge-comms-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = dir.join("comms.log");
+        let mut s = AppState::new();
+        s.comms_trace = Some(log.clone());
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+        }));
+        // Busy target: the hold names the pane activity, not just silence.
+        assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 1);
+        // Idle target: the delivery names conv, kind, and queue remainder.
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0);
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("hold"), "{text}");
+        assert!(text.contains("to=\"b\""), "{text}");
+        assert!(text.contains("activity=ToolUse"), "{text}");
+        assert!(text.contains("deliver"), "{text}");
+        assert!(text.contains("queued_left=0"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
+    }
+
+    #[test]
+    fn comms_trace_records_staged_enters() {
+        let dir = std::env::temp_dir().join(format!("forge-comms-enter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = dir.join("comms.log");
+        let mut s = AppState::new();
+        s.comms_trace = Some(log.clone());
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_b = RunId::generate();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", run_b.clone(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+        }));
+        assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
+        s.settle_comms();
+        assert_eq!(s.broker.queued(b), 0);
+        assert!(s.pending_enter.contains_key(&b), "body stages its Enter");
+        s.settle_enters(std::time::Instant::now() + std::time::Duration::from_millis(500));
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("enter"), "{text}");
+        assert!(text.contains("to=\"b\""), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(s.manager.remove(a));
         assert!(s.manager.remove(b));
     }
