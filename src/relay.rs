@@ -54,7 +54,19 @@ fn file_owner_pid(text: &str) -> Option<u32> {
     }
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let own = std::env::current_exe().ok()?;
-    (exe == own).then_some(pid)
+    same_binary(&exe, &own).then_some(pid)
+}
+
+/// A rebuild replaces the file under a running TUI and the kernel reports
+/// its exe link as `<path> (deleted)`; that is still the same forge.
+fn same_binary(owner_exe: &std::path::Path, own: &std::path::Path) -> bool {
+    if owner_exe == own {
+        return true;
+    }
+    owner_exe
+        .to_str()
+        .and_then(|s| s.strip_suffix(" (deleted)"))
+        .is_some_and(|s| std::path::Path::new(s) == own)
 }
 
 /// Endpoint from the live-endpoint file: `(owner pid, socket path)`. The
@@ -403,6 +415,20 @@ mod tests {
         clear_endpoint_file(&home);
         assert!(!endpoint_file_path(&home).exists(), "cleared");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn rebuilt_binary_still_owns_the_endpoint() {
+        let own = std::path::Path::new("/work/target/debug/forge");
+        assert!(same_binary(own, own));
+        // `cargo build` replaces the file under a running TUI; the kernel
+        // then reports its exe link with a " (deleted)" suffix.
+        assert!(
+            same_binary(std::path::Path::new("/work/target/debug/forge (deleted)"), own),
+            "a rebuild must not orphan scrubbed-env (muse) hooks"
+        );
+        assert!(!same_binary(std::path::Path::new("/usr/bin/sleep"), own));
+        assert!(!same_binary(std::path::Path::new("/usr/bin/sleep (deleted)"), own));
     }
 
     #[test]
