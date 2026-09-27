@@ -1,6 +1,6 @@
 //! Which-key hotkey help: pure data, layout, timing, and render.
 //!
-//! The command table mirrors the `Ctrl-b` prefix map in [`crate::input`];
+//! The command table mirrors the `Ctrl-b` prefix map in [`crate::tui::input`];
 //! dispatch authority stays there. This module only describes those
 //! bindings for display, decides when the HUD appears, and paints it.
 

@@ -58,7 +58,7 @@ Rules:
   reply ask-for-the-harness so the CLI handles it natively.
 - The PTY grid and visual pane stay a **raw custom `ratatui` view** fed by
   portable-pty readers. Never force PTY painting through components.
-- Semantic theme APIs only (`src/theme.rs`). No inline RGB. Rounded borders,
+- Semantic theme APIs only (`src/ui/theme.rs`). No inline RGB. Rounded borders,
   never blank panels.
 
 ## 5. UX design guidance (follow for all UI work)
@@ -82,13 +82,13 @@ Rules:
 - Every keyboard-activatable control is mouse-activatable, no exceptions:
   buttons fire on left-click, rows take focus on left-click. Dialogs
   expose `click()` hit-testing the exact spans the view paints (see
-  `groups.rs` / `telegram_dialog.rs`), and an open modal swallows ALL
+  `ui/dialogs/groups.rs` / `ui/dialogs/telegram.rs`), and an open modal swallows ALL
   mouse input — clicks behind it must move nothing (see the
   `forward_mouse` dispatch). Never ship a keyboard-only button or row.
 - Action buttons are pills everywhere, never bracket labels: rounded
   `ui::PILL_LEFT` / `ui::PILL_RIGHT` caps (Nerd Font), accent-filled
-  default carrying `*`, `>` chosen-marker — mirror `create.rs`
-  `pill_actions` / `quit.rs` `buttons`. New dialogs take the global
+  default carrying `*`, `>` chosen-marker — mirror `ui/dialogs/create.rs`
+  `pill_actions` / `ui/dialogs/quit.rs` `buttons`. New dialogs take the global
   pills flag at construction like they do.
 - Render tests pin the geometry: coordinates, centering math, pinned
   rows, and both layout modes live as colocated buffer assertions.
