@@ -1854,6 +1854,8 @@ pub struct BoardView {
     /// Pinned footer hint lines (long or short by measured width).
     pub hints: Vec<String>,
     pub notice: Option<String>,
+    /// Open text entry, rendered as the first footer line when set.
+    pub draft: Option<String>,
     /// Set when no board exists: hint text replaces the columns.
     pub empty: Option<String>,
 }
@@ -1894,6 +1896,15 @@ fn board_header_text(col: &BoardColumnView, pos: Option<(usize, usize)>) -> Stri
         Some((i, n)) => format!("{} ({}) ({}/{})", col.name, count, i + 1, n),
         None => format!("{} ({})", col.name, count),
     }
+}
+
+/// Footer rows reserved at the bottom of the board view: draft
+/// entry, notice, then hints. Paint and hit-testing share it so
+/// clicks never land on a footer row.
+fn board_footer_height(view: &BoardView) -> usize {
+    view.hints.len()
+        + usize::from(view.notice.is_some())
+        + usize::from(view.draft.is_some())
 }
 
 /// Paint the global kanban view into the main area: bordered block,
@@ -1989,6 +2000,12 @@ pub fn render_board(frame: &mut Frame, area: Rect, view: &BoardView) {
             }
         }
     }
+    if let Some(draft) = view.draft.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!("  {draft}"),
+            theme::style(theme::Role::Focus).add_modifier(Modifier::BOLD),
+        )));
+    }
     if let Some(notice) = view.notice.as_deref() {
         lines.push(Line::from(Span::styled(
             format!("  {notice}"),
@@ -2003,7 +2020,7 @@ pub fn render_board(frame: &mut Frame, area: Rect, view: &BoardView) {
     }
     // Pin the footer: pad short bodies so hints sit on the same rows
     // whatever the card count holds.
-    let foot_h = view.hints.len() + usize::from(view.notice.is_some());
+    let foot_h = board_footer_height(view);
     let body_h = inner.height as usize;
     if lines.len() < body_h && foot_h <= body_h {
         let pad = body_h - foot_h - (lines.len() - foot_h);
@@ -2036,8 +2053,7 @@ pub fn board_cell_at(
     if col < inner.x || col >= inner.right() || row < inner.y || row >= inner.bottom() {
         return None;
     }
-    let foot_h =
-        (view.hints.len() + usize::from(view.notice.is_some())) as u16;
+    let foot_h = board_footer_height(view) as u16;
     if row >= inner.bottom().saturating_sub(foot_h) {
         return None;
     }
@@ -2862,6 +2878,7 @@ mod tests {
             focus_col: 0,
             hints: vec!["h/l/j/k move · Space shift · x done".to_string()],
             notice: None,
+            draft: None,
             empty: None,
         }
     }
@@ -2950,10 +2967,25 @@ mod tests {
             focus_col: 0,
             hints: vec!["hint".to_string()],
             notice: None,
+            draft: None,
             empty: Some("No boards yet.".to_string()),
         };
         terminal.draw(|f| render_board(f, f.area(), &view)).unwrap();
         assert!(buffer_rows(&terminal).join("\n").contains("No boards yet."));
+    }
+
+    #[test]
+    fn board_draft_line_paints_above_hints() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut view = sample_board_view();
+        view.draft = Some("New card: fix▌".to_string());
+        terminal.draw(|f| render_board(f, f.area(), &view)).unwrap();
+        let rows = buffer_rows(&terminal);
+        let draft_y = rows.iter().position(|r| r.contains("New card:")).expect("draft paints");
+        let hint_y = rows.iter().position(|r| r.contains("h/l/j/k move")).expect("hints paint");
+        assert!(draft_y < hint_y, "draft sits above the hints");
+        assert_eq!(board_cell_at(Rect::new(0, 0, 100, 24), &view, 50, draft_y as u16), None);
     }
 
     #[test]

@@ -179,6 +179,8 @@ pub struct AppState {
     pub boards_dirty: bool,
     /// Board selection: picked board plus column/card cursor.
     pub board_focus: BoardFocus,
+    /// Open board text entry; `None` outside draft mode.
+    pub board_draft: Option<BoardDraft>,
     /// One-line board notice (corrupt save quarantined, ...), shown in
     /// the board footer until dismissed by opening the board.
     pub board_notice: Option<String>,
@@ -314,6 +316,28 @@ pub struct BoardFocus {
     pub card: usize,
 }
 
+/// Draft input cap: titles cap at 200 chars, so the buffer never
+/// holds more than a title can keep.
+pub const BOARD_DRAFT_MAX: usize = 200;
+
+/// What an open board draft submits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoardDraftAction {
+    NewBoard,
+    NewCard,
+    EditTitle,
+}
+
+/// Open text entry on the board: prompt, buffer, and what Enter
+/// submits. Mirrors the walkthrough ask draft — typing mode takes
+/// text, Enter submits, Esc cancels, everything else is swallowed.
+#[derive(Clone, Debug)]
+pub struct BoardDraft {
+    pub prompt: &'static str,
+    pub buffer: String,
+    pub action: BoardDraftAction,
+}
+
 impl AppState {
     pub fn new() -> Self {
         #[cfg(feature = "visual")]
@@ -375,6 +399,7 @@ impl AppState {
             boards: crate::board::BoardStore::new(),
             boards_dirty: false,
             board_focus: BoardFocus::default(),
+            board_draft: None,
             board_notice: None,
             whichkey: crate::whichkey::WhichKeyHud::new(),
             visual_seq: 0,
@@ -767,12 +792,17 @@ impl AppState {
         let hints = if wide {
             vec![
                 "h/l columns · j/k cards · 1-4 jump · Space/. move · x complete · d delete".to_string(),
-                "p priority · +/- progress · K/J reorder · W boards · Enter details · Ctrl-b b back".to_string(),
+                "a add · e edit · Enter details · p priority · +/- progress · W boards · q back"
+                    .to_string(),
             ]
         } else {
-            vec!["h/l/j/k move · Tab column · Space shift · x done · W boards".to_string()]
+            vec!["h/l/j/k move · Tab column · a add · e edit · x done".to_string()]
         };
         let notice = self.board_notice.clone();
+        let draft = self
+            .board_draft
+            .as_ref()
+            .map(|d| format!("{}: {}▌", d.prompt, d.buffer));
         let (Some(id), Some(board)) = (
             self.board_focus.board.clone(),
             self.board_focus.board.as_deref().and_then(|id| self.boards.board(id)),
@@ -783,9 +813,8 @@ impl AppState {
                 focus_col: 0,
                 hints,
                 notice,
-                empty: Some(
-                    "No boards yet — agents can create one with board_create.".to_string(),
-                ),
+                draft,
+                empty: Some("No boards yet — press a to create one.".to_string()),
             };
         };
         let _ = id;
@@ -835,6 +864,7 @@ impl AppState {
             focus_col: self.board_focus.column,
             hints,
             notice,
+            draft,
             empty: None,
         }
     }
@@ -844,6 +874,177 @@ impl AppState {
     pub fn board_defer_to_mcp(&mut self, what: &str) {
         self.board_notice = Some(format!("{what} editing is MCP-only here — see board_* tools"));
         self.dirty = true;
+    }
+
+    /// Open the `a` draft: a board when there is nothing yet, else a
+    /// card in the focused column.
+    pub fn board_start_add_draft(&mut self) {
+        if self.boards.boards.is_empty() {
+            self.board_draft = Some(BoardDraft {
+                prompt: "New board name",
+                buffer: String::new(),
+                action: BoardDraftAction::NewBoard,
+            });
+        } else {
+            self.ensure_board_focus();
+            if self.focused_board().is_none() {
+                return;
+            }
+            self.board_draft = Some(BoardDraft {
+                prompt: "New card",
+                buffer: String::new(),
+                action: BoardDraftAction::NewCard,
+            });
+        }
+        self.dirty = true;
+    }
+
+    /// Open the `e` draft, prefilled with the focused card's title.
+    pub fn board_start_title_draft(&mut self) {
+        let title = match self.focused_card_id().and_then(|id| {
+            self.focused_board().and_then(|b| b.card(&id).map(|c| c.title.clone()))
+        }) {
+            Some(title) => title,
+            None => return,
+        };
+        self.board_draft = Some(BoardDraft {
+            prompt: "Edit title",
+            buffer: title,
+            action: BoardDraftAction::EditTitle,
+        });
+        self.dirty = true;
+    }
+
+    /// Sanitize pasted text into the open draft: breaks and tabs
+    /// collapse to one space, other controls drop, capped like typing.
+    /// No-op outside draft mode so pastes never leak anywhere else.
+    pub fn board_push_paste(&mut self, text: &str) {
+        let Some(draft) = self.board_draft.as_mut() else {
+            return;
+        };
+        for c in text.chars() {
+            if draft.buffer.chars().count() >= BOARD_DRAFT_MAX {
+                break;
+            }
+            if c == '\n' || c == '\r' || c == '\t' {
+                if draft.buffer.chars().last().is_some_and(|l| l != ' ') {
+                    draft.buffer.push(' ');
+                }
+            } else if !c.is_control() {
+                draft.buffer.push(c);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// One key inside an open board draft: text appends (capped),
+    /// Backspace deletes, Enter submits, Esc cancels. Anything else
+    /// is swallowed so navigation chords never fire mid-typing.
+    pub fn board_draft_key(&mut self, key: &crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+        if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+        if self.board_draft.is_none() {
+            return;
+        }
+        match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => {
+                self.board_draft = None;
+                self.dirty = true;
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => self.board_submit_draft(),
+            KeyCode::Backspace if key.modifiers.is_empty() => {
+                if let Some(draft) = self.board_draft.as_mut() {
+                    draft.buffer.pop();
+                }
+                self.dirty = true;
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some(draft) = self.board_draft.as_mut() {
+                    if draft.buffer.chars().count() < BOARD_DRAFT_MAX {
+                        draft.buffer.push(c);
+                    }
+                }
+                self.dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Submit the open draft. Blank drafts stay open with guidance;
+    /// failures keep the draft so the text is never lost; success
+    /// closes it, focuses the new thing, and confirms in the footer.
+    fn board_submit_draft(&mut self) {
+        let (action, text) = match self.board_draft.as_ref() {
+            Some(draft) => (draft.action, draft.buffer.trim().to_string()),
+            None => return,
+        };
+        if text.is_empty() {
+            self.board_notice = Some("type a name first".to_string());
+            self.dirty = true;
+            return;
+        }
+        let result = match action {
+            BoardDraftAction::NewBoard => self.submit_new_board(&text),
+            BoardDraftAction::NewCard => self.submit_new_card(&text),
+            BoardDraftAction::EditTitle => self.submit_edit_title(&text),
+        };
+        match result {
+            Ok(notice) => {
+                self.board_draft = None;
+                self.board_notice = Some(notice);
+                self.ensure_board_focus();
+                self.note_boards_changed();
+            }
+            Err(e) => {
+                self.board_notice = Some(e);
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn submit_new_board(&mut self, name: &str) -> Result<String, String> {
+        self.boards.board_create(name, None).map_err(|e| e.to_string())?;
+        let id = self.boards.board(name).map(|b| b.id.clone());
+        self.board_focus.board = id;
+        self.board_focus.column = 0;
+        self.board_focus.card = 0;
+        Ok(format!("created board '{name}'"))
+    }
+
+    fn submit_new_card(&mut self, title: &str) -> Result<String, String> {
+        let column = self
+            .focused_board()
+            .and_then(|b| b.columns.get(self.board_focus.column))
+            .map(|c| c.name.clone())
+            .ok_or_else(|| "no column focused".to_string())?;
+        let mut draft = crate::board::CardDraft::new(title);
+        draft.column = Some(column);
+        let id = self
+            .focused_board_mut()
+            .ok_or_else(|| "no board focused".to_string())?
+            .card_create(draft)
+            .map_err(|e| e.to_string())?;
+        self.refocus_card(&id);
+        Ok(format!("added '{title}'"))
+    }
+
+    fn submit_edit_title(&mut self, title: &str) -> Result<String, String> {
+        let Some(id) = self.focused_card_id() else {
+            return Err("no card focused".to_string());
+        };
+        let patch = crate::board::CardPatch {
+            title: Some(title.to_string()),
+            ..Default::default()
+        };
+        self.focused_board_mut()
+            .ok_or_else(|| "no board focused".to_string())?
+            .card_update(&id, patch)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("renamed to '{title}'"))
     }
 
     /// Set the live permission mode; true when it changed. Non Off/Yolo
@@ -6902,6 +7103,51 @@ mod tests {
     }
 
     #[test]
+    fn board_push_paste_sanitizes_and_needs_draft() {
+        let mut s = AppState::new();
+        // No draft: the paste goes nowhere, nothing to leak into.
+        s.board_push_paste("nope");
+        assert!(s.board_notice.is_none());
+        s.boards.board_create("team", None).unwrap();
+        s.ensure_board_focus();
+        s.board_start_add_draft();
+        s.board_push_paste("fix\nleak\tx\u{7}!");
+        assert_eq!(
+            s.board_draft.as_ref().map(|d| d.buffer.as_str()),
+            Some("fix leak x!"),
+            "breaks collapse, controls drop"
+        );
+    }
+
+    #[test]
+    fn board_view_escapes_hostile_text() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        let mut draft = crate::board::CardDraft::new("<script>alert(1)</script>");
+        draft.assignee = Some("a\u{202E}b".to_string());
+        s.boards.board_mut("team").unwrap().card_create(draft).unwrap();
+        s.ensure_board_focus();
+        let view = s.board_view();
+        let card = &view.columns[0].cards[0];
+        // Terminal threat model is control/bidi/invisible spoofing
+        // (angle brackets paint literally and execute nothing here).
+        for shown in [&card.title, &card.meta] {
+            assert!(
+                !crate::safe_text::contains_bidi_controls(shown),
+                "bidi encoded: {shown:?}"
+            );
+            assert!(
+                !crate::safe_text::contains_invisibles(shown),
+                "invisibles encoded: {shown:?}"
+            );
+            assert!(
+                !shown.chars().any(|c| c.is_control()),
+                "controls encoded: {shown:?}"
+            );
+        }
+    }
+
+    #[test]
     fn board_focus_defaults_to_first_board_and_clamps() {
         let mut s = AppState::new();
         s.boards.board_create("team", None).unwrap();
@@ -9113,6 +9359,51 @@ mod tests {
         let names: Vec<&str> = board.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["Inbox", "Active", "Shipped"]);
         assert_eq!(board.columns[1].wip_limit, 2);
+    }
+
+    #[test]
+    fn board_update_and_get_defaults() {
+        let (mut state, live_run) = board_live_state();
+        comms_reply(&mut state, &live_run, "board_create", r#"{"name":"team"}"#);
+        let card = comms_reply(
+            &mut state,
+            &live_run,
+            "card_create",
+            r#"{"board_name":"team","title":"t","priority":"high","tags":["x","y"],"progress":5}"#,
+        );
+        assert!(card.contains(r#""ok":true"#), "card: {card}");
+        let body = &card[card.find(r#""result":"#).unwrap_or(0)..];
+        let start = body.find(r#""id":""#).map(|i| i + 6).unwrap_or(0);
+        let rest = &body[start..];
+        let id = rest[..rest.find('"').unwrap_or(0)].to_string();
+        assert!(id.starts_with("c-"), "card id: {card}");
+        // card_create ignores progress; card_update clamps it instead.
+        let updated = comms_reply(
+            &mut state,
+            &live_run,
+            "card_update",
+            &format!(
+                r#"{{"card_id":{},"title":"t2","progress":250}}"#,
+                crate::mcp::escape_json(&id)
+            ),
+        );
+        assert!(updated.contains(r#""title":"t2""#), "renamed: {updated}");
+        assert!(updated.contains(r#""progress":100"#), "clamped: {updated}");
+        // Duplicate board names fail loudly instead of forking state.
+        let dup = comms_reply(&mut state, &live_run, "board_create", r#"{"name":"team"}"#);
+        assert!(dup.contains("already exists"), "dup: {dup}");
+        // board_id lookups work, and bare board_get falls back instead
+        // of erroring when the operator just wants "the board".
+        let id = state.boards.board("team").unwrap().id.clone();
+        let by_id = comms_reply(
+            &mut state,
+            &live_run,
+            "board_get",
+            &format!(r#"{{"board_id":{}}}"#, crate::mcp::escape_json(&id)),
+        );
+        assert!(by_id.contains("Backlog"), "by id: {by_id}");
+        let bare = comms_reply(&mut state, &live_run, "board_get", r#"{}"#);
+        assert!(bare.contains("Backlog"), "default: {bare}");
     }
 
     #[test]

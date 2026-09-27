@@ -450,6 +450,11 @@ fn loop_until_quit(
                                 tour.push_paste(&text);
                                 state.dirty = true;
                             }
+                        } else if state.board_draft.is_some() {
+                            // An open board draft takes the paste
+                            // single-line like typing; the panes behind
+                            // the board never see it.
+                            state.board_push_paste(&text);
                         } else if let Some(active) = state.manager.active() {
                             let bracketed = state.manager.bracketed_paste(active);
                             let bytes = input::paste_bytes(&text, bracketed);
@@ -987,6 +992,12 @@ fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
     if !plain {
         return;
     }
+    // Open text entry owns every plain key: typing appends, Enter
+    // submits, Esc cancels, navigation never fires mid-draft.
+    if state.board_draft.is_some() {
+        state.board_draft_key(&key);
+        return;
+    }
     let lower = match key.code {
         KeyCode::Char(c) if c.is_ascii_uppercase() && key.modifiers == KeyModifiers::SHIFT => {
             c.to_ascii_lowercase()
@@ -1037,8 +1048,8 @@ fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
                 state.dirty = true;
             }
             'q' => state.toggle_board(),
-            'a' => state.board_defer_to_mcp("card creation"),
-            'e' => state.board_defer_to_mcp("card"),
+            'a' => state.board_start_add_draft(),
+            'e' => state.board_start_title_draft(),
             't' => state.board_defer_to_mcp("tag"),
             '@' => state.board_defer_to_mcp("assignee"),
             'c' => state.board_defer_to_mcp("column"),
@@ -1291,6 +1302,9 @@ fn settle_quit_save(state: &mut AppState, home: &std::path::Path) -> bool {
         return false;
     }
     state.quit_saving = false;
+    // Boards flush here too: the loop's per-frame flush may never run
+    // between the last mutation and this exit.
+    state.flush_boards(home);
     if let Err(e) = crate::checkpoint::save_quit_snapshot(
         &crate::branding::sessions_file(home),
         state.snapshot_sessions(),
@@ -2878,6 +2892,136 @@ mod tests {
             },
         );
         assert_eq!(state.board_focus.column, 1);
+    }
+
+    #[test]
+    fn board_a_types_and_enter_creates_board() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut state = AppState::new();
+        state.board_open = true;
+        // Reported gap: with no boards, `a` left the human stranded
+        // with a notice and no way to create anything.
+        handle_board_key(&mut state, ch('a'));
+        assert!(state.board_draft.is_some(), "a opens a draft, not a dead end");
+        for c in "team".chars() {
+            handle_board_key(&mut state, ch(c));
+        }
+        handle_board_key(&mut state, enter);
+        assert!(state.board_draft.is_none(), "submit closes the draft");
+        assert_eq!(state.boards.board_names(), vec!["team".to_string()]);
+        assert!(state.board_open, "still looking at the board");
+    }
+
+    #[test]
+    fn board_a_adds_card_and_e_edits_its_title() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut state = AppState::new();
+        state.boards.board_create("team", None).unwrap();
+        state.board_open = true;
+        state.ensure_board_focus();
+        handle_board_key(&mut state, ch('a'));
+        for c in "first".chars() {
+            handle_board_key(&mut state, ch(c));
+        }
+        handle_board_key(&mut state, enter);
+        let board = state.boards.board("team").unwrap();
+        assert_eq!(board.cards.len(), 1);
+        assert_eq!(board.cards[0].column, "Backlog", "lands in the focused column");
+        assert!(state.boards_dirty, "human adds persist");
+        // `e` prefills the title; typing appends to it.
+        handle_board_key(&mut state, ch('e'));
+        assert_eq!(
+            state.board_draft.as_ref().map(|d| d.buffer.as_str()),
+            Some("first"),
+            "prefilled, not blank"
+        );
+        for c in " v2".chars() {
+            handle_board_key(&mut state, ch(c));
+        }
+        handle_board_key(&mut state, enter);
+        assert_eq!(state.boards.board("team").unwrap().cards[0].title, "first v2");
+    }
+
+    #[test]
+    fn board_draft_esc_cancels_and_blank_enter_keeps() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut state = AppState::new();
+        state.board_open = true;
+        handle_board_key(&mut state, ch('a'));
+        handle_board_key(&mut state, esc);
+        assert!(state.board_draft.is_none(), "esc cancels");
+        assert!(state.boards.boards.is_empty(), "nothing created");
+        // Blank submit stays open with guidance instead of an
+        // "empty name" error that eats the draft.
+        handle_board_key(&mut state, ch('a'));
+        handle_board_key(&mut state, enter);
+        assert!(state.board_draft.is_some(), "blank keeps the draft");
+        assert!(state.board_notice.is_some(), "guidance in the footer");
+        // Navigation never fires mid-draft: `j` types, it doesn't move.
+        handle_board_key(&mut state, ch('j'));
+        assert_eq!(state.board_draft.as_ref().map(|d| d.buffer.as_str()), Some("j"));
+    }
+
+    #[test]
+    fn board_full_column_keeps_card_draft() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut state = AppState::new();
+        state.boards.board_create("team", None).unwrap();
+        for title in ["one", "two", "three"] {
+            let id = state
+                .boards
+                .board_mut("team")
+                .unwrap()
+                .card_create(crate::board::CardDraft::new(title))
+                .unwrap();
+            state.boards.board_mut("team").unwrap().card_move(&id, "Doing").unwrap();
+        }
+        state.board_open = true;
+        state.ensure_board_focus();
+        state.board_step_column(2);
+        handle_board_key(&mut state, ch('a'));
+        for c in "fourth".chars() {
+            handle_board_key(&mut state, ch(c));
+        }
+        handle_board_key(&mut state, enter);
+        // WIP blocks the create but the text survives to be fixed.
+        assert!(state.board_draft.is_some(), "draft kept on failure");
+        assert_eq!(
+            state.board_draft.as_ref().map(|d| d.buffer.as_str()),
+            Some("fourth")
+        );
+        assert!(state.board_notice.is_some_and(|n| n.contains("WIP")));
+        assert_eq!(state.boards.board("team").unwrap().cards.len(), 3);
+    }
+
+    #[test]
+    fn quit_save_flushes_pending_boards() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static QUIT_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "forge-quit-board-test-{}-{}",
+            std::process::id(),
+            QUIT_HOME_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let mut state = AppState::new();
+        state.boards.board_create("team", None).unwrap();
+        state.boards_dirty = true;
+        state.quit_saving = true;
+        assert!(settle_quit_save(&mut state, &home));
+        assert!(!state.boards_dirty, "quit flushes like the frame loop");
+        let mut fresh = AppState::new();
+        fresh.load_boards(&home);
+        assert_eq!(fresh.boards.board_names(), vec!["team".to_string()]);
     }
 
     #[test]
