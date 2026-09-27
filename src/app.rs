@@ -1632,7 +1632,7 @@ impl AppState {
             ));
             match q.answer.as_deref() {
                 Some(a) => {
-                    for line in crate::walkthrough::md_text(a).lines {
+                    for line in crate::walkthrough::highlight::md_text(a).lines {
                         let spans: Vec<crate::ui::SpanView> = line
                             .spans
                             .iter()

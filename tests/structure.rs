@@ -29,7 +29,6 @@ const FLAT_ALLOWED: &[&str] = &[
     "theme_dialog.rs",
     "tui.rs",
     "ui.rs",
-    "walkthrough.rs",
     "whichkey.rs",
 ];
 
