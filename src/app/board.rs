@@ -763,7 +763,6 @@ pub(super) fn scratch_home() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::test_support::*;
 
         #[test]
         fn board_toggle_flips_global_view() {
