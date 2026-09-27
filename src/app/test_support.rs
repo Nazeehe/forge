@@ -53,3 +53,61 @@ pub(super) fn tg_outbox(state: &AppState) -> Vec<crate::telegram::OutboundMessag
     }
     out
 }
+
+pub(super) fn spawn_visual_agent(state: &mut AppState, name: &str) -> (crate::session::SessionId, String) {
+    let id = state.manager.spawn_agent(
+        name, &std::env::temp_dir(), "exec cat",
+        crate::infra::ids::RunId::generate(), "codex",
+    ).unwrap();
+    let run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+    (id, run)
+}
+
+#[cfg(feature = "visual")]
+pub(super) fn fake_png(len: usize, w: u32, h: u32) -> Vec<u8> {
+    let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A,
+        0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+    v.extend_from_slice(&w.to_be_bytes());
+    v.extend_from_slice(&h.to_be_bytes());
+    v.resize(len.max(24), 0);
+    v
+}
+
+#[cfg(feature = "visual")]
+pub(super) fn complete(
+    state: &mut AppState,
+    session: crate::session::SessionId,
+    generation: u64,
+    png: Vec<u8>,
+) {
+    let (width, height) = crate::visual::png_dimensions(&png).unwrap();
+    state.visual_complete(crate::app::VisualDone {
+        session,
+        generation,
+        title: String::new(),
+        alt: String::new(),
+        result: Ok(crate::visual::RasterFrame {
+            png,
+            rgba: Vec::new(),
+            width,
+            height,
+            shapes: Vec::new(),
+            vb: [0.0, 0.0, width as f32, height as f32],
+        }),
+    });
+}
+
+#[cfg(feature = "visual")]
+pub(super) fn show_visual_overlay(state: &mut AppState, id: crate::session::SessionId) {
+    // Selection clears the overlay, so focus first, then open it.
+    state.select_session(0);
+    let slot = state.visual_slot(id).expect("visual slot exists");
+    state.overlay_view = Some((id, slot));
+}
+
+#[cfg(feature = "visual")]
+pub(super) fn paint_for(state: &AppState, id: crate::session::SessionId) -> crate::visual::VisualPaint {
+    state
+        .visual_paint(id, ratatui::layout::Rect::new(0, 0, 200, 50), 8.0, 16.0)
+        .expect("paint")
+}
