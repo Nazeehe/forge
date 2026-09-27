@@ -5208,8 +5208,23 @@ impl AppState {
                     None
                 };
                 let attributed = self.manager.lookup_run(&req.run_id).or(fallback_id);
+                // Background sub-sessions share the pane's process group,
+                // so their hooks attribute here too, but they carry their
+                // own session ID and may never Stop. Only the pane's own
+                // harness session moves its activity; the edges that
+                // (re)bind the harness ID below always apply.
+                let own_session = matches!(req.hook.as_str(), "SessionStart" | "UserPromptSubmit")
+                    || attributed.and_then(|id| self.manager.get(id)).is_none_or(|rec| {
+                        match (
+                            rec.harness_session_id.as_deref(),
+                            crate::session::session_id_from_hook_body(&req.body),
+                        ) {
+                            (Some(known), Some(sent)) => known == sent,
+                            _ => true,
+                        }
+                    });
                 if let Some(activity) = crate::session::activity_for_hook(&req.hook) {
-                    if let Some(id) = attributed {
+                    if let Some(id) = attributed.filter(|_| own_session) {
                         self.manager.set_activity(id, activity);
                     }
                 }
@@ -5555,6 +5570,64 @@ mod tests {
         );
         assert_eq!(s.manager.get(id).unwrap().activity, Activity::Thinking);
         assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn foreign_session_hooks_never_strand_a_pane_busy() {
+        // muse runs background sub-sessions in the pane's process group
+        // after its turn ends: their tool hooks resolve to the pane by
+        // source_sid but carry a different session_id and never Stop.
+        // They must not park the pane in ToolUse, or queued messages
+        // wait forever (comms.log: 486 holds, mu_1/mu_2 never delivered).
+        let mut s = AppState::new();
+        let cwd = std::env::temp_dir();
+        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &cwd, "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let m = s
+            .manager
+            .spawn_agent("m", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let sid = s.manager.process_session_id(m).expect("pty process session");
+        let edge = |hook: &str, session: &str| {
+            format!(
+                "{{\"v\":1,\"hook\":\"{hook}\",\"run_id\":\"\",\"forge_pid\":0,\"source_sid\":{sid},\"body\":{{\"session_id\":\"{session}\",\"cwd\":{cwd_json}}}}}"
+            )
+        };
+        s.apply(hook_request("UserPromptSubmit", "", &edge("UserPromptSubmit", "muse-main")));
+        // The pane's own tool hook still marks it busy.
+        s.apply(hook_request("PreToolUse", "", &edge("PreToolUse", "muse-main")));
+        assert_eq!(s.manager.get(m).unwrap().activity, crate::session::Activity::ToolUse);
+        s.apply(hook_request("Stop", "", &edge("Stop", "muse-main")));
+        assert_eq!(s.manager.get(m).unwrap().activity, crate::session::Activity::Stopped);
+        // A background sub-session's tool hook: same pane, foreign id.
+        s.apply(hook_request("PreToolUse", "", &edge("PreToolUse", "muse-sub")));
+        assert_eq!(
+            s.manager.get(m).unwrap().activity,
+            crate::session::Activity::Stopped,
+            "foreign session_id must not change pane activity"
+        );
+        // End to end: a tell queued for the pane is delivered once the
+        // hook debounce settles.
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, m, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"m\",\"text\":\"hello-m\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+        }));
+        assert_eq!(s.broker.queued(m), 1);
+        s.last_hook_activity.remove(&m);
+        s.settle_comms();
+        assert_eq!(s.broker.queued(m), 0, "stopped pane receives the tell");
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(m));
     }
 
     #[test]
