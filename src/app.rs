@@ -108,7 +108,7 @@ pub struct AppState {
     pub group_dialog: Option<crate::groups::GroupDialog>,
     /// Startup restore picker, if a sessions file offered entries. First
     /// input goes here until it resolves to a pick or a fresh start.
-    pub restore_picker: Option<crate::checkpoint::RestorePicker>,
+    pub restore_picker: Option<crate::session::checkpoint::RestorePicker>,
     /// Generic Yes/No confirmation modal (quit forge, kill a session).
     /// Captures all input while present; No is the default.
     pub confirm: Option<crate::quit::Confirm>,
@@ -3171,7 +3171,7 @@ impl AppState {
             return Err("internet sessions are unsupported (local sessions only)".to_string());
         }
         let harness_name = Self::tool_arg(args, "harness").unwrap_or_else(|| "claude".to_string());
-        let harness = crate::harness::Harness::from_name(&harness_name)
+        let harness = crate::session::harness::Harness::from_name(&harness_name)
             .ok_or_else(|| format!("unknown harness {harness_name:?} (claude/codex/muse)"))?;
         let cwd = match Self::tool_arg(args, "path") {
             Some(path) => {
@@ -3255,16 +3255,16 @@ impl AppState {
     ) -> Result<String, String> {
         let kind = Self::tool_arg(args, "kind")
             .ok_or_else(|| "set_session_status needs a kind".to_string())?;
-        let kind = crate::session_status::StatusKind::from_name(&kind).ok_or_else(|| {
+        let kind = crate::session::status::StatusKind::from_name(&kind).ok_or_else(|| {
             "unknown status kind (info/progress/success/warning/blocked/question)".to_string()
         })?;
         let message = Self::tool_arg(args, "message")
             .ok_or_else(|| "set_session_status needs a message".to_string())?;
-        let message = crate::session_status::validate(&message)?;
+        let message = crate::session::status::validate(&message)?;
         let Some(rec) = self.manager.get_mut(caller) else {
             return Err("unknown or stale run ID".to_string());
         };
-        rec.status = Some(crate::session_status::SessionStatus { kind, message: message.clone() });
+        rec.status = Some(crate::session::status::SessionStatus { kind, message: message.clone() });
         self.dirty = true;
         Ok(format!(
             r#"{{"kind":{},"message":{}}}"#,
@@ -3293,7 +3293,7 @@ impl AppState {
     ) -> Result<String, String> {
         let reason = Self::tool_arg(args, "reason")
             .ok_or_else(|| "request_attention needs a reason".to_string())?;
-        let reason = crate::session_status::validate(&reason)?;
+        let reason = crate::session::status::validate(&reason)?;
         if self.manager.get(caller).is_none() {
             return Err("unknown or stale run ID".to_string());
         }
@@ -4242,7 +4242,7 @@ impl AppState {
     /// Live agent sessions as restorable records, in bar order. Shells
     /// have no resume form and exited sessions are gone, so both are
     /// left out; groups ride along for exact rejoins.
-    pub fn snapshot_sessions(&self) -> Vec<crate::checkpoint::SavedSession> {
+    pub fn snapshot_sessions(&self) -> Vec<crate::session::checkpoint::SavedSession> {
         self.manager
             .order()
             .to_vec()
@@ -4252,10 +4252,10 @@ impl AppState {
                 if !rec.state.is_live() {
                     return None;
                 }
-                if crate::harness::Harness::from_name(&rec.cli_tool).is_none() {
+                if crate::session::harness::Harness::from_name(&rec.cli_tool).is_none() {
                     return None;
                 }
-                Some(crate::checkpoint::SavedSession {
+                Some(crate::session::checkpoint::SavedSession {
                     name: rec.name.clone(),
                     cli_tool: rec.cli_tool.clone(),
                     cwd: rec.cwd.to_string_lossy().into_owned(),
@@ -4270,13 +4270,13 @@ impl AppState {
     /// with resume argv (or the cwd-scoped fallback), rejoin their
     /// groups, and fit the main pane. Unknown tools and vanished working
     /// directories skip with a reason instead of failing the batch.
-    pub fn restore_entry(&mut self, entry: &crate::checkpoint::SavedEntry) -> RestoreReport {
+    pub fn restore_entry(&mut self, entry: &crate::session::checkpoint::SavedEntry) -> RestoreReport {
         let mut report = RestoreReport {
             spawned: 0,
             skipped: Vec::new(),
         };
         for saved in &entry.sessions {
-            let Some(harness) = crate::harness::Harness::from_name(&saved.cli_tool) else {
+            let Some(harness) = crate::session::harness::Harness::from_name(&saved.cli_tool) else {
                 report.skipped.push(format!("{}: unknown tool {}", saved.name, saved.cli_tool));
                 continue;
             };
@@ -4338,7 +4338,7 @@ impl AppState {
                 // Fresh launches carry the Forge runtime contract through
                 // the agent's strongest injection mechanism. Materialization
                 // fails open: a session without injection still launches.
-                let argv = match crate::runtime::ensure_materialized(
+                let argv = match crate::session::runtime::ensure_materialized(
                     &crate::core::branding::home_dir(),
                 ) {
                     Ok(file) => h.launch_argv_with_runtime(&binary, model, &file),
@@ -4693,8 +4693,8 @@ impl AppState {
                 Some(s)
                     if matches!(
                         s.kind,
-                        crate::session_status::StatusKind::Blocked
-                            | crate::session_status::StatusKind::Question
+                        crate::session::status::StatusKind::Blocked
+                            | crate::session::status::StatusKind::Question
                     ) =>
                 {
                     0
@@ -5848,10 +5848,10 @@ mod tests {
         let saved = std::env::var("METAMATE_BIN").ok();
         std::env::set_var("METAMATE_BIN", "/bin/true");
         let mut s = AppState::new();
-        let entry = crate::checkpoint::SavedEntry {
+        let entry = crate::session::checkpoint::SavedEntry {
             label: "m".to_string(),
             saved_at_unix: 1_700_000_000,
-            sessions: vec![crate::checkpoint::SavedSession {
+            sessions: vec![crate::session::checkpoint::SavedSession {
                 name: "m".to_string(),
                 cli_tool: "muse".to_string(),
                 cwd: std::env::temp_dir().to_string_lossy().into_owned(),
@@ -5907,25 +5907,25 @@ mod tests {
         let saved = std::env::var("CODEX_BIN").ok();
         std::env::set_var("CODEX_BIN", "/bin/true");
         let mut s = AppState::new();
-        let entry = crate::checkpoint::SavedEntry {
+        let entry = crate::session::checkpoint::SavedEntry {
             label: "a, gone, weird".to_string(),
             saved_at_unix: 1_700_000_000,
             sessions: vec![
-                crate::checkpoint::SavedSession {
+                crate::session::checkpoint::SavedSession {
                     name: "a".to_string(),
                     cli_tool: "codex".to_string(),
                     cwd: std::env::temp_dir().to_string_lossy().into_owned(),
                     groups: vec!["peers".to_string()],
                     harness_session_id: Some("uuid-a".to_string()),
                 },
-                crate::checkpoint::SavedSession {
+                crate::session::checkpoint::SavedSession {
                     name: "gone".to_string(),
                     cli_tool: "codex".to_string(),
                     cwd: "/no/such/dir-anywhere".to_string(),
                     groups: vec![],
                     harness_session_id: None,
                 },
-                crate::checkpoint::SavedSession {
+                crate::session::checkpoint::SavedSession {
                     name: "weird".to_string(),
                     cli_tool: "shell".to_string(),
                     cwd: std::env::temp_dir().to_string_lossy().into_owned(),
@@ -6709,7 +6709,7 @@ mod tests {
         // translation anywhere, no echo): the body arrives whole with no
         // Enter bundled in, and the CR follows as its own input event
         // after the beat — type text, press Enter, never one burst.
-        use crate::pty::PtyEvent;
+        use crate::session::pty::PtyEvent;
         let mut s = AppState::new();
         let run_a = RunId::generate();
         let a = s
@@ -6828,7 +6828,7 @@ mod tests {
         // Two queued tells must not merge into one submission: the first
         // settle writes only the head body and stages its Enter; the
         // second body waits for its own Enter after the first CR lands.
-        use crate::pty::PtyEvent;
+        use crate::session::pty::PtyEvent;
         let mut s = AppState::new();
         let run_a = RunId::generate();
         let a = s
@@ -7452,7 +7452,7 @@ mod tests {
         let mut s = AppState::new();
         let spec = crate::create::SessionSpec {
             kind: crate::create::SessionKind::Agent(
-                crate::harness::Harness::from_name("codex").unwrap(),
+                crate::session::harness::Harness::from_name("codex").unwrap(),
             ),
             name: "coder".to_string(),
             cwd: std::env::temp_dir(),
@@ -8231,7 +8231,7 @@ mod tests {
         let agent = s
             .create_session(&crate::create::SessionSpec {
                 kind: crate::create::SessionKind::Agent(
-                    crate::harness::Harness::from_name("codex").unwrap(),
+                    crate::session::harness::Harness::from_name("codex").unwrap(),
                 ),
                 name: "codex-1".to_string(),
                 cwd: std::env::temp_dir(),

@@ -1,5 +1,5 @@
 //! Agent CLI handles: indexes into the process-wide agent registry
-//! (`agents.json`, see [`crate::agents`]). The registry is set once at
+//! (`agents.json`, see [`crate::session::agents`]). The registry is set once at
 //! startup and never replaced, so indexes are stable and the handle
 //! stays `Copy` for [`crate::create::SessionKind`].
 //!
@@ -9,9 +9,9 @@
 //! own approval behavior while forge gates through hooks where
 //! supported, and the registry parser rejects bypasses in agent argv.
 
-use crate::agents::{AgentDef, Attribution, WithId};
+use crate::session::agents::{AgentDef, Attribution, WithId};
 
-/// Agent CLI behind an agent tab: an index into [`crate::agents::registry`].
+/// Agent CLI behind an agent tab: an index into [`crate::session::agents::registry`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Harness {
     index: usize,
@@ -21,31 +21,31 @@ impl Harness {
     /// Every registered agent, in file order (drives the create-dialog
     /// tool radio, so file order is display order).
     pub fn all() -> Vec<Harness> {
-        (0..crate::agents::registry().len())
+        (0..crate::session::agents::registry().len())
             .map(|index| Harness { index })
             .collect()
     }
 
     pub fn len() -> usize {
-        crate::agents::registry().len()
+        crate::session::agents::registry().len()
     }
 
     /// Saturating index: the create radio always picks a live agent,
     /// and the registry is never empty (startup rejects empty files).
     pub fn from_index(index: usize) -> Harness {
-        let max = crate::agents::registry().len().saturating_sub(1);
+        let max = crate::session::agents::registry().len().saturating_sub(1);
         Harness { index: index.min(max) }
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        crate::agents::registry()
+        crate::session::agents::registry()
             .iter()
             .position(|def| def.name == name)
             .map(|index| Harness { index })
     }
 
     fn def(self) -> &'static AgentDef {
-        &crate::agents::registry()[self.index]
+        &crate::session::agents::registry()[self.index]
     }
 
     pub fn as_str(self) -> &'static str {
@@ -68,9 +68,9 @@ impl Harness {
     }
 
     /// Provider-specific runtime adapter: how the canonical Forge runtime
-    /// contract reaches this agent at launch (see [`crate::runtime`]).
-    pub fn runtime_adapter(self) -> crate::runtime::RuntimeAdapter {
-        crate::runtime::RuntimeAdapter::for_agent(self.as_str())
+    /// contract reaches this agent at launch (see [`crate::session::runtime`]).
+    pub fn runtime_adapter(self) -> crate::session::runtime::RuntimeAdapter {
+        crate::session::runtime::RuntimeAdapter::for_agent(self.as_str())
     }
 
     /// Interactive argv plus the runtime-contract injection for a fresh

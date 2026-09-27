@@ -49,10 +49,10 @@ pub enum AppEvent {
 }
 
 impl AppEvent {
-    pub fn from_pty(id: SessionId, ev: crate::pty::PtyEvent) -> Self {
+    pub fn from_pty(id: SessionId, ev: crate::session::pty::PtyEvent) -> Self {
         match ev {
-            crate::pty::PtyEvent::Output(_) => AppEvent::SessionOutput { id },
-            crate::pty::PtyEvent::Exited(code) => AppEvent::SessionExited { id, code },
+            crate::session::pty::PtyEvent::Output(_) => AppEvent::SessionOutput { id },
+            crate::session::pty::PtyEvent::Exited(code) => AppEvent::SessionExited { id, code },
         }
     }
 }
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn from_pty_maps_both_kinds() {
-        use crate::pty::PtyEvent;
+        use crate::session::pty::PtyEvent;
         let id = SessionId::fresh();
         match AppEvent::from_pty(id, PtyEvent::Output(vec![9])) {
             AppEvent::SessionOutput { id: got } => {

@@ -699,7 +699,7 @@ pub fn install_one_mcp(home: &std::path::Path, harness: &str, forge_bin: &str) -
         // servers (verified live: "no comms route" until allowlisted).
         "codex" => {
             let Some(bin) =
-                crate::harness::Harness::from_name("codex").map(|h| h.spec().resolve_binary())
+                crate::session::harness::Harness::from_name("codex").map(|h| h.spec().resolve_binary())
             else {
                 return Outcome::error(harness, "codex is not in agents.json".to_string());
             };
@@ -857,7 +857,7 @@ pub fn uninstall_one_mcp(home: &std::path::Path, harness: &str) -> Outcome {
         }
         "codex" => {
             let Some(bin) =
-                crate::harness::Harness::from_name("codex").map(|h| h.spec().resolve_binary())
+                crate::session::harness::Harness::from_name("codex").map(|h| h.spec().resolve_binary())
             else {
                 return Outcome::error(harness, "codex is not in agents.json".to_string());
             };

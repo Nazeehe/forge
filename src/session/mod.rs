@@ -1,8 +1,18 @@
+//! Sessions and their runtime: identity, lifecycle, PTY panes, launch
+//! plumbing, snapshots, and the agent registry.
+//!
 //! Session identity and lifecycle states.
 //!
 //! Pure types only: PTY ownership and the manager live here in later steps.
 //! A session moves `Starting -> Running -> Exited`; exited sessions stay
 //! visible until explicitly deleted.
+
+pub mod agents;
+pub mod checkpoint;
+pub mod harness;
+pub mod pty;
+pub mod runtime;
+pub mod status;
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,7 +117,7 @@ pub enum TabKind {
 /// tabs start panelless and spawn lazily on first switch.
 pub struct Tab {
     pub kind: TabKind,
-    pane: Option<crate::pty::PtyPane>,
+    pane: Option<crate::session::pty::PtyPane>,
 }
 
 /// Lazy-tab command plus harness tag. The agent tab always spawns with
@@ -146,7 +156,7 @@ pub struct SessionRecord {
     pub exit_code: Option<i32>,
     /// Caller sticky status (blueprint #14/#15): one replaceable
     /// `kind: message` pair, shown in the sidebar.
-    pub status: Option<crate::session_status::SessionStatus>,
+    pub status: Option<crate::session::status::SessionStatus>,
     /// Spawn instant for the bootstrap attribution window.
     pub spawned_at: std::time::Instant,
 }
@@ -158,10 +168,10 @@ pub struct SessionManager {
     sessions: std::collections::HashMap<SessionId, SessionRecord>,
     active: Option<SessionId>,
     run_index: std::collections::HashMap<String, SessionId>,
-    pty_tx: std::sync::mpsc::SyncSender<(SessionId, crate::pty::PtyEvent)>,
-    pty_rx: std::sync::mpsc::Receiver<(SessionId, crate::pty::PtyEvent)>,
-    aux_tx: std::sync::mpsc::SyncSender<(SessionId, crate::pty::PtyEvent)>,
-    aux_rx: std::sync::mpsc::Receiver<(SessionId, crate::pty::PtyEvent)>,
+    pty_tx: std::sync::mpsc::SyncSender<(SessionId, crate::session::pty::PtyEvent)>,
+    pty_rx: std::sync::mpsc::Receiver<(SessionId, crate::session::pty::PtyEvent)>,
+    aux_tx: std::sync::mpsc::SyncSender<(SessionId, crate::session::pty::PtyEvent)>,
+    aux_rx: std::sync::mpsc::Receiver<(SessionId, crate::session::pty::PtyEvent)>,
 }
 
 /// Bound on each pane-event channel (AGENTS.md: "all... queues... bounded").
@@ -198,7 +208,7 @@ impl SessionManager {
         run_id: &str,
         cli_tool: &str,
         tab: usize,
-    ) -> std::io::Result<crate::pty::PtyPane> {
+    ) -> std::io::Result<crate::session::pty::PtyPane> {
         // Harnesses discover the broker through these: the run ID proves
         // authority, the endpoint inherits the listener socket.
         let tx = if tab == 0 {
@@ -206,7 +216,7 @@ impl SessionManager {
         } else {
             self.aux_tx.clone()
         };
-        crate::pty::PtyPane::spawn_with_env(
+        crate::session::pty::PtyPane::spawn_with_env(
             id,
             cmd,
             cwd,
@@ -392,7 +402,7 @@ impl SessionManager {
     }
 
     /// The visible pane, if it has one.
-    fn active_pane(&self, id: SessionId) -> Option<&crate::pty::PtyPane> {
+    fn active_pane(&self, id: SessionId) -> Option<&crate::session::pty::PtyPane> {
         let rec = self.sessions.get(&id)?;
         rec.tabs.get(rec.active_tab)?.pane.as_ref()
     }
@@ -400,7 +410,7 @@ impl SessionManager {
     /// Test seam (plus future pane surgery): kill or replace the live
     /// pane while the record stays put, e.g. to prove a failed write
     /// retries instead of dropping the message.
-    pub(crate) fn active_pane_mut(&mut self, id: SessionId) -> Option<&mut crate::pty::PtyPane> {
+    pub(crate) fn active_pane_mut(&mut self, id: SessionId) -> Option<&mut crate::session::pty::PtyPane> {
         let rec = self.sessions.get_mut(&id)?;
         let tab = rec.active_tab;
         rec.tabs.get_mut(tab)?.pane.as_mut()
@@ -472,7 +482,7 @@ impl SessionManager {
                     .tabs
                     .first()
                     .and_then(|tab| tab.pane.as_ref())
-                    .and_then(crate::pty::PtyPane::process_session_id)
+                    .and_then(crate::session::pty::PtyPane::process_session_id)
                     == Some(source_sid))
             .then_some(*id)
         })
@@ -494,7 +504,7 @@ impl SessionManager {
         let Some(rec) = self.sessions.get(&id) else {
             return false;
         };
-        if !crate::harness::Harness::from_name(&rec.cli_tool)
+        if !crate::session::harness::Harness::from_name(&rec.cli_tool)
             .is_some_and(|h| h.cwd_window_attribution())
         {
             return false;
@@ -539,7 +549,7 @@ impl SessionManager {
         let hook_cwd = std::path::Path::new(cwd);
         let mut candidates = self.sessions.iter().filter(|(_, rec)| {
             rec.state.is_live()
-                && crate::harness::Harness::from_name(&rec.cli_tool)
+                && crate::session::harness::Harness::from_name(&rec.cli_tool)
                     .is_some_and(|h| h.cwd_window_attribution())
                 && rec.harness_session_id.is_none()
                 && rec.cwd.as_path() == hook_cwd
@@ -715,7 +725,7 @@ impl SessionManager {
     }
 
     /// Styled screen rows of the visible tab; empty when gone.
-    pub fn styled_rows(&self, id: SessionId) -> Vec<Vec<crate::pty::FormattedCell>> {
+    pub fn styled_rows(&self, id: SessionId) -> Vec<Vec<crate::session::pty::FormattedCell>> {
         self.active_pane(id)
             .map(|pane| pane.styled_rows())
             .unwrap_or_default()
@@ -739,7 +749,7 @@ impl SessionManager {
     /// (state, code, run revocation, pane release) and returns what arrived
     /// as `(session, tab, event)`. Tab 0 decides session liveness; a later
     /// tab exiting only releases its own pane.
-    pub fn drain_pty(&mut self) -> Vec<(SessionId, usize, crate::pty::PtyEvent)> {
+    pub fn drain_pty(&mut self) -> Vec<(SessionId, usize, crate::session::pty::PtyEvent)> {
         self.drain_pty_max(usize::MAX)
     }
 
@@ -749,7 +759,7 @@ impl SessionManager {
     pub fn drain_pty_max(
         &mut self,
         max: usize,
-    ) -> Vec<(SessionId, usize, crate::pty::PtyEvent)> {
+    ) -> Vec<(SessionId, usize, crate::session::pty::PtyEvent)> {
         let mut out = Vec::new();
         while out.len() < max {
             let Ok((id, ev)) = self.pty_rx.try_recv() else {
@@ -771,8 +781,8 @@ impl SessionManager {
     /// Fold one exit into record state. Primary-tab exits end the session
     /// (revoking the run binding and reaping sibling panes); later-tab
     /// exits only release that tab's pane.
-    fn apply_exit(&mut self, id: SessionId, tab: usize, ev: &crate::pty::PtyEvent) {
-        let crate::pty::PtyEvent::Exited(code) = ev else {
+    fn apply_exit(&mut self, id: SessionId, tab: usize, ev: &crate::session::pty::PtyEvent) {
+        let crate::session::pty::PtyEvent::Exited(code) = ev else {
             return;
         };
         let Some(rec) = self.sessions.get_mut(&id) else {
@@ -814,7 +824,7 @@ impl SessionManager {
 
     /// Scroll the visible tab: positive climbs, negative returns toward
     /// live. On the normal screen this moves the scrollback viewport
-    /// (see [`crate::pty::PtyPane::scroll_viewport`]); on the alternate
+    /// (see [`crate::session::pty::PtyPane::scroll_viewport`]); on the alternate
     /// screen there is no scrollback, so the wheel becomes Up/Down arrows
     /// instead — fullscreen apps that never take the mouse (codex,
     /// claude) scroll with those, and a dead wheel would strand the user.
@@ -985,7 +995,7 @@ mod tests {
     }
 
     use crate::core::ids::RunId;
-    use crate::pty::PtyEvent;
+    use crate::session::pty::PtyEvent;
     use std::time::{Duration, Instant};
 
     fn workdir() -> std::path::PathBuf {

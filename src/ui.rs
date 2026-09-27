@@ -17,7 +17,7 @@ use tuirealm::state::State;
 
 use crate::{
     core::safe_text,
-    pty::{CellColor, CellFormat, FormattedCell},
+    session::pty::{CellColor, CellFormat, FormattedCell},
     theme,
 };
 
@@ -846,7 +846,7 @@ pub struct SessionDetail {
     /// Caller sticky status text (`kind: message`), if one is set.
     pub status: Option<String>,
     /// Kind behind `status`, for the signal emoji. `None` matches `status`.
-    pub status_kind: Option<crate::session_status::StatusKind>,
+    pub status_kind: Option<crate::session::status::StatusKind>,
     /// Armed timers of the focused session only; empty hides the section.
     pub timers: Vec<TimerView>,
 }
@@ -888,14 +888,14 @@ pub struct FleetRow {
 /// Signal emoji per sticky kind. Bare glyphs only: no variation
 /// selectors, no ZWJ sequences (same rule as the topbar icons), so
 /// `Line::width` measures them exactly.
-pub fn status_emoji(kind: crate::session_status::StatusKind) -> &'static str {
+pub fn status_emoji(kind: crate::session::status::StatusKind) -> &'static str {
     match kind {
-        crate::session_status::StatusKind::Info => "ℹ",
-        crate::session_status::StatusKind::Progress => "🔄",
-        crate::session_status::StatusKind::Success => "✔",
-        crate::session_status::StatusKind::Warning => "⚠",
-        crate::session_status::StatusKind::Blocked => "🛑",
-        crate::session_status::StatusKind::Question => "💬",
+        crate::session::status::StatusKind::Info => "ℹ",
+        crate::session::status::StatusKind::Progress => "🔄",
+        crate::session::status::StatusKind::Success => "✔",
+        crate::session::status::StatusKind::Warning => "⚠",
+        crate::session::status::StatusKind::Blocked => "🛑",
+        crate::session::status::StatusKind::Question => "💬",
     }
 }
 
@@ -3709,7 +3709,7 @@ mod tests {
                 cwd: "/tmp/proj".to_string(),
                 state: "running".to_string(),
                 status: Some("blocked: waiting on review".to_string()),
-                status_kind: Some(crate::session_status::StatusKind::Blocked),
+                status_kind: Some(crate::session::status::StatusKind::Blocked),
                 timers: vec![TimerView { id: "t1".to_string(), remaining: "9:55".to_string() }],
             }),
             sessions: Vec::new(),
@@ -3795,7 +3795,7 @@ mod tests {
                 cwd: "/tmp/proj".to_string(),
                 state: "running · Thinking".to_string(),
                 status: Some("blocked: waiting on review".to_string()),
-                status_kind: Some(crate::session_status::StatusKind::Blocked),
+                status_kind: Some(crate::session::status::StatusKind::Blocked),
                 timers: Vec::new(),
             }),
             sessions: Vec::new(),
@@ -3849,7 +3849,7 @@ mod tests {
                 cwd: "/tmp/proj".to_string(),
                 state: "running".to_string(),
                 status: Some("progress: compiling".to_string()),
-                status_kind: Some(crate::session_status::StatusKind::Progress),
+                status_kind: Some(crate::session::status::StatusKind::Progress),
                 timers: vec![TimerView { id: "t1".to_string(), remaining: "9:55".to_string() }],
             }),
             sessions: Vec::new(),
@@ -4019,7 +4019,7 @@ mod tests {
 
     #[test]
     fn status_emoji_has_no_joiners_or_selectors() {
-        use crate::session_status::StatusKind;
+        use crate::session::status::StatusKind;
         // Bare glyphs only: no VS16, no ZWJ, like the topbar icons.
         for kind in [
             StatusKind::Info,
@@ -4048,7 +4048,7 @@ mod tests {
 
     #[test]
     fn fleet_rows_and_status_carry_emoji_beside_marks() {
-        use crate::session_status::StatusKind;
+        use crate::session::status::StatusKind;
         let id = crate::session::SessionId::fresh();
         let info = SidebarInfo {
             session: Some(SessionDetail {
@@ -4870,7 +4870,7 @@ mod tests {
 
     #[test]
     fn style_for_maps_sgr_attributes() {
-        use crate::pty::{CellColor, CellFormat};
+        use crate::session::pty::{CellColor, CellFormat};
         let f = CellFormat {
             fg: CellColor::Indexed(1),
             bg: CellColor::Rgb(10, 20, 30),

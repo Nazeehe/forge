@@ -351,8 +351,8 @@ fn loop_until_quit(
     state.apply(AppEvent::Resize(size.height, size.width));
     // Saved snapshots offer themselves before anything else: a pick
     // restores the whole topology, Esc starts fresh.
-    let file = crate::checkpoint::SessionsFile::load(&crate::core::branding::sessions_file(home));
-    if let Some(picker) = crate::checkpoint::RestorePicker::new(&file) {
+    let file = crate::session::checkpoint::SessionsFile::load(&crate::core::branding::sessions_file(home));
+    if let Some(picker) = crate::session::checkpoint::RestorePicker::new(&file) {
         state.restore_picker = Some(picker);
         state.dirty = true;
     }
@@ -611,7 +611,7 @@ fn loop_until_quit(
                     crate::quit::view_saving(f, crate::quit::saving_area(area));
                 }
                 if let Some(picker) = state.restore_picker.as_ref() {
-                    picker.view(f, crate::checkpoint::RestorePicker::picker_area(area));
+                    picker.view(f, crate::session::checkpoint::RestorePicker::picker_area(area));
                 }
                 // First run sits above every other modal (below the tour):
                 // it owns input while present, so it paints on top.
@@ -1309,7 +1309,7 @@ fn handle_theme_mouse(
 fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
     let outcome = state.restore_picker.as_mut().map(|p| p.key(&key));
     match outcome {
-        Some(crate::checkpoint::RestoreOutcome::Pick(_)) => {
+        Some(crate::session::checkpoint::RestoreOutcome::Pick(_)) => {
             let entry = state.restore_picker.as_ref().and_then(|p| p.take_selected());
             state.restore_picker = None;
             if let Some(entry) = entry {
@@ -1318,11 +1318,11 @@ fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
             }
             state.dirty = true;
         }
-        Some(crate::checkpoint::RestoreOutcome::Fresh) => {
+        Some(crate::session::checkpoint::RestoreOutcome::Fresh) => {
             state.restore_picker = None;
             state.dirty = true;
         }
-        Some(crate::checkpoint::RestoreOutcome::Pending) | None => {}
+        Some(crate::session::checkpoint::RestoreOutcome::Pending) | None => {}
     }
 }
 
@@ -1397,7 +1397,7 @@ fn settle_quit_save(state: &mut AppState, home: &std::path::Path) -> bool {
     // Boards flush here too: the loop's per-frame flush may never run
     // between the last mutation and this exit.
     state.flush_boards(home);
-    if let Err(e) = crate::checkpoint::save_quit_snapshot(
+    if let Err(e) = crate::session::checkpoint::save_quit_snapshot(
         &crate::core::branding::sessions_file(home),
         state.snapshot_sessions(),
     ) {
@@ -1795,7 +1795,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
             match mev.kind {
                 event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
                     if let Some(active) = state.manager.active() {
-                        let step = crate::pty::PtyPane::SCROLL_LINES_PER_NOTCH;
+                        let step = crate::session::pty::PtyPane::SCROLL_LINES_PER_NOTCH;
                         let delta = if matches!(mev.kind, event::MouseEventKind::ScrollUp) {
                             step
                         } else {
@@ -1899,7 +1899,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         // arrows for fullscreen apps that never take the mouse (codex,
         // claude). Other buttons still do nothing.
         if ui::translate_mouse(ui::pane_grid_area(&areas), mev.column, mev.row).is_some() {
-            let step = crate::pty::PtyPane::SCROLL_LINES_PER_NOTCH;
+            let step = crate::session::pty::PtyPane::SCROLL_LINES_PER_NOTCH;
             match mev.kind {
                 event::MouseEventKind::ScrollUp => {
                     state.manager.scroll_view(active, step);
@@ -4017,10 +4017,10 @@ mod tests {
         let none = KeyModifiers::NONE;
         let saved = std::env::var("CODEX_BIN").ok();
         std::env::set_var("CODEX_BIN", "/bin/true");
-        let entry = crate::checkpoint::SavedEntry {
+        let entry = crate::session::checkpoint::SavedEntry {
             label: "a".to_string(),
             saved_at_unix: 1_700_000_000,
-            sessions: vec![crate::checkpoint::SavedSession {
+            sessions: vec![crate::session::checkpoint::SavedSession {
                 name: "a".to_string(),
                 cli_tool: "codex".to_string(),
                 cwd: std::env::temp_dir().to_string_lossy().into_owned(),
@@ -4028,17 +4028,17 @@ mod tests {
                 harness_session_id: None,
             }],
         };
-        let file = crate::checkpoint::SessionsFile {
+        let file = crate::session::checkpoint::SessionsFile {
             entries: vec![entry],
         };
         // Esc resolves fresh with no sessions and keeps the file.
         let mut state = AppState::new();
-        state.restore_picker = crate::checkpoint::RestorePicker::new(&file);
+        state.restore_picker = crate::session::checkpoint::RestorePicker::new(&file);
         handle_restore_key(&mut state, KeyEvent::new(KeyCode::Esc, none));
         assert!(state.restore_picker.is_none());
         assert!(state.manager.order().is_empty());
         // Enter restores the entry.
-        state.restore_picker = crate::checkpoint::RestorePicker::new(&file);
+        state.restore_picker = crate::session::checkpoint::RestorePicker::new(&file);
         handle_restore_key(&mut state, KeyEvent::new(KeyCode::Enter, none));
         assert!(state.restore_picker.is_none());
         let order = state.manager.order().to_vec();
@@ -4193,7 +4193,7 @@ mod tests {
 
     #[test]
     fn restore_picker_ignores_arrows_esc_dismisses() {
-        use crate::checkpoint::{make_entry, RestorePicker, SavedSession, SessionsFile};
+        use crate::session::checkpoint::{make_entry, RestorePicker, SavedSession, SessionsFile};
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut state = AppState::new();
         let mut file = SessionsFile::default();

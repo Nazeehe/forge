@@ -4,7 +4,6 @@
 // phases land and re-address whatever it unhides.
 #![allow(dead_code)]
 
-mod agents;
 mod app;
 mod audit;
 mod board;
@@ -13,9 +12,7 @@ mod card_edit;
 mod comms;
 mod core;
 mod create;
-mod checkpoint;
 mod groups;
-mod harness;
 mod help;
 mod input;
 mod install;
@@ -23,10 +20,8 @@ mod listener;
 mod mcp;
 mod oobe;
 mod policy;
-mod pty;
 mod quit;
 mod relay;
-mod runtime;
 mod telegram;
 mod telegram_dialog;
 mod tetris;
@@ -34,7 +29,6 @@ mod theme_dialog;
 #[cfg(all(target_os = "linux", feature = "visual"))]
 mod screenshot;
 mod session;
-mod session_status;
 mod theme;
 mod tui;
 mod ui;
@@ -181,12 +175,12 @@ fn startup(force_oobe: bool) -> i32 {
     // with the wrong argv is worse than not launching.
     let agents_path = core::branding::agents_file(&home);
     if !agents_path.exists() {
-        if let Err(e) = std::fs::write(&agents_path, crate::agents::DEFAULT_AGENTS_JSON) {
+        if let Err(e) = std::fs::write(&agents_path, crate::session::agents::DEFAULT_AGENTS_JSON) {
             eprintln!("error: cannot write agents file: {e}");
             return 1;
         }
     }
-    if let Err(e) = crate::agents::load_registry(&agents_path) {
+    if let Err(e) = crate::session::agents::load_registry(&agents_path) {
         eprintln!("error: {e}");
         return 1;
     }
@@ -198,7 +192,7 @@ fn startup(force_oobe: bool) -> i32 {
     // inject at launch (see `runtime.rs`). Forge-owned and refreshed every
     // boot; a failed write warns instead of blocking startup because fresh
     // launches re-ensure it (fail-open without injection).
-    if let Err(e) = crate::runtime::ensure_materialized(&home) {
+    if let Err(e) = crate::session::runtime::ensure_materialized(&home) {
         eprintln!("warning: cannot write Forge runtime contract: {e}");
     }
     // Configuration guide for AI agents: docs only, so a failed drop
@@ -257,7 +251,7 @@ fn startup(force_oobe: bool) -> i32 {
     // before (Esc + quit-empty is a normal flow), and the picker shows
     // each entry's age.
     state.trace_snapshot("quit");
-    if let Err(e) = checkpoint::save_quit_snapshot(
+    if let Err(e) = session::checkpoint::save_quit_snapshot(
         &core::branding::sessions_file(&home),
         state.snapshot_sessions(),
     ) {
