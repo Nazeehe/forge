@@ -516,6 +516,46 @@ fn tool_defs() -> Vec<ToolDef> {
             description: "When the user asks to visualize code, plan, etc, render a diagram into your Visual tab: content is the diagram source, format is mermaid (only), title and alt label it for the operator.",
             schema: r#"{"type":"object","properties":{"content":{"type":"string"},"format":{"type":"string"},"title":{"type":"string"},"alt":{"type":"string"}},"required":["content"]}"#,
         },
+        ToolDef {
+            name: "board_list",
+            description: "List workspace kanban boards with per-column card counts. Boards are global: they outlive every session and render in the Kanban view (Ctrl-b b).",
+            schema: r#"{"type":"object","properties":{}}"#,
+        },
+        ToolDef {
+            name: "board_get",
+            description: "Show one board's columns and cards with WIP limits, priority, assignee, and progress. Defaults to the focused board when neither board_name nor board_id is given.",
+            schema: r#"{"type":"object","properties":{"board_name":{"type":"string"},"board_id":{"type":"string"}}}"#,
+        },
+        ToolDef {
+            name: "board_create",
+            description: "Create a kanban board. Columns defaults to Backlog, Todo, Doing (WIP 3), Done; each entry is either a name or an object with name and wip_limit.",
+            schema: r#"{"type":"object","properties":{"name":{"type":"string"},"columns":{"type":"array","items":{}}},"required":["name"]}"#,
+        },
+        ToolDef {
+            name: "card_create",
+            description: "Add a card to a board (default column Backlog). WIP limits bind: a full column rejects the create.",
+            schema: r#"{"type":"object","properties":{"board_name":{"type":"string"},"title":{"type":"string"},"column":{"type":"string"},"description":{"type":"string"},"assignee":{"type":"string"},"priority":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"due_date":{"type":"string"}},"required":["board_name","title"]}"#,
+        },
+        ToolDef {
+            name: "card_move",
+            description: "Move a card to another column. WIP-checked; moving into the last column sets progress to 100.",
+            schema: r#"{"type":"object","properties":{"card_id":{"type":"string"},"column":{"type":"string"}},"required":["card_id","column"]}"#,
+        },
+        ToolDef {
+            name: "card_update",
+            description: "Partially update a card: title, description, assignee, priority, progress (clamped 0-100), tags, due_date.",
+            schema: r#"{"type":"object","properties":{"card_id":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"},"assignee":{"type":"string"},"priority":{"type":"string"},"progress":{"type":"integer"},"tags":{"type":"array","items":{"type":"string"}},"due_date":{"type":"string"}},"required":["card_id"]}"#,
+        },
+        ToolDef {
+            name: "card_delete",
+            description: "Delete a card by ID. Returns a confirmation; the human's cursor clamps to a live card.",
+            schema: r#"{"type":"object","properties":{"card_id":{"type":"string"}},"required":["card_id"]}"#,
+        },
+        ToolDef {
+            name: "card_assign",
+            description: "Assign a card. No assignee claims the caller's session (else unknown) and moves the card to Doing when that column has room.",
+            schema: r#"{"type":"object","properties":{"card_id":{"type":"string"},"assignee":{"type":"string"}},"required":["card_id"]}"#,
+        },
     ]
 }
 

@@ -7,6 +7,7 @@
 mod agents;
 mod app;
 mod audit;
+mod board;
 mod bot;
 mod branding;
 mod comms;

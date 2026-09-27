@@ -348,6 +348,9 @@ fn loop_until_quit(
         state.restore_picker = Some(picker);
         state.dirty = true;
     }
+    // Workspace boards load once; a corrupt save quarantines with a
+    // footer notice instead of blocking startup.
+    state.load_boards(home);
     fit_active_pane(state);
     let mut cursor_shown = true;
     // Frame pacer: the first paint is immediate, background repaints
@@ -541,10 +544,15 @@ fn loop_until_quit(
                     .map(|cfg| if cfg.enabled { "on" } else { "off" })
                     .unwrap_or("off"),
                 telegram_badge: info.telegram_badge,
+                board_open: state.board_open,
+                board: state.board_open.then(|| state.board_view()),
                 grid: state.grid_mode,
                 pills: state.pill_tabs,
             };
             let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
+            // Board mutations flush within a frame; the dirty flag keeps
+            // clean frames free of filesystem work.
+            state.flush_boards(home);
             terminal.draw(|f| {
                 let area = f.area();
                 ui::render(f, area, &views, &chrome);
@@ -752,6 +760,13 @@ fn handle_key_at(
         handle_pinned_key(state, router, key);
         return;
     }
+    // The open board owns plain keys so `j` moves the cursor instead
+    // of typing into a pane; the prefix chord still escapes to the
+    // router so `Ctrl-b b` (and every other command) keeps working.
+    if state.board_open && !InputRouter::is_prefix(&key) && !router.is_pending() {
+        handle_board_key(state, key);
+        return;
+    }
     match router.feed(key) {
         RoutedKey::Forward(k) => {
             state.whichkey.note_resolved();
@@ -906,6 +921,12 @@ fn fire_command(state: &mut AppState, cmd: UserCommand) {
                 fit_active_pane(state);
             }
         }
+        UserCommand::ToggleBoard => {
+            state.toggle_board();
+            if !state.board_open {
+                fit_active_pane(state);
+            }
+        }
         UserCommand::TelegramSettings => {
             state.open_telegram_dialog();
         }
@@ -950,6 +971,90 @@ fn handle_walkthrough_key(state: &mut AppState, key: event::KeyEvent) {
             state.dirty = true;
         }
         WalkKey::Ignored => {}
+    }
+}
+
+/// One key inside the open kanban board: the blueprint's clikan map
+/// minus text entry (add/edit/columns stay MCP-only and say so).
+/// Ctrl/Alt chords never reach here — the dispatcher keeps them for
+/// the prefix path — and `q`/Esc leaves the board.
+fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) {
+        return;
+    }
+    let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    if !plain {
+        return;
+    }
+    let lower = match key.code {
+        KeyCode::Char(c) if c.is_ascii_uppercase() && key.modifiers == KeyModifiers::SHIFT => {
+            c.to_ascii_lowercase()
+        }
+        KeyCode::Char(c) => c,
+        _ => '\0',
+    };
+    match key.code {
+        KeyCode::Esc => state.toggle_board(),
+        KeyCode::Enter if key.modifiers.is_empty() => state.board_enter_details(),
+        KeyCode::Tab if key.modifiers.is_empty() => state.board_step_column(1),
+        KeyCode::BackTab => state.board_step_column(-1),
+        KeyCode::Left if key.modifiers.is_empty() => state.board_step_column(-1),
+        KeyCode::Right if key.modifiers.is_empty() => state.board_step_column(1),
+        KeyCode::Up if key.modifiers.is_empty() => state.board_step_card(-1),
+        KeyCode::Down if key.modifiers.is_empty() => state.board_step_card(1),
+        KeyCode::Home if key.modifiers.is_empty() => state.board_focus_card_edge(false),
+        KeyCode::End if key.modifiers.is_empty() => state.board_focus_card_edge(true),
+        KeyCode::Backspace if key.modifiers.is_empty() => state.board_shift_focused_card(-1),
+        KeyCode::Char('1'..='9') => {
+            state.board_focus_column_index((lower as u8 - b'1') as usize);
+        }
+        _ => match lower {
+            'h' => state.board_step_column(-1),
+            'l' => state.board_step_column(1),
+            // Shift-held J/K belong to reorder below, never the cursor.
+            'j' if key.modifiers.is_empty() => state.board_step_card(1),
+            'k' if key.modifiers.is_empty() => state.board_step_card(-1),
+            'g' => {
+                if key.code == KeyCode::Char('G') {
+                    state.board_focus_card_edge(true);
+                } else {
+                    state.board_focus_card_edge(false);
+                }
+            }
+            ' ' | '.' => state.board_shift_focused_card(1),
+            ',' => state.board_shift_focused_card(-1),
+            '>' => state.board_send_focused_card(true),
+            '<' => state.board_send_focused_card(false),
+            'x' => state.board_complete_focused(),
+            'd' => state.board_delete_focused(),
+            'p' => state.board_cycle_priority_focused(),
+            '+' | '=' => state.board_bump_progress_focused(10),
+            '-' | '_' => state.board_bump_progress_focused(-10),
+            'w' => state.board_cycle_board(),
+            'r' => {
+                state.ensure_board_focus();
+                state.dirty = true;
+            }
+            'q' => state.toggle_board(),
+            'a' => state.board_defer_to_mcp("card creation"),
+            'e' => state.board_defer_to_mcp("card"),
+            't' => state.board_defer_to_mcp("tag"),
+            '@' => state.board_defer_to_mcp("assignee"),
+            'c' => state.board_defer_to_mcp("column"),
+            _ => {}
+        },
+    }
+    // Uppercase move/reorder chords arrive lowercased above; handle the
+    // shift-held originals here so `K` never reads as `k`.
+    if key.modifiers == KeyModifiers::SHIFT {
+        match key.code {
+            KeyCode::Char('J') => state.board_reorder_focused(crate::board::Shift::Down),
+            KeyCode::Char('K') => state.board_reorder_focused(crate::board::Shift::Up),
+            KeyCode::Char('T') => state.board_reorder_focused(crate::board::Shift::Top),
+            KeyCode::Char('B') => state.board_reorder_focused(crate::board::Shift::Bottom),
+            _ => {}
+        }
     }
 }
 
@@ -1315,6 +1420,27 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     }
     let (rows, cols) = state.term_size;
     let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    // The open board owns main-area clicks: column/card focus follows
+    // the painted cells, footer and border stay dead, and nothing
+    // falls through to the panes behind the board.
+    if state.board_open
+        && matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
+        && mev.column >= areas.main.x
+        && mev.column < areas.main.x + areas.main.width
+        && mev.row >= areas.main.y
+        && mev.row < areas.main.y + areas.main.height
+    {
+        let view = state.board_view();
+        if let Some((ci, card)) = ui::board_cell_at(areas.main, &view, mev.column, mev.row) {
+            state.board_focus.column = ci;
+            if let Some(k) = card {
+                state.board_focus.card = k;
+            }
+            state.ensure_board_focus();
+            state.dirty = true;
+        }
+        return;
+    }
     // Tab strip: click-to-activate like the sessions bar, hover ignored.
     // Grid mode draws no tab strip, so row 0 belongs to the tiles there.
     if !state.grid_mode
@@ -1433,6 +1559,23 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                     }
                 }
                 None => {}
+            }
+        }
+        // Kanban button, pinned under the autopilot buttons: same
+        // builder the render uses, so clicks track the paint exactly.
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+            let info = state.sidebar_info();
+            let board = ui::board_button_area(
+                areas.sidebar,
+                &info,
+                ui::sidebar_is_rich(areas.sidebar),
+                state.pill_tabs,
+            );
+            if ui::board_at(&board, mev.column, mev.row)
+                && ui::ChromeButton::new("[Kanban]", ratatui::style::Style::default())
+                    .click(mev.column, mev.row, board)
+            {
+                state.toggle_board();
             }
         }
         return;
@@ -2629,8 +2772,21 @@ mod tests {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
         // Sidebar is x=64..80; with nothing pending the footer
-        // shrinks and buttons sit at y=21, Off at x=66..71.
+        // shrinks and buttons sit at y=20, Off at x=66..71, the
+        // Kanban button one row below at y=21.
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 67,
+                row: 20,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
+        // The Kanban row toggles the board, never the permission mode.
+        assert!(!state.board_open);
         forward_mouse(
             &mut state,
             MouseEvent {
@@ -2640,6 +2796,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
+        assert!(state.board_open);
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
         // Hover over Yolo (x=72..78) must not flip it back.
         state.dirty = false;
@@ -2648,7 +2805,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Moved,
                 column: 73,
-                row: 21,
+                row: 20,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
@@ -2660,11 +2817,85 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 75,
-                row: 21,
+                row: 20,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
+    }
+
+    #[test]
+    fn board_keys_drive_cursor_and_mutations() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let ch = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut state = AppState::new();
+        state.boards.board_create("team", None).unwrap();
+        let id = state
+            .boards
+            .board_mut("team")
+            .unwrap()
+            .card_create(crate::board::CardDraft::new("ship"))
+            .unwrap();
+        state.board_open = true;
+        state.ensure_board_focus();
+        // Cursor steps; x completes the focused card.
+        handle_board_key(&mut state, ch('l'));
+        assert_eq!(state.board_focus.column, 1);
+        handle_board_key(&mut state, ch('h'));
+        assert_eq!(state.board_focus.column, 0);
+        handle_board_key(&mut state, ch('x'));
+        let card = state.boards.board("team").unwrap().card(&id).unwrap();
+        assert_eq!((card.column.as_str(), card.progress), ("Done", 100));
+        assert!(state.boards_dirty, "mutations persist");
+        // d deletes with footer confirmation.
+        handle_board_key(&mut state, ch('d'));
+        assert!(state.boards.board("team").unwrap().card(&id).is_none());
+        assert!(state.board_notice.is_some());
+        // Esc leaves the board; sessions are untouched.
+        handle_board_key(&mut state, esc);
+        assert!(!state.board_open);
+    }
+
+    #[test]
+    fn board_click_focuses_painted_column() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(30, 160));
+        state.boards.board_create("team", None).unwrap();
+        state.board_open = true;
+        state.ensure_board_focus();
+        assert_eq!(state.board_focus.column, 0);
+        // Four default columns across the wide main area: the header
+        // paints at row 3 and the second column starts at x=31.
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 40,
+                row: 3,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.board_focus.column, 1);
+    }
+
+    #[test]
+    fn board_open_keeps_prefix_escapes() {
+        use crate::input::{prefix_key, InputRouter};
+        let mut state = AppState::new();
+        state.boards.board_create("team", None).unwrap();
+        state.board_open = true;
+        state.ensure_board_focus();
+        let mut router = InputRouter::new();
+        // The prefix still reaches the router: Ctrl-b b can leave.
+        handle_key_at(&mut state, &mut router, prefix_key(), std::time::Instant::now());
+        assert!(router.is_pending(), "prefix escapes the board");
+        handle_key_at(&mut state, &mut router, {
+            use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)
+        }, std::time::Instant::now());
+        assert!(!state.board_open, "Ctrl-b b closes the board");
     }
 
     #[test]

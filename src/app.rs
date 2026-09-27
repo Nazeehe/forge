@@ -169,6 +169,19 @@ pub struct AppState {
     /// Grid mode (`Ctrl-b w`): the main area tiles every session in
     /// framed cells instead of showing only the focused one.
     pub grid_mode: bool,
+    /// Global kanban view (`Ctrl-b b`, sidebar Kanban button): the main
+    /// area shows workspace boards instead of sessions. Never scoped to
+    /// a session — boards outlive every session.
+    pub board_open: bool,
+    /// Workspace kanban boards, mutated by the human and by MCP tools.
+    pub boards: crate::board::BoardStore,
+    /// Boards changed since the last atomic save; the TUI loop flushes.
+    pub boards_dirty: bool,
+    /// Board selection: picked board plus column/card cursor.
+    pub board_focus: BoardFocus,
+    /// One-line board notice (corrupt save quarantined, ...), shown in
+    /// the board footer until dismissed by opening the board.
+    pub board_notice: Option<String>,
     /// Which-key hotkey HUD (`Ctrl-b` pause shows it, `Ctrl-b ?` pins
     /// it). Pure display state: dispatch authority stays in the input
     /// router, timing ticks in the TUI loop.
@@ -292,6 +305,15 @@ pub const DEFAULT_VISUAL_BUDGET_COUNT: usize = 8;
 /// shells by the same gate as the topbar.
 pub const OVERLAY_TABS: [&str; 2] = ["Visual", "Walkthrough"];
 
+/// Kanban selection: picked board (by id — names rename) plus the
+/// column cursor and the card cursor inside that column.
+#[derive(Clone, Debug, Default)]
+pub struct BoardFocus {
+    pub board: Option<String>,
+    pub column: usize,
+    pub card: usize,
+}
+
 impl AppState {
     pub fn new() -> Self {
         #[cfg(feature = "visual")]
@@ -349,6 +371,11 @@ impl AppState {
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
             grid_mode: false,
+            board_open: false,
+            boards: crate::board::BoardStore::new(),
+            boards_dirty: false,
+            board_focus: BoardFocus::default(),
+            board_notice: None,
             whichkey: crate::whichkey::WhichKeyHud::new(),
             visual_seq: 0,
             pill_tabs: true,
@@ -374,6 +401,448 @@ impl AppState {
     /// Flip grid mode; selecting a session by number leaves it.
     pub fn toggle_grid(&mut self) {
         self.grid_mode = !self.grid_mode;
+        self.dirty = true;
+    }
+
+    /// Flip the global kanban view. Opening it keeps the sidebar
+    /// visible so the Kanban button stays clickable; the notice
+    /// clears once the human has seen the board footer.
+    pub fn toggle_board(&mut self) {
+        self.board_open = !self.board_open;
+        if self.board_open {
+            self.ensure_board_focus();
+            self.board_notice = None;
+        }
+        self.dirty = true;
+    }
+
+    /// Point the focus at a live board, defaulting to the first one,
+    /// and clamp both cursors so deletion can never leave them dangling.
+    pub fn ensure_board_focus(&mut self) {
+        let live = self
+            .board_focus
+            .board
+            .as_deref()
+            .and_then(|id| self.boards.board(id))
+            .is_some();
+        if !live {
+            self.board_focus.board = self.boards.boards.first().map(|b| b.id.clone());
+            self.board_focus.column = 0;
+            self.board_focus.card = 0;
+        }
+        if let Some(id) = self.board_focus.board.clone() {
+            if let Some(b) = self.boards.board(&id) {
+                self.board_focus.column =
+                    crate::board::clamp_index(b.columns.len(), self.board_focus.column);
+                let column = b
+                    .columns
+                    .get(self.board_focus.column)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+                self.board_focus.card =
+                    crate::board::clamp_index(b.cards_in(&column).len(), self.board_focus.card);
+            }
+        }
+    }
+
+    /// Load workspace boards; a missing file starts empty, anything
+    /// unreadable or corrupt quarantines aside with a footer notice.
+    pub fn load_boards(&mut self, home: &std::path::Path) {
+        let path = crate::branding::kanban_file(home);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                self.board_notice =
+                    Some(format!("kanban save unreadable ({e}); starting empty"));
+                return;
+            }
+        };
+        match crate::board::BoardStore::from_json_str(&text) {
+            Ok(store) => {
+                self.boards = store;
+            }
+            Err(e) => {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let stale = path.with_extension(format!("corrupt-{stamp}.json"));
+                let _ = std::fs::rename(&path, &stale);
+                self.boards = crate::board::BoardStore::new();
+                self.board_notice =
+                    Some(format!("kanban save corrupt ({e}); quarantined, starting empty"));
+            }
+        }
+        self.ensure_board_focus();
+    }
+
+    /// Persist workspace boards atomically; failures are the caller's
+    /// to surface (a toast/notice), never silent.
+    pub fn save_boards(&self, home: &std::path::Path) -> std::io::Result<()> {
+        crate::fs_atomic::write_atomic(
+            &crate::branding::kanban_file(home),
+            self.boards.to_json_string().as_bytes(),
+        )
+    }
+
+    /// Flush pending board mutations; failures land in the footer
+    /// notice instead of blocking the loop.
+    pub fn flush_boards(&mut self, home: &std::path::Path) {
+        if !self.boards_dirty {
+            return;
+        }
+        match self.save_boards(home) {
+            Ok(()) => self.boards_dirty = false,
+            Err(e) => self.board_notice = Some(format!("kanban save failed ({e})")),
+        }
+    }
+
+    fn focused_board(&self) -> Option<&crate::board::Board> {
+        self.board_focus.board.as_deref().and_then(|id| self.boards.board(id))
+    }
+
+    fn focused_board_mut(&mut self) -> Option<&mut crate::board::Board> {
+        let id = self.board_focus.board.clone()?;
+        self.boards.board_mut(&id)
+    }
+
+    fn focused_card_id(&self) -> Option<String> {
+        let board = self.focused_board()?;
+        let column = board.columns.get(self.board_focus.column)?.name.clone();
+        board.cards_in(&column).get(self.board_focus.card).map(|c| c.id.clone())
+    }
+
+    fn note_boards_changed(&mut self) {
+        self.boards_dirty = true;
+        self.dirty = true;
+    }
+
+    /// Move the column cursor; the card cursor clamps into the column.
+    pub fn board_step_column(&mut self, dir: i32) {
+        let len = self.focused_board().map(|b| b.columns.len()).unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        let next = (self.board_focus.column as i32 + dir).clamp(0, len as i32 - 1) as usize;
+        self.board_focus.column = next;
+        self.ensure_board_focus();
+        self.dirty = true;
+    }
+
+    /// Move the card cursor inside the focused column.
+    pub fn board_step_card(&mut self, dir: i32) {
+        let len = self
+            .focused_board()
+            .and_then(|b| b.columns.get(self.board_focus.column))
+            .map(|c| {
+                self.focused_board()
+                    .map(|b| b.cards_in(&c.name).len())
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        self.board_focus.card =
+            (self.board_focus.card as i32 + dir).clamp(0, len as i32 - 1) as usize;
+        self.dirty = true;
+    }
+
+    /// Move the focused card `dir` columns over; blocked moves report
+    /// the WIP limit in the footer and stay put.
+    pub fn board_shift_focused_card(&mut self, dir: i32) {
+        let dest = match self.focused_board() {
+            Some(b) if !b.columns.is_empty() => (self.board_focus.column as i32 + dir)
+                .clamp(0, b.columns.len() as i32 - 1) as usize,
+            _ => return,
+        };
+        let target = match self.focused_board().and_then(|b| b.columns.get(dest)) {
+            Some(col) => col.name.clone(),
+            None => return,
+        };
+        let Some(id) = self.focused_card_id() else { return };
+        match self.focused_board_mut().map(|b| b.card_move(&id, &target)) {
+            Some(Ok(())) => {
+                self.board_focus.column = dest;
+                self.refocus_card(&id);
+                self.note_boards_changed();
+            }
+            Some(Err(e)) => {
+                self.board_notice = Some(e.to_string());
+                self.dirty = true;
+            }
+            None => {}
+        }
+    }
+
+    /// Send the focused card to the first or last column.
+    pub fn board_send_focused_card(&mut self, to_last: bool) {
+        let target = match self.focused_board() {
+            Some(b) if !b.columns.is_empty() => {
+                if to_last {
+                    b.columns.last().map(|c| c.name.clone())
+                } else {
+                    b.columns.first().map(|c| c.name.clone())
+                }
+            }
+            _ => None,
+        };
+        let (Some(target), Some(id)) = (target, self.focused_card_id()) else { return };
+        match self.focused_board_mut().map(|b| b.card_move(&id, &target)) {
+            Some(Ok(())) => {
+                let col = self
+                    .focused_board()
+                    .and_then(|b| b.columns.iter().position(|c| c.name == target))
+                    .unwrap_or(0);
+                self.board_focus.column = col;
+                self.refocus_card(&id);
+                self.note_boards_changed();
+            }
+            Some(Err(e)) => {
+                self.board_notice = Some(e.to_string());
+                self.dirty = true;
+            }
+            None => {}
+        }
+    }
+
+    /// Complete the focused card: last column, progress 100.
+    pub fn board_complete_focused(&mut self) {
+        self.board_send_focused_card(true);
+    }
+
+    /// Delete the focused card; the footer confirms what went away.
+    pub fn board_delete_focused(&mut self) {
+        let Some(id) = self.focused_card_id() else { return };
+        let title = self
+            .focused_board()
+            .and_then(|b| b.card(&id))
+            .map(|c| c.title.clone())
+            .unwrap_or_default();
+        if self.focused_board_mut().is_some_and(|b| b.card_delete(&id).is_ok()) {
+            self.board_notice = Some(format!("deleted '{title}'"));
+            self.ensure_board_focus();
+            self.note_boards_changed();
+        }
+    }
+
+    /// Cycle the focused card's priority (`p`).
+    pub fn board_cycle_priority_focused(&mut self) {
+        let Some(id) = self.focused_card_id() else { return };
+        let next = self
+            .focused_board()
+            .and_then(|b| b.card(&id))
+            .map(|c| c.priority.cycle());
+        if let (Some(next), Some(board)) = (next, self.focused_board_mut()) {
+            let patch = crate::board::CardPatch { priority: Some(next), ..Default::default() };
+            if board.card_update(&id, patch).is_ok() {
+                self.note_boards_changed();
+            }
+        }
+    }
+
+    /// Nudge the focused card's progress; clamps 0–100.
+    pub fn board_bump_progress_focused(&mut self, delta: i16) {
+        let Some(id) = self.focused_card_id() else { return };
+        let next = self
+            .focused_board()
+            .and_then(|b| b.card(&id))
+            .map(|c| (c.progress as i16 + delta).clamp(0, 100) as u16);
+        if let (Some(next), Some(board)) = (next, self.focused_board_mut()) {
+            let patch = crate::board::CardPatch { progress: Some(next), ..Default::default() };
+            if board.card_update(&id, patch).is_ok() {
+                self.note_boards_changed();
+            }
+        }
+    }
+
+    /// Reorder the focused card inside its column; the cursor follows.
+    pub fn board_reorder_focused(&mut self, dir: crate::board::Shift) {
+        let Some(id) = self.focused_card_id() else { return };
+        if self.focused_board_mut().is_some_and(|b| b.shift_card(&id, dir).is_ok()) {
+            self.refocus_card(&id);
+            self.note_boards_changed();
+        }
+    }
+
+    /// Jump the column cursor to `index`, clamped (`1`–`4`).
+    pub fn board_focus_column_index(&mut self, index: usize) {
+        let len = self.focused_board().map(|b| b.columns.len()).unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        self.board_focus.column = index.min(len - 1);
+        self.ensure_board_focus();
+        self.dirty = true;
+    }
+
+    /// Jump the card cursor to the first or last card (`g`/`G`,
+    /// `Home`/`End`).
+    pub fn board_focus_card_edge(&mut self, last: bool) {
+        let len = self
+            .focused_board()
+            .and_then(|b| b.columns.get(self.board_focus.column))
+            .map(|c| {
+                self.focused_board()
+                    .map(|b| b.cards_in(&c.name).len())
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        self.board_focus.card = if last { len - 1 } else { 0 };
+        self.dirty = true;
+    }
+
+    /// Cycle to the next board, wrapping (`W`).
+    pub fn board_cycle_board(&mut self) {
+        if self.boards.boards.is_empty() {
+            return;
+        }
+        let next = self
+            .board_focus
+            .board
+            .as_deref()
+            .and_then(|id| self.boards.boards.iter().position(|b| b.id == id))
+            .map(|i| (i + 1) % self.boards.boards.len())
+            .unwrap_or(0);
+        self.board_focus.board = self.boards.boards.get(next).map(|b| b.id.clone());
+        self.board_focus.column = 0;
+        self.board_focus.card = 0;
+        self.ensure_board_focus();
+        self.dirty = true;
+    }
+
+    /// Show the focused card's details in the footer (`Enter`).
+    pub fn board_enter_details(&mut self) {
+        let text = self.focused_card_id().and_then(|id| {
+            self.focused_board().and_then(|b| {
+                b.card(&id).map(|c| {
+                    let mut parts = vec![c.title.clone()];
+                    if !c.description.is_empty() {
+                        parts.push(c.description.clone());
+                    }
+                    let mut meta = format!("priority {}", c.priority.as_str());
+                    if !c.assignee.is_empty() {
+                        meta.push_str(&format!(" · @{}", c.assignee));
+                    }
+                    meta.push_str(&format!(" · {}%", c.progress));
+                    parts.push(meta);
+                    parts.join(" — ")
+                })
+            })
+        });
+        if let Some(text) = text {
+            let flat: String = text.chars().take(240).collect();
+            self.board_notice = Some(flat);
+            self.dirty = true;
+        }
+    }
+
+    /// Point the card cursor at a card by id (used after mutations move
+    /// it inside its new column).
+    fn refocus_card(&mut self, id: &str) {
+        let column = self
+            .focused_board()
+            .and_then(|b| b.columns.get(self.board_focus.column))
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        if let Some(board) = self.focused_board() {
+            let cards = board.cards_in(&column);
+            if let Some(pos) = cards.iter().position(|c| c.id == id) {
+                self.board_focus.card = pos;
+            } else {
+                self.board_focus.card =
+                    crate::board::clamp_index(cards.len(), self.board_focus.card);
+            }
+        }
+    }
+
+    /// Testable content for the board view: selection, escaped text,
+    /// width-picked hints. Frame rendering lives in `ui`.
+    pub fn board_view(&self) -> crate::ui::BoardView {
+        let wide = self.term_size.1 >= 100;
+        let hints = if wide {
+            vec![
+                "h/l columns · j/k cards · 1-4 jump · Space/. move · x complete · d delete".to_string(),
+                "p priority · +/- progress · K/J reorder · W boards · Enter details · Ctrl-b b back".to_string(),
+            ]
+        } else {
+            vec!["h/l/j/k move · Tab column · Space shift · x done · W boards".to_string()]
+        };
+        let notice = self.board_notice.clone();
+        let (Some(id), Some(board)) = (
+            self.board_focus.board.clone(),
+            self.board_focus.board.as_deref().and_then(|id| self.boards.board(id)),
+        ) else {
+            return crate::ui::BoardView {
+                title: "Kanban".to_string(),
+                columns: Vec::new(),
+                focus_col: 0,
+                hints,
+                notice,
+                empty: Some(
+                    "No boards yet — agents can create one with board_create.".to_string(),
+                ),
+            };
+        };
+        let _ = id;
+        let columns = board
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(ci, col)| {
+                let cards = board.cards_in(&col.name);
+                crate::ui::BoardColumnView {
+                    name: crate::safe_text::encode_for_display(&col.name),
+                    wip_limit: col.wip_limit,
+                    count: cards.len(),
+                    selected: ci == self.board_focus.column,
+                    cards: cards
+                        .iter()
+                        .enumerate()
+                        .map(|(ki, card)| {
+                            let mut meta = card.priority.as_str().to_string();
+                            if !card.assignee.is_empty() {
+                                meta.push_str(&format!(
+                                    " @{}",
+                                    crate::safe_text::encode_for_display(&card.assignee)
+                                ));
+                            }
+                            meta.push_str(&format!(" {}%", card.progress));
+                            if let Some(due) = card.due_date.as_deref() {
+                                meta.push_str(&format!(
+                                    " · {}",
+                                    crate::safe_text::encode_for_display(due)
+                                ));
+                            }
+                            crate::ui::BoardCardView {
+                                title: crate::safe_text::encode_for_display(&card.title),
+                                meta,
+                                selected: ci == self.board_focus.column
+                                    && ki == self.board_focus.card,
+                            }
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        crate::ui::BoardView {
+            title: format!("Kanban · {}", crate::safe_text::encode_for_display(&board.name)),
+            columns,
+            focus_col: self.board_focus.column,
+            hints,
+            notice,
+            empty: None,
+        }
+    }
+
+    /// Text-entry editing (add/edit/columns/picker) is MCP-only in this
+    /// build; the footer says so instead of swallowing the key.
+    pub fn board_defer_to_mcp(&mut self, what: &str) {
+        self.board_notice = Some(format!("{what} editing is MCP-only here — see board_* tools"));
         self.dirty = true;
     }
 
@@ -1552,6 +2021,303 @@ impl AppState {
                 Some(Ok(r#"{"ended":true}"#.to_string()))
             }
         }
+    }
+
+    /// Kanban-family tools: workspace-global boards, authorized by the
+    /// caller's run ID like every other tool. `None` when the name is
+    /// not a board tool and the next handler should answer instead.
+    fn board_tool(
+        &mut self,
+        run_id: &str,
+        tool: &str,
+        args: &str,
+    ) -> Option<Result<String, String>> {
+        match tool {
+            "board_list" | "board_get" | "board_create" | "card_create" | "card_move"
+            | "card_update" | "card_delete" | "card_assign" => {}
+            _ => return None,
+        }
+        let caller = match self.resolve_tool_caller(run_id) {
+            Ok(id) => id,
+            Err(e) => return Some(Err(e)),
+        };
+        let args_v: serde_json::Value =
+            serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+        // serde_json already decoded the escapes (unlike the raw
+        // `tool_arg` path), so these strings are final.
+        let arg = |key: &str| {
+            args_v
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty())
+        };
+        let outcome = match tool {
+            "board_list" => Ok(self.board_list_json()),
+            "board_get" => match arg("board_name").or_else(|| arg("board_id")) {
+                Some(name) => match self.boards.board(&name) {
+                    Some(_) => Ok(self.board_get_json(&name)),
+                    None => Err(format!("board not found: {name}")),
+                },
+                None => match self.default_board_id() {
+                    Some(id) => Ok(self.board_get_json(&id)),
+                    None => Err("no boards yet".to_string()),
+                },
+            },
+            "board_create" => {
+                let Some(name) = arg("name") else {
+                    return Some(Err("board_create needs a name".to_string()));
+                };
+                let columns = match Self::parse_column_specs(&args_v) {
+                    Ok(columns) => columns,
+                    Err(e) => return Some(Err(e)),
+                };
+                match self.boards.board_create(&name, columns) {
+                    Ok(()) => {
+                        self.ensure_board_focus();
+                        Ok(self.board_get_json(&name))
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            "card_create" => {
+                let (Some(board_name), Some(title)) = (arg("board_name"), arg("title")) else {
+                    return Some(Err("card_create needs board_name and title".to_string()));
+                };
+                let draft = crate::board::CardDraft {
+                    title,
+                    column: arg("column"),
+                    description: arg("description").unwrap_or_default(),
+                    assignee: arg("assignee"),
+                    priority: arg("priority")
+                        .map(|p| crate::board::Priority::parse(&p))
+                        .unwrap_or(crate::board::Priority::Normal),
+                    tags: args_v
+                        .get("tags")
+                        .and_then(|t| t.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|t| t.as_str())
+                                .map(|t| t.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    due_date: arg("due_date"),
+                };
+                match self.boards.board_mut(&board_name) {
+                    None => Err(format!("board not found: {board_name}")),
+                    Some(board) => match board.card_create(draft) {
+                        Ok(id) => Ok(Self::card_json(board.card(&id).expect("just created"))),
+                        Err(e) => Err(e.to_string()),
+                    },
+                }
+            }
+            "card_move" => {
+                let (Some(card_id), Some(column)) = (arg("card_id"), arg("column")) else {
+                    return Some(Err("card_move needs card_id and column".to_string()));
+                };
+                match self.locate_card(&card_id) {
+                    None => Err(format!("card not found: {card_id}")),
+                    Some((bi, _)) => {
+                        let board = &mut self.boards.boards[bi];
+                        match board.card_move(&card_id, &column) {
+                            Ok(()) => Ok(Self::card_json(board.card(&card_id).expect("just moved"))),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                }
+            }
+            "card_update" => {
+                let Some(card_id) = arg("card_id") else {
+                    return Some(Err("card_update needs card_id".to_string()));
+                };
+                let progress = match args_v.get("progress") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::Number(n)) => n.as_u64().map(|p| p.min(10_000) as u16),
+                    Some(_) => return Some(Err("progress must be a number".to_string())),
+                };
+                let patch = crate::board::CardPatch {
+                    title: arg("title"),
+                    description: arg("description"),
+                    assignee: arg("assignee"),
+                    clear_assignee: false,
+                    priority: arg("priority").map(|p| crate::board::Priority::parse(&p)),
+                    progress,
+                    tags: args_v.get("tags").and_then(|t| t.as_array()).map(|arr| {
+                        arr.iter().filter_map(|t| t.as_str()).map(|t| t.to_string()).collect()
+                    }),
+                    due_date: arg("due_date"),
+                    clear_due_date: false,
+                };
+                match self.locate_card(&card_id) {
+                    None => Err(format!("card not found: {card_id}")),
+                    Some((bi, _)) => {
+                        let board = &mut self.boards.boards[bi];
+                        match board.card_update(&card_id, patch) {
+                            Ok(()) => Ok(Self::card_json(board.card(&card_id).expect("just updated"))),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                }
+            }
+            "card_delete" => {
+                let Some(card_id) = arg("card_id") else {
+                    return Some(Err("card_delete needs card_id".to_string()));
+                };
+                match self.locate_card(&card_id) {
+                    None => Err(format!("card not found: {card_id}")),
+                    Some((bi, _)) => {
+                        let board = &mut self.boards.boards[bi];
+                        match board.card_delete(&card_id) {
+                            Ok(()) => {
+                                self.ensure_board_focus();
+                                Ok(format!(
+                                    "{{\"deleted\":true,\"card_id\":{}}}",
+                                    crate::mcp::escape_json(&card_id)
+                                ))
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                }
+            }
+            "card_assign" => {
+                let Some(card_id) = arg("card_id") else {
+                    return Some(Err("card_assign needs card_id".to_string()));
+                };
+                let who = arg("assignee").or_else(|| {
+                    self.manager
+                        .get(caller)
+                        .map(|rec| rec.name.clone())
+                        .filter(|n| !n.trim().is_empty())
+                });
+                match self.locate_card(&card_id) {
+                    None => Err(format!("card not found: {card_id}")),
+                    Some((bi, _)) => {
+                        let board = &mut self.boards.boards[bi];
+                        match board.card_assign(&card_id, who.as_deref()) {
+                            Ok(()) => Ok(Self::card_json(board.card(&card_id).expect("just assigned"))),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                }
+            }
+            _ => unreachable!("board_tool gate"),
+        };
+        if outcome.is_ok() {
+            self.boards_dirty = true;
+            self.ensure_board_focus();
+            self.dirty = true;
+        }
+        Some(outcome)
+    }
+
+    /// Focused board first, else the first board: `board_get` default.
+    fn default_board_id(&self) -> Option<String> {
+        self.board_focus
+            .board
+            .clone()
+            .filter(|id| self.boards.board(id).is_some())
+            .or_else(|| self.boards.boards.first().map(|b| b.id.clone()))
+    }
+
+    /// `(board index, card index)` for a card ID, boards in order.
+    fn locate_card(&self, card_id: &str) -> Option<(usize, usize)> {
+        self.boards.boards.iter().enumerate().find_map(|(bi, b)| {
+            b.cards.iter().position(|c| c.id == card_id).map(|ci| (bi, ci))
+        })
+    }
+
+    fn parse_column_specs(
+        args: &serde_json::Value,
+    ) -> Result<Option<Vec<crate::board::ColumnSpec>>, String> {
+        let Some(raw) = args.get("columns") else {
+            return Ok(None);
+        };
+        if raw.is_null() {
+            return Ok(None);
+        }
+        let arr = raw.as_array().ok_or("columns must be an array")?;
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            if let Some(name) = item.as_str() {
+                out.push(crate::board::ColumnSpec::new(name));
+            } else if item.is_object() {
+                let name = item
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .ok_or("column entries need a name")?;
+                let wip = item.get("wip_limit").and_then(|w| w.as_u64()).unwrap_or(0) as u32;
+                out.push(crate::board::ColumnSpec::with_wip(name, wip));
+            } else {
+                return Err("column entries must be names or {name, wip_limit}".to_string());
+            }
+        }
+        Ok(Some(out))
+    }
+
+    fn card_json(card: &crate::board::Card) -> String {
+        serde_json::json!({
+            "id": card.id,
+            "title": card.title,
+            "description": card.description,
+            "column": card.column,
+            "assignee": card.assignee,
+            "tags": card.tags,
+            "priority": card.priority.as_str(),
+            "created_at": card.created_at,
+            "updated_at": card.updated_at,
+            "due_date": card.due_date,
+            "progress": card.progress,
+        })
+        .to_string()
+    }
+
+    fn board_list_json(&self) -> String {
+        let boards: Vec<serde_json::Value> = self
+            .boards
+            .boards
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "id": b.id,
+                    "name": b.name,
+                    "columns": b.columns.iter().map(|c| {
+                        serde_json::json!({
+                            "name": c.name,
+                            "cards": b.cards_in(&c.name).len(),
+                            "wip_limit": c.wip_limit,
+                        })
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        serde_json::json!({ "boards": boards }).to_string()
+    }
+
+    fn board_get_json(&self, name_or_id: &str) -> String {
+        let Some(board) = self.boards.board(name_or_id) else {
+            return format!(
+                "{{\"error\":{}}}",
+                crate::mcp::escape_json(&format!("board not found: {name_or_id}"))
+            );
+        };
+        serde_json::json!({
+            "id": board.id,
+            "name": board.name,
+            "columns": board.columns.iter().map(|c| {
+                serde_json::json!({ "name": c.name, "position": c.position, "wip_limit": c.wip_limit })
+            }).collect::<Vec<_>>(),
+            "cards": board.cards.iter().map(|c| {
+                serde_json::json!({
+                    "id": c.id, "title": c.title, "description": c.description,
+                    "column": c.column, "assignee": c.assignee, "tags": c.tags,
+                    "priority": c.priority.as_str(), "created_at": c.created_at,
+                    "updated_at": c.updated_at, "due_date": c.due_date, "progress": c.progress,
+                })
+            }).collect::<Vec<_>>(),
+        })
+        .to_string()
     }
 
     /// Visual-family tools: answering carries the caller's session
@@ -3476,6 +4242,7 @@ impl AppState {
             other_timers,
             pending: self.pending_hooks.len(),
             mode: self.permission_mode.as_str(),
+            board_open: self.board_open,
             telegram: telegram_state,
             telegram_badge,
         }
@@ -3582,10 +4349,10 @@ impl AppState {
                     self.dirty = true;
                     return;
                 }
-                // Walkthrough, visual, and session tools answer here
-                // (they own overlay and manager state the broker
-                // cannot see); everything else goes to the broker at
-                // once. The verdict goes straight back to `mcp-serve`.
+                // Walkthrough, visual, session, and board tools answer
+                // here (they own overlay, manager, and board state the
+                // broker cannot see); everything else goes to the broker
+                // at once. The verdict goes straight back to `mcp-serve`.
                 // Failures stay single-line JSON, escaped.
                 let now = std::time::Instant::now();
                 let verdict = match self.walkthrough_tool(&req.run_id, &req.tool, &req.args) {
@@ -3594,7 +4361,10 @@ impl AppState {
                         Some(verdict) => verdict,
                         None => match self.session_tool(&req.run_id, &req.tool, &req.args) {
                             Some(verdict) => verdict,
-                            None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                            None => match self.board_tool(&req.run_id, &req.tool, &req.args) {
+                                Some(verdict) => verdict,
+                                None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                            },
                         },
                     },
                 };
@@ -5995,6 +6765,154 @@ mod tests {
         assert_eq!(s.permission_mode, crate::config::PermissionMode::Yolo);
     }
 
+    fn scratch_home() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static BOARD_HOME_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "forge-board-test-{}-{}",
+            std::process::id(),
+            BOARD_HOME_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn board_toggle_flips_global_view() {
+        let mut s = AppState::new();
+        assert!(!s.board_open);
+        s.dirty = false;
+        s.toggle_board();
+        assert!(s.board_open);
+        assert!(s.dirty);
+        s.toggle_board();
+        assert!(!s.board_open);
+    }
+
+    #[test]
+    fn board_load_missing_starts_empty_without_notice() {
+        let mut s = AppState::new();
+        s.load_boards(&scratch_home());
+        assert!(s.boards.boards.is_empty());
+        assert!(s.board_notice.is_none());
+    }
+
+    #[test]
+    fn board_load_corrupt_quarantines_and_notices() {
+        let mut s = AppState::new();
+        let home = scratch_home();
+        let path = crate::branding::kanban_file(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{torn").unwrap();
+        s.load_boards(&home);
+        assert!(s.boards.boards.is_empty());
+        assert!(s.board_notice.is_some());
+        assert!(!path.exists(), "corrupt save is quarantined away");
+    }
+
+    #[test]
+    fn board_save_and_reload_round_trips() {
+        let mut s = AppState::new();
+        let home = scratch_home();
+        s.boards.board_create("team", None).unwrap();
+        s.save_boards(&home).unwrap();
+        let mut t = AppState::new();
+        t.load_boards(&home);
+        assert_eq!(t.boards.board_names(), vec!["team".to_string()]);
+        assert!(t.board_notice.is_none());
+    }
+
+    #[test]
+    fn board_view_marks_selection_and_hints() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        let draft_a = crate::board::CardDraft::new("alpha");
+        s.boards.board_mut("team").unwrap().card_create(draft_a).unwrap();
+        let mut draft_b = crate::board::CardDraft::new("beta");
+        draft_b.column = Some("Todo".to_string());
+        s.boards.board_mut("team").unwrap().card_create(draft_b).unwrap();
+        s.ensure_board_focus();
+        let view = s.board_view();
+        assert_eq!(view.title, "Kanban · team");
+        assert_eq!(view.columns.len(), 4);
+        assert!(view.empty.is_none());
+        assert!(view.columns[0].selected, "cursor starts on first column");
+        assert!(view.columns[0].cards.iter().any(|c| c.title == "alpha" && c.selected));
+        s.board_step_column(1);
+        let view = s.board_view();
+        assert!(view.columns[1].selected, "step moves the column cursor");
+        assert!(view.columns[1].cards.iter().any(|c| c.title == "beta" && c.selected));
+        assert!(!view.hints.is_empty(), "footer hints always paint");
+    }
+
+    #[test]
+    fn board_view_empty_without_boards() {
+        let s = AppState::new();
+        let view = s.board_view();
+        assert!(view.empty.is_some(), "never a blank panel");
+        assert!(view.columns.is_empty());
+    }
+
+    #[test]
+    fn board_move_blocked_by_wip_sets_notice() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        for t in ["one", "two", "three"] {
+            let id = s.boards.board_mut("team").unwrap().card_create(crate::board::CardDraft::new(t)).unwrap();
+            s.boards.board_mut("team").unwrap().card_move(&id, "Doing").unwrap();
+        }
+        let mut fourth = crate::board::CardDraft::new("fourth");
+        fourth.column = Some("Todo".to_string());
+        let extra = s.boards.board_mut("team").unwrap().card_create(fourth).unwrap();
+        s.ensure_board_focus();
+        // Cursor to Todo's "fourth"; shifting right targets full Doing.
+        s.board_step_column(1);
+        s.board_shift_focused_card(1);
+        let card = s.boards.board("team").unwrap().card(&extra).unwrap();
+        assert_eq!(card.column, "Todo", "blocked move stays put");
+        assert!(s.board_notice.is_some_and(|n| n.contains("WIP")), "actionable notice");
+        assert!(!s.boards_dirty, "a blocked move persists nothing");
+    }
+
+    #[test]
+    fn board_complete_and_delete_focused_card() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        let id = s.boards.board_mut("team").unwrap().card_create(crate::board::CardDraft::new("ship")).unwrap();
+        s.ensure_board_focus();
+        s.board_complete_focused();
+        assert_eq!(s.boards.board("team").unwrap().card(&id).unwrap().progress, 100);
+        s.board_delete_focused();
+        assert!(s.boards.board("team").unwrap().card(&id).is_none());
+        assert!(s.board_notice.is_some(), "delete confirms in the footer");
+    }
+
+    #[test]
+    fn board_cycle_board_wraps() {
+        let mut s = AppState::new();
+        s.boards.board_create("one", None).unwrap();
+        s.boards.board_create("two", None).unwrap();
+        s.ensure_board_focus();
+        let first = s.board_focus.board.clone().unwrap();
+        s.board_cycle_board();
+        let second = s.board_focus.board.clone().unwrap();
+        assert_ne!(first, second);
+        s.board_cycle_board();
+        assert_eq!(s.board_focus.board.clone().unwrap(), first);
+    }
+
+    #[test]
+    fn board_focus_defaults_to_first_board_and_clamps() {
+        let mut s = AppState::new();
+        s.boards.board_create("team", None).unwrap();
+        s.ensure_board_focus();
+        let first = s.boards.boards.first().map(|b| b.id.clone());
+        assert_eq!(s.board_focus.board, first);
+        s.board_focus.card = 99;
+        s.ensure_board_focus();
+        assert_eq!(s.board_focus.card, 0);
+    }
+
     #[test]
     fn fleet_lists_attention_first() {
         let mut s = AppState::new();
@@ -7894,6 +8812,8 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+            board_open: false,
+            board: None,
             grid: false,
             pills: true,
         };
@@ -8072,6 +8992,127 @@ mod tests {
         assert!(state.walkthrough_overlay().unwrap().completed);
         std::fs::remove_file(&path).ok();
         assert!(state.manager.remove(id));
+    }
+
+    fn board_live_state() -> (AppState, String) {
+        let mut state = AppState::new();
+        let id = state
+            .manager
+            .spawn_agent(
+                "agent",
+                &std::env::temp_dir(),
+                "exec cat",
+                crate::ids::RunId::generate(),
+                "codex",
+            )
+            .unwrap();
+        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+        (state, live_run)
+    }
+
+    #[test]
+    fn board_tools_drive_card_lifecycle() {
+        let (mut state, live_run) = board_live_state();
+        let created = comms_reply(&mut state, &live_run, "board_create", r#"{"name":"team"}"#);
+        assert!(created.contains(r#""ok":true"#), "created: {created}");
+        assert!(created.contains("team"), "created: {created}");
+        let listed = comms_reply(&mut state, &live_run, "board_list", r#"{}"#);
+        assert!(listed.contains("team"), "listed: {listed}");
+        assert!(listed.contains("Doing"), "per-column counts: {listed}");
+        let card = comms_reply(
+            &mut state,
+            &live_run,
+            "card_create",
+            r#"{"board_name":"team","title":"ship it"}"#,
+        );
+        assert!(card.contains(r#""ok":true"#), "card: {card}");
+        let id: String = {
+            let body = &card[card.find(r#""result":"#).unwrap_or(0)..];
+            let start = body.find(r#""id":""#).map(|i| i + 6).unwrap_or(0);
+            let rest = &body[start..];
+            rest[..rest.find('"').unwrap_or(0)].to_string()
+        };
+        assert!(id.starts_with("c-"), "card id: {card}");
+        let moved = comms_reply(
+            &mut state,
+            &live_run,
+            "card_move",
+            &format!(r#"{{"card_id":{},"column":"Done"}}"#, crate::mcp::escape_json(&id)),
+        );
+        assert!(moved.contains(r#""progress":100"#), "done sets 100: {moved}");
+        let got = comms_reply(
+            &mut state,
+            &live_run,
+            "board_get",
+            r#"{"board_name":"team"}"#,
+        );
+        assert!(got.contains("ship it") && got.contains("Done"), "get: {got}");
+        // Assign with no name claims the caller's session and tries Doing.
+        let assigned = comms_reply(
+            &mut state,
+            &live_run,
+            "card_assign",
+            &format!(r#"{{"card_id":{}}}"#, crate::mcp::escape_json(&id)),
+        );
+        assert!(assigned.contains("agent"), "caller session named: {assigned}");
+        let deleted = comms_reply(
+            &mut state,
+            &live_run,
+            "card_delete",
+            &format!(r#"{{"card_id":{}}}"#, crate::mcp::escape_json(&id)),
+        );
+        assert!(deleted.contains(r#""deleted":true"#), "deleted: {deleted}");
+        assert!(state.boards_dirty, "tool mutations persist");
+    }
+
+    #[test]
+    fn board_tools_reject_bad_calls() {
+        let (mut state, live_run) = board_live_state();
+        // Forged run ID never reaches the boards.
+        let forged = comms_reply(&mut state, &"0".repeat(32), "board_list", r#"{}"#);
+        assert!(forged.contains("unknown or stale run ID"), "forged: {forged}");
+        // Unknown board and card stay errors, never panics.
+        let no_board = comms_reply(&mut state, &live_run, "board_get", r#"{"board_name":"nope"}"#);
+        assert!(no_board.contains("board not found"), "no board: {no_board}");
+        let no_card = comms_reply(&mut state, &live_run, "card_move", r#"{"card_id":"c-dead","column":"Done"}"#);
+        assert!(no_card.contains("card not found"), "no card: {no_card}");
+        // Nameless creates fail loudly.
+        let nameless = comms_reply(&mut state, &live_run, "board_create", r#"{}"#);
+        assert!(nameless.contains("needs a name"), "nameless: {nameless}");
+        // WIP limits bind agents too.
+        comms_reply(&mut state, &live_run, "board_create", r#"{"name":"wip"}"#);
+        for t in ["a", "b", "c"] {
+            let card = comms_reply(
+                &mut state,
+                &live_run,
+                "card_create",
+                &format!(r#"{{"board_name":"wip","title":"{t}","column":"Doing"}}"#),
+            );
+            assert!(card.contains(r#""ok":true"#), "fill: {card}");
+        }
+        let full = comms_reply(
+            &mut state,
+            &live_run,
+            "card_create",
+            r#"{"board_name":"wip","title":"overflow","column":"Doing"}"#,
+        );
+        assert!(full.contains("WIP"), "wip binds: {full}");
+    }
+
+    #[test]
+    fn board_create_honors_columns() {
+        let (mut state, live_run) = board_live_state();
+        let created = comms_reply(
+            &mut state,
+            &live_run,
+            "board_create",
+            r#"{"name":"flow","columns":["Inbox",{"name":"Active","wip_limit":2},"Shipped"]}"#,
+        );
+        assert!(created.contains(r#""ok":true"#), "created: {created}");
+        let board = state.boards.board("flow").unwrap();
+        let names: Vec<&str> = board.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Inbox", "Active", "Shipped"]);
+        assert_eq!(board.columns[1].wip_limit, 2);
     }
 
     #[test]

@@ -77,6 +77,11 @@ pub fn themes_dir(home: &Path) -> PathBuf {
     config_dir(home).join("themes")
 }
 
+/// `~/.forge/kanban.json`: workspace kanban boards, atomically written.
+pub fn kanban_file(home: &Path) -> PathBuf {
+    config_dir(home).join("kanban.json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +139,10 @@ mod tests {
         assert_eq!(
             app_log(home),
             PathBuf::from("/home/tester/.forge/forge.log")
+        );
+        assert_eq!(
+            kanban_file(home),
+            PathBuf::from("/home/tester/.forge/kanban.json")
         );
     }
 }

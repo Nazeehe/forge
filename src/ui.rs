@@ -993,6 +993,8 @@ pub struct SidebarInfo {
     pub pending: usize,
     /// "off" or "yolo": drives which settings button highlights.
     pub mode: &'static str,
+    /// Board view open: drives the Kanban button highlight.
+    pub board_open: bool,
     /// "on" or "off": Telegram mobile transport state.
     pub telegram: &'static str,
     /// Latest `message_user` badge as `(session, text)`, if any. The
@@ -1016,11 +1018,12 @@ pub fn sidebar_is_rich(sidebar: Rect) -> bool {
     sidebar.width >= 30 && sidebar.height >= 30
 }
 
-/// Pinned footer height: settings rows, plus the badge row when
-/// present. Compact also spends a pending row, hidden when there is
-/// nothing pending (rich pending lives in the focused block instead).
+/// Pinned footer height: settings rows, the Kanban row under the mode
+/// buttons, plus the badge row when present. Compact also spends a
+/// pending row, hidden when there is nothing pending (rich pending
+/// lives in the focused block instead).
 pub fn sidebar_footer_height(info: &SidebarInfo, rich: bool) -> u16 {
-    let base = if rich { 6 } else { 5 };
+    let base = if rich { 7 } else { 6 };
     base + u16::from(info.telegram_badge.is_some())
         - u16::from(!rich && info.pending == 0)
 }
@@ -1398,6 +1401,9 @@ pub struct SidebarPaint {
     pub lines: Vec<Line<'static>>,
     /// Content row of the mode-button widgets (footer-relative).
     pub btn_row: usize,
+    /// Content row of the Kanban button: always `btn_row + 1`, pinned
+    /// directly under the autopilot buttons.
+    pub kanban_row: usize,
 }
 
 pub fn sidebar_paint(
@@ -1434,13 +1440,43 @@ pub fn sidebar_paint(
     let btn_row = list_h + if rich { 3 } else { 1 };
     let mut lines = list;
     lines.extend(footer_lines(info, rich, pills));
-    SidebarPaint { lines, btn_row }
+    SidebarPaint { lines, kanban_row: btn_row + 1, btn_row }
+}
+
+/// Kanban button row, pinned directly under the mode buttons. The
+/// line carries the same text the overlay widget paints, so content
+/// readers agree with the buffer; an open board fills like the active
+/// mode pill.
+fn kanban_line(info: &SidebarInfo, pills: bool) -> Line<'static> {
+    if pills {
+        let (style, cap) = if info.board_open {
+            (theme::style(theme::Role::TabActive), Color::Yellow)
+        } else {
+            (theme::style(theme::Role::TabInactive), Color::DarkGray)
+        };
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(crate::theme::pill_left().to_string(), Style::default().fg(cap)),
+            Span::styled(" Kanban ", style),
+            Span::styled(crate::theme::pill_right().to_string(), Style::default().fg(cap)),
+        ])
+    } else if info.board_open {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "[Kanban]",
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ),
+        ])
+    } else {
+        Line::from(vec![Span::raw("  "), Span::styled("[Kanban]", Style::default())])
+    }
 }
 
 /// Pinned footer rows, exactly `sidebar_footer_height` long: settings,
-/// mode buttons, shortcuts, transport, badge. The button line carries
-/// the same text the overlay widgets paint, so content readers agree
-/// with the buffer.
+/// mode buttons, Kanban, shortcuts, transport, badge. The button line
+/// carries the same text the overlay widgets paint, so content readers
+/// agree with the buffer.
 fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if rich {
@@ -1495,6 +1531,7 @@ fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static
             Span::styled("[Yolo]", yolo_style),
         ])
     });
+    lines.push(kanban_line(info, pills));
     if rich {
         lines.push(Line::from(Span::styled(
             " Ctrl-b shortcuts",
@@ -1751,6 +1788,20 @@ pub fn mode_at(buttons: &ModeButtons, col: u16, row: u16) -> Option<&'static str
     }
 }
 
+/// Kanban button hit area: the content row right below the mode
+/// buttons under the same visibility gate, so clicks never desync
+/// from the paint. Legacy `[Kanban]` is 8 wide, the pill 10.
+pub fn board_button_area(sidebar: Rect, info: &SidebarInfo, rich: bool, pills: bool) -> Rect {
+    let mode = footer_mode_buttons(sidebar, info, rich, pills);
+    let visible = sidebar.height >= SETTINGS_ROW + 2 && sidebar.width >= 16;
+    Rect::new(sidebar.x + 2, mode.off.y + 1, if visible { if pills { 10 } else { 8 } } else { 0 }, 1)
+}
+
+/// Kanban button under a sidebar click, if any.
+pub fn board_at(area: &Rect, col: u16, row: u16) -> bool {
+    area.width > 0 && row == area.y && col >= area.x && col < area.x + area.width
+}
+
 /// Chrome snapshots: session-bar tabs plus sidebar state.
 pub struct Chrome {
     pub tabs: Vec<SessionTab>,
@@ -1764,6 +1815,10 @@ pub struct Chrome {
     pub other_timers: usize,
     pub pending: usize,
     pub mode: &'static str,
+    /// Board view open: highlights the sidebar Kanban button.
+    pub board_open: bool,
+    /// Global kanban content; painted in the main area when open.
+    pub board: Option<BoardView>,
     /// "on" or "off": Telegram mobile transport state for the sidebar row.
     pub telegram: &'static str,
     /// Latest `message_user` badge as `(session, text)`, if any.
@@ -1773,6 +1828,241 @@ pub struct Chrome {
     pub grid: bool,
     /// Pill session tabs: rounded Nerd Font ends around each tab button.
     pub pills: bool,
+}
+
+/// Kanban content model: the board view renders this, never live
+/// state, so geometry and selection are assertable off-screen.
+pub struct BoardCardView {
+    pub title: String,
+    pub meta: String,
+    pub selected: bool,
+}
+
+pub struct BoardColumnView {
+    pub name: String,
+    pub wip_limit: u32,
+    pub count: usize,
+    pub selected: bool,
+    pub cards: Vec<BoardCardView>,
+}
+
+pub struct BoardView {
+    /// Block title, e.g. `"Kanban · team"`.
+    pub title: String,
+    pub columns: Vec<BoardColumnView>,
+    pub focus_col: usize,
+    /// Pinned footer hint lines (long or short by measured width).
+    pub hints: Vec<String>,
+    pub notice: Option<String>,
+    /// Set when no board exists: hint text replaces the columns.
+    pub empty: Option<String>,
+}
+
+/// Board column geometry shared by paint and hit-testing: equal
+/// columns when they fit (30+ cells each), otherwise the focused
+/// column alone with its position.
+enum BoardCells {
+    Wide { col_w: u16 },
+    Narrow,
+}
+
+fn board_cells(inner_w: u16, ncols: usize) -> BoardCells {
+    if ncols > 0 && inner_w / ncols.max(1) as u16 >= 30 {
+        BoardCells::Wide { col_w: inner_w / ncols as u16 }
+    } else {
+        BoardCells::Narrow
+    }
+}
+
+fn truncate_cells(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else if max == 0 {
+        String::new()
+    } else {
+        s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
+
+fn board_header_text(col: &BoardColumnView, pos: Option<(usize, usize)>) -> String {
+    let count = if col.wip_limit > 0 {
+        format!("{}/{}", col.count, col.wip_limit)
+    } else {
+        format!("{}", col.count)
+    };
+    match pos {
+        Some((i, n)) => format!("{} ({}) ({}/{})", col.name, count, i + 1, n),
+        None => format!("{} ({})", col.name, count),
+    }
+}
+
+/// Paint the global kanban view into the main area: bordered block,
+/// column grid, pinned footer. `area` includes the border.
+pub fn render_board(frame: &mut Frame, area: Rect, view: &BoardView) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(crate::theme::border_type())
+        .border_style(theme::style(theme::Role::BorderFocused))
+        .title(format!(" {} ", view.title));
+    let inner = block.inner(area);
+    let mut lines: Vec<Line<'static>> = vec![Line::from("")];
+    if let Some(empty) = view.empty.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!("  {empty}"),
+            theme::style(theme::Role::Muted),
+        )));
+    } else {
+        let ncols = view.columns.len();
+        match board_cells(inner.width, ncols) {
+            BoardCells::Wide { col_w } => {
+                let cw = col_w.max(1) as usize;
+                let mut header: Vec<Span<'static>> = Vec::new();
+                for col in &view.columns {
+                    let text = truncate_cells(&board_header_text(col, None), cw);
+                    let pad = cw.saturating_sub(text.chars().count());
+                    let style = if col.selected {
+                        theme::style(theme::Role::Focus).add_modifier(Modifier::BOLD)
+                    } else {
+                        theme::style(theme::Role::Text)
+                    };
+                    header.push(Span::styled(format!(" {text}{}", " ".repeat(pad.saturating_sub(1))), style));
+                }
+                lines.push(Line::from(header));
+                // Row-major: every screen row carries all columns, so a
+                // click's x always resolves to the painted column.
+                let depth = view.columns.iter().map(|c| c.cards.len()).max().unwrap_or(0);
+                for k in 0..depth {
+                    let mut titles: Vec<Span<'static>> = Vec::new();
+                    let mut metas: Vec<Span<'static>> = Vec::new();
+                    for col in &view.columns {
+                        let (marker, title, style) = match col.cards.get(k) {
+                            Some(card) if card.selected => {
+                                ("▸ ", truncate_cells(&card.title, cw.saturating_sub(2)), theme::focus_row())
+                            }
+                            Some(card) => {
+                                ("  ", truncate_cells(&card.title, cw.saturating_sub(2)), theme::style(theme::Role::Text))
+                            }
+                            None => ("  ", String::new(), theme::style(theme::Role::Text)),
+                        };
+                        let pad = cw.saturating_sub(2 + title.chars().count());
+                        titles.push(Span::styled(
+                            format!("{marker}{title}{}", " ".repeat(pad)),
+                            style,
+                        ));
+                        let meta = col.cards.get(k).map(|c| c.meta.as_str()).unwrap_or("");
+                        let meta = truncate_cells(meta, cw.saturating_sub(2));
+                        let pad = cw.saturating_sub(2 + meta.chars().count());
+                        metas.push(Span::styled(
+                            format!("  {meta}{}", " ".repeat(pad)),
+                            theme::style(theme::Role::Muted),
+                        ));
+                    }
+                    lines.push(Line::from(titles));
+                    lines.push(Line::from(metas));
+                }
+            }
+            BoardCells::Narrow => {
+                let w = inner.width.max(1) as usize;
+                let focus = view.focus_col.min(ncols.saturating_sub(1));
+                if let Some(col) = view.columns.get(focus) {
+                    let text = truncate_cells(&board_header_text(col, Some((focus, ncols))), w.saturating_sub(1));
+                    lines.push(Line::from(Span::styled(
+                        format!(" {text}"),
+                        theme::style(theme::Role::Focus).add_modifier(Modifier::BOLD),
+                    )));
+                    for card in &col.cards {
+                        let (marker, style) = if card.selected {
+                            ("▸ ", theme::focus_row())
+                        } else {
+                            ("  ", theme::style(theme::Role::Text))
+                        };
+                        lines.push(Line::from(Span::styled(
+                            format!("{marker}{}", truncate_cells(&card.title, w.saturating_sub(2))),
+                            style,
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", truncate_cells(&card.meta, w.saturating_sub(2))),
+                            theme::style(theme::Role::Muted),
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(notice) = view.notice.as_deref() {
+        lines.push(Line::from(Span::styled(
+            format!("  {notice}"),
+            theme::style(theme::Role::Warning),
+        )));
+    }
+    for hint in &view.hints {
+        lines.push(Line::from(Span::styled(
+            format!("  {hint}"),
+            theme::style(theme::Role::Muted),
+        )));
+    }
+    // Pin the footer: pad short bodies so hints sit on the same rows
+    // whatever the card count holds.
+    let foot_h = view.hints.len() + usize::from(view.notice.is_some());
+    let body_h = inner.height as usize;
+    if lines.len() < body_h && foot_h <= body_h {
+        let pad = body_h - foot_h - (lines.len() - foot_h);
+        for _ in 0..pad {
+            lines.insert(lines.len() - foot_h, Line::from(""));
+        }
+    }
+    lines.truncate(body_h);
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
+}
+
+/// Board cell under a main-area click: `(column, card?)` — a header
+/// or empty column space focuses the column, a card row the card.
+/// Footer rows and the border are dead. Same layout as the paint.
+pub fn board_cell_at(
+    area: Rect,
+    view: &BoardView,
+    col: u16,
+    row: u16,
+) -> Option<(usize, Option<usize>)> {
+    if view.columns.is_empty() {
+        return None;
+    }
+    let inner = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    if col < inner.x || col >= inner.right() || row < inner.y || row >= inner.bottom() {
+        return None;
+    }
+    let foot_h =
+        (view.hints.len() + usize::from(view.notice.is_some())) as u16;
+    if row >= inner.bottom().saturating_sub(foot_h) {
+        return None;
+    }
+    let ncols = view.columns.len();
+    let ci = match board_cells(inner.width, ncols) {
+        BoardCells::Wide { col_w } => {
+            let ci = (col - inner.x) / col_w.max(1);
+            if ci as usize >= ncols {
+                return None;
+            }
+            ci as usize
+        }
+        BoardCells::Narrow => view.focus_col.min(ncols.saturating_sub(1)),
+    };
+    let rel = row - inner.y;
+    if rel < 2 {
+        // Top pad and the header row focus the column, never a card.
+        return Some((ci, None));
+    }
+    let k = (rel - 2) / 2;
+    if (k as usize) < view.columns[ci].cards.len() {
+        Some((ci, Some(k as usize)))
+    } else {
+        Some((ci, None))
+    }
 }
 
 /// Grid tiling for grid mode: the blueprint's 1x1, 2x1, 2x2, 3x2, 3x3
@@ -1950,6 +2240,15 @@ pub fn render(frame: &mut Frame, area: Rect, panes: &[PaneView], chrome: &Chrome
     let areas = chrome_areas(area);
     if chrome.grid {
         render_grid(frame, area, panes, chrome);
+    } else if let Some(board) = chrome.board.as_ref() {
+        // Global kanban view: the board owns the main area while the
+        // topbar, sidebar (with its Kanban button), and session bar
+        // stay live around it.
+        render_board(frame, areas.main, board);
+        if areas.topbar.height > 0 {
+            render_topbar(frame, areas.topbar, &chrome.topbar.tabs, chrome.pills);
+        }
+        render_sidebar(frame, &areas, chrome);
     } else {
         render_focused(frame, &areas, panes, chrome.detail.as_ref());
         if areas.topbar.height > 0 {
@@ -2037,6 +2336,7 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
             other_timers: chrome.other_timers,
             pending: chrome.pending,
             mode: chrome.mode,
+            board_open: chrome.board_open,
             telegram: chrome.telegram,
             telegram_badge: chrome.telegram_badge.clone(),
         };
@@ -2058,6 +2358,12 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
         if let Some(line) = lines.get_mut(btn_row) {
             *line = Line::from(""); // the controls below own this row
         }
+        // The Kanban button owns the row right below the mode buttons.
+        let board_area = board_button_area(areas.sidebar, &info, rich, chrome.pills);
+        let kanban_row = board_area.y.saturating_sub(areas.sidebar.y + 1) as usize;
+        if let Some(line) = lines.get_mut(kanban_row) {
+            *line = Line::from("");
+        }
         let side = Paragraph::new(Text::from(lines)).block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2066,6 +2372,24 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
                 .title(" status "),
         );
         frame.render_widget(side, areas.sidebar);
+        if board_area.width > 0 && board_area.right() <= areas.sidebar.right().saturating_sub(1) {
+            if chrome.pills {
+                let (style, left, right) = theme::button_chrome(
+                    info.board_open,
+                    theme::style(theme::Role::TabActive),
+                    theme::style(theme::Role::TabInactive),
+                    Color::DarkGray,
+                );
+                render_pill(frame, board_area, "Kanban", style, left, right);
+            } else {
+                let style = if info.board_open {
+                    theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+                } else {
+                    theme::style(theme::Role::Text)
+                };
+                ChromeButton::new("[Kanban]", style).view(frame, board_area);
+            }
+        }
         for (label, area, active) in [
             ("Off", btn_areas.off, info.mode == "off"),
             ("Yolo", btn_areas.yolo, info.mode == "yolo"),
@@ -2379,7 +2703,7 @@ mod tests {
 
     #[test]
     fn pill_cancel_rects_widen_and_keep_edge() {
-        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
         let areas = chrome_areas(Rect::new(0, 0, 180, 40));
         let rects = timer_cancel_rects(areas.sidebar, &info, true);
         assert_eq!(rects.len(), 2);
@@ -2397,16 +2721,18 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &c)).unwrap();
         let rows = buffer_rows(&terminal);
-        // The pinned footer puts the button row at 20; pills still
-        // replace the brackets there, and the fixed row stays blank.
+        // The pinned footer puts the button row at 20 with Kanban at
+        // 21; pills still replace the brackets there, and the fixed
+        // row stays blank.
         assert!(!rows[11].contains("Off"), "no ghost row: {:?}", rows[11]);
-        assert!(rows[21].contains("Off"), "off pill: {:?}", rows[21]);
-        assert!(!rows[21].contains("[Off]"), "no legacy brackets");
+        assert!(rows[20].contains("Off"), "off pill: {:?}", rows[20]);
+        assert!(!rows[20].contains("[Off]"), "no legacy brackets");
+        assert!(rows[21].contains("Kanban"), "kanban pill: {:?}", rows[21]);
         let cancel_y = rows.iter().position(|r| r.contains("Cancel")).expect("cancel pill");
         assert!(rows[cancel_y].contains("\u{e0b6}"));
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(66, 21)].fg, Color::Yellow, "active off cap");
-        assert_eq!(buf[(67, 21)].bg, Color::Yellow, "active off fill");
+        assert_eq!(buf[(66, 20)].fg, Color::Yellow, "active off cap");
+        assert_eq!(buf[(67, 20)].bg, Color::Yellow, "active off fill");
         let cap_byte = rows[cancel_y].find("\u{e0b6}").expect("left cap");
         let cap_x = rows[cancel_y][..cap_byte].chars().count() as u16;
         assert_eq!(buf[(cap_x, cancel_y as u16)].fg, Color::Red, "destructive caps");
@@ -2459,14 +2785,175 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &chrome())).unwrap();
         let rows = buffer_rows(&terminal);
-        assert_eq!(rows[21].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
+        assert_eq!(rows[20].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
+        assert_eq!(rows[21].chars().skip(66).take(8).collect::<String>(), "[Kanban]");
         assert!(!rows[12].contains("[Off]"));
 
         let mut tall = Terminal::new(TestBackend::new(120, 40)).unwrap();
         tall.draw(|f| render(f, Rect::new(0, 0, 120, 40), &[], &chrome())).unwrap();
         let tall_rows = buffer_rows(&tall);
-        assert!(tall_rows[37].contains("[Off] [Yolo]"));
+        assert!(tall_rows[36].contains("[Off] [Yolo]"));
+        assert!(tall_rows[37].contains("[Kanban]"));
         assert!(!tall_rows[11].contains("[Off]"));
+    }
+
+    #[test]
+    fn kanban_button_sits_one_row_below_mode_buttons_and_hit_tests() {
+        let info = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
+        let sidebar = Rect::new(64, 0, 16, 23);
+        let rich = sidebar_is_rich(sidebar);
+        let paint = sidebar_paint(&info, rich, sidebar.width, sidebar.height, false);
+        assert_eq!(paint.kanban_row, paint.btn_row + 1, "kanban pins under autopilot");
+        let row_text: String =
+            paint.lines[paint.kanban_row].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(row_text.contains("Kanban"), "kanban row paints: {row_text:?}");
+        let area = board_button_area(sidebar, &info, rich, false);
+        assert_eq!(area.y, sidebar.y + 1 + paint.kanban_row as u16, "hit row tracks paint");
+        assert!(board_at(&area, area.x + 1, area.y), "label clicks");
+        assert!(!board_at(&area, area.x + 1, area.y + 1), "row below is dead");
+        assert!(!board_at(&area, area.x + area.width + 2, area.y), "past the edge is dead");
+    }
+
+    #[test]
+    fn kanban_button_click_cells_hit_from_painted_buffer() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| render(f, area(), &[], &chrome())).unwrap();
+        let rows = buffer_rows(&terminal);
+        let mode_y = rows.iter().position(|r| r.contains("[Off]")).expect("mode paints");
+        let kanban_y = rows.iter().position(|r| r.contains("[Kanban]")).expect("kanban paints");
+        assert_eq!(kanban_y, mode_y + 1, "kanban sits directly under autopilot buttons");
+        let areas = chrome_areas(Rect::new(0, 0, 80, 24));
+        let rich = sidebar_is_rich(areas.sidebar);
+        let c = chrome();
+        let info = SidebarInfo { session: c.detail.clone(), sessions: c.sessions.clone(), active: c.active, fleet_cursor: c.fleet_cursor, fleet_scroll: c.fleet_scroll, other_timers: c.other_timers, pending: c.pending, mode: c.mode, telegram: c.telegram, telegram_badge: c.telegram_badge.clone(), board_open: c.board_open };
+        let button = board_button_area(areas.sidebar, &info, rich, c.pills);
+        let byte_x = rows[kanban_y].find("[Kanban]").expect("kanban label");
+        let cell_x = rows[kanban_y][..byte_x].chars().count() as u16;
+        assert!(board_at(&button, cell_x + 1, kanban_y as u16), "painted label clicks");
+    }
+
+    fn sample_board_view() -> BoardView {
+        BoardView {
+            title: "Kanban · team".to_string(),
+            columns: vec![
+                BoardColumnView {
+                    name: "Backlog".to_string(),
+                    wip_limit: 0,
+                    count: 1,
+                    selected: true,
+                    cards: vec![BoardCardView {
+                        title: "fix leak".to_string(),
+                        meta: "high @kins 40%".to_string(),
+                        selected: true,
+                    }],
+                },
+                BoardColumnView {
+                    name: "Doing".to_string(),
+                    wip_limit: 3,
+                    count: 1,
+                    selected: false,
+                    cards: vec![BoardCardView {
+                        title: "ship pills".to_string(),
+                        meta: "normal 0%".to_string(),
+                        selected: false,
+                    }],
+                },
+            ],
+            focus_col: 0,
+            hints: vec!["h/l/j/k move · Space shift · x done".to_string()],
+            notice: None,
+            empty: None,
+        }
+    }
+
+    #[test]
+    fn board_renders_columns_selection_and_footer() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let view = sample_board_view();
+        terminal.draw(|f| render_board(f, f.area(), &view)).unwrap();
+        let rows = buffer_rows(&terminal);
+        let text = rows.join("\n");
+        assert!(text.contains("Kanban · team"), "titled block");
+        assert!(text.contains("Backlog"), "column header");
+        assert!(text.contains("Doing (1/3)"), "WIP count paints");
+        assert!(text.contains("fix leak"), "card title");
+        assert!(text.contains("high @kins 40%"), "card meta");
+        assert!(text.contains("h/l/j/k move"), "footer hints pin");
+        let buf = terminal.backend().buffer();
+        let y = rows.iter().position(|r| r.contains("fix leak")).expect("card row paints");
+        let byte_x = rows[y].find("fix leak").expect("card cell");
+        let cell_x = rows[y][..byte_x].chars().count() as u16;
+        assert!(
+            buf[(cell_x.saturating_sub(2), y as u16)].modifier.contains(Modifier::REVERSED),
+            "selected card reverses its marker"
+        );
+    }
+
+    #[test]
+    fn board_narrow_mode_shows_focused_column_only() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(50, 24)).unwrap();
+        terminal.draw(|f| render_board(f, f.area(), &sample_board_view())).unwrap();
+        let text = buffer_rows(&terminal).join("\n");
+        assert!(text.contains("Backlog"), "focused column paints");
+        assert!(text.contains("(1/2)"), "column position paints");
+        assert!(!text.contains("ship pills"), "other columns stack away");
+    }
+
+    #[test]
+    fn board_cell_hit_matches_paint() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let area = Rect::new(0, 0, 100, 24);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let view = sample_board_view();
+        terminal.draw(|f| render_board(f, area, &view)).unwrap();
+        let rows = buffer_rows(&terminal);
+        let y = rows.iter().position(|r| r.contains("fix leak")).expect("card paints");
+        let byte_x = rows[y].find("fix leak").expect("card cell");
+        let cell_x = rows[y][..byte_x].chars().count() as u16;
+        assert_eq!(
+            board_cell_at(area, &view, cell_x, y as u16),
+            Some((0, Some(0))),
+            "painted card clicks"
+        );
+        let hy = rows.iter().position(|r| r.contains("Doing")).expect("header paints");
+        let hbyte = rows[hy].find("Doing").expect("header cell");
+        let hcell = rows[hy][..hbyte].chars().count() as u16;
+        assert_eq!(
+            board_cell_at(area, &view, hcell, hy as u16),
+            Some((1, None)),
+            "header focuses the column"
+        );
+        assert_eq!(board_cell_at(area, &view, 50, 23), None, "footer is dead");
+    }
+
+    #[test]
+    fn board_open_renders_board_in_main_area() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut c = chrome();
+        c.board = Some(sample_board_view());
+        terminal.draw(|f| render(f, f.area(), &[], &c)).unwrap();
+        let text = buffer_rows(&terminal).join("\n");
+        assert!(text.contains("Kanban · team"), "board owns the main area");
+        assert!(text.contains("fix leak"), "cards paint, not panes");
+    }
+
+    #[test]
+    fn board_renders_empty_hint_never_blank() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let view = BoardView {
+            title: "Kanban".to_string(),
+            columns: Vec::new(),
+            focus_col: 0,
+            hints: vec!["hint".to_string()],
+            notice: None,
+            empty: Some("No boards yet.".to_string()),
+        };
+        terminal.draw(|f| render_board(f, f.area(), &view)).unwrap();
+        assert!(buffer_rows(&terminal).join("\n").contains("No boards yet."));
     }
 
     #[test]
@@ -2475,7 +2962,8 @@ mod tests {
         terminal.draw(|f| render(f, Rect::new(0, 0, 80, 14), &[], &chrome())).unwrap();
         let rows = buffer_rows(&terminal);
         // Taller sidebar earns its button row; the bottom border stays clean.
-        assert!(rows[11].contains("[Off]"), "buttons visible: {:?}", rows[11]);
+        assert!(rows[10].contains("[Off]"), "buttons visible: {:?}", rows[10]);
+        assert!(rows[11].contains("[Kanban]"), "kanban follows: {:?}", rows[11]);
         assert!(!rows[12].contains("[Off]"), "border clean: {:?}", rows[12]);
     }
 
@@ -2803,6 +3291,8 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+            board_open: false,
+            board: None,
             grid: false,
             pills: true,
         }
@@ -2824,14 +3314,14 @@ mod tests {
                 .collect::<String>()
         };
         // The pinned footer owns the buttons now: Settings heads it
-        // at row 25 whatever the list above holds.
+        // at row 24 whatever the list above holds.
         assert!(!row_text(11).contains(PILL_LEFT), "no ghost row: {:?}", row_text(11));
-        assert!(row_text(25).contains("Settings"), "header visible: {:?}", row_text(25));
+        assert!(row_text(24).contains("Settings"), "header visible: {:?}", row_text(24));
         let pill_rows: Vec<u16> = (0..30)
             .filter(|y| row_text(*y).contains(PILL_LEFT))
             .collect();
-        // Mode pills plus the timer Cancel: exactly two pill rows.
-        assert_eq!(pill_rows.len(), 2, "one button row, one cancel: {pill_rows:?}");
+        // Mode pills, the Kanban pill, plus the timer Cancel: three.
+        assert_eq!(pill_rows.len(), 3, "buttons, kanban, cancel: {pill_rows:?}");
         assert!(mode_at(
             &footer_mode_buttons(areas.sidebar, &sidebar_chrome_info(), false, true),
             areas.sidebar.x + 3,
@@ -2842,7 +3332,7 @@ mod tests {
     #[cfg(test)]
     fn sidebar_chrome_info() -> SidebarInfo {
         let c = sidebar_chrome();
-        SidebarInfo { session: c.detail.clone(), sessions: c.sessions.clone(), active: c.active, fleet_cursor: c.fleet_cursor, fleet_scroll: c.fleet_scroll, other_timers: c.other_timers, pending: c.pending, mode: c.mode, telegram: "off", telegram_badge: None }
+        SidebarInfo { session: c.detail.clone(), sessions: c.sessions.clone(), active: c.active, fleet_cursor: c.fleet_cursor, fleet_scroll: c.fleet_scroll, other_timers: c.other_timers, pending: c.pending, mode: c.mode, telegram: "off", telegram_badge: None, board_open: false }
     }
 
     #[test]
@@ -2884,6 +3374,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         let lines = sidebar_lines(&info);
         assert!(has(&lines, "shell-1"), "name: {lines:?}");
@@ -2906,11 +3397,11 @@ mod tests {
         assert!(has(&timed_lines, "◷ in 9:55"), "countdown: {timed_lines:?}");
         assert!(!has(&lines, "Scheduled"), "hidden when empty: {lines:?}");
         // Yolo highlights instead when active.
-        let yolo = SidebarInfo { session: info.session.clone(), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "yolo", telegram: "off", telegram_badge: None };
+        let yolo = SidebarInfo { session: info.session.clone(), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "yolo", telegram: "off", telegram_badge: None, board_open: false };
         let yolo_lines = sidebar_lines(&yolo);
         assert!(has(&yolo_lines, "[Yolo]"), "yolo highlighted: {yolo_lines:?}");
         // Never blank: empty state still guides.
-        let empty = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
+        let empty = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false });
         assert!(has(&empty, "Ctrl-b c"), "guides: {empty:?}");
     }
 
@@ -2937,6 +3428,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         let lines = sidebar_lines(&info);
         for needle in ["Stats", "Uptime", "Tool calls", "✓", "×"] {
@@ -2963,13 +3455,13 @@ mod tests {
             pending: 0,
             mode: "off",
             telegram: "off",
-            telegram_badge: Some(("agent".to_string(), "hi\u{202E}bye".to_string())),
+            telegram_badge: Some(("agent".to_string(), "hi\u{202E}bye".to_string())), board_open: false,
         };
         let lines = sidebar_lines(&info);
         let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect();
         assert!(!text.contains("\u{202E}"), "bidi exposed, never raw: {text:?}");
         assert!(text.contains("agent"), "session named: {text:?}");
-        let bare = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let bare = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
         // The paint always fills the panel; the badge grows the pinned
         // footer by exactly one row instead.
         assert_eq!(
@@ -2981,10 +3473,10 @@ mod tests {
 
     #[test]
     fn sidebar_shows_telegram_state() {
-        let off = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None });
+        let off = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false });
         assert!(has(&off, "Telegram off"), "off state: {off:?}");
         assert!(has(&off, "Ctrl-b m"), "settings key: {off:?}");
-        let on = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "on", telegram_badge: None });
+        let on = sidebar_lines(&SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "on", telegram_badge: None, board_open: false });
         assert!(has(&on, "Telegram on"), "on state: {on:?}");
     }
 
@@ -3076,7 +3568,7 @@ mod tests {
             pending: 0,
             mode: "off",
             telegram: "on",
-            telegram_badge: Some(("agent".to_string(), "hi".to_string())),
+            telegram_badge: Some(("agent".to_string(), "hi".to_string())), board_open: false,
         };
         for_h_fleet(&mut info);
         let lines = rich_sidebar_lines(&info, 45, 20);
@@ -3151,6 +3643,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         // Marks still carry meaning; emoji ride beside them.
         let compact = sidebar_lines(&info);
@@ -3196,6 +3689,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         let text_of = |l: &Line| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
         let compact = sidebar_lines(&info);
@@ -3227,6 +3721,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         // Width 24: the long reason must wrap, never clip mid-word off-panel.
         let lines = sidebar_lines_at(&info, false, 24, 60).0;
@@ -3264,6 +3759,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         for line in sidebar_lines(&info) {
             assert!(!text_of(&line).contains("Pending"), "zero hides: {line:?}");
@@ -3290,6 +3786,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         for_h_fleet(&mut info);
         let clipped = sidebar_paint(&info, false, 24, 20, false).lines;
@@ -3328,6 +3825,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         // Room for everything: attention group leads, spawn order inside.
         let full = fleet_window_items(&info, 24, 100);
@@ -3371,6 +3869,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         let lines = sidebar_paint(&info, false, 24, 30, false).lines;
         let text: Vec<String> = lines.iter().map(text_of).collect();
@@ -3413,6 +3912,7 @@ mod tests {
             mode: "off",
             telegram: "off",
             telegram_badge: None,
+        board_open: false,
         };
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
@@ -3529,7 +4029,7 @@ mod tests {
 
     #[test]
     fn scheduled_section_keeps_breathing_room() {
-        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
         let lines = rich_sidebar_lines(&info, 30, 45);
         let header = lines
             .iter()
@@ -3553,7 +4053,7 @@ mod tests {
 
     #[test]
     fn timer_cancel_rects_match_painted_rows() {
-        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let info = SidebarInfo { session: Some(timed_detail()), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
         let areas = chrome_areas(Rect::new(0, 0, 180, 40));
         let rects = timer_cancel_rects(areas.sidebar, &info, false);
         assert_eq!(rects.len(), 2);
@@ -3580,7 +4080,7 @@ mod tests {
         let mut impostor = timed_detail();
         impostor.name = "Scheduled".to_string();
         impostor.timers.clear();
-        let bare = SidebarInfo { session: Some(impostor), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None };
+        let bare = SidebarInfo { session: Some(impostor), sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
         assert!(timer_cancel_rects(areas.sidebar, &bare, false).is_empty());
     }
 
@@ -3635,6 +4135,8 @@ mod tests {
             other_timers: 0,
             pending: 0,
             mode: "off",
+            board_open: false,
+            board: None,
             telegram: "off",
             telegram_badge: None,
             grid: false,

@@ -70,6 +70,7 @@ pub static PREFIX_BINDINGS: &[PrefixBinding] = &[
     PrefixBinding { label: "g", desc: "Manage groups", group: "Groups", invokes: PrefixInvoke::Command('g', UserCommand::ManageGroups) },
     PrefixBinding { label: "t", desc: "Switch tab", group: "View", invokes: PrefixInvoke::Command('t', UserCommand::SwitchTab) },
     PrefixBinding { label: "w", desc: "Toggle grid", group: "View", invokes: PrefixInvoke::Command('w', UserCommand::ToggleGrid) },
+    PrefixBinding { label: "b", desc: "Kanban board", group: "View", invokes: PrefixInvoke::Command('b', UserCommand::ToggleBoard) },
     PrefixBinding { label: "y", desc: "Toggle permission mode", group: "Safety", invokes: PrefixInvoke::Command('y', UserCommand::TogglePermissionMode) },
     PrefixBinding { label: "m", desc: "Telegram settings", group: "Settings", invokes: PrefixInvoke::Command('m', UserCommand::TelegramSettings) },
     PrefixBinding { label: "e", desc: "Theme picker", group: "Settings", invokes: PrefixInvoke::Command('e', UserCommand::ThemePicker) },
@@ -105,6 +106,9 @@ pub enum UserCommand {
     TerminateSession,
     /// Toggle grid mode: every session tiles the main area at once.
     ToggleGrid,
+    /// Toggle the global kanban view: the main area shows workspace
+    /// boards instead of sessions. Mouse twin is the sidebar button.
+    ToggleBoard,
     /// Open the Telegram mobile-transport settings dialog.
     TelegramSettings,
     /// Open the theme picker (`theme.json` files under `~/.forge/themes`).
@@ -542,6 +546,12 @@ mod tests {
         assert_eq!(
             r.feed(key(KeyCode::Char('e'))),
             RoutedKey::Command(UserCommand::ThemePicker)
+        );
+
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('b'))),
+            RoutedKey::Command(UserCommand::ToggleBoard)
         );
     }
 
