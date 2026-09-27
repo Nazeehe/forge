@@ -26,11 +26,11 @@ pub struct WhichEntry {
 }
 
 /// Display rows for the HUD, built from the canonical binding table
-/// in [`crate::input::PREFIX_BINDINGS`]: adding a shortcut there
+/// in [`crate::tui::input::PREFIX_BINDINGS`]: adding a shortcut there
 /// lists it here with no second edit. Order is the display order:
 /// entries stay grouped, groups in first-seen order.
 pub fn entries() -> Vec<WhichEntry> {
-    crate::input::PREFIX_BINDINGS
+    crate::tui::input::PREFIX_BINDINGS
         .iter()
         .map(|b| WhichEntry { key: b.label, desc: b.desc, group: b.group })
         .collect()
@@ -336,7 +336,7 @@ mod tests {
         // second key through a real router and require the HUD to list
         // exactly the keys that resolve. A shortcut added anywhere but
         // the binding table fails here.
-        use crate::input::{prefix_key, InputRouter, RoutedKey};
+        use crate::tui::input::{prefix_key, InputRouter, RoutedKey};
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut probes: Vec<KeyEvent> = ('a'..='z')
             .chain('A'..='Z')

@@ -845,7 +845,7 @@ impl SessionManager {
             KeyCode::Down
         };
         let key = KeyEvent::new(code, KeyModifiers::NONE);
-        if let Some(seq) = crate::input::encode_key(&key, app_cursor) {
+        if let Some(seq) = crate::tui::input::encode_key(&key, app_cursor) {
             let _ = self.pane_write(id, &seq.repeat(lines.unsigned_abs() as usize));
         }
     }

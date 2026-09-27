@@ -9,7 +9,6 @@ mod bot;
 mod comms;
 mod core;
 mod hooks;
-mod input;
 mod ipc;
 mod kanban;
 mod session;
