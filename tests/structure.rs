@@ -25,7 +25,6 @@ const FLAT_ALLOWED: &[&str] = &[
     "oobe.rs",
     "quit.rs",
     "telegram_dialog.rs",
-    "tetris.rs",
     "theme.rs",
     "theme_dialog.rs",
     "tui.rs",
