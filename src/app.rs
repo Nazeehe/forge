@@ -100,7 +100,7 @@ pub struct AppState {
     telegram_seq: u64,
     /// `message_user` idempotency replays, one bounded cache shared by
     /// all sessions (keys carry their session).
-    message_user_idem: crate::bot::IdemCache,
+    message_user_idem: crate::comms::bot::IdemCache,
     pub create_dialog: Option<crate::ui::dialogs::create::CreateDialog>,
     /// Open group-management dialog, if any. Captures all input while
     /// present; never both dialogs at once (openers are unreachable
@@ -381,7 +381,7 @@ impl AppState {
             attention_flags: std::collections::HashMap::new(),
             fleet_cursor: None,
             fleet_scroll: 0,
-            message_user_idem: crate::bot::IdemCache::new(),
+            message_user_idem: crate::comms::bot::IdemCache::new(),
             telegram_outbox: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -3324,17 +3324,17 @@ impl AppState {
         let message = Self::tool_arg(args, "message")
             .ok_or_else(|| "message_user needs a message".to_string())?;
         let now = std::time::Instant::now();
-        let fingerprint = crate::bot::fingerprint("message_user", &[&message]);
+        let fingerprint = crate::comms::bot::fingerprint("message_user", &[&message]);
         let idem_key = Self::tool_arg(args, "idempotency_key").map(|k| format!("{caller:?}:{k}"));
         if let Some(ref key) = idem_key {
             match self.message_user_idem.check(key, fingerprint, now) {
-                crate::bot::IdemCheck::Hit(result) => return Ok(result),
-                crate::bot::IdemCheck::Conflict => {
+                crate::comms::bot::IdemCheck::Hit(result) => return Ok(result),
+                crate::comms::bot::IdemCheck::Conflict => {
                     return Err(
                         "idempotency_key conflict: same key, different message".to_string(),
                     )
                 }
-                crate::bot::IdemCheck::Miss => {}
+                crate::comms::bot::IdemCheck::Miss => {}
             }
         }
         let window = self.message_user_windows.entry(caller).or_default();
@@ -5101,8 +5101,8 @@ impl AppState {
                 if !crate::ipc::listener::claim_execute(&req.claim) {
                     let mut line = String::from("{\"ok\":false,\"error\":");
                     line.push_str(
-                        &crate::bot::BotError::new(
-                            crate::bot::ErrorCode::Timeout,
+                        &crate::comms::bot::BotError::new(
+                            crate::comms::bot::ErrorCode::Timeout,
                             "caller timed out; retry with the same idempotency_key",
                         )
                         .to_json(),

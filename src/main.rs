@@ -5,7 +5,6 @@
 #![allow(dead_code)]
 
 mod app;
-mod bot;
 mod comms;
 mod core;
 mod hooks;

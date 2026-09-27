@@ -538,11 +538,11 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
 /// One fail-closed refusal line without touching the loop.
 fn refuse_bot<S: std::io::Write>(
     conn: &mut S,
-    code: crate::bot::ErrorCode,
+    code: crate::comms::bot::ErrorCode,
     message: &str,
 ) {
     let mut line = String::from("{\"ok\":false,\"error\":");
-    line.push_str(&crate::bot::BotError::new(code, message).to_json());
+    line.push_str(&crate::comms::bot::BotError::new(code, message).to_json());
     line.push_str("}\n");
     let _ = conn.write_all(line.as_bytes());
 }
@@ -555,7 +555,7 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
     let Some(parts) = bot_parts(text) else {
         refuse_bot(
             &mut conn,
-            crate::bot::ErrorCode::InvalidArguments,
+            crate::comms::bot::ErrorCode::InvalidArguments,
             "bot envelope needs bot.name and a tool",
         );
         return;
@@ -570,7 +570,7 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
     let Some(pinned) = pinned else {
         refuse_bot(
             &mut conn,
-            crate::bot::ErrorCode::InvalidArguments,
+            crate::comms::bot::ErrorCode::InvalidArguments,
             "bot envelope needs a positive forge_pid",
         );
         return;
@@ -578,7 +578,7 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
     if !instance_pinned_ok(pinned, std::process::id()) {
         refuse_bot(
             &mut conn,
-            crate::bot::ErrorCode::Unavailable,
+            crate::comms::bot::ErrorCode::Unavailable,
             "wrong forge instance",
         );
         return;

@@ -8,11 +8,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use crate::bot::{
+use crate::comms::bot::{
     BotClient, BotConv, BotConvKind, BotConvState, BotError, BotKind, ErrorCode, IdemCache,
     IdemCheck,
 };
 use crate::session::{SessionId, SessionManager};
+
+pub mod bot;
 
 /// Per-target message pressure cap: undelivered injections plus delivered
 /// asks awaiting response. Delivered tells no longer count.
@@ -380,7 +382,7 @@ impl Broker {
             queue: HashMap::new(),
             timers: HashMap::new(),
             next_color: 0,
-            epoch: crate::bot::generate_epoch(),
+            epoch: crate::comms::bot::generate_epoch(),
             clients: HashMap::new(),
             bot_convs: HashMap::new(),
             dead_sessions: HashSet::new(),
@@ -777,8 +779,8 @@ impl Broker {
         let keyed = match Self::arg(args, "idempotency_key").filter(|s| !s.is_empty()) {
             None => None,
             Some(key) => {
-                crate::bot::validate_key(&key).map_err(|e| e.message)?;
-                let fp = crate::bot::fingerprint(tool, &[&caller_s, args]);
+                crate::comms::bot::validate_key(&key).map_err(|e| e.message)?;
+                let fp = crate::comms::bot::fingerprint(tool, &[&caller_s, args]);
                 let cached = self
                     .session_idem
                     .entry(caller_s.clone())
@@ -836,7 +838,7 @@ impl Broker {
         token: &str,
         grants: Vec<String>,
     ) -> Result<(), BotError> {
-        crate::bot::validate_name(name)?;
+        crate::comms::bot::validate_name(name)?;
         if groups.is_empty() {
             return Err(BotError::new(
                 ErrorCode::InvalidArguments,
@@ -844,9 +846,9 @@ impl Broker {
             ));
         }
         for g in &groups {
-            crate::bot::validate_group(g)?;
+            crate::comms::bot::validate_group(g)?;
         }
-        crate::bot::validate_token(token)?;
+        crate::comms::bot::validate_token(token)?;
         if self.clients.contains_key(name) {
             return Err(BotError::new(
                 ErrorCode::Conflict,
@@ -882,7 +884,7 @@ impl Broker {
         grants: Vec<String>,
         token_file: std::path::PathBuf,
     ) -> Result<(), BotError> {
-        crate::bot::validate_name(name)?;
+        crate::comms::bot::validate_name(name)?;
         if groups.is_empty() {
             return Err(BotError::new(
                 ErrorCode::InvalidArguments,
@@ -890,7 +892,7 @@ impl Broker {
             ));
         }
         for g in &groups {
-            crate::bot::validate_group(g)?;
+            crate::comms::bot::validate_group(g)?;
         }
         if self.clients.contains_key(name) {
             return Err(BotError::new(
@@ -957,7 +959,7 @@ impl Broker {
                 "unknown or revoked client",
             )),
             None => {
-                let _ = crate::bot::token_eq(DUMMY, token);
+                let _ = crate::comms::bot::token_eq(DUMMY, token);
                 Err(BotError::new(
                     ErrorCode::Unauthorized,
                     "unknown or revoked client",
@@ -1076,7 +1078,7 @@ impl Broker {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| BotError::new(ErrorCode::InvalidArguments, "ask needs text"))?;
         let key = Self::arg(args, "idempotency_key").filter(|s| !s.is_empty());
-        let fp = crate::bot::fingerprint("ask_session", &[&target_name, &text, ""]);
+        let fp = crate::comms::bot::fingerprint("ask_session", &[&target_name, &text, ""]);
         if let Some(replay) = self
             .clients
             .get_mut(client)
@@ -1112,7 +1114,7 @@ impl Broker {
                 format!("pressure cap reached for {target_name:?}"),
             ));
         }
-        if self.client_outstanding(client) >= crate::bot::CLIENT_MAX_OUTSTANDING {
+        if self.client_outstanding(client) >= crate::comms::bot::CLIENT_MAX_OUTSTANDING {
             return Err(BotError::new(
                 ErrorCode::PressureLimit,
                 "client send cap reached",
@@ -1170,7 +1172,7 @@ impl Broker {
         if let Some(id) = Self::arg2(args, &["conversation_id", "conversation"])
             .filter(|s| !s.is_empty())
         {
-            let fp = crate::bot::fingerprint("tell_session", &[&target_name, &text, &id]);
+            let fp = crate::comms::bot::fingerprint("tell_session", &[&target_name, &text, &id]);
             if let Some(replay) = self
                 .clients
                 .get_mut(client)
@@ -1186,7 +1188,7 @@ impl Broker {
                 .idem_store(key.as_deref(), fp, &result, now);
             return Ok(result);
         }
-        let fp = crate::bot::fingerprint("tell_session", &[&target_name, &text, ""]);
+        let fp = crate::comms::bot::fingerprint("tell_session", &[&target_name, &text, ""]);
         if let Some(replay) = self
             .clients
             .get_mut(client)
@@ -1222,7 +1224,7 @@ impl Broker {
                 format!("pressure cap reached for {target_name:?}"),
             ));
         }
-        if self.client_outstanding(client) >= crate::bot::CLIENT_MAX_OUTSTANDING {
+        if self.client_outstanding(client) >= crate::comms::bot::CLIENT_MAX_OUTSTANDING {
             return Err(BotError::new(
                 ErrorCode::PressureLimit,
                 "client send cap reached",
@@ -1524,10 +1526,10 @@ impl Broker {
             }
         }
         let limit = match Self::arg_u64(args, "limit") {
-            None => crate::bot::POLL_MAX_EVENTS,
+            None => crate::comms::bot::POLL_MAX_EVENTS,
             Some(Ok(n)) => usize::try_from(n)
-                .unwrap_or(crate::bot::POLL_MAX_EVENTS)
-                .clamp(1, crate::bot::POLL_MAX_EVENTS),
+                .unwrap_or(crate::comms::bot::POLL_MAX_EVENTS)
+                .clamp(1, crate::comms::bot::POLL_MAX_EVENTS),
             Some(Err(e)) => return Err(e),
         };
         let acked = self
@@ -1701,7 +1703,7 @@ impl Broker {
             .get(target_name)
             .expect("caller checked registration")
             .unacked()
-            >= crate::bot::INBOX_CAP
+            >= crate::comms::bot::INBOX_CAP
         {
             return Err(format!("pressure cap reached for {target_name:?}"));
         }
@@ -1721,7 +1723,7 @@ impl Broker {
                 &from_id,
                 &from_name,
                 text,
-                crate::bot::now_unix_ms(),
+                crate::comms::bot::now_unix_ms(),
             )
             .map_err(|_| format!("pressure cap reached for {target_name:?}"))?;
         self.bot_convs.insert(
@@ -2087,7 +2089,7 @@ impl Broker {
         if self
             .clients
             .get(&client)
-            .is_some_and(|c| c.unacked() >= crate::bot::INBOX_CAP)
+            .is_some_and(|c| c.unacked() >= crate::comms::bot::INBOX_CAP)
         {
             return Some(Err(format!("pressure cap reached for {target_name:?}")));
         }
@@ -2103,7 +2105,7 @@ impl Broker {
                 &from_id,
                 &from_name,
                 text,
-                crate::bot::now_unix_ms(),
+                crate::comms::bot::now_unix_ms(),
             );
         if deposit.is_err() {
             return Some(Err(format!("pressure cap reached for {target_name:?}")));
@@ -2164,7 +2166,7 @@ impl Broker {
                 &from_id,
                 &from_name,
                 text,
-                crate::bot::now_unix_ms(),
+                crate::comms::bot::now_unix_ms(),
             );
         if deposit.is_err() {
             return Some(Err(format!("pressure cap reached for {client:?}")));
@@ -2219,7 +2221,7 @@ impl Broker {
                 &from_id,
                 &from_name,
                 "ack_message",
-                crate::bot::now_unix_ms(),
+                crate::comms::bot::now_unix_ms(),
             );
         if deposit.is_err() {
             return Some(Err(format!("pressure cap reached for {client:?}")));
@@ -2406,7 +2408,7 @@ impl Broker {
                             &typer.to_string(),
                             typer_name,
                             TEXT,
-                            crate::bot::now_unix_ms(),
+                            crate::comms::bot::now_unix_ms(),
                         )
                         .is_ok(),
                     // No inbox exists: nothing to retry toward.
@@ -2484,7 +2486,7 @@ impl Broker {
                         &session_id,
                         &session_name,
                         "target exited",
-                        crate::bot::now_unix_ms(),
+                        crate::comms::bot::now_unix_ms(),
                     )
                     .is_ok(),
                 // No inbox exists: nothing to retry toward.
@@ -2556,7 +2558,7 @@ impl Broker {
                         &id.to_string(),
                         &session_name,
                         "target exited",
-                        crate::bot::now_unix_ms(),
+                        crate::comms::bot::now_unix_ms(),
                     )
                     .is_ok(),
                 // No inbox exists (revocation fails convs itself, so
@@ -2687,7 +2689,7 @@ impl Broker {
                             &session.to_string(),
                             &source,
                             "no update since your ack; the source is still waiting",
-                            crate::bot::now_unix_ms(),
+                            crate::comms::bot::now_unix_ms(),
                         )
                         .is_ok()
                     })
@@ -2727,7 +2729,7 @@ impl Broker {
                             &id.to_string(),
                             &session_name,
                             "target exited",
-                            crate::bot::now_unix_ms(),
+                            crate::comms::bot::now_unix_ms(),
                         )
                         .is_ok()
                     })
@@ -2766,7 +2768,7 @@ impl Broker {
                         &session_id,
                         &session_name,
                         "target exited",
-                        crate::bot::now_unix_ms(),
+                        crate::comms::bot::now_unix_ms(),
                     )
                     .is_ok(),
                 None => true,
@@ -2938,7 +2940,7 @@ mod tests {
             name: &str,
             tool: &str,
             args: &str,
-        ) -> Result<String, crate::bot::BotError> {
+        ) -> Result<String, crate::comms::bot::BotError> {
             self.bcall_as(name, BOT_TOKEN, tool, args)
         }
 
@@ -2948,7 +2950,7 @@ mod tests {
             token: &str,
             tool: &str,
             args: &str,
-        ) -> Result<String, crate::bot::BotError> {
+        ) -> Result<String, crate::comms::bot::BotError> {
             let now = std::time::Instant::now();
             self.state
                 .broker
@@ -2960,7 +2962,7 @@ mod tests {
 
     #[test]
     fn bot_registration_validates_and_revocation_bites_at_once() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         assert!(p
@@ -3056,7 +3058,7 @@ mod tests {
 
     #[test]
     fn client_response_after_session_leaves_group_is_refused() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let res = p
@@ -3118,7 +3120,7 @@ mod tests {
 
     #[test]
     fn client_ack_after_session_leaves_group_is_refused() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let res = p
@@ -3240,7 +3242,7 @@ mod tests {
         // After a restart event IDs begin at 1 again, so a resumed
         // nonzero cursor without the epoch would echo itself as
         // next_cursor forever while new events 1..N go unseen.
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let err = p
@@ -3254,7 +3256,7 @@ mod tests {
         // A cursor past everything produced is a stale pre-restart
         // cursor with a fresh epoch (or a client bug): echoing it
         // back as next_cursor would skip the whole inbox.
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let first = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
@@ -3276,7 +3278,7 @@ mod tests {
 
     #[test]
     fn bot_retry_with_same_key_replays_and_conflicts() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let args = r#"{"target":"b","message":"ready?","idempotency_key":"k-1"}"#;
@@ -3296,7 +3298,7 @@ mod tests {
 
     #[test]
     fn bot_malformed_arguments_are_invalid_not_conflicts() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         for (tool, args) in [
@@ -3319,7 +3321,7 @@ mod tests {
 
     #[test]
     fn bot_answers_to_unknown_and_closed_conversations_fail_typed() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         assert_eq!(
@@ -3353,7 +3355,7 @@ mod tests {
 
     #[test]
     fn bot_sends_fail_typed_on_routing_and_pressure() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         // Ambiguous names fail rather than guess.
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
@@ -3451,7 +3453,7 @@ mod tests {
 
     #[test]
     fn bot_target_exit_arrives_as_a_failed_event() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let res = p
@@ -3477,7 +3479,7 @@ mod tests {
 
     #[test]
     fn bot_poll_with_a_stale_epoch_conflicts() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let epoch = p.state.broker.epoch();
@@ -3491,7 +3493,7 @@ mod tests {
 
     #[test]
     fn bot_control_tools_are_denied_and_unknown_is_not_found() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         assert_eq!(
@@ -3512,7 +3514,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("forge-bot-reg-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("skippy.token");
-        crate::bot::write_test_token(&path, BOT_TOKEN);
+        crate::comms::bot::write_test_token(&path, BOT_TOKEN);
         p.state
             .broker
             .register_client_file(
@@ -3530,7 +3532,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         assert_eq!(
             p.bcall("skippy", "list_sessions", "{}").unwrap_err().code,
-            crate::bot::ErrorCode::Unauthorized
+            crate::comms::bot::ErrorCode::Unauthorized
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3989,7 +3991,7 @@ mod tests {
             .expect("client registered");
         let mut n = 0;
         while c
-            .deposit(crate::bot::BotKind::Tell, "pad", "pad", "pad", "pad", 0)
+            .deposit(crate::comms::bot::BotKind::Tell, "pad", "pad", "pad", "pad", 0)
             .is_ok()
         {
             n += 1;
@@ -4004,7 +4006,7 @@ mod tests {
         let first = p.bcall(client, "bot_poll", "{}").expect("poll validates");
         let epoch = crate::ipc::mcp::top_raw(&first, "epoch").expect("epoch echoed");
         for step in 1..=13 {
-            let cursor = (step * 20).min(crate::bot::INBOX_CAP as u64);
+            let cursor = (step * 20).min(crate::comms::bot::INBOX_CAP as u64);
             p.bcall(client, "bot_poll", "{}").expect("poll validates");
             p.bcall(
                 client,
@@ -4073,7 +4075,7 @@ mod tests {
         p.state.broker.target_exited(&p.state.manager, p.b);
         assert_eq!(
             p.state.broker.bot_convs.get(&conv).expect("conv").state,
-            crate::bot::BotConvState::Open,
+            crate::comms::bot::BotConvState::Open,
             "unsent failure notice holds the conv open"
         );
         // Room opens: the next sweep delivers the failure and closes.
@@ -4081,7 +4083,7 @@ mod tests {
         p.state.broker.tick(std::time::Instant::now());
         assert_eq!(
             p.state.broker.bot_convs.get(&conv).expect("conv").state,
-            crate::bot::BotConvState::Failed
+            crate::comms::bot::BotConvState::Failed
         );
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll: {poll}");
@@ -4242,7 +4244,7 @@ mod tests {
         // A bot tell was acked, the session exits with a full inbox
         // (failure retry pending): the courtesy sweep must not push
         // a Reminder to the removed queue — nobody will drain it.
-        use crate::bot::{BotKind, INBOX_CAP};
+        use crate::comms::bot::{BotKind, INBOX_CAP};
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let res = p
@@ -4287,7 +4289,7 @@ mod tests {
         // The inbox is full when the session exits: the failure
         // notice parks instead of dropping, and the next sweep
         // delivers it once space frees.
-        use crate::bot::{BotKind, INBOX_CAP};
+        use crate::comms::bot::{BotKind, INBOX_CAP};
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let res = p
@@ -4465,7 +4467,7 @@ mod tests {
     fn quiet_bot_tells_quiesce_past_ttl() {
         // Same quiescence rule, bot table: a day-quiet Open tell
         // evicts, an Open ask never does.
-        use crate::bot::{BotConv, BotConvKind, BotConvState};
+        use crate::comms::bot::{BotConv, BotConvKind, BotConvState};
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let now = std::time::Instant::now();
@@ -4605,7 +4607,7 @@ mod tests {
 
     #[test]
     fn terminal_bot_conversations_evict_past_ttl() {
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let res = p
@@ -4707,7 +4709,7 @@ mod tests {
         // Like polls, a nonzero ack without the epoch may be a stale
         // pre-restart retry: accepting it would advance (and delete)
         // a fresh epoch's received prefix.
-        use crate::bot::ErrorCode;
+        use crate::comms::bot::ErrorCode;
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         for n in 0..3 {
@@ -4759,7 +4761,7 @@ mod tests {
     fn idempotency_capacity_is_per_caller() {
         // One noisy session flooding past the cache cap must not
         // evict another caller's still-live retry record.
-        use crate::bot::IDEM_MAX_KEYS;
+        use crate::comms::bot::IDEM_MAX_KEYS;
         let mut p = live_pair().grouped();
         let args = r#"{"target":"a","message":"q","idempotency_key":"bk"}"#;
         let first = p
@@ -4771,7 +4773,7 @@ mod tests {
                 .broker
                 .session_idem
                 .entry(p.a.to_string())
-                .or_insert_with(crate::bot::IdemCache::new)
+                .or_insert_with(crate::comms::bot::IdemCache::new)
                 .store(&format!("k-{i}"), i as u64, "x", now);
         }
         let replay = p
