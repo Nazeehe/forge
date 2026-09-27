@@ -226,6 +226,12 @@ fn startup(force_oobe: bool) -> i32 {
             loaded.config.permission.mode
         ));
     }
+    logging::set_hook_trace_path(branding::hooks_log(&home));
+    logging::hook_trace_global(&format!(
+        "tui start pid={} run={run} exe={}",
+        std::process::id(),
+        std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()
+    ));
     let mut state = app::AppState::new();
     // Greet a fresh owner before anything else: the dialog offers
     // every known CLI (all checked) and installs hooks for the pick.
@@ -255,6 +261,7 @@ fn startup(force_oobe: bool) -> i32 {
     // empty quit leaves the file alone: it may hold older entries from
     // before (Esc + quit-empty is a normal flow), and the picker shows
     // each entry's age.
+    state.trace_snapshot("quit");
     if let Err(e) = checkpoint::save_quit_snapshot(
         &branding::sessions_file(&home),
         state.snapshot_sessions(),

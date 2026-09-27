@@ -51,6 +51,40 @@ impl FileLogger {
     }
 }
 
+static HOOK_TRACE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Turn on hook tracing process-wide (TUI boot and each hook relay). Never
+/// set under test, so tests never touch the real `~/.forge/hooks.log`.
+pub fn set_hook_trace_path(path: PathBuf) {
+    let _ = HOOK_TRACE.set(path);
+}
+
+pub fn hook_trace_path() -> Option<PathBuf> {
+    HOOK_TRACE.get().cloned()
+}
+
+/// Append `<secs>.<millis> <line>` to the bounded hook trace. Best-effort:
+/// relays and the TUI both write here, and tracing must never fail a hook.
+pub fn hook_trace(path: &Path, line: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    if let Ok(mut log) = FileLogger::open(path, DEFAULT_MAX_BYTES) {
+        let _ = log.append(&format!(
+            "{}.{:03} {line}",
+            now.as_secs(),
+            now.subsec_millis()
+        ));
+    }
+}
+
+/// Trace to the process-wide hook log, when one is set.
+pub fn hook_trace_global(line: &str) {
+    if let Some(path) = HOOK_TRACE.get() {
+        hook_trace(path, line);
+    }
+}
+
 /// Strip control characters and anything that could drive a terminal when
 /// the log is tailed. Newlines become spaces; other C0/C1 controls are
 /// dropped; DEL is dropped.
@@ -104,6 +138,22 @@ mod tests {
         assert!(rotated.is_file(), "expected rotation sidecar");
         let main = std::fs::metadata(&path).unwrap().len();
         assert!(main <= 256, "main log bounded, was {main}");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn hook_trace_appends_timestamped_lines() {
+        let path = scratch();
+        hook_trace(&path, "relay hook=Stop");
+        hook_trace(&path, "tui hook=Stop");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        let (ts, rest) = lines[0].split_once(' ').unwrap();
+        let (secs, millis) = ts.split_once('.').expect("secs.millis stamp");
+        assert!(secs.parse::<u64>().unwrap() > 1_700_000_000, "{ts}");
+        assert_eq!(millis.len(), 3, "{ts}");
+        assert_eq!(rest, "relay hook=Stop");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

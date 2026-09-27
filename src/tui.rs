@@ -178,11 +178,19 @@ pub fn run(
                 &spawned.sock_path,
             ) {
                 eprintln!("warning: cannot publish endpoint file: {e}");
+                crate::logging::hook_trace_global(&format!("tui endpoint file write failed: {e}"));
+            } else {
+                crate::logging::hook_trace_global(&format!(
+                    "tui listening sock={} endpoint_file={}",
+                    spawned.sock_path.display(),
+                    crate::relay::endpoint_file_path(home).display()
+                ));
             }
             Some(spawned)
         }
         Err(e) => {
             eprintln!("warning: ipc listener unavailable: {e}");
+            crate::logging::hook_trace_global(&format!("tui ipc listener unavailable: {e}"));
             None
         }
     };

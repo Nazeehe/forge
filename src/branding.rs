@@ -71,6 +71,11 @@ pub fn sessions_file(home: &Path) -> PathBuf {
     config_dir(home).join("sessions.json")
 }
 
+/// `~/.forge/hooks.log`: bounded hook delivery/attribution trace.
+pub fn hooks_log(home: &Path) -> PathBuf {
+    config_dir(home).join("hooks.log")
+}
+
 /// Move the pre-`.json` `~/.forge/sessions` into place. Never clobbers an
 /// existing `sessions.json`; failures leave both files as they were.
 pub fn migrate_sessions_file(home: &Path) {
@@ -157,6 +162,10 @@ mod tests {
         assert_eq!(
             sessions_file(home),
             PathBuf::from("/home/tester/.forge/sessions.json")
+        );
+        assert_eq!(
+            hooks_log(home),
+            PathBuf::from("/home/tester/.forge/hooks.log")
         );
     }
 

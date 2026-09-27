@@ -346,13 +346,32 @@ fn handle_conn<S: std::io::Read + std::io::Write>(
 ) {
     let line = match read_record_line(&mut conn, MAX_LINE) {
         Ok(line) => line,
-        Err(_) => return,
+        Err(e) => {
+            crate::logging::hook_trace_global(&format!("listener record unreadable: {e}"));
+            return;
+        }
     };
     match classify(&line) {
         Route::Hook { hook } => handle_hook(conn, &line, hook, tx),
         Route::Comms => handle_comms(conn, &line, tx),
-        Route::Other => {}
+        Route::Other => crate::logging::hook_trace_global(&format!(
+            "listener unroutable record ({} bytes)",
+            line.len()
+        )),
     }
+}
+
+/// One hook-trace line for a record the listener accepted or dropped.
+fn hook_record_trace(line: &[u8], hook: &str, verdict: &str) -> String {
+    let text = String::from_utf8_lossy(line);
+    let run_id = crate::mcp::top_str(&text, "run_id").unwrap_or_default();
+    let raw = |key: &str| crate::mcp::top_raw(&text, key).unwrap_or("-").to_string();
+    format!(
+        "listener hook={hook} run_id={} forge_pid={} source_sid={} -> {verdict}",
+        if run_id.is_empty() { "empty" } else { "set" },
+        raw("forge_pid"),
+        raw("source_sid"),
+    )
 }
 
 fn handle_hook<S: std::io::Read + std::io::Write>(
@@ -369,6 +388,11 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(0);
     if forge_pid != 0 && forge_pid != std::process::id() {
+        crate::logging::hook_trace_global(&hook_record_trace(
+            line,
+            &hook,
+            &format!("dropped: forge_pid {forge_pid} is another instance"),
+        ));
         return;
     }
     let sync = crate::relay::is_sync_hook(&hook);
@@ -387,8 +411,14 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
         }))
         .is_err()
     {
+        crate::logging::hook_trace_global(&hook_record_trace(
+            line,
+            &hook_for_timeout,
+            "dropped: event queue full or closed",
+        ));
         return;
     }
+    crate::logging::hook_trace_global(&hook_record_trace(line, &hook_for_timeout, "queued"));
     if !sync {
         return;
     }
@@ -896,6 +926,21 @@ mod tests {
             "empty verdict closes with no bytes"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hook_record_trace_names_verdict() {
+        let line = br#"{"v":1,"hook":"Stop","run_id":"","forge_pid":42,"source_sid":7,"body":{}}"#;
+        let t = hook_record_trace(line, "Stop", "dropped: forge_pid 42 is another instance");
+        for needle in [
+            "listener hook=Stop",
+            "run_id=empty",
+            "forge_pid=42",
+            "source_sid=7",
+            "-> dropped: forge_pid 42 is another instance",
+        ] {
+            assert!(t.contains(needle), "{needle} missing: {t}");
+        }
     }
 
     #[test]

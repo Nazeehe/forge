@@ -146,6 +146,8 @@ pub struct AppState {
     /// another session's delivery. Unattributed runs stamp nothing —
     /// with no pane to protect there is no race to debounce.
     pub last_hook_activity: std::collections::HashMap<crate::session::SessionId, std::time::Instant>,
+    /// `~/.forge/hooks.log` when hook tracing is on; None in tests.
+    pub hook_trace: Option<std::path::PathBuf>,
     /// Sessions owed a staged Enter: an injection body went out and its CR
     /// follows after [`crate::comms::INJECT_ENTER_DELAY`], one entry per
     /// session. Later bodies stay queued until the staged CR lands, so
@@ -403,6 +405,7 @@ impl AppState {
             last_human_input: std::collections::HashMap::new(),
             last_broker_tick: None,
             last_hook_activity: std::collections::HashMap::new(),
+            hook_trace: crate::logging::hook_trace_path(),
             pending_enter: std::collections::HashMap::new(),
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
@@ -4091,6 +4094,33 @@ impl AppState {
         self.dirty = true;
     }
 
+    /// Trace every session's attribution state (hooks.log): what a save
+    /// would write, plus the PTY process-session ID hooks must match.
+    pub fn trace_snapshot(&self, reason: &str) {
+        let Some(path) = self.hook_trace.as_deref() else {
+            return;
+        };
+        let sessions: Vec<String> = self
+            .manager
+            .order()
+            .iter()
+            .filter_map(|id| {
+                let rec = self.manager.get(*id)?;
+                Some(format!(
+                    "{id}[name={} tool={} live={} sid={} harness={}]",
+                    rec.name,
+                    rec.cli_tool,
+                    rec.state.is_live(),
+                    self.manager
+                        .process_session_id(*id)
+                        .map_or_else(|| "-".to_string(), |sid| sid.to_string()),
+                    rec.harness_session_id.as_deref().unwrap_or("-"),
+                ))
+            })
+            .collect();
+        crate::logging::hook_trace(path, &format!("tui snapshot {reason}: {}", sessions.join(" ")));
+    }
+
     /// Live agent sessions as restorable records, in bar order. Shells
     /// have no resume form and exited sessions are gone, so both are
     /// left out; groups ride along for exact rejoins.
@@ -4967,6 +4997,30 @@ impl AppState {
                         }
                     }
                 }
+                if let Some(path) = self.hook_trace.as_deref() {
+                    let show = |id: Option<crate::session::SessionId>| {
+                        id.map_or_else(|| "none".to_string(), |id| id.to_string())
+                    };
+                    let harness_after = attributed
+                        .and_then(|id| self.manager.get(id))
+                        .and_then(|rec| rec.harness_session_id.clone())
+                        .unwrap_or_else(|| "-".to_string());
+                    crate::logging::hook_trace(
+                        path,
+                        &format!(
+                            "tui hook={} run={} source_sid={} by_sid={} session_id={} cwd={} attributed={} harness_after={harness_after}",
+                            req.hook,
+                            show(self.manager.lookup_run(&req.run_id)),
+                            source_sid.map_or_else(|| "-".to_string(), |sid| sid.to_string()),
+                            show(source_session),
+                            crate::session::session_id_from_hook_body(&req.body)
+                                .unwrap_or_else(|| "-".to_string()),
+                            crate::session::cwd_from_hook_body(&req.body)
+                                .unwrap_or_else(|| "-".to_string()),
+                            show(attributed),
+                        ),
+                    );
+                }
                 if self.pending_hooks.len() < crate::listener::MAX_PENDING_HOOKS {
                     if let Some(id) = attributed {
                         self.last_hook_activity
@@ -5272,6 +5326,59 @@ mod tests {
         );
         assert_eq!(s.manager.get(id).unwrap().activity, Activity::Thinking);
         assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn hook_trace_records_attribution_and_snapshot() {
+        let dir = std::env::temp_dir().join(format!("forge-hook-trace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = dir.join("hooks.log");
+        let mut s = AppState::new();
+        s.hook_trace = Some(log.clone());
+        let cwd = std::env::temp_dir();
+        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let id = s
+            .manager
+            .spawn_agent("m", &cwd, "exec sleep 30", RunId::generate(), "muse")
+            .unwrap();
+        let sid = s.manager.process_session_id(id).expect("pty process session");
+        let prompt = format!(
+            "{{\"v\":1,\"hook\":\"UserPromptSubmit\",\"run_id\":\"\",\"forge_pid\":0,\"source_sid\":{sid},\"body\":{{\"session_id\":\"muse-t\",\"cwd\":{cwd_json}}}}}"
+        );
+        s.apply(hook_request("UserPromptSubmit", "", &prompt));
+        // A stray relay from outside every pane: nothing resolves.
+        let stray = r#"{"v":1,"hook":"Stop","run_id":"","source_sid":1,"body":{"session_id":"ghost"}}"#;
+        s.apply(hook_request("Stop", "", stray));
+        s.trace_snapshot("quit");
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        for needle in [
+            "tui hook=UserPromptSubmit",
+            "run=none",
+            &format!("source_sid={sid}"),
+            &format!("by_sid={id}"),
+            "session_id=muse-t",
+            &format!("attributed={id}"),
+            "harness_after=muse-t",
+        ] {
+            assert!(lines[0].contains(needle), "{needle} missing: {}", lines[0]);
+        }
+        for needle in ["tui hook=Stop", "by_sid=none", "attributed=none"] {
+            assert!(lines[1].contains(needle), "{needle} missing: {}", lines[1]);
+        }
+        for needle in [
+            "snapshot quit",
+            &format!("{id}"),
+            "name=m",
+            "tool=muse",
+            &format!("sid={sid}"),
+            "harness=muse-t",
+        ] {
+            assert!(lines[2].contains(needle), "{needle} missing: {}", lines[2]);
+        }
+        assert!(s.manager.remove(id));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

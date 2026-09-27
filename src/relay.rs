@@ -48,39 +48,59 @@ pub fn clear_endpoint_file(home: &std::path::Path) {
 /// same binary. Anything else (missing file, foreign pid, reused pid now
 /// running something else) yields None.
 fn file_owner_pid(text: &str) -> Option<u32> {
-    let pid: u32 = crate::mcp::top_raw(text, "pid")?.parse().ok()?;
-    if pid == 0 || pid == std::process::id() {
-        return None;
-    }
-    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    let own = std::env::current_exe().ok()?;
-    same_binary(&exe, &own).then_some(pid)
+    file_owner(text).ok()
 }
 
-/// A rebuild replaces the file under a running TUI and the kernel reports
-/// its exe link as `<path> (deleted)`; that is still the same forge.
-fn same_binary(owner_exe: &std::path::Path, own: &std::path::Path) -> bool {
-    if owner_exe == own {
-        return true;
+/// [`file_owner_pid`] with the rejection reason, for the hook trace.
+fn file_owner(text: &str) -> Result<u32, String> {
+    let raw = crate::mcp::top_raw(text, "pid").ok_or("no pid field")?;
+    let pid: u32 = raw.parse().map_err(|_| format!("bad pid {raw:?}"))?;
+    if pid == 0 {
+        return Err("pid 0".to_string());
     }
-    owner_exe
-        .to_str()
-        .and_then(|s| s.strip_suffix(" (deleted)"))
-        .is_some_and(|s| std::path::Path::new(s) == own)
+    if pid == std::process::id() {
+        return Err("owner pid is this process".to_string());
+    }
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .map_err(|e| format!("owner {pid} exe unreadable: {e}"))?;
+    let own = std::env::current_exe().map_err(|e| format!("own exe unknown: {e}"))?;
+    if same_binary(&exe, &own) {
+        Ok(pid)
+    } else {
+        Err(format!("owner {pid} exe {} != {}", exe.display(), own.display()))
+    }
+}
+
+/// Whether the endpoint owner runs forge. Compared by file name, not path:
+/// the TUI may run an installed copy while harness hooks name a dev build,
+/// and a rebuild shows the owner's exe as `<path> (deleted)`. Records still
+/// carry the owner pid, so the listener rejects any other instance's relays.
+fn same_binary(owner_exe: &std::path::Path, own: &std::path::Path) -> bool {
+    let owner = owner_exe.to_str().map(|s| s.strip_suffix(" (deleted)").unwrap_or(s));
+    let owner_name = owner.and_then(|s| std::path::Path::new(s).file_name());
+    owner_name.is_some() && owner_name == own.file_name()
 }
 
 /// Endpoint from the live-endpoint file: `(owner pid, socket path)`. The
 /// pid check keeps stale files (dead TUI, reused pid) fail-open and lets
 /// the loop drop records that another instance's relays send our way.
 pub fn file_endpoint() -> Option<(u32, String)> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
-    let text = std::fs::read_to_string(endpoint_file_path(&home)).ok()?;
-    let pid = file_owner_pid(&text)?;
-    let sock = crate::mcp::top_str(&text, "sock")?;
-    if sock.is_empty() {
-        return None;
+    file_endpoint_traced().ok()
+}
+
+/// [`file_endpoint`] with the rejection reason, for the hook trace.
+fn file_endpoint_traced() -> Result<(u32, String), String> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or("HOME unset")?;
+    let path = endpoint_file_path(&home);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{} unreadable: {e}", path.display()))?;
+    let pid = file_owner(&text)?;
+    match crate::mcp::top_str(&text, "sock") {
+        Some(sock) if !sock.is_empty() => Ok((pid, sock)),
+        _ => Err("no sock field".to_string()),
     }
-    Some((pid, sock))
 }
 
 /// Hooks that block the harness until Forge decides. Everything else is
@@ -208,11 +228,23 @@ pub fn run(
     stdout: &mut dyn std::io::Write,
     timeout: std::time::Duration,
 ) -> i32 {
+    deliver(stdin_bytes, endpoint, forge_pid, stdout, timeout);
+    0
+}
+
+/// [`run`], describing what happened for the hook trace.
+pub fn deliver(
+    stdin_bytes: &[u8],
+    endpoint: Option<&str>,
+    forge_pid: u32,
+    stdout: &mut dyn std::io::Write,
+    timeout: std::time::Duration,
+) -> String {
     if stdin_bytes.iter().all(|b| b.is_ascii_whitespace()) {
-        return 0;
+        return "empty stdin".to_string();
     }
     let Some(path) = endpoint.filter(|p| !p.is_empty()) else {
-        return 0;
+        return "no endpoint".to_string();
     };
     let hook = hook_name(stdin_bytes);
     // Hook children inherit this from the session pane (session.rs); it
@@ -222,19 +254,19 @@ pub fn run(
     let record = record_line(stdin_bytes, hook.as_deref(), &run_id, forge_pid);
     let mut conn = match std::os::unix::net::UnixStream::connect(path) {
         Ok(conn) => conn,
-        Err(_) => return 0,
+        Err(e) => return format!("connect failed: {e}"),
     };
     {
         use std::io::Write;
-        if conn.write_all(&record).is_err() {
-            return 0;
+        if let Err(e) = conn.write_all(&record) {
+            return format!("write failed: {e}");
         }
     }
     if !hook.as_deref().is_some_and(is_sync_hook) {
-        return 0;
+        return "sent".to_string();
     }
-    if conn.set_read_timeout(Some(timeout)).is_err() {
-        return 0;
+    if let Err(e) = conn.set_read_timeout(Some(timeout)) {
+        return format!("sent; read timeout unset: {e}");
     }
     {
         use std::io::Read;
@@ -248,14 +280,49 @@ pub fn run(
                         break;
                     }
                 }
-                _ => return 0,
+                Ok(_) => return "sent; no decision (closed)".to_string(),
+                Err(e) => return format!("sent; no decision: {e}"),
             }
         }
         if reply.ends_with(b"\n") {
             let _ = stdout.write_all(&reply);
+            return "sent; decision relayed".to_string();
         }
     }
-    0
+    "sent; decision too long".to_string()
+}
+
+/// One hook-trace line for this relay invocation: everything the TUI
+/// needs to attribute it, plus how (and whether) it was delivered.
+pub fn trace_line(input: &[u8], run_id: &str, endpoint: &str, sock: &str, outcome: &str) -> String {
+    let text = String::from_utf8_lossy(input);
+    // SAFETY: getsid/getppid with no pointers only query this process.
+    let (sid, ppid) = unsafe { (libc::getsid(0), libc::getppid()) };
+    format!(
+        "relay pid={} ppid={ppid} sid={sid} hook={} session_id={} run_id={} endpoint={endpoint} sock={sock} -> {outcome}",
+        std::process::id(),
+        hook_name(input).unwrap_or_else(|| "-".to_string()),
+        crate::mcp::top_str(&text, "session_id").unwrap_or_else(|| "-".to_string()),
+        if run_id.is_empty() { "empty" } else { "set" },
+    )
+}
+
+/// Where the relay writes its trace: `$HOME`, else the passwd entry, since
+/// a scrubbed hook environment may carry no HOME at all.
+fn trace_home() -> Option<std::path::PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        return Some(home.into());
+    }
+    // SAFETY: getpwuid returns a pointer into static storage (or null); the
+    // relay is single-threaded and copies the string out immediately.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        let dir = std::ffi::CStr::from_ptr((*pw).pw_dir);
+        Some(std::path::PathBuf::from(dir.to_string_lossy().into_owned()))
+    }
 }
 
 /// Read stdin fully and relay through the endpoint override,
@@ -263,28 +330,41 @@ pub fn run(
 /// like muse that scrub hook-child environments). Always exits zero; use
 /// the return as the code.
 pub fn run_stdin(endpoint_override: Option<&str>) -> i32 {
+    if let Some(home) = trace_home() {
+        crate::logging::set_hook_trace_path(crate::branding::hooks_log(&home));
+    }
     let mut stdin_bytes = Vec::new();
     {
         use std::io::Read;
-        if std::io::stdin().read_to_end(&mut stdin_bytes).is_err() {
+        if let Err(e) = std::io::stdin().read_to_end(&mut stdin_bytes) {
+            crate::logging::hook_trace_global(&format!("relay stdin read failed: {e}"));
             return 0;
         }
     }
-    let env_endpoint = std::env::var("FORGE_IPC_ENDPOINT").ok();
-    let (endpoint, forge_pid) = match endpoint_override
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .or(env_endpoint)
-    {
-        Some(path) => (Some(path), 0),
-        None => match file_endpoint() {
-            Some((pid, sock)) => (Some(sock), pid),
-            None => (None, 0),
-        },
+    let env_endpoint = std::env::var("FORGE_IPC_ENDPOINT").ok().filter(|p| !p.is_empty());
+    let override_endpoint = endpoint_override.filter(|p| !p.is_empty()).map(str::to_string);
+    let (endpoint, forge_pid, source) = if let Some(path) = override_endpoint {
+        (Some(path), 0, "override".to_string())
+    } else if let Some(path) = env_endpoint {
+        (Some(path), 0, "env".to_string())
+    } else {
+        match file_endpoint_traced() {
+            Ok((pid, sock)) => (Some(sock), pid, format!("file:{pid}")),
+            Err(why) => (None, 0, format!("none({why})")),
+        }
     };
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    run(&stdin_bytes, endpoint.as_deref(), forge_pid, &mut handle, DECISION_TIMEOUT)
+    let outcome = deliver(&stdin_bytes, endpoint.as_deref(), forge_pid, &mut handle, DECISION_TIMEOUT);
+    let run_id = std::env::var("FORGE_RUN_ID").unwrap_or_default();
+    crate::logging::hook_trace_global(&trace_line(
+        &stdin_bytes,
+        &run_id,
+        &source,
+        endpoint.as_deref().unwrap_or("-"),
+        &outcome,
+    ));
+    0
 }
 
 #[cfg(test)]
@@ -418,6 +498,64 @@ mod tests {
     }
 
     #[test]
+    fn file_owner_explains_every_rejection() {
+        let own = std::process::id();
+        assert!(file_owner("not json").unwrap_err().contains("pid"));
+        assert!(file_owner(r#"{"pid":0}"#).unwrap_err().contains("pid 0"));
+        assert!(file_owner(&format!(r#"{{"pid":{own}}}"#))
+            .unwrap_err()
+            .contains("this process"));
+        let dead = file_owner(r#"{"pid":424242}"#).unwrap_err();
+        assert!(dead.contains("424242") && dead.contains("unreadable"), "{dead}");
+        let mut other = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let foreign = file_owner(&format!(r#"{{"pid":{}}}"#, other.id())).unwrap_err();
+        let _ = other.kill();
+        let _ = other.wait();
+        assert!(foreign.contains("sleep") && foreign.contains("!="), "{foreign}");
+    }
+
+    #[test]
+    fn deliver_reports_its_outcome() {
+        let quick = std::time::Duration::from_millis(50);
+        let mut out = Vec::new();
+        assert_eq!(deliver(b"  ", Some("/x.sock"), 0, &mut out, quick), "empty stdin");
+        assert_eq!(deliver(b"{}", None, 0, &mut out, quick), "no endpoint");
+        let failed = deliver(
+            br#"{"hook_event_name":"Stop"}"#,
+            Some("/nonexistent-forge-test.sock"),
+            0,
+            &mut out,
+            quick,
+        );
+        assert!(failed.starts_with("connect failed"), "{failed}");
+    }
+
+    #[test]
+    fn trace_line_carries_attribution_facts() {
+        let line = trace_line(
+            br#"{"hook_event_name":"UserPromptSubmit","session_id":"muse-1"}"#,
+            "",
+            "file:77",
+            "/tmp/f.sock",
+            "sent",
+        );
+        for needle in [
+            "relay ",
+            "hook=UserPromptSubmit",
+            "session_id=muse-1",
+            "run_id=empty",
+            "endpoint=file:77",
+            "sock=/tmp/f.sock",
+            "-> sent",
+            &format!("pid={}", std::process::id()),
+            &format!("sid={}", unsafe { libc::getsid(0) }),
+        ] {
+            assert!(line.contains(needle), "{needle} missing: {line}");
+        }
+        assert!(trace_line(b"{}", "r", "env", "", "sent").contains("run_id=set"));
+    }
+
+    #[test]
     fn rebuilt_binary_still_owns_the_endpoint() {
         let own = std::path::Path::new("/work/target/debug/forge");
         assert!(same_binary(own, own));
@@ -426,6 +564,12 @@ mod tests {
         assert!(
             same_binary(std::path::Path::new("/work/target/debug/forge (deleted)"), own),
             "a rebuild must not orphan scrubbed-env (muse) hooks"
+        );
+        // Grounded in hooks.log: the TUI ran from ~/.local/bin while muse's
+        // hook command named target/debug, so every muse hook was dropped.
+        assert!(
+            same_binary(std::path::Path::new("/home/u/.local/bin/forge"), own),
+            "an installed copy and a dev build are both forge"
         );
         assert!(!same_binary(std::path::Path::new("/usr/bin/sleep"), own));
         assert!(!same_binary(std::path::Path::new("/usr/bin/sleep (deleted)"), own));
