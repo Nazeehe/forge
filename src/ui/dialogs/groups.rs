@@ -554,7 +554,7 @@ impl GroupDialog {
                                 spans.push(Span::styled(label, row_style));
                             }
                             Some(member) => {
-                                let color = crate::ui::group_palette(ctx.groups[over.group].color);
+                                let color = crate::ui::session_bar::group_palette(ctx.groups[over.group].color);
                                 let name = fit_row(member, cw as usize - 8);
                                 spans.push(Span::styled("    ", row_style));
                                 spans.push(Span::styled("●", style(Role::Text).fg(color)));
@@ -1086,7 +1086,7 @@ mod tests {
         assert!(content.contains("a add session"));
         let dot = terminal.backend().buffer().content.chunks(80).nth(5).unwrap()
             .iter().find(|cell| cell.symbol() == "●").unwrap();
-        assert_eq!(dot.fg, crate::ui::group_palette(2));
+        assert_eq!(dot.fg, crate::ui::session_bar::group_palette(2));
         // The forge header moved down one row with the padding.
         assert!(dialog.click(area.x + 4, area.y + 5, area, &ctx));
         assert_eq!(dialog.selected_name(), "forge");
@@ -1116,7 +1116,7 @@ mod tests {
         assert!(name.modifier.contains(Modifier::REVERSED), "cursor row reverses");
         // The group dot keeps its identity color under focus.
         assert_eq!(buf[(17, 5)].symbol(), "●");
-        assert_eq!(buf[(17, 5)].fg, crate::ui::group_palette(0));
+        assert_eq!(buf[(17, 5)].fg, crate::ui::session_bar::group_palette(0));
         // The header row above stays plain white text.
         assert_eq!(buf[(11, 4)].symbol(), " ");
         assert_eq!(buf[(13, 4)].fg, Color::White);

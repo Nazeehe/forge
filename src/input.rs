@@ -210,7 +210,7 @@ pub fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
 }
 
 /// Encode a mouse event for the pane. `column`/`row` are already 1-based
-/// pane-grid cells (see `ui::translate_mouse`). Events the pane's mode does
+/// pane-grid cells (see `ui::layout::translate_mouse`). Events the pane's mode does
 /// not cover (releases in press-only mode, passive motion without
 /// any-motion) return `None`.
 pub fn encode_mouse(

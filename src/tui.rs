@@ -268,12 +268,12 @@ pub fn run(
 #[cfg(feature = "visual")]
 fn visual_viewport(
     state: &AppState,
-) -> Option<(crate::session::SessionId, crate::ui::VisualChrome, (f64, f64))> {
+) -> Option<(crate::session::SessionId, crate::ui::visual::VisualChrome, (f64, f64))> {
     let (id, _) = state.visual_focused_frame()?;
     let (rows, cols) = state.term_size;
-    let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
-    let content = ui::pane_content_area(&areas);
-    let chrome = ui::visual_chrome(
+    let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let content = ui::layout::pane_content_area(&areas);
+    let chrome = ui::visual::visual_chrome(
         content,
         state.pill_tabs,
         state.visual_footer_rows(id, content.height),
@@ -731,10 +731,10 @@ fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> bool {
             state.visual_scroll(id, 0, 1, area_cols, area_rows, cell_w, cell_h);
         }
         KeyCode::Char('+') | KeyCode::Char('=') => {
-            state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, area_cols, area_rows, cell_w, cell_h);
+            state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomIn, area_cols, area_rows, cell_w, cell_h);
         }
         KeyCode::Char('-') | KeyCode::Char('_') => {
-            state.visual_zoom(id, crate::ui::VisualButton::ZoomOut, area_cols, area_rows, cell_w, cell_h);
+            state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomOut, area_cols, area_rows, cell_w, cell_h);
         }
         KeyCode::Char('c') => {
             state.visual_toggle_chat(id);
@@ -1525,7 +1525,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         return;
     }
     let (rows, cols) = state.term_size;
-    let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
     // The open card editor swallows ALL mouse input: rows take focus
     // and Save/Cancel fire, clicks behind it move nothing.
     if state.card_edit.is_some() {
@@ -1548,7 +1548,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row < areas.main.y + areas.main.height
     {
         let view = state.board_view();
-        if let Some((ci, card)) = ui::board_cell_at(areas.main, &view, mev.column, mev.row) {
+        if let Some((ci, card)) = ui::board::board_cell_at(areas.main, &view, mev.column, mev.row) {
             state.board_focus.column = ci;
             if let Some(k) = card {
                 state.board_focus.card = k;
@@ -1566,12 +1566,12 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row < areas.topbar.y + areas.topbar.height
     {
         let topbar = state.topbar();
-        let buttons = ui::layout_topbar(areas.topbar, &topbar.tabs, state.pill_tabs);
-        if let Some(index) = ui::topbar_at(&buttons, mev.column) {
+        let buttons = ui::topbar::layout_topbar(areas.topbar, &topbar.tabs, state.pill_tabs);
+        if let Some(index) = ui::topbar::topbar_at(&buttons, mev.column) {
             let button = &buttons[index];
             let area = ratatui::layout::Rect::new(button.start, areas.topbar.y, button.end - button.start, 1);
             if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
-                && ui::ChromeButton::new("", ratatui::style::Style::default())
+                && ui::topbar::ChromeButton::new("", ratatui::style::Style::default())
                     .click(mev.column, mev.row, area)
             {
                 if state.manager.active().is_some() {
@@ -1600,7 +1600,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         // Fleet router: wheel scrolls the slot, left-click switches to
         // the row. Same rects and window the render paints, recomputed
         // live, so a repaint can never desync them.
-        let rich = ui::sidebar_is_rich(areas.sidebar);
+        let rich = ui::sidebar::sidebar_is_rich(areas.sidebar);
         match mev.kind {
             event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
                 // Wheel scrolls the fleet only over the list region;
@@ -1611,7 +1611,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                 }
                 let info = state.sidebar_info();
                 let layout =
-                    ui::sidebar_layout(areas.sidebar, ui::sidebar_footer_height(&info, rich));
+                    ui::sidebar::sidebar_layout(areas.sidebar, ui::sidebar::sidebar_footer_height(&info, rich));
                 let in_list = mev.column >= layout.list.x
                     && mev.column < layout.list.x + layout.list.width
                     && mev.row >= layout.list.y
@@ -1637,8 +1637,8 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
             && matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
         {
             let info = state.sidebar_info();
-            for (id, area) in ui::sidebar_session_rects(areas.sidebar, &info, rich) {
-                if ui::ChromeButton::new("[fleet]", ratatui::style::Style::default())
+            for (id, area) in ui::sidebar::sidebar_session_rects(areas.sidebar, &info, rich) {
+                if ui::topbar::ChromeButton::new("[fleet]", ratatui::style::Style::default())
                     .click(mev.column, mev.row, area)
                 {
                     if state.focus_session(id) {
@@ -1655,8 +1655,8 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
             && matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
         {
             let info = state.sidebar_info();
-            for (timer_id, area) in ui::timer_cancel_rects(areas.sidebar, &info, state.pill_tabs) {
-                if ui::ChromeButton::new("[Cancel]", ratatui::style::Style::default())
+            for (timer_id, area) in ui::sidebar::timer_cancel_rects(areas.sidebar, &info, state.pill_tabs) {
+                if ui::topbar::ChromeButton::new("[Cancel]", ratatui::style::Style::default())
                     .click(mev.column, mev.row, area)
                 {
                     state.cancel_timer(&timer_id);
@@ -1667,21 +1667,21 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         }
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             // Pinned footer row, same builder the render uses.
-            let buttons = ui::footer_mode_buttons(
+            let buttons = ui::sidebar::footer_mode_buttons(
                 areas.sidebar,
                 &state.sidebar_info(),
                 rich,
                 state.pill_tabs,
             );
-            match ui::mode_at(&buttons, mev.column, mev.row) {
+            match ui::sidebar::mode_at(&buttons, mev.column, mev.row) {
                 Some("yolo") => {
-                    if ui::ChromeButton::new("[Yolo]", ratatui::style::Style::default())
+                    if ui::topbar::ChromeButton::new("[Yolo]", ratatui::style::Style::default())
                         .click(mev.column, mev.row, buttons.yolo) {
                         state.set_permission_mode(crate::core::config::PermissionMode::Yolo);
                     }
                 }
                 Some(_) => {
-                    if ui::ChromeButton::new("[Off]", ratatui::style::Style::default())
+                    if ui::topbar::ChromeButton::new("[Off]", ratatui::style::Style::default())
                         .click(mev.column, mev.row, buttons.off) {
                         state.set_permission_mode(crate::core::config::PermissionMode::Off);
                     }
@@ -1693,14 +1693,14 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         // builder the render uses, so clicks track the paint exactly.
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let info = state.sidebar_info();
-            let board = ui::board_button_area(
+            let board = ui::sidebar::board_button_area(
                 areas.sidebar,
                 &info,
-                ui::sidebar_is_rich(areas.sidebar),
+                ui::sidebar::sidebar_is_rich(areas.sidebar),
                 state.pill_tabs,
             );
-            if ui::board_at(&board, mev.column, mev.row)
-                && ui::ChromeButton::new("[Kanban]", ratatui::style::Style::default())
+            if ui::board::board_at(&board, mev.column, mev.row)
+                && ui::topbar::ChromeButton::new("[Kanban]", ratatui::style::Style::default())
                     .click(mev.column, mev.row, board)
             {
                 state.toggle_board();
@@ -1710,14 +1710,14 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         // uses, so clicks track the paint exactly.
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let info = state.sidebar_info();
-            let game = ui::tetris_button_area(
+            let game = ui::sidebar::tetris_button_area(
                 areas.sidebar,
                 &info,
-                ui::sidebar_is_rich(areas.sidebar),
+                ui::sidebar::sidebar_is_rich(areas.sidebar),
                 state.pill_tabs,
             );
-            if ui::board_at(&game, mev.column, mev.row)
-                && ui::ChromeButton::new("[Tetris]", ratatui::style::Style::default())
+            if ui::board::board_at(&game, mev.column, mev.row)
+                && ui::topbar::ChromeButton::new("[Tetris]", ratatui::style::Style::default())
                     .click(mev.column, mev.row, game)
             {
                 state.toggle_tetris();
@@ -1729,15 +1729,15 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         && mev.row < areas.session_bar.y + areas.session_bar.height
         && areas.session_bar.height > 0
     {
-        let segments = ui::session_bar_segments_for_area(&state.tabs(), areas.session_bar, state.pill_tabs);
-        let buttons = ui::layout_session_bar(areas.session_bar, &segments);
+        let segments = ui::session_bar::session_bar_segments_for_area(&state.tabs(), areas.session_bar, state.pill_tabs);
+        let buttons = ui::session_bar::layout_session_bar(areas.session_bar, &segments);
         // Click-to-activate only: hover (Moved) and drags must never steal
         // the session; pane mouse protocols still get every event below.
-        if let Some(index) = ui::session_at(&buttons, mev.column) {
+        if let Some(index) = ui::session_bar::session_at(&buttons, mev.column) {
             let button = buttons.iter().find(|b| b.index == Some(index)).unwrap();
             let area = ratatui::layout::Rect::new(button.start, areas.session_bar.y, button.end - button.start, 1);
             if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
-                && ui::ChromeButton::new(&button.label, ratatui::style::Style::default())
+                && ui::topbar::ChromeButton::new(&button.label, ratatui::style::Style::default())
                     .click(mev.column, mev.row, area)
             {
                 if state.select_session(index) {
@@ -1777,15 +1777,15 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     // full-size panes, so forwarding them would mis-deliver.
     if state.grid_mode {
         let full = ratatui::layout::Rect::new(0, 0, cols, rows);
-        let grid = ui::grid_area(full);
+        let grid = ui::layout::grid_area(full);
         let in_grid = mev.column >= grid.x
             && mev.column < grid.right()
             && mev.row >= grid.y
             && mev.row < grid.bottom();
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let order = state.manager.order().to_vec();
-            let cells = ui::grid_cells(grid, order.len());
-            if let Some(index) = ui::grid_cell_at(&cells, mev.column, mev.row) {
+            let cells = ui::layout::grid_cells(grid, order.len());
+            if let Some(index) = ui::layout::grid_cell_at(&cells, mev.column, mev.row) {
                 if let Some(&id) = order.get(index) {
                     state.manager.switch(id);
                     state.dirty = true;
@@ -1830,7 +1830,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                     // Wheel over the chat footer reads back through
                     // history; over the image it pans the diagram.
                     // Visible history is the box interior rows.
-                    let visible = crate::ui::visual_chat_history_rows(chrome.footer.height);
+                    let visible = crate::ui::visual::visual_chat_history_rows(chrome.footer.height);
                     if over_footer {
                         state.visual_chat_scroll(id, 3, visible);
                     } else {
@@ -1838,7 +1838,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                     }
                 }
                 event::MouseEventKind::ScrollDown => {
-                    let visible = crate::ui::visual_chat_history_rows(chrome.footer.height);
+                    let visible = crate::ui::visual::visual_chat_history_rows(chrome.footer.height);
                     if over_footer {
                         state.visual_chat_scroll(id, -3, visible);
                     } else {
@@ -1855,8 +1855,8 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                     // Buttons keep priority over the image, so a click
                     // never does both. Centering follows the backend
                     // that painted, like the pick math must.
-                    match ui::visual_button_at(&chrome, mev.column, mev.row) {
-                        Some(ui::VisualButton::Chat) => {
+                    match ui::visual::visual_button_at(&chrome, mev.column, mev.row) {
+                        Some(ui::visual::VisualButton::Chat) => {
                             state.visual_toggle_chat(id);
                         }
                         Some(button) => {
@@ -1898,7 +1898,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         // the alternate screen has none, so scroll_view sends Up/Down
         // arrows for fullscreen apps that never take the mouse (codex,
         // claude). Other buttons still do nothing.
-        if ui::translate_mouse(ui::pane_grid_area(&areas), mev.column, mev.row).is_some() {
+        if ui::layout::translate_mouse(ui::layout::pane_grid_area(&areas), mev.column, mev.row).is_some() {
             let step = crate::session::pty::PtyPane::SCROLL_LINES_PER_NOTCH;
             match mev.kind {
                 event::MouseEventKind::ScrollUp => {
@@ -1914,7 +1914,7 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         }
         return;
     }
-    let Some((col, row)) = ui::translate_mouse(ui::pane_grid_area(&areas), mev.column, mev.row) else {
+    let Some((col, row)) = ui::layout::translate_mouse(ui::layout::pane_grid_area(&areas), mev.column, mev.row) else {
         return;
     };
     let pev = event::MouseEvent {
@@ -1934,8 +1934,8 @@ fn fit_active_pane(state: &mut AppState) {
         return;
     };
     let (rows, cols) = state.term_size;
-    let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
-    let main = ui::pane_grid_area(&areas);
+    let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let main = ui::layout::pane_grid_area(&areas);
     let pane_rows = main.height.saturating_sub(2).max(1);
     let pane_cols = main.width.saturating_sub(2).max(1);
     let _ = state.manager.resize(active, pane_rows, pane_cols);
@@ -1947,9 +1947,9 @@ fn fit_active_pane(state: &mut AppState) {
 /// toggle itself can never leave a tile showing an un-resized pane.
 fn fit_grid_panes(state: &mut AppState) {
     let (rows, cols) = state.term_size;
-    let grid = ui::grid_area(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let grid = ui::layout::grid_area(ratatui::layout::Rect::new(0, 0, cols, rows));
     let order = state.manager.order().to_vec();
-    let cells = ui::grid_cells(grid, order.len());
+    let cells = ui::layout::grid_cells(grid, order.len());
     for (id, cell) in order.iter().zip(cells.iter()) {
         if cell.width <= 2 || cell.height <= 2 {
             continue;
@@ -2038,9 +2038,9 @@ mod tests {
         // Blocks breathe: name plus reason rows, then a dead gap row.
         // Drive the click from the painted rect, never hand-computed
         // geometry.
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
         let info = state.sidebar_info();
-        let rects = ui::sidebar_session_rects(areas.sidebar, &info, true);
+        let rects = ui::sidebar::sidebar_session_rects(areas.sidebar, &info, true);
         assert_eq!(rects.len(), 2);
         assert_eq!(
             rects[0].1.y + rects[0].1.height + 1,
@@ -2129,7 +2129,7 @@ mod tests {
         }
         // Scroll once from the list, then wheel the pinned footer row:
         // settings must never scroll the fleet.
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
         forward_mouse(
             &mut state,
             MouseEvent {
@@ -2273,9 +2273,9 @@ mod tests {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(40, 180));
         let id = open_visual_overlay(&mut state);
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let content = ui::pane_content_area(&areas);
-        let chrome = ui::visual_chrome(
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let content = ui::layout::pane_content_area(&areas);
+        let chrome = ui::visual::visual_chrome(
             content,
             state.pill_tabs,
             state.visual_footer_rows(id, content.height),
@@ -2284,7 +2284,7 @@ mod tests {
         // Zoom to the max: the square test image only overflows the
         // wide tab horizontally at high zoom (at low zoom the height
         // is the limiting axis, so x clamps to zero).
-        while state.visual_zoom(id, ui::VisualButton::ZoomIn, area_cols, area_rows, 8.0, 16.0) {}
+        while state.visual_zoom(id, ui::visual::VisualButton::ZoomIn, area_cols, area_rows, 8.0, 16.0) {}
         let wheel = |kind| MouseEvent {
             kind, column: chrome.image.x + 2, row: chrome.image.y + 2,
             modifiers: KeyModifiers::NONE,
@@ -2303,9 +2303,9 @@ mod tests {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(40, 180));
         let id = open_visual_overlay(&mut state);
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let content = ui::pane_content_area(&areas);
-        let chrome = ui::visual_chrome(
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let content = ui::layout::pane_content_area(&areas);
+        let chrome = ui::visual::visual_chrome(
             content,
             state.pill_tabs,
             state.visual_footer_rows(id, content.height),
@@ -2510,9 +2510,9 @@ mod tests {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(40, 180));
         let id = open_visual_overlay(&mut state);
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let content = ui::pane_content_area(&areas);
-        let chrome = ui::visual_chrome(
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let content = ui::layout::pane_content_area(&areas);
+        let chrome = ui::visual::visual_chrome(
             content,
             state.pill_tabs,
             state.visual_footer_rows(id, content.height),
@@ -2550,9 +2550,9 @@ mod tests {
                 })
                 .collect();
         }
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let content = ui::pane_content_area(&areas);
-        let chrome = ui::visual_chrome(
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let content = ui::layout::pane_content_area(&areas);
+        let chrome = ui::visual::visual_chrome(
             content,
             state.pill_tabs,
             state.visual_footer_rows(id, content.height),
@@ -2586,16 +2586,16 @@ mod tests {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(40, 180));
         let id = open_visual_overlay(&mut state);
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let content = ui::pane_content_area(&areas);
-        let chrome = ui::visual_chrome(
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let content = ui::layout::pane_content_area(&areas);
+        let chrome = ui::visual::visual_chrome(
             content,
             state.pill_tabs,
             state.visual_footer_rows(id, content.height),
         );
         let (area_cols, area_rows) = (chrome.image.width, chrome.image.height);
         for _ in 0..3 {
-            assert!(state.visual_zoom(id, ui::VisualButton::ZoomIn, area_cols, area_rows, 8.0, 16.0));
+            assert!(state.visual_zoom(id, ui::visual::VisualButton::ZoomIn, area_cols, area_rows, 8.0, 16.0));
         }
         let zoomed = state.visual_slots.get(&id).unwrap().zoom;
         let wheel = |kind| MouseEvent {
@@ -2631,8 +2631,8 @@ mod tests {
             "agent", &std::env::temp_dir(), "exec cat",
             RunId::generate(), "codex",
         ).unwrap();
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let buttons = ui::topbar::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
         let click = |column| MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left), column, row: areas.topbar.y,
             modifiers: KeyModifiers::NONE,
@@ -2726,8 +2726,8 @@ mod tests {
         assert_eq!(state.walkthrough_overlay().unwrap().code_scroll, 0);
         // Clicks in the tour pane never reach the agent, but the tab
         // strip above it still switches back to the CLI tab.
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let buttons = ui::topbar::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
         forward_mouse(&mut state, MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: buttons[0].start, row: areas.topbar.y, modifiers: KeyModifiers::NONE,
@@ -2752,8 +2752,8 @@ mod tests {
         let now = std::time::Instant::now();
         state.broker.call(&state.manager, &run, "schedule_prompt",
             r#"{"prompt":"later","delay_seconds":600}"#, now).expect("arms");
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let rects = ui::timer_cancel_rects(areas.sidebar, &state.sidebar_info(), state.pill_tabs);
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let rects = ui::sidebar::timer_cancel_rects(areas.sidebar, &state.sidebar_info(), state.pill_tabs);
         assert_eq!(rects.len(), 1, "one armed timer, one button");
         let (_, area) = &rects[0];
         forward_mouse(&mut state, MouseEvent {
@@ -2773,8 +2773,8 @@ mod tests {
             "agent", &std::env::temp_dir(), "exec cat",
             RunId::generate(), "codex",
         ).unwrap();
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
-        let buttons = ui::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let buttons = ui::topbar::layout_topbar(areas.topbar, &state.topbar().tabs, state.pill_tabs);
         // Click the SCM tab: the pane is born 24x80 and must take the
         // main area at once (180x40 less top strip, session bar, and
         // main-pane borders), not render cornered.
@@ -2852,8 +2852,8 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "history never arrived");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
-        let grid = crate::ui::pane_grid_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let grid = crate::ui::layout::pane_grid_area(&areas);
         let at = |kind| MouseEvent {
             kind,
             column: grid.x + grid.width / 2,
@@ -2911,8 +2911,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(state.manager.alternate_screen(id));
-        let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
-        let grid = crate::ui::pane_grid_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let grid = crate::ui::layout::pane_grid_area(&areas);
         let at = |kind| MouseEvent {
             kind,
             column: grid.x + grid.width / 2,
@@ -3626,7 +3626,7 @@ mod tests {
             RunId::generate(), "codex",
         ).unwrap();
         state.open_telegram_dialog();
-        let areas = ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 180, 40));
         let (mut loaded, home) = telegram_test_ctx();
         // Topbar click behind the modal: nothing switches, modal stays.
         handle_telegram_mouse(

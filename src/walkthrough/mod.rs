@@ -750,8 +750,8 @@ impl Walkthrough {
 /// layouts inset the strip into the grid's first row, which is cut
 /// here (the grid itself keeps that row for PTY sizing).
 pub fn walk_area(term: ratatui::layout::Rect) -> ratatui::layout::Rect {
-    let areas = crate::ui::chrome_areas(term);
-    let mut grid = crate::ui::pane_grid_area(&areas);
+    let areas = crate::ui::layout::chrome_areas(term);
+    let mut grid = crate::ui::layout::pane_grid_area(&areas);
     if areas.topbar.height > 0
         && areas.topbar.y >= grid.y
         && areas.topbar.y < grid.y.saturating_add(grid.height)
@@ -1083,7 +1083,7 @@ mod tests {
         use ratatui::layout::Rect;
         for (w, h) in [(120u16, 30u16), (200u16, 50u16)] {
             let term = Rect::new(0, 0, w, h);
-            let areas = crate::ui::chrome_areas(term);
+            let areas = crate::ui::layout::chrome_areas(term);
             let walk = walk_area(term);
             assert!(
                 walk.y >= areas.topbar.y + areas.topbar.height,

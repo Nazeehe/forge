@@ -858,7 +858,7 @@ impl AppState {
 
     /// Testable content for the board view: selection, escaped text,
     /// width-picked hints. Frame rendering lives in `ui`.
-    pub fn board_view(&self) -> crate::ui::BoardView {
+    pub fn board_view(&self) -> crate::ui::board::BoardView {
         let wide = self.term_size.1 >= 100;
         let hints = if wide {
             vec![
@@ -878,7 +878,7 @@ impl AppState {
             self.board_focus.board.clone(),
             self.board_focus.board.as_deref().and_then(|id| self.boards.board(id)),
         ) else {
-            return crate::ui::BoardView {
+            return crate::ui::board::BoardView {
                 title: "Kanban".to_string(),
                 columns: Vec::new(),
                 focus_col: 0,
@@ -895,7 +895,7 @@ impl AppState {
             .enumerate()
             .map(|(ci, col)| {
                 let cards = board.cards_in(&col.name);
-                crate::ui::BoardColumnView {
+                crate::ui::board::BoardColumnView {
                     name: crate::core::safe_text::encode_for_display(&col.name),
                     wip_limit: col.wip_limit,
                     count: cards.len(),
@@ -927,7 +927,7 @@ impl AppState {
                                     crate::core::safe_text::encode_for_display(due)
                                 ));
                             }
-                            crate::ui::BoardCardView {
+                            crate::ui::board::BoardCardView {
                                 title: crate::core::safe_text::encode_for_display(&card.title),
                                 meta,
                                 selected: ci == self.board_focus.column
@@ -938,7 +938,7 @@ impl AppState {
                 }
             })
             .collect();
-        crate::ui::BoardView {
+        crate::ui::board::BoardView {
             title: format!("Kanban · {}", crate::core::safe_text::encode_for_display(&board.name)),
             columns,
             focus_col: self.board_focus.column,
@@ -1250,18 +1250,18 @@ impl AppState {
     /// Per-session tab strip for the focused session: agent CLI, human
     /// terminal, and lazygit SCM tabs, plus read-only overlay views.
     /// Empty when nothing is focused.
-    pub fn topbar(&self) -> crate::ui::TopBar {
+    pub fn topbar(&self) -> crate::ui::topbar::TopBar {
         let Some(id) = self.manager.active() else {
-            return crate::ui::TopBar::default();
+            return crate::ui::topbar::TopBar::default();
         };
         let Some(rec) = self.manager.get(id) else {
-            return crate::ui::TopBar::default();
+            return crate::ui::topbar::TopBar::default();
         };
-        let mut tabs: Vec<crate::ui::TopTab> = rec
+        let mut tabs: Vec<crate::ui::topbar::TopTab> = rec
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, tab)| crate::ui::TopTab {
+            .map(|(i, tab)| crate::ui::topbar::TopTab {
                 label: match tab.kind {
                     crate::session::TabKind::Agent => {
                         let mut chars = rec.cli_tool.chars();
@@ -1280,7 +1280,7 @@ impl AppState {
             .collect();
         if rec.tabs.len() > 1 && self.term_size.1 >= 100 {
             for (index, label) in OVERLAY_TABS.iter().enumerate() {
-                tabs.push(crate::ui::TopTab {
+                tabs.push(crate::ui::topbar::TopTab {
                     label: (*label).to_string(),
                     active: self.overlay_view == Some((id, index + rec.tabs.len())),
                 });
@@ -1298,7 +1298,7 @@ impl AppState {
                 tab.label = format!("{icon} {}", tab.label);
             }
         }
-        crate::ui::TopBar { tabs }
+        crate::ui::topbar::TopBar { tabs }
     }
 
     /// Select a PTY tab or one of the read-only view slots shown in the
@@ -1490,7 +1490,7 @@ impl AppState {
     pub fn visual_zoom(
         &mut self,
         id: crate::session::SessionId,
-        dir: crate::ui::VisualButton,
+        dir: crate::ui::visual::VisualButton,
         area_cols: u16,
         area_rows: u16,
         cell_w: f64,
@@ -1501,11 +1501,11 @@ impl AppState {
             return false;
         };
         let dir = match dir {
-            crate::ui::VisualButton::ZoomIn => ZoomDir::In,
-            crate::ui::VisualButton::ZoomOut => ZoomDir::Out,
+            crate::ui::visual::VisualButton::ZoomIn => ZoomDir::In,
+            crate::ui::visual::VisualButton::ZoomOut => ZoomDir::Out,
             // The chat toggle never reaches zoom: the mouse path
             // routes it to the toggle first. Unreachable by design.
-            crate::ui::VisualButton::Chat => return false,
+            crate::ui::visual::VisualButton::Chat => return false,
         };
         let next = zoom_step(slot.zoom, dir);
         if next == slot.zoom {
@@ -1588,7 +1588,7 @@ impl AppState {
     #[cfg(feature = "visual")]
     pub fn visual_footer_rows(&self, id: crate::session::SessionId, content_h: u16) -> u16 {
         match self.visual_slots.get(&id) {
-            Some(slot) if slot.chat_open => crate::ui::visual_chat_footer_rows(content_h),
+            Some(slot) if slot.chat_open => crate::ui::visual::visual_chat_footer_rows(content_h),
             _ => 0,
         }
     }
@@ -1600,8 +1600,8 @@ impl AppState {
         // History wraps to the box interior: content minus borders
         // and side pads, so sided rows stay exactly content-wide.
         let (rows, cols) = self.term_size;
-        let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
-        crate::ui::pane_content_area(&areas).width.saturating_sub(6)
+        let areas = crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+        crate::ui::layout::pane_content_area(&areas).width.saturating_sub(6)
     }
 
     /// All chat history rows for one slot, oldest first: one wrapped
@@ -1619,7 +1619,7 @@ impl AppState {
             if n > 0 {
                 rows.push(Vec::new());
             }
-            rows.extend(crate::ui::wrap_spans(
+            rows.extend(crate::ui::text::wrap_spans(
                 vec![crate::ui::SpanView {
                     text: format!(
                         "Q ({}): {}",
@@ -1644,7 +1644,7 @@ impl AppState {
                         if spans.is_empty() {
                             rows.push(Vec::new());
                         } else {
-                            rows.extend(crate::ui::wrap_spans(spans, width));
+                            rows.extend(crate::ui::text::wrap_spans(spans, width));
                         }
                     }
                 }
@@ -1955,11 +1955,11 @@ impl AppState {
         // rows below must match the rects the mouse path hit-tests,
         // or clicks and wheel routing desync from the paint.
         let (rows, cols) = self.term_size;
-        let areas = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
-        let content = crate::ui::pane_content_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+        let content = crate::ui::layout::pane_content_area(&areas);
         let foot_rows = self.visual_footer_rows(id, content.height);
-        let chrome = crate::ui::visual_chrome(content, self.pill_tabs, foot_rows);
-        let mut strip = crate::ui::visual_button_spans(self.pill_tabs, slot.chat_open);
+        let chrome = crate::ui::visual::visual_chrome(content, self.pill_tabs, foot_rows);
+        let mut strip = crate::ui::visual::visual_button_spans(self.pill_tabs, slot.chat_open);
         strip.push(crate::ui::SpanView {
             text: "  ←→↑↓ scroll · wheel scrolls".to_string(),
             style: muted,
@@ -1994,9 +1994,9 @@ impl AppState {
                 ),
                 style: muted,
             }];
-            strip.extend(crate::ui::truncate_spans(
+            strip.extend(crate::ui::text::truncate_spans(
                 alt,
-                crate::ui::VISUAL_STRIP_ALT_MAX,
+                crate::ui::visual::VISUAL_STRIP_ALT_MAX,
             ));
         }
         lines.push(strip);
@@ -2097,7 +2097,7 @@ impl AppState {
                 style: muted,
             };
             let fill_content = |mut row: Vec<crate::ui::SpanView>| {
-                let w = crate::ui::spans_width(&row);
+                let w = crate::ui::text::spans_width(&row);
                 let style = row.last().map(|s| s.style).unwrap_or(muted);
                 row.push(crate::ui::SpanView {
                     text: " ".repeat(inner.saturating_sub(w)),
@@ -2118,7 +2118,7 @@ impl AppState {
             let history = self.visual_chat_history_lines(slot);
             let tail = history.len().saturating_sub(slot.chat_scroll as usize);
             let start = tail.saturating_sub(
-                crate::ui::visual_chat_history_rows(foot_rows) as usize,
+                crate::ui::visual::visual_chat_history_rows(foot_rows) as usize,
             );
             for row in history[start..tail.min(history.len())].iter().cloned() {
                 let mut history_line = vec![side("│  ")];
@@ -2163,7 +2163,7 @@ impl AppState {
                 ],
             };
             let mut input_line = vec![side("│  ")];
-            input_line.extend(fill_content(crate::ui::truncate_spans(
+            input_line.extend(fill_content(crate::ui::text::truncate_spans(
                 input_spans,
                 inner as u16,
             )));
@@ -4729,30 +4729,30 @@ impl AppState {
         // grouped window, sharing the paint's exact math.
         let (rows, cols) = self.term_size;
         let sidebar =
-            crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows)).sidebar;
-        let rich = crate::ui::sidebar_is_rich(sidebar);
+            crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, cols, rows)).sidebar;
+        let rich = crate::ui::sidebar::sidebar_is_rich(sidebar);
         for _ in 0..=ids.len() {
             let info = self.sidebar_info();
-            let layout = crate::ui::sidebar_layout(
+            let layout = crate::ui::sidebar::sidebar_layout(
                 sidebar,
-                crate::ui::sidebar_footer_height(&info, rich),
+                crate::ui::sidebar::sidebar_footer_height(&info, rich),
             );
-            let budget = crate::ui::fleet_items_budget(
+            let budget = crate::ui::sidebar::fleet::fleet_items_budget(
                 &info,
                 rich,
                 sidebar.width,
                 layout.list.height,
             );
-            let window = crate::ui::fleet_window_items(&info, sidebar.width, budget);
+            let window = crate::ui::sidebar::fleet::fleet_window_items(&info, sidebar.width, budget);
             let cursor_block = self.fleet_cursor.and_then(|c| {
                 info.sessions
                     .iter()
                     .position(|row| row.id == c)
-                    .map(crate::ui::FleetItem::Block)
+                    .map(crate::ui::sidebar::fleet::FleetItem::Block)
             });
             match cursor_block {
                 Some(block) if window.contains(&block) => break,
-                Some(crate::ui::FleetItem::Block(p)) if p < self.fleet_scroll => {
+                Some(crate::ui::sidebar::fleet::FleetItem::Block(p)) if p < self.fleet_scroll => {
                     self.fleet_scroll = p;
                 }
                 Some(_) => {
@@ -4795,7 +4795,7 @@ impl AppState {
     }
 
     /// Session-bar tabs in order with live/focus flags.
-    pub fn tabs(&self) -> Vec<crate::ui::SessionTab> {
+    pub fn tabs(&self) -> Vec<crate::ui::session_bar::SessionTab> {
         let active = self.manager.active();
         self.bar_order()
             .into_iter()
@@ -4805,7 +4805,7 @@ impl AppState {
                     let group_color = group
                         .as_deref()
                         .and_then(|g| self.broker.group_color(g));
-                    crate::ui::SessionTab {
+                    crate::ui::session_bar::SessionTab {
                         title: rec.name.clone(),
                         live: rec.state.is_live(),
                         focused: Some(id) == active,
@@ -4835,12 +4835,12 @@ impl AppState {
         }
     }
 
-    pub fn sidebar_info(&self) -> crate::ui::SidebarInfo {
+    pub fn sidebar_info(&self) -> crate::ui::sidebar::SidebarInfo {
         let now = std::time::Instant::now();
         let active = self.manager.active();
         let session = active.and_then(|id| {
             self.manager.get(id).map(|rec| {
-                crate::ui::SessionDetail {
+                crate::ui::sidebar::SessionDetail {
                     name: rec.name.clone(),
                     cli_tool: rec.cli_tool.clone(),
                     cwd: rec.cwd.to_string_lossy().into_owned(),
@@ -4853,9 +4853,9 @@ impl AppState {
                         .broker
                         .timers_for(id)
                         .into_iter()
-                        .map(|(timer_id, due)| crate::ui::TimerView {
+                        .map(|(timer_id, due)| crate::ui::sidebar::TimerView {
                             id: timer_id,
-                            remaining: crate::ui::format_countdown(
+                            remaining: crate::ui::sidebar::format_countdown(
                                 due.saturating_duration_since(now),
                             ),
                         })
@@ -4873,9 +4873,9 @@ impl AppState {
             };
             let tier_n = self.fleet_tier(id, rec, active);
             let tier = match tier_n {
-                0 => crate::ui::FleetTier::Attention,
-                1 => crate::ui::FleetTier::Working,
-                _ => crate::ui::FleetTier::Idle,
+                0 => crate::ui::sidebar::FleetTier::Attention,
+                1 => crate::ui::sidebar::FleetTier::Working,
+                _ => crate::ui::sidebar::FleetTier::Idle,
             };
             // Reason prefers the explicit ping, then the sticky
             // status; the emoji mirrors the same source.
@@ -4885,19 +4885,19 @@ impl AppState {
                 if let Some(badge) = self.message_user_badges.get(&id) {
                     (badge.clone(), "🔔")
                 } else if let Some(st) = rec.status.as_ref() {
-                    (st.display(), crate::ui::status_emoji(st.kind))
+                    (st.display(), crate::ui::sidebar::status_emoji(st.kind))
                 } else {
                     (Self::session_state_label(rec), "")
                 }
             } else if let Some(st) = rec.status.as_ref() {
-                (st.display(), crate::ui::status_emoji(st.kind))
+                (st.display(), crate::ui::sidebar::status_emoji(st.kind))
             } else {
                 (Self::session_state_label(rec), "")
             };
             if Some(id) != active {
                 other_timers += self.broker.timers_for(id).len();
             }
-            sessions.push(crate::ui::FleetRow {
+            sessions.push(crate::ui::sidebar::FleetRow {
                 id,
                 name: rec.name.clone(),
                 tier,
@@ -4931,7 +4931,7 @@ impl AppState {
             let text = self.message_user_badges.get(&id)?.clone();
             Some((name, text))
         });
-        crate::ui::SidebarInfo {
+        crate::ui::sidebar::SidebarInfo {
             session,
             sessions,
             active,
@@ -8750,7 +8750,7 @@ mod tests {
         // Zooming changes the fingerprint but reuses the image id, so
         // the fixed placement id swaps the re-display without a
         // delete flash in between.
-        assert!(state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        assert!(state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
         let zoomed = paint_for(&state, id);
         assert_ne!(zoomed, paint, "zoom moves the paint");
         let reshow = state.visual_take_show(true, zoomed).expect("repaint");
@@ -8771,7 +8771,7 @@ mod tests {
         assert_eq!(state.visual_current_paint(), Some(paint));
         // Viewport moved without a reshow: the terminal is stale, so
         // the TUI must build bytes again.
-        assert!(state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        assert!(state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
         let zoomed = paint_for(&state, id);
         assert_ne!(state.visual_current_paint(), Some(zoomed), "stale paint");
         state.visual_take_show(true, zoomed).expect("reshow");
@@ -8789,20 +8789,20 @@ mod tests {
         complete(&mut state, id, 1, fake_png(64, 1000, 1000));
         // Zoomed out at minimum: further out changes nothing.
         for _ in 0..20 {
-            state.visual_zoom(id, crate::ui::VisualButton::ZoomOut, 200, 50, 8.0, 16.0);
+            state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomOut, 200, 50, 8.0, 16.0);
         }
         let slot = state.visual_slots.get(&id).unwrap();
         assert_eq!(slot.zoom, crate::visual::MIN_ZOOM);
         state.dirty = false;
-        assert!(!state.visual_zoom(id, crate::ui::VisualButton::ZoomOut, 200, 50, 8.0, 16.0));
+        assert!(!state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomOut, 200, 50, 8.0, 16.0));
         assert!(!state.dirty, "no-op zoom stays clean");
         // Zoom to maximum: 1000x1000 at 8x overflows a 200x50 tab by
         // (600, 350) cells.
         for _ in 0..30 {
-            state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0);
+            state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomIn, 200, 50, 8.0, 16.0);
         }
         assert_eq!(state.visual_slots.get(&id).unwrap().zoom, crate::visual::MAX_ZOOM);
-        assert!(!state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        assert!(!state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
         state.dirty = false;
         assert!(state.visual_scroll(id, 5, 7, 200, 50, 8.0, 16.0));
         assert!(state.dirty, "scroll marks dirty");
@@ -8817,7 +8817,7 @@ mod tests {
         state.dirty = false;
         let ghost = crate::session::SessionId::fresh();
         assert!(!state.visual_scroll(ghost, 1, 1, 200, 50, 8.0, 16.0));
-        assert!(!state.visual_zoom(ghost, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        assert!(!state.visual_zoom(ghost, crate::ui::visual::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
         assert!(!state.dirty);
     }
 
@@ -8953,7 +8953,7 @@ mod tests {
         assert_eq!(state.visual_slots.get(&id).unwrap().selected, None);
         assert!(!state.visual_select_at(id, 5, 5, 200, 50, 8.0, 16.0, false), "empty space, nothing selected");
         // Zoomed and panned: the same shape still resolves.
-        assert!(state.visual_zoom(id, crate::ui::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
+        assert!(state.visual_zoom(id, crate::ui::visual::VisualButton::ZoomIn, 200, 50, 8.0, 16.0));
         assert!(state.visual_scroll(id, 10, 5, 200, 50, 8.0, 16.0));
         assert!(state.visual_select_at(id, 65, 19, 200, 50, 8.0, 16.0, false));
         assert_eq!(state.visual_slots.get(&id).unwrap().selected, Some(1));
@@ -9338,15 +9338,15 @@ mod tests {
         complete(&mut state, id, 1, fake_png(64, 10, 10));
         assert!(state.visual_toggle_chat(id));
         let view = state.visual_view(id, true);
-        let areas = crate::ui::chrome_areas(Rect::new(0, 0, 100, 40));
-        let content = crate::ui::pane_content_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(Rect::new(0, 0, 100, 40));
+        let content = crate::ui::layout::pane_content_area(&areas);
         let foot = state.visual_footer_rows(id, content.height);
-        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let chrome = crate::ui::visual::visual_chrome(content, state.pill_tabs, foot);
         let ask_idx = (chrome.footer.y - content.y) as usize;
         let block = &view.lines[ask_idx..ask_idx + foot as usize];
         let width = content.width as usize;
         for (i, row) in block.iter().enumerate() {
-            assert_eq!(crate::ui::spans_width(row), width, "box row {i} fills");
+            assert_eq!(crate::ui::text::spans_width(row), width, "box row {i} fills");
         }
         let text = |row: &Vec<crate::ui::SpanView>| {
             row.iter().map(|s| s.text.as_str()).collect::<String>()
@@ -9493,10 +9493,10 @@ mod tests {
         });
         let view = state.visual_view(id, true);
         use ratatui::layout::Rect;
-        let areas = crate::ui::chrome_areas(Rect::new(0, 0, 100, 40));
-        let content = crate::ui::pane_content_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(Rect::new(0, 0, 100, 40));
+        let content = crate::ui::layout::pane_content_area(&areas);
         let foot = state.visual_footer_rows(id, content.height);
-        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let chrome = crate::ui::visual::visual_chrome(content, state.pill_tabs, foot);
         let base = (chrome.footer.y - content.y) as usize;
         let text = |i: usize| {
             view.lines[i].iter().map(|s| s.text.as_str()).collect::<String>()
@@ -9551,10 +9551,10 @@ mod tests {
         assert!(state.visual_toggle_chat(id));
         assert_eq!(state.visual_footer_rows(id, 36), 11);
         let view = state.visual_view(id, true);
-        let areas = crate::ui::chrome_areas(Rect::new(0, 0, 100, 40));
-        let content = crate::ui::pane_content_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(Rect::new(0, 0, 100, 40));
+        let content = crate::ui::layout::pane_content_area(&areas);
         assert_eq!(content.height, 36);
-        let chrome = crate::ui::visual_chrome(
+        let chrome = crate::ui::visual::visual_chrome(
             content,
             state.pill_tabs,
             state.visual_footer_rows(id, content.height),
@@ -9838,10 +9838,10 @@ mod tests {
         assert!(state.visual_toggle_chat(id));
         let view = state.visual_view(id, true);
         let (rows, cols) = state.term_size;
-        let areas = crate::ui::chrome_areas(Rect::new(0, 0, cols, rows));
-        let content = crate::ui::pane_content_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(Rect::new(0, 0, cols, rows));
+        let content = crate::ui::layout::pane_content_area(&areas);
         let foot = state.visual_footer_rows(id, content.height);
-        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let chrome = crate::ui::visual::visual_chrome(content, state.pill_tabs, foot);
         let ask_idx = (chrome.footer.y - content.y) as usize;
         assert!(
             ask_idx < view.lines.len(),
@@ -9887,10 +9887,10 @@ mod tests {
         });
         let view = state.visual_view(id, false);
         let (rows, cols) = state.term_size;
-        let areas = crate::ui::chrome_areas(Rect::new(0, 0, cols, rows));
-        let content = crate::ui::pane_content_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(Rect::new(0, 0, cols, rows));
+        let content = crate::ui::layout::pane_content_area(&areas);
         let foot = state.visual_footer_rows(id, content.height);
-        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let chrome = crate::ui::visual::visual_chrome(content, state.pill_tabs, foot);
         let ask_idx = (chrome.footer.y - content.y) as usize;
         assert!(
             ask_idx < view.lines.len(),
@@ -9934,19 +9934,19 @@ mod tests {
         let view = state.visual_view(id, true);
         let (rows, cols) = state.term_size;
         let area = Rect::new(0, 0, cols, rows);
-        let areas = crate::ui::chrome_areas(area);
-        let content = crate::ui::pane_content_area(&areas);
+        let areas = crate::ui::layout::chrome_areas(area);
+        let content = crate::ui::layout::pane_content_area(&areas);
         let foot = state.visual_footer_rows(id, content.height);
-        let chrome = crate::ui::visual_chrome(content, state.pill_tabs, foot);
+        let chrome = crate::ui::visual::visual_chrome(content, state.pill_tabs, foot);
         let chrome_ui = crate::ui::Chrome {
-            tabs: vec![crate::ui::SessionTab {
+            tabs: vec![crate::ui::session_bar::SessionTab {
                 title: "agent".to_string(),
                 live: true,
                 focused: true,
                 group: None,
                 group_color: None,
             }],
-            topbar: crate::ui::TopBar { tabs: Vec::new() },
+            topbar: crate::ui::topbar::TopBar { tabs: Vec::new() },
             detail: None,
             sessions: Vec::new(),
             active: None,
@@ -10429,7 +10429,7 @@ mod tests {
         assert!(set.contains(r#""ok":true"#), "set: {set}");
         let detail = state.sidebar_info().session.expect("detail renders");
         assert!(detail.status.as_deref() == Some("progress: compiling"), "detail: {detail:?}");
-        let lines = crate::ui::sidebar_lines(&state.sidebar_info());
+        let lines = crate::ui::sidebar::sidebar_lines(&state.sidebar_info());
         assert!(lines.iter().any(|l| {
             l.spans.iter().any(|s| s.content.contains("progress: compiling"))
         }), "sidebar shows status");
@@ -11374,8 +11374,8 @@ mod tests {
             crate::core::ids::RunId::generate(), "codex",
         ).unwrap();
         assert_eq!(state.topbar().tabs.len(), 5);
-        let bar = crate::ui::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
-        assert_eq!(crate::ui::layout_topbar(bar, &state.topbar().tabs, false).len(), 5);
+        let bar = crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
+        assert_eq!(crate::ui::topbar::layout_topbar(bar, &state.topbar().tabs, false).len(), 5);
         assert!(state.manager.remove(id));
     }
 

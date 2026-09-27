@@ -23,7 +23,7 @@ const FLAT_ALLOWED: &[&str] = &[
 
 /// `.rs` files under `src/` (paths relative to `src/`) allowed to exceed
 /// [`MAX_FILE_LINES`]. Emptied as the oversized files are split.
-const OVERSIZE_ALLOWED: &[&str] = &["app.rs", "comms.rs", "hooks/install.rs", "tui.rs", "ui/mod.rs"];
+const OVERSIZE_ALLOWED: &[&str] = &["app.rs", "comms.rs", "hooks/install.rs", "tui.rs"];
 
 fn src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
