@@ -1152,10 +1152,10 @@ fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
     // shift-held originals here so `K` never reads as `k`.
     if key.modifiers == KeyModifiers::SHIFT {
         match key.code {
-            KeyCode::Char('J') => state.board_reorder_focused(crate::board::Shift::Down),
-            KeyCode::Char('K') => state.board_reorder_focused(crate::board::Shift::Up),
-            KeyCode::Char('T') => state.board_reorder_focused(crate::board::Shift::Top),
-            KeyCode::Char('B') => state.board_reorder_focused(crate::board::Shift::Bottom),
+            KeyCode::Char('J') => state.board_reorder_focused(crate::kanban::board::Shift::Down),
+            KeyCode::Char('K') => state.board_reorder_focused(crate::kanban::board::Shift::Up),
+            KeyCode::Char('T') => state.board_reorder_focused(crate::kanban::board::Shift::Top),
+            KeyCode::Char('B') => state.board_reorder_focused(crate::kanban::board::Shift::Bottom),
             _ => {}
         }
     }
@@ -3065,7 +3065,7 @@ mod tests {
             .boards
             .board_mut("team")
             .unwrap()
-            .card_create(crate::board::CardDraft::new("ship"))
+            .card_create(crate::kanban::board::CardDraft::new("ship"))
             .unwrap();
         state.board_open = true;
         state.ensure_board_focus();
@@ -3170,7 +3170,7 @@ mod tests {
             .boards
             .board_mut("team")
             .unwrap()
-            .card_create(crate::board::CardDraft::new("first"))
+            .card_create(crate::kanban::board::CardDraft::new("first"))
             .unwrap();
         state.board_open = true;
         state.ensure_board_focus();
@@ -3191,7 +3191,7 @@ mod tests {
             .boards
             .board_mut("team")
             .unwrap()
-            .card_create(crate::board::CardDraft::new("first"))
+            .card_create(crate::kanban::board::CardDraft::new("first"))
             .unwrap();
         state.board_open = true;
         state.ensure_board_focus();
@@ -3232,7 +3232,7 @@ mod tests {
             .boards
             .board_mut("team")
             .unwrap()
-            .card_create(crate::board::CardDraft::new("first"))
+            .card_create(crate::kanban::board::CardDraft::new("first"))
             .unwrap();
         state.board_open = true;
         state.ensure_board_focus();
@@ -3285,7 +3285,7 @@ mod tests {
                 .boards
                 .board_mut("team")
                 .unwrap()
-                .card_create(crate::board::CardDraft::new(title))
+                .card_create(crate::kanban::board::CardDraft::new(title))
                 .unwrap();
             state.boards.board_mut("team").unwrap().card_move(&id, "Doing").unwrap();
         }

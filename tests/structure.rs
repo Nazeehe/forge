@@ -15,7 +15,6 @@ const MAX_FILE_LINES: usize = 1500;
 /// Emptied as feature folders take their files.
 const FLAT_ALLOWED: &[&str] = &[
     "app.rs",
-    "board.rs",
     "bot.rs",
     "card_edit.rs",
     "comms.rs",

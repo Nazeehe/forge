@@ -35,7 +35,7 @@ const FIELD_COUNT: usize = 11;
 /// WIP-checked status move (`None` keeps the card where it is).
 #[derive(Clone, Debug)]
 pub struct CardEditResult {
-    pub patch: crate::board::CardPatch,
+    pub patch: crate::kanban::board::CardPatch,
     pub column: Option<String>,
 }
 
@@ -75,7 +75,7 @@ impl CardEditDialog {
     /// Prefill every row from the card. `columns` are the live board
     /// column names in order; the status cycler starts on the card's
     /// own column (or the first when it somehow went missing).
-    pub fn new(card: &crate::board::Card, columns: &[String], pills: bool) -> Self {
+    pub fn new(card: &crate::kanban::board::Card, columns: &[String], pills: bool) -> Self {
         let column_pos = columns.iter().position(|c| c == &card.column).unwrap_or(0);
         let column = Select::default()
             .choices(columns.to_vec())
@@ -88,10 +88,10 @@ impl CardEditDialog {
             "urgent".to_string(),
         ];
         let priority_pos = match card.priority {
-            crate::board::Priority::Low => 0,
-            crate::board::Priority::Normal => 1,
-            crate::board::Priority::High => 2,
-            crate::board::Priority::Urgent => 3,
+            crate::kanban::board::Priority::Low => 0,
+            crate::kanban::board::Priority::Normal => 1,
+            crate::kanban::board::Priority::High => 2,
+            crate::kanban::board::Priority::Urgent => 3,
         };
         let priority = Select::default()
             .choices(priorities)
@@ -170,7 +170,7 @@ impl CardEditDialog {
 
     /// Parse the estimate row: blank clears a previously set value
     /// and keeps an unset one; numbers clamp to
-    /// [`crate::board::MAX_ESTIMATE`]; anything else errors.
+    /// [`crate::kanban::board::MAX_ESTIMATE`]; anything else errors.
     fn estimate_patch(&self) -> Result<(Option<u32>, bool), String> {
         let raw = Self::text_of(&self.estimate);
         let trimmed = raw.trim();
@@ -179,7 +179,7 @@ impl CardEditDialog {
         }
         match trimmed.parse::<u64>() {
             Ok(e) => Ok((
-                Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32),
+                Some(e.min(crate::kanban::board::MAX_ESTIMATE as u64) as u32),
                 false,
             )),
             Err(_) => Err("estimate must be a number".to_string()),
@@ -206,10 +206,10 @@ impl CardEditDialog {
             self.error = Some("title must not be empty".to_string());
             return CardEditOutcome::Pending;
         }
-        if title.trim().chars().count() > crate::board::MAX_TITLE_LEN {
+        if title.trim().chars().count() > crate::kanban::board::MAX_TITLE_LEN {
             self.error = Some(format!(
                 "title too long (max {} chars)",
-                crate::board::MAX_TITLE_LEN
+                crate::kanban::board::MAX_TITLE_LEN
             ));
             return CardEditOutcome::Pending;
         }
@@ -242,10 +242,10 @@ impl CardEditDialog {
         } else {
             Some(column_now)
         };
-        let priority = crate::board::Priority::parse(&Self::selected(&self.priority));
+        let priority = crate::kanban::board::Priority::parse(&Self::selected(&self.priority));
         self.error = None;
         CardEditOutcome::Submitted(CardEditResult {
-            patch: crate::board::CardPatch {
+            patch: crate::kanban::board::CardPatch {
                 title: Some(title.trim().to_string()),
                 description: Some(Self::text_of(&self.description)),
                 assignee: (!assignee_raw.trim().is_empty()).then(|| assignee_raw.trim().to_string()),
@@ -685,15 +685,15 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
-    fn sample_card() -> crate::board::Card {
-        crate::board::Card {
+    fn sample_card() -> crate::kanban::board::Card {
+        crate::kanban::board::Card {
             id: "c-1".to_string(),
             title: "fix leak".to_string(),
             description: "torn write".to_string(),
             column: "Backlog".to_string(),
             assignee: "kins".to_string(),
             tags: vec!["pty".to_string()],
-            priority: crate::board::Priority::High,
+            priority: crate::kanban::board::Priority::High,
             created_at: 1,
             updated_at: 1,
             start_date: Some("2026-09-01".to_string()),

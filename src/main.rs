@@ -5,7 +5,6 @@
 #![allow(dead_code)]
 
 mod app;
-mod board;
 mod bot;
 mod card_edit;
 mod comms;
@@ -16,6 +15,7 @@ mod help;
 mod hooks;
 mod input;
 mod ipc;
+mod kanban;
 mod oobe;
 mod quit;
 mod telegram;

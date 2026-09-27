@@ -189,7 +189,7 @@ pub struct AppState {
     /// Last gravity drop; `None` arms the timer without stepping.
     pub tetris_last_drop: Option<std::time::Instant>,
     /// Workspace kanban boards, mutated by the human and by MCP tools.
-    pub boards: crate::board::BoardStore,
+    pub boards: crate::kanban::board::BoardStore,
     /// Boards changed since the last atomic save; the TUI loop flushes.
     pub boards_dirty: bool,
     /// Board selection: picked board plus column/card cursor.
@@ -419,7 +419,7 @@ impl AppState {
             tetris_open: false,
             tetris: crate::tetris::TetrisGame::new(),
             tetris_last_drop: None,
-            boards: crate::board::BoardStore::new(),
+            boards: crate::kanban::board::BoardStore::new(),
             boards_dirty: false,
             board_focus: BoardFocus::default(),
             board_draft: None,
@@ -511,14 +511,14 @@ impl AppState {
         if let Some(id) = self.board_focus.board.clone() {
             if let Some(b) = self.boards.board(&id) {
                 self.board_focus.column =
-                    crate::board::clamp_index(b.columns.len(), self.board_focus.column);
+                    crate::kanban::board::clamp_index(b.columns.len(), self.board_focus.column);
                 let column = b
                     .columns
                     .get(self.board_focus.column)
                     .map(|c| c.name.clone())
                     .unwrap_or_default();
                 self.board_focus.card =
-                    crate::board::clamp_index(b.cards_in(&column).len(), self.board_focus.card);
+                    crate::kanban::board::clamp_index(b.cards_in(&column).len(), self.board_focus.card);
             }
         }
     }
@@ -536,7 +536,7 @@ impl AppState {
                 return;
             }
         };
-        match crate::board::BoardStore::from_json_str(&text) {
+        match crate::kanban::board::BoardStore::from_json_str(&text) {
             Ok(store) => {
                 self.boards = store;
             }
@@ -547,7 +547,7 @@ impl AppState {
                     .unwrap_or(0);
                 let stale = path.with_extension(format!("corrupt-{stamp}.json"));
                 let _ = std::fs::rename(&path, &stale);
-                self.boards = crate::board::BoardStore::new();
+                self.boards = crate::kanban::board::BoardStore::new();
                 self.board_notice =
                     Some(format!("kanban save corrupt ({e}); quarantined, starting empty"));
             }
@@ -576,11 +576,11 @@ impl AppState {
         }
     }
 
-    fn focused_board(&self) -> Option<&crate::board::Board> {
+    fn focused_board(&self) -> Option<&crate::kanban::board::Board> {
         self.board_focus.board.as_deref().and_then(|id| self.boards.board(id))
     }
 
-    fn focused_board_mut(&mut self) -> Option<&mut crate::board::Board> {
+    fn focused_board_mut(&mut self) -> Option<&mut crate::kanban::board::Board> {
         let id = self.board_focus.board.clone()?;
         self.boards.board_mut(&id)
     }
@@ -713,7 +713,7 @@ impl AppState {
             .and_then(|b| b.card(&id))
             .map(|c| c.priority.cycle());
         if let (Some(next), Some(board)) = (next, self.focused_board_mut()) {
-            let patch = crate::board::CardPatch { priority: Some(next), ..Default::default() };
+            let patch = crate::kanban::board::CardPatch { priority: Some(next), ..Default::default() };
             if board.card_update(&id, patch).is_ok() {
                 self.note_boards_changed();
             }
@@ -728,7 +728,7 @@ impl AppState {
             .and_then(|b| b.card(&id))
             .map(|c| (c.progress as i16 + delta).clamp(0, 100) as u16);
         if let (Some(next), Some(board)) = (next, self.focused_board_mut()) {
-            let patch = crate::board::CardPatch { progress: Some(next), ..Default::default() };
+            let patch = crate::kanban::board::CardPatch { progress: Some(next), ..Default::default() };
             if board.card_update(&id, patch).is_ok() {
                 self.note_boards_changed();
             }
@@ -736,7 +736,7 @@ impl AppState {
     }
 
     /// Reorder the focused card inside its column; the cursor follows.
-    pub fn board_reorder_focused(&mut self, dir: crate::board::Shift) {
+    pub fn board_reorder_focused(&mut self, dir: crate::kanban::board::Shift) {
         let Some(id) = self.focused_card_id() else { return };
         if self.focused_board_mut().is_some_and(|b| b.shift_card(&id, dir).is_ok()) {
             self.refocus_card(&id);
@@ -851,7 +851,7 @@ impl AppState {
                 self.board_focus.card = pos;
             } else {
                 self.board_focus.card =
-                    crate::board::clamp_index(cards.len(), self.board_focus.card);
+                    crate::kanban::board::clamp_index(cards.len(), self.board_focus.card);
             }
         }
     }
@@ -1061,7 +1061,7 @@ impl AppState {
             let moved = self
                 .focused_board_mut()
                 .map(|board| board.card_move(&id, target))
-                .unwrap_or(Err(crate::board::BoardError::CardNotFound(id.clone())));
+                .unwrap_or(Err(crate::kanban::board::BoardError::CardNotFound(id.clone())));
             if let Err(e) = moved {
                 self.board_notice = Some(e.to_string());
                 self.dirty = true;
@@ -1077,7 +1077,7 @@ impl AppState {
         match self
             .focused_board_mut()
             .map(|board| board.card_update(&id, patch))
-            .unwrap_or(Err(crate::board::BoardError::CardNotFound(id.clone())))
+            .unwrap_or(Err(crate::kanban::board::BoardError::CardNotFound(id.clone())))
         {
             Ok(()) => {
                 self.card_edit = None;
@@ -1200,7 +1200,7 @@ impl AppState {
             .and_then(|b| b.columns.get(self.board_focus.column))
             .map(|c| c.name.clone())
             .ok_or_else(|| "no column focused".to_string())?;
-        let mut draft = crate::board::CardDraft::new(title);
+        let mut draft = crate::kanban::board::CardDraft::new(title);
         draft.column = Some(column);
         let id = self
             .focused_board_mut()
@@ -1215,7 +1215,7 @@ impl AppState {
         let Some(id) = self.focused_card_id() else {
             return Err("no card focused".to_string());
         };
-        let patch = crate::board::CardPatch {
+        let patch = crate::kanban::board::CardPatch {
             title: Some(title.to_string()),
             ..Default::default()
         };
@@ -2472,14 +2472,14 @@ impl AppState {
                     Ok(estimate) => estimate,
                     Err(e) => return Some(Err(e)),
                 };
-                let draft = crate::board::CardDraft {
+                let draft = crate::kanban::board::CardDraft {
                     title,
                     column: arg("column"),
                     description: arg("description").unwrap_or_default(),
                     assignee: arg("assignee"),
                     priority: arg("priority")
-                        .map(|p| crate::board::Priority::parse(&p))
-                        .unwrap_or(crate::board::Priority::Normal),
+                        .map(|p| crate::kanban::board::Priority::parse(&p))
+                        .unwrap_or(crate::kanban::board::Priority::Normal),
                     tags: args_v
                         .get("tags")
                         .and_then(|t| t.as_array())
@@ -2532,12 +2532,12 @@ impl AppState {
                 let raw_empty = |key: &str| {
                     args_v.get(key).and_then(|v| v.as_str()).is_some_and(|s| s.trim().is_empty())
                 };
-                let patch = crate::board::CardPatch {
+                let patch = crate::kanban::board::CardPatch {
                     title: arg("title"),
                     description: arg("description"),
                     assignee: arg("assignee"),
                     clear_assignee: raw_empty("assignee"),
-                    priority: arg("priority").map(|p| crate::board::Priority::parse(&p)),
+                    priority: arg("priority").map(|p| crate::kanban::board::Priority::parse(&p)),
                     progress,
                     tags: args_v.get("tags").and_then(|t| t.as_array()).map(|arr| {
                         arr.iter().filter_map(|t| t.as_str()).map(|t| t.to_string()).collect()
@@ -2636,7 +2636,7 @@ impl AppState {
 
     fn parse_column_specs(
         args: &serde_json::Value,
-    ) -> Result<Option<Vec<crate::board::ColumnSpec>>, String> {
+    ) -> Result<Option<Vec<crate::kanban::board::ColumnSpec>>, String> {
         let Some(raw) = args.get("columns") else {
             return Ok(None);
         };
@@ -2647,14 +2647,14 @@ impl AppState {
         let mut out = Vec::with_capacity(arr.len());
         for item in arr {
             if let Some(name) = item.as_str() {
-                out.push(crate::board::ColumnSpec::new(name));
+                out.push(crate::kanban::board::ColumnSpec::new(name));
             } else if item.is_object() {
                 let name = item
                     .get("name")
                     .and_then(|n| n.as_str())
                     .ok_or("column entries need a name")?;
                 let wip = item.get("wip_limit").and_then(|w| w.as_u64()).unwrap_or(0) as u32;
-                out.push(crate::board::ColumnSpec::with_wip(name, wip));
+                out.push(crate::kanban::board::ColumnSpec::with_wip(name, wip));
             } else {
                 return Err("column entries must be names or {name, wip_limit}".to_string());
             }
@@ -2662,7 +2662,7 @@ impl AppState {
         Ok(Some(out))
     }
 
-    fn card_json(card: &crate::board::Card) -> String {
+    fn card_json(card: &crate::kanban::board::Card) -> String {
         serde_json::json!({
             "id": card.id,
             "title": card.title,
@@ -2688,13 +2688,13 @@ impl AppState {
             None | Some(serde_json::Value::Null) => Ok(None),
             Some(serde_json::Value::Number(n)) => n
                 .as_u64()
-                .map(|e| Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32))
+                .map(|e| Some(e.min(crate::kanban::board::MAX_ESTIMATE as u64) as u32))
                 .ok_or_else(|| "estimate must be a number".to_string()),
             Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok(None),
             Some(serde_json::Value::String(s)) => s
                 .trim()
                 .parse::<u64>()
-                .map(|e| Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32))
+                .map(|e| Some(e.min(crate::kanban::board::MAX_ESTIMATE as u64) as u32))
                 .map_err(|_| "estimate must be a number".to_string()),
             Some(_) => Err("estimate must be a number".to_string()),
         }
@@ -2707,13 +2707,13 @@ impl AppState {
             None | Some(serde_json::Value::Null) => Ok((None, false)),
             Some(serde_json::Value::Number(n)) => n
                 .as_u64()
-                .map(|e| (Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32), false))
+                .map(|e| (Some(e.min(crate::kanban::board::MAX_ESTIMATE as u64) as u32), false))
                 .ok_or_else(|| "estimate must be a number".to_string()),
             Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok((None, true)),
             Some(serde_json::Value::String(s)) => s
                 .trim()
                 .parse::<u64>()
-                .map(|e| (Some(e.min(crate::board::MAX_ESTIMATE as u64) as u32), false))
+                .map(|e| (Some(e.min(crate::kanban::board::MAX_ESTIMATE as u64) as u32), false))
                 .map_err(|_| "estimate must be a number".to_string()),
             Some(_) => Err("estimate must be a number".to_string()),
         }
@@ -7867,9 +7867,9 @@ mod tests {
     fn board_view_marks_selection_and_hints() {
         let mut s = AppState::new();
         s.boards.board_create("team", None).unwrap();
-        let draft_a = crate::board::CardDraft::new("alpha");
+        let draft_a = crate::kanban::board::CardDraft::new("alpha");
         s.boards.board_mut("team").unwrap().card_create(draft_a).unwrap();
-        let mut draft_b = crate::board::CardDraft::new("beta");
+        let mut draft_b = crate::kanban::board::CardDraft::new("beta");
         draft_b.column = Some("Todo".to_string());
         s.boards.board_mut("team").unwrap().card_create(draft_b).unwrap();
         s.ensure_board_focus();
@@ -7899,10 +7899,10 @@ mod tests {
         let mut s = AppState::new();
         s.boards.board_create("team", None).unwrap();
         for t in ["one", "two", "three"] {
-            let id = s.boards.board_mut("team").unwrap().card_create(crate::board::CardDraft::new(t)).unwrap();
+            let id = s.boards.board_mut("team").unwrap().card_create(crate::kanban::board::CardDraft::new(t)).unwrap();
             s.boards.board_mut("team").unwrap().card_move(&id, "Doing").unwrap();
         }
-        let mut fourth = crate::board::CardDraft::new("fourth");
+        let mut fourth = crate::kanban::board::CardDraft::new("fourth");
         fourth.column = Some("Todo".to_string());
         let extra = s.boards.board_mut("team").unwrap().card_create(fourth).unwrap();
         s.ensure_board_focus();
@@ -7919,7 +7919,7 @@ mod tests {
     fn board_complete_and_delete_focused_card() {
         let mut s = AppState::new();
         s.boards.board_create("team", None).unwrap();
-        let id = s.boards.board_mut("team").unwrap().card_create(crate::board::CardDraft::new("ship")).unwrap();
+        let id = s.boards.board_mut("team").unwrap().card_create(crate::kanban::board::CardDraft::new("ship")).unwrap();
         s.ensure_board_focus();
         s.board_complete_focused();
         assert_eq!(s.boards.board("team").unwrap().card(&id).unwrap().progress, 100);
@@ -7963,7 +7963,7 @@ mod tests {
     fn board_view_escapes_hostile_text() {
         let mut s = AppState::new();
         s.boards.board_create("team", None).unwrap();
-        let mut draft = crate::board::CardDraft::new("<script>alert(1)</script>");
+        let mut draft = crate::kanban::board::CardDraft::new("<script>alert(1)</script>");
         draft.assignee = Some("a\u{202E}b".to_string());
         s.boards.board_mut("team").unwrap().card_create(draft).unwrap();
         s.ensure_board_focus();
