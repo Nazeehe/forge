@@ -187,7 +187,6 @@ impl Broker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::comms::test_support::*;
 
         #[test]

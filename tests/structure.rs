@@ -13,14 +13,11 @@ const MAX_FILE_LINES: usize = 1500;
 
 /// Flat `src/*.rs` files (besides `main.rs`) still allowed at the top level.
 /// Emptied as feature folders take their files.
-const FLAT_ALLOWED: &[&str] = &[
-    "app.rs",
-    "comms.rs",
-];
+const FLAT_ALLOWED: &[&str] = &["app.rs"];
 
 /// `.rs` files under `src/` (paths relative to `src/`) allowed to exceed
 /// [`MAX_FILE_LINES`]. Emptied as the oversized files are split.
-const OVERSIZE_ALLOWED: &[&str] = &["app.rs", "comms.rs", "hooks/install.rs"];
+const OVERSIZE_ALLOWED: &[&str] = &["app.rs", "hooks/install.rs"];
 
 fn src_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
