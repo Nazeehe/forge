@@ -711,7 +711,7 @@ fn pad_top_for(inner_height: u16) -> u16 {
 }
 
 fn safe_name(raw: &str) -> String {
-    crate::core::safe_text::encode_for_display(raw)
+    crate::infra::safe_text::encode_for_display(raw)
 }
 
 /// Truncate a row to a cell width, marking cuts with an ellipsis so

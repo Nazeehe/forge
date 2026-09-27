@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use tuirealm::component::Component;
 
-use crate::core::safe_text;
+use crate::infra::safe_text;
 
 use super::layout::ChromeAreas;
 use super::session_bar::render_pill;

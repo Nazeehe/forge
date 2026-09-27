@@ -206,13 +206,13 @@ pub(super) fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                 Some("yolo") => {
                     if ui::topbar::ChromeButton::new("[Yolo]", ratatui::style::Style::default())
                         .click(mev.column, mev.row, buttons.yolo) {
-                        state.set_permission_mode(crate::core::config::PermissionMode::Yolo);
+                        state.set_permission_mode(crate::infra::config::PermissionMode::Yolo);
                     }
                 }
                 Some(_) => {
                     if ui::topbar::ChromeButton::new("[Off]", ratatui::style::Style::default())
                         .click(mev.column, mev.row, buttons.off) {
-                        state.set_permission_mode(crate::core::config::PermissionMode::Off);
+                        state.set_permission_mode(crate::infra::config::PermissionMode::Off);
                     }
                 }
                 None => {}
@@ -460,8 +460,8 @@ pub(super) fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::event::AppEvent;
-    use crate::core::ids::RunId;
+    use crate::infra::event::AppEvent;
+    use crate::infra::ids::RunId;
     use crate::tui::keys::spawn_shell_cmd;
 
     #[test]
@@ -604,7 +604,7 @@ mod tests {
                 "a",
                 &std::env::temp_dir(),
                 "exec cat",
-                crate::core::ids::RunId::generate(),
+                crate::infra::ids::RunId::generate(),
                 "codex",
             )
             .unwrap();
@@ -947,7 +947,7 @@ mod tests {
         // Sidebar is x=64..80; with nothing pending the footer
         // shrinks and buttons sit at y=19, Off at x=66..71, the
         // Kanban button one row below at y=20, Tetris at y=21.
-        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Yolo);
+        assert_eq!(state.permission_mode, crate::infra::config::PermissionMode::Yolo);
         forward_mouse(
             &mut state,
             MouseEvent {
@@ -957,7 +957,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Off);
+        assert_eq!(state.permission_mode, crate::infra::config::PermissionMode::Off);
         // The Kanban row toggles the board, never the permission mode.
         assert!(!state.board_open);
         forward_mouse(
@@ -970,7 +970,7 @@ mod tests {
             },
         );
         assert!(state.board_open);
-        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Off);
+        assert_eq!(state.permission_mode, crate::infra::config::PermissionMode::Off);
         // Hover over Yolo (x=72..78) must not flip it back.
         state.dirty = false;
         forward_mouse(
@@ -982,7 +982,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Off);
+        assert_eq!(state.permission_mode, crate::infra::config::PermissionMode::Off);
         assert!(!state.dirty, "hover leaves no work");
         // Click Yolo to return (pill starts at x=74, footer row 19).
         forward_mouse(
@@ -994,7 +994,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Yolo);
+        assert_eq!(state.permission_mode, crate::infra::config::PermissionMode::Yolo);
     }
 
     #[test]

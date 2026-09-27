@@ -661,10 +661,10 @@ pub enum HandoffOutcome {
 /// or confirming a command that Forge did not accept.
 pub fn handoff_report(
     poller: &mut Poller,
-    tx: &std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
     report: PollReport,
 ) -> HandoffOutcome {
-    let mut event = crate::core::event::AppEvent::TelegramPoll(report);
+    let mut event = crate::infra::event::AppEvent::TelegramPoll(report);
     for attempt in 0..HANDOFF_RETRIES {
         match tx.try_send(event) {
             Ok(()) => {
@@ -698,8 +698,8 @@ pub fn handoff_report(
 /// repolls from scratch, which can redeliver recent operator text but
 /// never drops it.
 pub fn poll_forever(
-    shared: std::sync::Arc<std::sync::Mutex<crate::core::config::TelegramConfig>>,
-    tx: std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    shared: std::sync::Arc<std::sync::Mutex<crate::infra::config::TelegramConfig>>,
+    tx: std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
 ) {
     let mut poller = Poller::new();
     loop {
@@ -717,8 +717,8 @@ pub fn poll_forever(
 /// touches nothing (no fetch, no events, no confirmations).
 pub fn poll_turn(
     poller: &mut Poller,
-    cfg: &crate::core::config::TelegramConfig,
-    tx: &std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    cfg: &crate::infra::config::TelegramConfig,
+    tx: &std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
 ) -> PollTurn {
     if !cfg.enabled {
         return PollTurn::IdleDisabled;
@@ -750,8 +750,8 @@ pub fn poll_turn(
 }
 
 fn sleep_backoff_while_unchanged(
-    shared: &std::sync::Arc<std::sync::Mutex<crate::core::config::TelegramConfig>>,
-    original: &crate::core::config::TelegramConfig,
+    shared: &std::sync::Arc<std::sync::Mutex<crate::infra::config::TelegramConfig>>,
+    original: &crate::infra::config::TelegramConfig,
     total: std::time::Duration,
 ) {
     let start = std::time::Instant::now();
@@ -770,10 +770,10 @@ fn sleep_backoff_while_unchanged(
 /// Dedicated outbound worker. A condition variable wakes it as soon as the
 /// owner queues a reply, independently of any in-flight long poll.
 pub fn sender_forever(
-    shared: std::sync::Arc<std::sync::Mutex<crate::core::config::TelegramConfig>>,
+    shared: std::sync::Arc<std::sync::Mutex<crate::infra::config::TelegramConfig>>,
     outbox: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<OutboundMessage>>>,
     wake: std::sync::Arc<std::sync::Condvar>,
-    tx: std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
 ) {
     let mut failed = false;
     loop {
@@ -787,7 +787,7 @@ pub fn sender_forever(
             Ok(token) => token,
             Err(_) => {
                 if !failed {
-                    if tx.send(crate::core::event::AppEvent::TelegramSendStatus { failed: true, dropped: false }).is_err() {
+                    if tx.send(crate::infra::event::AppEvent::TelegramSendStatus { failed: true, dropped: false }).is_err() {
                         return;
                     }
                     failed = true;
@@ -803,13 +803,13 @@ pub fn sender_forever(
             Ok(message_id) => {
                 if let Some(session) = message.session {
                     if tx
-                        .send(crate::core::event::AppEvent::TelegramMessageSent { message_id, session })
+                        .send(crate::infra::event::AppEvent::TelegramMessageSent { message_id, session })
                         .is_err()
                     {
                         return;
                     }
                 }
-                if tx.send(crate::core::event::AppEvent::TelegramSendStatus { failed: false, dropped: false }).is_err() {
+                if tx.send(crate::infra::event::AppEvent::TelegramSendStatus { failed: false, dropped: false }).is_err() {
                     return;
                 }
                 failed = false;
@@ -826,7 +826,7 @@ pub fn sender_forever(
                         return;
                     }
                 }
-                if tx.send(crate::core::event::AppEvent::TelegramSendStatus { failed: true, dropped }).is_err() {
+                if tx.send(crate::infra::event::AppEvent::TelegramSendStatus { failed: true, dropped }).is_err() {
                     return;
                 }
                 let delay = std::time::Duration::from_secs(1u64 << attempt.min(5));
@@ -977,7 +977,7 @@ mod tests {
         let report = p.observe(Ok(FIXTURE.to_string()), &[11]).expect("actionable");
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         assert_eq!(handoff_report(&mut p, &tx, report), HandoffOutcome::Delivered);
-        assert!(matches!(rx.try_recv(), Ok(crate::core::event::AppEvent::TelegramPoll(_))));
+        assert!(matches!(rx.try_recv(), Ok(crate::infra::event::AppEvent::TelegramPoll(_))));
         assert_eq!(p.offset(), Some(13));
     }
 
@@ -1142,9 +1142,9 @@ mod tests {
     #[test]
     fn disabled_poller_turn_touches_nothing() {
         let mut poller = Poller::new();
-        let cfg = crate::core::config::TelegramConfig {
+        let cfg = crate::infra::config::TelegramConfig {
             enabled: false,
-            ..crate::core::config::TelegramConfig::default()
+            ..crate::infra::config::TelegramConfig::default()
         };
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         assert!(matches!(poll_turn(&mut poller, &cfg, &tx), PollTurn::IdleDisabled));

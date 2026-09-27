@@ -9,7 +9,7 @@
 use std::fmt;
 use std::path::Path;
 
-use crate::core::{branding, fs_atomic};
+use crate::infra::{branding, fs_atomic};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PermissionMode {

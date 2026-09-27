@@ -11,7 +11,7 @@ use super::input;
 use super::input::{InputRouter, RoutedKey, UserCommand};
 #[cfg(feature = "visual")]
 use super::visual::handle_visual_key;
-use crate::core::ids::RunId;
+use crate::infra::ids::RunId;
 
 pub(super) fn handle_key(state: &mut AppState, router: &mut InputRouter, key: event::KeyEvent) {
     handle_key_at(state, router, key, Instant::now());
@@ -449,7 +449,7 @@ mod tests {
     use super::super::fit_grid_panes;
     use super::*;
     use ratatui::Terminal;
-    use crate::core::event::AppEvent;
+    use crate::infra::event::AppEvent;
     use crate::tui::dialogs::{handle_confirm_key, handle_group_key, handle_theme_key};
     use crate::tui::mouse::forward_mouse;
 
@@ -1022,7 +1022,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&home);
-        let dir = crate::core::branding::themes_dir(&home);
+        let dir = crate::infra::branding::themes_dir(&home);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("square.json"),
@@ -1039,12 +1039,12 @@ mod tests {
         // Move to square and apply; the config persists the choice.
         handle_theme_key(
             &mut state,
-            &mut crate::core::config::LoadedConfig::load(&crate::core::branding::config_file(&home)).unwrap(),
+            &mut crate::infra::config::LoadedConfig::load(&crate::infra::branding::config_file(&home)).unwrap(),
             &home,
             KeyEvent::new(KeyCode::Down, none),
         );
         let mut loaded =
-            crate::core::config::LoadedConfig::load(&crate::core::branding::config_file(&home)).unwrap();
+            crate::infra::config::LoadedConfig::load(&crate::infra::branding::config_file(&home)).unwrap();
         handle_theme_key(
             &mut state,
             &mut loaded,
@@ -1264,7 +1264,7 @@ mod tests {
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
-        assert_eq!(state.permission_mode, crate::core::config::PermissionMode::Yolo);
+        assert_eq!(state.permission_mode, crate::infra::config::PermissionMode::Yolo);
         assert!(!state.dirty, "swallowed clicks leave no work");
         // Esc closes.
         handle_group_key(&mut state, gkey(KeyCode::Esc));

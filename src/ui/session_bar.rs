@@ -8,7 +8,7 @@ use ratatui::Frame;
 use tui_realm_stdlib::components::Label;
 use tuirealm::component::Component;
 
-use crate::core::safe_text;
+use crate::infra::safe_text;
 
 use super::layout::ChromeAreas;
 use super::topbar::ChromeButton;

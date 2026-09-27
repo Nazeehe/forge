@@ -8,7 +8,7 @@
 //! cached; Ask is never cached. Shell-execution keys stay byte-exact while
 //! all other keys normalize case and whitespace.
 
-use crate::core::config::PermissionMode;
+use crate::infra::config::PermissionMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {

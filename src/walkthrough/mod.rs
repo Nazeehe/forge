@@ -488,7 +488,7 @@ impl Walkthrough {
         use ratatui::layout::Rect;
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Clear, Paragraph};
-        use crate::core::safe_text::encode_for_display;
+        use crate::infra::safe_text::encode_for_display;
         use crate::ui::theme::{style, Role};
         frame.render_widget(Clear, area);
         let (x, y, w, h) = (area.x, area.y, area.width, area.height);
@@ -543,7 +543,7 @@ impl Walkthrough {
     fn render_code(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::Paragraph;
-        use crate::core::safe_text::encode_for_display;
+        use crate::infra::safe_text::encode_for_display;
         if area.height == 0 {
             return;
         }

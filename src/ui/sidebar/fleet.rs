@@ -3,7 +3,7 @@
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
-use crate::core::safe_text;
+use crate::infra::safe_text;
 
 use super::focused_block_lines;
 use super::{FleetTier, SidebarInfo};

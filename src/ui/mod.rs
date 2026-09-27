@@ -27,7 +27,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::{
-    core::safe_text,
+    infra::safe_text,
     session::pty::{CellColor, CellFormat, FormattedCell},
 };
 

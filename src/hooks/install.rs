@@ -124,7 +124,7 @@ fn write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), S
     }
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| format!("cannot encode {}: {e}", path.display()))?;
-    crate::core::fs_atomic::write_atomic(path, text.as_bytes())
+    crate::infra::fs_atomic::write_atomic(path, text.as_bytes())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
@@ -832,7 +832,7 @@ fn ensure_codex_mcp_env(home: &std::path::Path) -> Result<(), String> {
     if text.ends_with('\n') {
         out.push('\n');
     }
-    crate::core::fs_atomic::write_atomic(&path, out.as_bytes())
+    crate::infra::fs_atomic::write_atomic(&path, out.as_bytes())
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(())
 }

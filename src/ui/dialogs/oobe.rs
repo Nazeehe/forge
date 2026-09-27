@@ -119,7 +119,7 @@ pub fn all_clis() -> &'static [&'static dyn Cli] {
 /// First run means no `~/.forge` yet: the config dir is only created
 /// by startup materialization, so its absence means Forge never ran.
 pub fn is_first_run(home: &Path) -> bool {
-    !crate::core::branding::config_dir(home).exists()
+    !crate::infra::branding::config_dir(home).exists()
 }
 
 /// Install hooks for the picked CLI ids, in registry order. Unknown
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn not_first_run_once_forge_dir_exists() {
         let home = scratch_home("exists");
-        std::fs::create_dir_all(crate::core::branding::config_dir(&home)).unwrap();
+        std::fs::create_dir_all(crate::infra::branding::config_dir(&home)).unwrap();
         assert!(!is_first_run(&home));
         let _ = std::fs::remove_dir_all(&home);
     }

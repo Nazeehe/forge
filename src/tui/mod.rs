@@ -20,7 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::app::AppState;
-use crate::core::event::AppEvent;
+use crate::infra::event::AppEvent;
 use crate::ui;
 
 use self::input::InputRouter;
@@ -129,7 +129,7 @@ fn install_panic_hook() {
 /// startup.
 pub fn run(
     state: &mut AppState,
-    loaded: &mut crate::core::config::LoadedConfig,
+    loaded: &mut crate::infra::config::LoadedConfig,
     home: &std::path::Path,
     audit_path: &std::path::Path,
 ) -> i32 {
@@ -143,7 +143,7 @@ pub fn run(
     install_panic_hook();
     state.permission_mode = loaded.config.permission.mode.clone();
     state.pill_tabs = loaded.config.pills_enabled;
-    state.themes_dir = Some(crate::core::branding::themes_dir(home));
+    state.themes_dir = Some(crate::infra::branding::themes_dir(home));
     // Saved theme applies at startup; a missing or broken file warns
     // and keeps the builtin look instead of blocking boot.
     if loaded.config.theme != "default" {
@@ -170,7 +170,7 @@ pub fn run(
         Ok(policy) => policy,
         Err(e) => {
             eprintln!("warning: bad permission pattern ({e}); asking everything");
-            crate::hooks::policy::Policy::new(crate::core::config::PermissionMode::Off, &[], &[])
+            crate::hooks::policy::Policy::new(crate::infra::config::PermissionMode::Off, &[], &[])
                 .expect("empty patterns compile")
         }
     };
@@ -190,9 +190,9 @@ pub fn run(
                 &spawned.sock_path,
             ) {
                 eprintln!("warning: cannot publish endpoint file: {e}");
-                crate::core::logging::hook_trace_global(&format!("tui endpoint file write failed: {e}"));
+                crate::infra::logging::hook_trace_global(&format!("tui endpoint file write failed: {e}"));
             } else {
-                crate::core::logging::hook_trace_global(&format!(
+                crate::infra::logging::hook_trace_global(&format!(
                     "tui listening sock={} endpoint_file={}",
                     spawned.sock_path.display(),
                     crate::hooks::relay::endpoint_file_path(home).display()
@@ -202,7 +202,7 @@ pub fn run(
         }
         Err(e) => {
             eprintln!("warning: ipc listener unavailable: {e}");
-            crate::core::logging::hook_trace_global(&format!("tui ipc listener unavailable: {e}"));
+            crate::infra::logging::hook_trace_global(&format!("tui ipc listener unavailable: {e}"));
             None
         }
     };
@@ -242,9 +242,9 @@ pub fn run(
     if survivors > 0 {
         // The terminal still owns the screen, so the app log (not
         // stderr) carries the straggler report.
-        if let Ok(mut log) = crate::core::logging::FileLogger::open(
-            &crate::core::branding::app_log(home),
-            crate::core::logging::DEFAULT_MAX_BYTES,
+        if let Ok(mut log) = crate::infra::logging::FileLogger::open(
+            &crate::infra::branding::app_log(home),
+            crate::infra::logging::DEFAULT_MAX_BYTES,
         ) {
             let _ = log.append(&format!(
                 "quit: {survivors} pane(s) ignored SIGTERM, SIGKILLed"
@@ -275,7 +275,7 @@ fn loop_until_quit(
     ipc_tx: &std::sync::mpsc::SyncSender<AppEvent>,
     policy: &mut crate::hooks::policy::Policy,
     audit_path: &std::path::Path,
-    loaded: &mut crate::core::config::LoadedConfig,
+    loaded: &mut crate::infra::config::LoadedConfig,
     home: &std::path::Path,
 ) -> io::Result<()> {
     let mut router = InputRouter::new();
@@ -283,7 +283,7 @@ fn loop_until_quit(
     state.apply(AppEvent::Resize(size.height, size.width));
     // Saved snapshots offer themselves before anything else: a pick
     // restores the whole topology, Esc starts fresh.
-    let file = crate::session::checkpoint::SessionsFile::load(&crate::core::branding::sessions_file(home));
+    let file = crate::session::checkpoint::SessionsFile::load(&crate::infra::branding::sessions_file(home));
     if let Some(picker) = crate::session::checkpoint::RestorePicker::new(&file) {
         state.restore_picker = Some(picker);
         state.dirty = true;

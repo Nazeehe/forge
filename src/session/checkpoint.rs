@@ -113,7 +113,7 @@ impl SessionsFile {
             }));
         }
         let text = serde_json::json!({ "entries": entries }).to_string();
-        crate::core::fs_atomic::write_atomic(path, text.as_bytes())
+        crate::infra::fs_atomic::write_atomic(path, text.as_bytes())
     }
 }
 

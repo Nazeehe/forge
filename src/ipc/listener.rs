@@ -245,7 +245,7 @@ impl Drop for ListenerGuard {
 /// arrives on the loop as `AppEvent::HookRequest`.
 pub fn spawn_unix(
     path: &std::path::Path,
-    tx: std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
     cap: usize,
 ) -> std::io::Result<ListenerGuard> {
     let listener = bind_unix(path)?;
@@ -258,7 +258,7 @@ pub fn spawn_unix(
 /// Spawn the loopback-TCP accept loop on a dynamic port (for reverse
 /// forwarding): same protocol and cap as the Unix socket.
 pub fn spawn_tcp(
-    tx: std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
     cap: usize,
 ) -> std::io::Result<(ListenerGuard, u16)> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -270,7 +270,7 @@ pub fn spawn_tcp(
 /// Spawn both transports with the production cap and a pid-namespaced
 /// socket path. Never fatal to the TUI: hooks fail open without it.
 pub fn spawn_all(
-    tx: std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
 ) -> std::io::Result<Spawned> {
     let path = std::env::temp_dir().join(format!("forge.{}.sock", std::process::id()));
     let guard = spawn_unix(&path, tx.clone(), MAX_CONNS)?;
@@ -316,7 +316,7 @@ impl Acceptor for std::net::TcpListener {
 
 fn accept_loop<A: Acceptor>(
     listener: A,
-    tx: std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
     cap: usize,
 ) {
     let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -342,19 +342,19 @@ fn accept_loop<A: Acceptor>(
 
 fn handle_conn<S: std::io::Read + std::io::Write>(
     mut conn: S,
-    tx: &std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
 ) {
     let line = match read_record_line(&mut conn, MAX_LINE) {
         Ok(line) => line,
         Err(e) => {
-            crate::core::logging::hook_trace_global(&format!("listener record unreadable: {e}"));
+            crate::infra::logging::hook_trace_global(&format!("listener record unreadable: {e}"));
             return;
         }
     };
     match classify(&line) {
         Route::Hook { hook } => handle_hook(conn, &line, hook, tx),
         Route::Comms => handle_comms(conn, &line, tx),
-        Route::Other => crate::core::logging::hook_trace_global(&format!(
+        Route::Other => crate::infra::logging::hook_trace_global(&format!(
             "listener unroutable record ({} bytes)",
             line.len()
         )),
@@ -378,7 +378,7 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
     mut conn: S,
     line: &[u8],
     hook: String,
-    tx: &std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
 ) {
     let body = String::from_utf8_lossy(line).into_owned();
     let run_id = crate::ipc::mcp::top_str(&body, "run_id").unwrap_or_default();
@@ -388,7 +388,7 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(0);
     if forge_pid != 0 && forge_pid != std::process::id() {
-        crate::core::logging::hook_trace_global(&hook_record_trace(
+        crate::infra::logging::hook_trace_global(&hook_record_trace(
             line,
             &hook,
             &format!("dropped: forge_pid {forge_pid} is another instance"),
@@ -401,7 +401,7 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     if tx
-        .try_send(crate::core::event::AppEvent::HookRequest(HookRequest {
+        .try_send(crate::infra::event::AppEvent::HookRequest(HookRequest {
             hook,
             body,
             run_id,
@@ -411,14 +411,14 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
         }))
         .is_err()
     {
-        crate::core::logging::hook_trace_global(&hook_record_trace(
+        crate::infra::logging::hook_trace_global(&hook_record_trace(
             line,
             &hook_for_timeout,
             "dropped: event queue full or closed",
         ));
         return;
     }
-    crate::core::logging::hook_trace_global(&hook_record_trace(line, &hook_for_timeout, "queued"));
+    crate::infra::logging::hook_trace_global(&hook_record_trace(line, &hook_for_timeout, "queued"));
     if !sync {
         return;
     }
@@ -475,7 +475,7 @@ fn comms_record_trace(tool: &str, run_id: &str, verdict: &str) -> String {
 fn handle_comms<S: std::io::Read + std::io::Write>(
     mut conn: S,
     line: &[u8],
-    tx: &std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
 ) {
     let text = String::from_utf8_lossy(line).into_owned();
     if crate::ipc::mcp::top_raw(&text, "bot").is_some() {
@@ -485,7 +485,7 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
         crate::ipc::mcp::top_str(&text, "run_id"),
         crate::ipc::mcp::top_str(&text, "tool"),
     ) else {
-        crate::core::logging::comms_trace_global(&comms_record_trace(
+        crate::infra::logging::comms_trace_global(&comms_record_trace(
             &crate::ipc::mcp::top_str(&text, "tool").unwrap_or_default(),
             &crate::ipc::mcp::top_str(&text, "run_id").unwrap_or_default(),
             "malformed: missing run_id/tool",
@@ -496,7 +496,7 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     let claim = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CLAIM_PENDING));
     if tx
-        .try_send(crate::core::event::AppEvent::CommsRequest(CommsRequest {
+        .try_send(crate::infra::event::AppEvent::CommsRequest(CommsRequest {
             run_id: run_id.clone(),
             tool: tool.clone(),
             args,
@@ -505,7 +505,7 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
         }))
         .is_err()
     {
-        crate::core::logging::comms_trace_global(&comms_record_trace(
+        crate::infra::logging::comms_trace_global(&comms_record_trace(
             &tool,
             &run_id,
             "dropped: event queue full or closed",
@@ -523,7 +523,7 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
         // TimedOut so a late `apply` (even one stalled past the
         // deadline) skips the send. When the owner already claimed
         // it, the mutation commits and the caller's retry replays.
-        crate::core::logging::comms_trace_global(&comms_record_trace(
+        crate::infra::logging::comms_trace_global(&comms_record_trace(
             &tool,
             &run_id,
             "timeout: loop gave no verdict in time",
@@ -550,7 +550,7 @@ fn refuse_bot<S: std::io::Write>(
 fn handle_bot<S: std::io::Read + std::io::Write>(
     mut conn: S,
     text: &str,
-    tx: &std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
+    tx: &std::sync::mpsc::SyncSender<crate::infra::event::AppEvent>,
 ) {
     let Some(parts) = bot_parts(text) else {
         refuse_bot(
@@ -586,7 +586,7 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     let claim = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CLAIM_PENDING));
     if tx
-        .try_send(crate::core::event::AppEvent::BotRequest(BotRequest {
+        .try_send(crate::infra::event::AppEvent::BotRequest(BotRequest {
             name: parts.name,
             token: parts.token,
             tool: parts.tool,
@@ -741,7 +741,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("hook event arrives");
         match event {
-            crate::core::event::AppEvent::HookRequest(req) => {
+            crate::infra::event::AppEvent::HookRequest(req) => {
                 assert_eq!(req.hook, "PreToolUse");
                 assert_eq!(req.run_id, "run-9", "envelope attributes the sender");
                 assert!(req.sync, "PreToolUse waits for a decision");
@@ -798,7 +798,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("own record arrives");
         assert!(
-            matches!(event, crate::core::event::AppEvent::HookRequest(_)),
+            matches!(event, crate::infra::event::AppEvent::HookRequest(_)),
             "own record kept"
         );
         let mut conn = UnixStream::connect(&path).unwrap();
@@ -808,7 +808,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("untagged record arrives");
         assert!(
-            matches!(event, crate::core::event::AppEvent::HookRequest(_)),
+            matches!(event, crate::infra::event::AppEvent::HookRequest(_)),
             "legacy record kept"
         );
         let _ = std::fs::remove_file(&path);
@@ -832,7 +832,7 @@ mod tests {
         let event = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("hook event arrives");
-        let crate::core::event::AppEvent::HookRequest(req) = event else {
+        let crate::infra::event::AppEvent::HookRequest(req) = event else {
             panic!("wrong event");
         };
         conn.set_read_timeout(Some(super::REPLY_WAIT + std::time::Duration::from_secs(5)))
@@ -879,7 +879,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("hook event arrives over tcp")
         {
-            crate::core::event::AppEvent::HookRequest(req) => {
+            crate::infra::event::AppEvent::HookRequest(req) => {
                 assert_eq!(req.hook, "Stop");
             }
             other => panic!("wrong event: {other:?}"),
@@ -902,7 +902,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("async event still delivered")
         {
-            crate::core::event::AppEvent::HookRequest(req) => {
+            crate::infra::event::AppEvent::HookRequest(req) => {
                 assert!(!req.sync, "Stop never waits");
             }
             other => panic!("wrong event: {other:?}"),
@@ -941,7 +941,7 @@ mod tests {
         let event = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("hook event arrives");
-        let crate::core::event::AppEvent::HookRequest(req) = event else {
+        let crate::infra::event::AppEvent::HookRequest(req) = event else {
             panic!("wrong event");
         };
         assert!(req.sync, "PreToolUse waits");
@@ -1021,7 +1021,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("comms event arrives");
         match event {
-            crate::core::event::AppEvent::CommsRequest(req) => {
+            crate::infra::event::AppEvent::CommsRequest(req) => {
                 assert_eq!(req.run_id, "abc");
                 assert_eq!(req.tool, "list_sessions");
                 assert_eq!(req.args, "{}");
@@ -1134,7 +1134,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("bot event arrives")
         {
-            crate::core::event::AppEvent::BotRequest(req) => {
+            crate::infra::event::AppEvent::BotRequest(req) => {
                 assert_eq!(req.name, "skippy");
                 assert_eq!(req.token, "tok-1");
                 assert_eq!(req.tool, "bot_poll");

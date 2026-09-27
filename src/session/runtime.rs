@@ -54,7 +54,7 @@ pub const RUNTIME_FILE_NAME: &str = "runtime.md";
 /// `~/.forge/runtime.md`: the canonical contract on disk. Forge-owned and
 /// refreshed on every materialization (unlike the user-editable guide).
 pub fn runtime_file(home: &Path) -> PathBuf {
-    crate::core::branding::config_dir(home).join(RUNTIME_FILE_NAME)
+    crate::infra::branding::config_dir(home).join(RUNTIME_FILE_NAME)
 }
 
 /// Atomically (re)write the canonical contract to `~/.forge/runtime.md`.
@@ -62,7 +62,7 @@ pub fn runtime_file(home: &Path) -> PathBuf {
 /// Returns the file path for argv construction.
 pub fn ensure_materialized(home: &Path) -> std::io::Result<PathBuf> {
     let path = runtime_file(home);
-    crate::core::fs_atomic::write_atomic(&path, FORGE_RUNTIME_CONTRACT.as_bytes())?;
+    crate::infra::fs_atomic::write_atomic(&path, FORGE_RUNTIME_CONTRACT.as_bytes())?;
     Ok(path)
 }
 

@@ -144,7 +144,7 @@ pub struct SessionRecord {
     pub cwd: std::path::PathBuf,
     pub state: SessionState,
     pub activity: Activity,
-    pub run_id: crate::core::ids::RunId,
+    pub run_id: crate::infra::ids::RunId,
     /// Harness-side conversation ID from the SessionStart/UserPromptSubmit
     /// hook body, when the harness reports one. This is what resume argv
     /// needs on restore.
@@ -237,7 +237,7 @@ impl SessionManager {
         id: SessionId,
         name: &str,
         cwd: &std::path::Path,
-        run_id: crate::core::ids::RunId,
+        run_id: crate::infra::ids::RunId,
         cli_tool: &str,
         tabs: Vec<Tab>,
     ) {
@@ -276,7 +276,7 @@ impl SessionManager {
         name: &str,
         cwd: &std::path::Path,
         cmd: &str,
-        run_id: crate::core::ids::RunId,
+        run_id: crate::infra::ids::RunId,
         cli_tool: &str,
     ) -> std::io::Result<SessionId> {
         let id = SessionId::fresh();
@@ -298,7 +298,7 @@ impl SessionManager {
         name: &str,
         cwd: &std::path::Path,
         cmd: &str,
-        run_id: crate::core::ids::RunId,
+        run_id: crate::infra::ids::RunId,
         cli_tool: &str,
     ) -> std::io::Result<SessionId> {
         let id = SessionId::fresh();
@@ -439,7 +439,7 @@ impl SessionManager {
         }
     }
 
-    pub fn rebind(&mut self, id: SessionId, run_id: crate::core::ids::RunId) -> bool {
+    pub fn rebind(&mut self, id: SessionId, run_id: crate::infra::ids::RunId) -> bool {
         match self.sessions.get_mut(&id) {
             None => false,
             Some(rec) => {
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(activity_for_hook("Bogus"), None);
     }
 
-    use crate::core::ids::RunId;
+    use crate::infra::ids::RunId;
     use crate::session::pty::PtyEvent;
     use std::time::{Duration, Instant};
 

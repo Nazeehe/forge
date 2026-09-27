@@ -227,8 +227,8 @@ pub(super) fn handle_visual_key(state: &mut AppState, key: event::KeyEvent) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::event::AppEvent;
-    use crate::core::ids::RunId;
+    use crate::infra::event::AppEvent;
+    use crate::infra::ids::RunId;
     use crate::tui::input::InputRouter;
     use crate::tui::keys::handle_key;
     use crate::tui::mouse::forward_mouse;

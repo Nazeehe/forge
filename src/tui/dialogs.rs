@@ -28,7 +28,7 @@ pub(super) fn handle_group_key(state: &mut AppState, key: event::KeyEvent) {
 /// edits redraw.
 fn settle_telegram_outcome(
     state: &mut AppState,
-    loaded: &mut crate::core::config::LoadedConfig,
+    loaded: &mut crate::infra::config::LoadedConfig,
     home: &std::path::Path,
     outcome: Option<crate::ui::dialogs::telegram::TelegramOutcome>,
 ) {
@@ -57,7 +57,7 @@ fn settle_telegram_outcome(
 /// One Telegram-settings key: Tab cycles rows, Enter fires.
 pub(super) fn handle_telegram_key(
     state: &mut AppState,
-    loaded: &mut crate::core::config::LoadedConfig,
+    loaded: &mut crate::infra::config::LoadedConfig,
     home: &std::path::Path,
     key: event::KeyEvent,
 ) {
@@ -69,7 +69,7 @@ pub(super) fn handle_telegram_key(
 /// Clicks outside the modal die here so nothing behind it moves.
 pub(super) fn handle_telegram_mouse(
     state: &mut AppState,
-    loaded: &mut crate::core::config::LoadedConfig,
+    loaded: &mut crate::infra::config::LoadedConfig,
     home: &std::path::Path,
     mev: event::MouseEvent,
 ) {
@@ -91,7 +91,7 @@ pub(super) fn handle_telegram_mouse(
 /// and persists `theme` in the config, cancel/close just redraws.
 fn settle_theme_outcome(
     state: &mut AppState,
-    loaded: &mut crate::core::config::LoadedConfig,
+    loaded: &mut crate::infra::config::LoadedConfig,
     home: &std::path::Path,
     outcome: Option<crate::ui::dialogs::theme::ThemeOutcome>,
 ) {
@@ -119,7 +119,7 @@ fn settle_theme_outcome(
 /// One theme-picker key: arrows move, Enter applies, Esc closes.
 pub(super) fn handle_theme_key(
     state: &mut AppState,
-    loaded: &mut crate::core::config::LoadedConfig,
+    loaded: &mut crate::infra::config::LoadedConfig,
     home: &std::path::Path,
     key: event::KeyEvent,
 ) {
@@ -131,7 +131,7 @@ pub(super) fn handle_theme_key(
 /// Clicks outside the modal die here so nothing behind it moves.
 pub(super) fn handle_theme_mouse(
     state: &mut AppState,
-    loaded: &mut crate::core::config::LoadedConfig,
+    loaded: &mut crate::infra::config::LoadedConfig,
     home: &std::path::Path,
     mev: event::MouseEvent,
 ) {
@@ -221,7 +221,7 @@ pub(super) fn settle_quit_save(state: &mut AppState, home: &std::path::Path) -> 
     // between the last mutation and this exit.
     state.flush_boards(home);
     if let Err(e) = crate::session::checkpoint::save_quit_snapshot(
-        &crate::core::branding::sessions_file(home),
+        &crate::infra::branding::sessions_file(home),
         state.snapshot_sessions(),
     ) {
         eprintln!("warning: cannot save sessions: {e}");
@@ -290,8 +290,8 @@ pub(super) fn handle_dialog_key(state: &mut AppState, key: event::KeyEvent) {
 mod tests {
     use super::*;
     use ratatui::Terminal;
-    use crate::core::event::AppEvent;
-    use crate::core::ids::RunId;
+    use crate::infra::event::AppEvent;
+    use crate::infra::ids::RunId;
     use crate::tui::input::InputRouter;
     use crate::tui::keys::{handle_key, spawn_shell_cmd};
     use crate::tui::mouse::forward_mouse;
@@ -331,7 +331,7 @@ mod tests {
         let mut idle = AppState::new();
         assert!(!settle_quit_save(&mut idle, &home), "idle saves nothing");
         assert!(
-            !crate::core::branding::sessions_file(&home).exists(),
+            !crate::infra::branding::sessions_file(&home).exists(),
             "idle writes nothing"
         );
         // One live agent: the pending save persists it and clears the flag.
@@ -342,14 +342,14 @@ mod tests {
                 "qsave",
                 &std::env::temp_dir(),
                 "exec sleep 30",
-                crate::core::ids::RunId::generate(),
+                crate::infra::ids::RunId::generate(),
                 "claude",
             )
             .expect("spawn agent");
         state.quit_saving = true;
         assert!(settle_quit_save(&mut state, &home), "pending save runs");
         assert!(!state.quit_saving, "flag clears after save");
-        let text = std::fs::read_to_string(crate::core::branding::sessions_file(&home))
+        let text = std::fs::read_to_string(crate::infra::branding::sessions_file(&home))
             .expect("sessions file written");
         assert!(text.contains("qsave"), "snapshot saved: {text}");
         assert!(state.manager.remove(id), "cleanup pane");
@@ -376,10 +376,10 @@ mod tests {
         (area.x + start as u16 + (needle.chars().count() as u16) / 2, y)
     }
 
-    fn telegram_test_ctx() -> (crate::core::config::LoadedConfig, std::path::PathBuf) {
+    fn telegram_test_ctx() -> (crate::infra::config::LoadedConfig, std::path::PathBuf) {
         let home = std::env::temp_dir().join(format!("forge-tg-click-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let loaded = crate::core::config::LoadedConfig::load(&home.join("config.toml"))
+        let loaded = crate::infra::config::LoadedConfig::load(&home.join("config.toml"))
             .expect("missing file loads defaults");
         (loaded, home)
     }

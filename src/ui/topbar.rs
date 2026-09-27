@@ -10,7 +10,7 @@ use tuirealm::component::Component;
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::state::State;
 
-use crate::core::safe_text;
+use crate::infra::safe_text;
 
 use super::session_bar::render_pill;
 use super::theme;
