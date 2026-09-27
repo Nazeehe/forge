@@ -169,7 +169,7 @@ pub fn classify(line: &[u8]) -> Route {
             return Route::Comms;
         }
     }
-    if let Some(hook) = crate::relay::hook_name(line) {
+    if let Some(hook) = crate::hooks::relay::hook_name(line) {
         // `hook_name` also matches nested fields; require the envelope shape
         // so a JSON-RPC body mentioning hooks cannot misroute.
         if line.windows(6).any(|w| w == b"\"body\"") {
@@ -395,7 +395,7 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
         ));
         return;
     }
-    let sync = crate::relay::is_sync_hook(&hook);
+    let sync = crate::hooks::relay::is_sync_hook(&hook);
     // The timeout-deny below still needs the name after the move.
     let hook_for_timeout = hook.clone();
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
@@ -430,9 +430,9 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
         // so any late reply is known-steered-nowhere.
         Err(_) => {
             timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
-            crate::policy::decision_line(
+            crate::hooks::policy::decision_line(
                 &hook_for_timeout,
-                crate::policy::Decision::Deny,
+                crate::hooks::policy::Decision::Deny,
                 "operator timeout; denied",
             )
         }

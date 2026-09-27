@@ -5,7 +5,6 @@
 #![allow(dead_code)]
 
 mod app;
-mod audit;
 mod board;
 mod bot;
 mod card_edit;
@@ -14,14 +13,12 @@ mod core;
 mod create;
 mod groups;
 mod help;
+mod hooks;
 mod input;
-mod install;
 mod listener;
 mod mcp;
 mod oobe;
-mod policy;
 mod quit;
-mod relay;
 mod telegram;
 mod telegram_dialog;
 mod tetris;
@@ -89,7 +86,7 @@ fn print_help() {
 
 /// Print installer outcomes, one line each. Skips are not failures; only
 /// real errors fail the subcommand.
-fn report_install(outs: Vec<install::Outcome>) -> i32 {
+fn report_install(outs: Vec<hooks::install::Outcome>) -> i32 {
     let mut code = 0;
     for o in outs {
         if let Some(e) = &o.error {
@@ -270,55 +267,55 @@ fn main() {
         }
         Some("hook-relay") => {
             let endpoint = args.next();
-            std::process::exit(relay::run_stdin(endpoint.as_deref()));
+            std::process::exit(hooks::relay::run_stdin(endpoint.as_deref()));
         }
         Some("install-hooks") => {
-            std::process::exit(report_install(install::install_hooks(&home_dir(), &forge_binary())));
+            std::process::exit(report_install(hooks::install::install_hooks(&home_dir(), &forge_binary())));
         }
         Some("uninstall-hooks") => {
-            std::process::exit(report_install(install::uninstall_hooks(&home_dir())));
+            std::process::exit(report_install(hooks::install::uninstall_hooks(&home_dir())));
         }
         Some("install-mcp") => {
-            std::process::exit(report_install(install::install_mcp(&home_dir(), &forge_binary())));
+            std::process::exit(report_install(hooks::install::install_mcp(&home_dir(), &forge_binary())));
         }
         Some("uninstall-mcp") => {
-            std::process::exit(report_install(install::uninstall_mcp(&home_dir())));
+            std::process::exit(report_install(hooks::install::uninstall_mcp(&home_dir())));
         }
         Some("install-skills") => {
-            std::process::exit(report_install(install::install_skills(&home_dir())));
+            std::process::exit(report_install(hooks::install::install_skills(&home_dir())));
         }
         Some("uninstall-skills") => {
-            std::process::exit(report_install(install::uninstall_skills(&home_dir())));
+            std::process::exit(report_install(hooks::install::uninstall_skills(&home_dir())));
         }
         Some("install-codex") => {
-            std::process::exit(report_install(install::install_one(&home_dir(), "codex", &forge_binary())));
+            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "codex", &forge_binary())));
         }
         Some("uninstall-codex") => {
-            std::process::exit(report_install(install::uninstall_one(&home_dir(), "codex")));
+            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "codex")));
         }
         Some("install-gemini") => {
-            std::process::exit(report_install(install::install_one(&home_dir(), "gemini", &forge_binary())));
+            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "gemini", &forge_binary())));
         }
         Some("uninstall-gemini") => {
-            std::process::exit(report_install(install::uninstall_one(&home_dir(), "gemini")));
+            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "gemini")));
         }
         Some("install-copilot") => {
-            std::process::exit(report_install(install::install_one(&home_dir(), "copilot", &forge_binary())));
+            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "copilot", &forge_binary())));
         }
         Some("uninstall-copilot") => {
-            std::process::exit(report_install(install::uninstall_one(&home_dir(), "copilot")));
+            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "copilot")));
         }
         Some("install-pi") => {
-            std::process::exit(report_install(install::install_one(&home_dir(), "pi", &forge_binary())));
+            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "pi", &forge_binary())));
         }
         Some("uninstall-pi") => {
-            std::process::exit(report_install(install::uninstall_one(&home_dir(), "pi")));
+            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "pi")));
         }
         Some("install-metamate") => {
-            std::process::exit(report_install(install::install_one(&home_dir(), "metamate", &forge_binary())));
+            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "metamate", &forge_binary())));
         }
         Some("uninstall-metamate") => {
-            std::process::exit(report_install(install::uninstall_one(&home_dir(), "metamate")));
+            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "metamate")));
         }
         Some("mcp-serve") => {
             let mut explicit: Option<String> = None;

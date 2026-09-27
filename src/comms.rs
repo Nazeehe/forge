@@ -115,7 +115,7 @@ fn log_text_part(text: Option<String>) -> String {
 /// truncated preview. Idempotency keys and anything credential-shaped
 /// never ride this summary; unknown tools report only the arg length.
 pub fn summarize_call(tool: &str, args: &str) -> String {
-    let field = |names: &[&str]| crate::policy::json_string_field(args.as_bytes(), names);
+    let field = |names: &[&str]| crate::hooks::policy::json_string_field(args.as_bytes(), names);
     let text = || field(&["message", "text", "prompt"]);
     let conv = || field(&["conversation_id", "conversation"]);
     match tool {
@@ -1606,13 +1606,13 @@ impl Broker {
     }
 
     fn arg(args: &str, name: &str) -> Option<String> {
-        crate::policy::json_string_field(args.as_bytes(), &[name])
+        crate::hooks::policy::json_string_field(args.as_bytes(), &[name])
     }
 
     /// Canonical blueprint names first (`message`, `conversation_id`), with
     /// the Phase 4a short forms accepted as aliases.
     fn arg2(args: &str, names: &[&str]) -> Option<String> {
-        crate::policy::json_string_field(args.as_bytes(), names)
+        crate::hooks::policy::json_string_field(args.as_bytes(), names)
     }
 
     fn ask(
@@ -2880,7 +2880,7 @@ mod tests {
     use crate::session::SessionId;
 
     fn json_field(haystack: &str, field: &str) -> Option<String> {
-        crate::policy::json_string_field(haystack.as_bytes(), &[field])
+        crate::hooks::policy::json_string_field(haystack.as_bytes(), &[field])
     }
 
     struct Pair {
@@ -5012,7 +5012,7 @@ mod tests {
         let out = p
             .call(&p.run_a.clone(), "schedule_prompt", r#"{"prompt":"later","delay_seconds":60}"#)
             .expect("future schedules");
-        let timer = crate::policy::json_string_field(out.as_bytes(), &["timer_id"]).unwrap();
+        let timer = crate::hooks::policy::json_string_field(out.as_bytes(), &["timer_id"]).unwrap();
         let cancelled = p
             .call(&p.run_a.clone(), "cancel_scheduled_prompt", &format!(r#"{{"timer_id":"{timer}"}}"#))
             .expect("cancel works");

@@ -2306,7 +2306,7 @@ impl AppState {
     /// newlines, so multi-line steps and Markdown answers arrive
     /// intact), blanked to missing.
     fn tool_arg(args: &str, name: &str) -> Option<String> {
-        crate::policy::json_string_field(args.as_bytes(), &[name])
+        crate::hooks::policy::json_string_field(args.as_bytes(), &[name])
             .map(|s| crate::mcp::decode_json_string(&s))
             .filter(|s| !s.is_empty())
     }
@@ -4158,7 +4158,7 @@ impl AppState {
         args: &str,
     ) -> String {
         let Some(target_name) =
-            crate::policy::json_string_field(args.as_bytes(), &["target"])
+            crate::hooks::policy::json_string_field(args.as_bytes(), &["target"])
                 .filter(|s| !s.is_empty())
         else {
             return String::new();
@@ -4209,7 +4209,7 @@ impl AppState {
         let line = match verdict {
             Ok(result) => {
                 let conv =
-                    crate::policy::json_string_field(result.as_bytes(), &["conversation", "timer_id"])
+                    crate::hooks::policy::json_string_field(result.as_bytes(), &["conversation", "timer_id"])
                         .map(|c| format!(" conv={}", crate::comms::log_quote(&c)))
                         .unwrap_or_default();
                 format!("comms tool={tool} {caller} {summary} -> ok{conv}{target_state}")
@@ -4953,7 +4953,7 @@ impl AppState {
     /// its native permission flow takes over. Audit failures never block.
     pub fn settle_hooks(
         &mut self,
-        policy: &mut crate::policy::Policy,
+        policy: &mut crate::hooks::policy::Policy,
         audit_path: &std::path::Path,
     ) {
         while let Some(req) = self.pending_hooks.pop_front() {
@@ -4979,7 +4979,7 @@ impl AppState {
                 .and_then(|id| self.manager.get(id))
                 .map(|rec| rec.cli_tool.as_str())
                 .unwrap_or("");
-            let line = crate::policy::decision_line_for(cli_tool, &req.hook, decision, reason);
+            let line = crate::hooks::policy::decision_line_for(cli_tool, &req.hook, decision, reason);
             let _ = req.reply.send(line);
             // The verdict races bodies only in its own pane: stamp the
             // attributed session, never the whole app.
@@ -5000,16 +5000,16 @@ impl AppState {
         audit_path: &std::path::Path,
         hook: &str,
         body: &str,
-        decision: crate::policy::Decision,
+        decision: crate::hooks::policy::Decision,
         reason: &str,
     ) {
-        let tool = crate::policy::tool_name(body);
+        let tool = crate::hooks::policy::tool_name(body);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let name = format!("{decision:?}").to_lowercase();
-        let _ = crate::audit::append(audit_path, hook, &tool, &name, reason, now);
+        let _ = crate::hooks::audit::append(audit_path, hook, &tool, &name, reason, now);
     }
 
     /// Reduce one event. Input routing arrives with the input slice; until
@@ -5323,7 +5323,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&audit);
         let mut policy =
-            crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+            crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
         let mut s = AppState::new();
         let codex_run = RunId::generate();
         let codex_id = s
@@ -5434,7 +5434,7 @@ mod tests {
             .unwrap();
         // YOLO allow must arrive as the behavior envelope Codex accepts.
         let mut yolo =
-            crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+            crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
         let (allow_tx, allow_rx) = std::sync::mpsc::channel();
         s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
             hook: "PermissionRequest".to_string(),
@@ -5452,7 +5452,7 @@ mod tests {
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
         assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
         // Off ask declines to decide so the native prompt continues.
-        let mut off = crate::policy::Policy::new(PermissionMode::Off, &[], &[]).unwrap();
+        let mut off = crate::hooks::policy::Policy::new(PermissionMode::Off, &[], &[]).unwrap();
         let (ask_tx, ask_rx) = std::sync::mpsc::channel();
         s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
             hook: "PermissionRequest".to_string(),
@@ -5987,7 +5987,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&audit);
-        let mut yolo = crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+        let mut yolo = crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
         let mut s = AppState::new();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
@@ -6031,7 +6031,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&audit);
-        let mut yolo = crate::policy::Policy::new(
+        let mut yolo = crate::hooks::policy::Policy::new(
             PermissionMode::Yolo,
             &[],
             &[],
@@ -6060,7 +6060,7 @@ mod tests {
         assert_eq!(logged.lines().count(), 1);
         assert!(logged.contains(r#""decision":"allow""#), "audit: {logged:?}");
 
-        let mut off = crate::policy::Policy::new(
+        let mut off = crate::hooks::policy::Policy::new(
             PermissionMode::Off,
             &[],
             &[],
@@ -6096,7 +6096,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&audit);
-        let mut policy = crate::policy::Policy::new(PermissionMode::Yolo, &[], &[])
+        let mut policy = crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[])
             .unwrap();
         let mut s = AppState::new();
         // Empty queue: the 60Hz loop must not repaint from this.
@@ -6191,7 +6191,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&audit);
-        let mut policy = crate::policy::Policy::new(
+        let mut policy = crate::hooks::policy::Policy::new(
             PermissionMode::SafeOnly,
             &[],
             &["doom".to_string()],
@@ -6603,7 +6603,7 @@ mod tests {
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 0, "turn end delivers the ask");
         // B answers; A is still mid-turn so the reply waits.
-        let conv = crate::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
+        let conv = crate::hooks::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
             .expect("ask returns a conversation");
         let resp_line = comms(
             &mut s,
@@ -7130,7 +7130,7 @@ mod tests {
             r#"{"target":"b","message":"q?"}"#.to_string(),
         );
         assert!(ask_line.contains(r#""ok":true"#), "ask accepted: {ask_line}");
-        let conv = crate::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
+        let conv = crate::hooks::policy::json_string_field(ask_line.as_bytes(), &["conversation"])
             .expect("conversation id");
         let resp_line = converse(
             &run_b.to_string(),
@@ -7199,7 +7199,7 @@ mod tests {
             std::process::id()
         ));
         let mut yolo =
-            crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+            crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
         s.settle_hooks(&mut yolo, &audit);
         let age = std::time::Instant::now()
             .duration_since(*s.last_hook_activity.get(&a).expect("verdict stamps"));
@@ -7380,7 +7380,7 @@ mod tests {
             std::process::id()
         ));
         let mut yolo =
-            crate::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
+            crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
         s.settle_hooks(&mut yolo, &audit);
         let age = std::time::Instant::now()
             .duration_since(*s.last_hook_activity.get(&a).expect("verdict stamps"));
@@ -8214,7 +8214,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&audit);
         let mut yolo =
-            crate::policy::Policy::new(crate::core::config::PermissionMode::Yolo, &[], &[]).unwrap();
+            crate::hooks::policy::Policy::new(crate::core::config::PermissionMode::Yolo, &[], &[]).unwrap();
         s.settle_hooks(&mut yolo, &audit);
         assert!(s.pending_hooks.is_empty(), "queue drains");
         assert!(s.last_hook_activity.contains_key(&id), "verdict stamps activity");
@@ -11191,7 +11191,7 @@ mod tests {
             &mut state, &run_a, "schedule_prompt",
             r#"{"prompt":"later","delay_seconds":600}"#,
         );
-        let timer = crate::policy::json_string_field(out.as_bytes(), &["timer_id"]).unwrap();
+        let timer = crate::hooks::policy::json_string_field(out.as_bytes(), &["timer_id"]).unwrap();
         assert_eq!(state.manager.active(), Some(a));
         let focused = state.sidebar_info().session.expect("detail renders");
         assert_eq!(focused.timers.len(), 1, "focused session shows its timer");

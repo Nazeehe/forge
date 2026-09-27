@@ -150,7 +150,7 @@ pub fn run(
     if let Ok(mut tg) = state.telegram_config.lock() {
         *tg = loaded.config.telegram.clone();
     }
-    let mut policy = match crate::policy::Policy::new(
+    let mut policy = match crate::hooks::policy::Policy::new(
         loaded.config.permission.mode.clone(),
         &loaded.config.permission.allow,
         &loaded.config.permission.block,
@@ -158,7 +158,7 @@ pub fn run(
         Ok(policy) => policy,
         Err(e) => {
             eprintln!("warning: bad permission pattern ({e}); asking everything");
-            crate::policy::Policy::new(crate::core::config::PermissionMode::Off, &[], &[])
+            crate::hooks::policy::Policy::new(crate::core::config::PermissionMode::Off, &[], &[])
                 .expect("empty patterns compile")
         }
     };
@@ -172,7 +172,7 @@ pub fn run(
     let _ipc = match crate::listener::spawn_all(ipc_tx.clone()) {
         Ok(spawned) => {
             std::env::set_var("FORGE_IPC_ENDPOINT", &spawned.sock_path);
-            if let Err(e) = crate::relay::write_endpoint_file(
+            if let Err(e) = crate::hooks::relay::write_endpoint_file(
                 home,
                 std::process::id(),
                 &spawned.sock_path,
@@ -183,7 +183,7 @@ pub fn run(
                 crate::core::logging::hook_trace_global(&format!(
                     "tui listening sock={} endpoint_file={}",
                     spawned.sock_path.display(),
-                    crate::relay::endpoint_file_path(home).display()
+                    crate::hooks::relay::endpoint_file_path(home).display()
                 ));
             }
             Some(spawned)
@@ -249,10 +249,10 @@ pub fn run(
     }
     if let Err(e) = result {
         eprintln!("error: main loop failed: {e}");
-        crate::relay::clear_endpoint_file(home);
+        crate::hooks::relay::clear_endpoint_file(home);
         return 1;
     }
-    crate::relay::clear_endpoint_file(home);
+    crate::hooks::relay::clear_endpoint_file(home);
     0
 }
 
@@ -341,7 +341,7 @@ fn loop_until_quit(
     terminal: &mut StdoutTerminal,
     ipc: std::sync::mpsc::Receiver<AppEvent>,
     ipc_tx: &std::sync::mpsc::SyncSender<AppEvent>,
-    policy: &mut crate::policy::Policy,
+    policy: &mut crate::hooks::policy::Policy,
     audit_path: &std::path::Path,
     loaded: &mut crate::core::config::LoadedConfig,
     home: &std::path::Path,
@@ -375,7 +375,7 @@ fn loop_until_quit(
         // persist the config; a failed save keeps the live mode and warns.
         if state.permission_mode != policy.mode() {
             let patterns = loaded.config.permission.clone();
-            match crate::policy::Policy::new(
+            match crate::hooks::policy::Policy::new(
                 state.permission_mode.clone(),
                 &patterns.allow,
                 &patterns.block,

@@ -8,10 +8,10 @@ use std::path::Path;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 
-use crate::install::Outcome;
+use crate::hooks::install::Outcome;
 
 /// One known agent CLI: identity plus its install behavior. Thin
-/// delegates over [`crate::install`]; the registry list below is what
+/// delegates over [`crate::hooks::install`]; the registry list below is what
 /// the OOBE dialog and bulk installers drive.
 pub trait Cli: Send + Sync {
     fn id(&self) -> &'static str;
@@ -34,10 +34,10 @@ impl Cli for ClaudeCli {
         "claude"
     }
     fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::install::install_one_hooks(home, self.id(), forge_bin)
+        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
     }
     fn uninstall(&self, home: &Path) -> Outcome {
-        crate::install::uninstall_one_hooks(home, self.id())
+        crate::hooks::install::uninstall_one_hooks(home, self.id())
     }
 }
 
@@ -49,10 +49,10 @@ impl Cli for CodexCli {
         "codex"
     }
     fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::install::install_one_hooks(home, self.id(), forge_bin)
+        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
     }
     fn uninstall(&self, home: &Path) -> Outcome {
-        crate::install::uninstall_one_hooks(home, self.id())
+        crate::hooks::install::uninstall_one_hooks(home, self.id())
     }
 }
 
@@ -64,10 +64,10 @@ impl Cli for MuseCli {
         "muse"
     }
     fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::install::install_one_hooks(home, self.id(), forge_bin)
+        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
     }
     fn uninstall(&self, home: &Path) -> Outcome {
-        crate::install::uninstall_one_hooks(home, self.id())
+        crate::hooks::install::uninstall_one_hooks(home, self.id())
     }
 }
 
@@ -79,10 +79,10 @@ impl Cli for CopilotCli {
         "copilot"
     }
     fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::install::install_one_hooks(home, self.id(), forge_bin)
+        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
     }
     fn uninstall(&self, home: &Path) -> Outcome {
-        crate::install::uninstall_one_hooks(home, self.id())
+        crate::hooks::install::uninstall_one_hooks(home, self.id())
     }
 }
 
@@ -94,10 +94,10 @@ impl Cli for PiCli {
         "pi"
     }
     fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::install::install_one_hooks(home, self.id(), forge_bin)
+        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
     }
     fn uninstall(&self, home: &Path) -> Outcome {
-        crate::install::uninstall_one_hooks(home, self.id())
+        crate::hooks::install::uninstall_one_hooks(home, self.id())
     }
 }
 

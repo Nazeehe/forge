@@ -664,7 +664,7 @@ pub fn resolve_endpoint(explicit: Option<&str>) -> Option<String> {
     resolve_endpoint_from(
         explicit,
         std::env::var("FORGE_IPC_ENDPOINT").ok(),
-        crate::relay::file_endpoint().map(|(_, sock)| sock),
+        crate::hooks::relay::file_endpoint().map(|(_, sock)| sock),
     )
 }
 
