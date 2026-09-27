@@ -71,6 +71,7 @@ pub static PREFIX_BINDINGS: &[PrefixBinding] = &[
     PrefixBinding { label: "t", desc: "Switch tab", group: "View", invokes: PrefixInvoke::Command('t', UserCommand::SwitchTab) },
     PrefixBinding { label: "w", desc: "Toggle grid", group: "View", invokes: PrefixInvoke::Command('w', UserCommand::ToggleGrid) },
     PrefixBinding { label: "b", desc: "Kanban board", group: "View", invokes: PrefixInvoke::Command('b', UserCommand::ToggleBoard) },
+    PrefixBinding { label: "r", desc: "Tetris game", group: "View", invokes: PrefixInvoke::Command('r', UserCommand::ToggleTetris) },
     PrefixBinding { label: "y", desc: "Toggle permission mode", group: "Safety", invokes: PrefixInvoke::Command('y', UserCommand::TogglePermissionMode) },
     PrefixBinding { label: "m", desc: "Telegram settings", group: "Settings", invokes: PrefixInvoke::Command('m', UserCommand::TelegramSettings) },
     PrefixBinding { label: "e", desc: "Theme picker", group: "Settings", invokes: PrefixInvoke::Command('e', UserCommand::ThemePicker) },
@@ -109,6 +110,10 @@ pub enum UserCommand {
     /// Toggle the global kanban view: the main area shows workspace
     /// boards instead of sessions. Mouse twin is the sidebar button.
     ToggleBoard,
+    /// Toggle the sidebar Tetris game: the sidebar list region shows a
+    /// playable game instead of the fleet. Mouse twin is the sidebar
+    /// Tetris button.
+    ToggleTetris,
     /// Open the Telegram mobile-transport settings dialog.
     TelegramSettings,
     /// Open the theme picker (`theme.json` files under `~/.forge/themes`).
@@ -552,6 +557,16 @@ mod tests {
         assert_eq!(
             r.feed(key(KeyCode::Char('b'))),
             RoutedKey::Command(UserCommand::ToggleBoard)
+        );
+    }
+
+    #[test]
+    fn prefix_r_routes_to_toggle_tetris() {
+        let mut r = InputRouter::new();
+        assert_eq!(r.feed(prefix_key()), RoutedKey::PrefixPending);
+        assert_eq!(
+            r.feed(key(KeyCode::Char('r'))),
+            RoutedKey::Command(UserCommand::ToggleTetris)
         );
     }
 

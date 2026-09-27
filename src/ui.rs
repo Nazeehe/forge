@@ -1019,11 +1019,11 @@ pub fn sidebar_is_rich(sidebar: Rect) -> bool {
 }
 
 /// Pinned footer height: settings rows, the Kanban row under the mode
-/// buttons, plus the badge row when present. Compact also spends a
-/// pending row, hidden when there is nothing pending (rich pending
-/// lives in the focused block instead).
+/// buttons, the Tetris row under Kanban, plus the badge row when
+/// present. Compact also spends a pending row, hidden when there is
+/// nothing pending (rich pending lives in the focused block instead).
 pub fn sidebar_footer_height(info: &SidebarInfo, rich: bool) -> u16 {
-    let base = if rich { 7 } else { 6 };
+    let base = if rich { 8 } else { 7 };
     base + u16::from(info.telegram_badge.is_some())
         - u16::from(!rich && info.pending == 0)
 }
@@ -1404,6 +1404,9 @@ pub struct SidebarPaint {
     /// Content row of the Kanban button: always `btn_row + 1`, pinned
     /// directly under the autopilot buttons.
     pub kanban_row: usize,
+    /// Content row of the Tetris button: always `kanban_row + 1`,
+    /// pinned directly under Kanban.
+    pub tetris_row: usize,
 }
 
 pub fn sidebar_paint(
@@ -1440,7 +1443,12 @@ pub fn sidebar_paint(
     let btn_row = list_h + if rich { 3 } else { 1 };
     let mut lines = list;
     lines.extend(footer_lines(info, rich, pills));
-    SidebarPaint { lines, kanban_row: btn_row + 1, btn_row }
+    SidebarPaint {
+        lines,
+        kanban_row: btn_row + 1,
+        tetris_row: btn_row + 2,
+        btn_row,
+    }
 }
 
 /// Kanban button row, pinned directly under the mode buttons. The
@@ -1474,9 +1482,9 @@ fn kanban_line(info: &SidebarInfo, pills: bool) -> Line<'static> {
 }
 
 /// Pinned footer rows, exactly `sidebar_footer_height` long: settings,
-/// mode buttons, Kanban, shortcuts, transport, badge. The button line
-/// carries the same text the overlay widgets paint, so content readers
-/// agree with the buffer.
+/// mode buttons, Kanban, Tetris, shortcuts, transport, badge. The
+/// button lines carry the same text the overlay widgets paint, so
+/// content readers agree with the buffer.
 fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if rich {
@@ -1532,6 +1540,7 @@ fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static
         ])
     });
     lines.push(kanban_line(info, pills));
+    lines.push(tetris_line(pills));
     if rich {
         lines.push(Line::from(Span::styled(
             " Ctrl-b shortcuts",
@@ -1797,6 +1806,142 @@ pub fn board_button_area(sidebar: Rect, info: &SidebarInfo, rich: bool, pills: b
     Rect::new(sidebar.x + 2, mode.off.y + 1, if visible { if pills { 10 } else { 8 } } else { 0 }, 1)
 }
 
+/// Tetris button hit area: the content row right below Kanban under
+/// the same visibility gate, so clicks never desync from the paint.
+/// Legacy `[Tetris]` is 8 wide, the pill 10, exactly like Kanban.
+pub fn tetris_button_area(sidebar: Rect, info: &SidebarInfo, rich: bool, pills: bool) -> Rect {
+    let mode = footer_mode_buttons(sidebar, info, rich, pills);
+    let visible = sidebar.height >= SETTINGS_ROW + 2 && sidebar.width >= 16;
+    Rect::new(sidebar.x + 2, mode.off.y + 2, if visible { if pills { 10 } else { 8 } } else { 0 }, 1)
+}
+
+/// Tetris button underlay: the same label the overlay widget paints,
+/// so content readers agree with the buffer. The open highlight lives
+/// on the overlay widget (like the mode buttons), which owns the row
+/// in the real render.
+fn tetris_line(pills: bool) -> Line<'static> {
+    if pills {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                crate::theme::pill_left().to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(" Tetris ", theme::style(theme::Role::TabInactive)),
+            Span::styled(
+                crate::theme::pill_right().to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        Line::from(vec![Span::raw("  "), Span::styled("[Tetris]", Style::default())])
+    }
+}
+
+/// One tetromino's chrome color. Semantic theme roles only, never raw
+/// RGB; shape and position carry the game, so monochrome stays fully
+/// playable.
+fn tetris_kind_style(kind: crate::tetris::PieceKind) -> Style {
+    use crate::tetris::PieceKind;
+    theme::style(match kind {
+        PieceKind::I => theme::Role::Info,
+        PieceKind::O => theme::Role::Warning,
+        PieceKind::T => theme::Role::Brand,
+        PieceKind::S => theme::Role::Success,
+        PieceKind::Z => theme::Role::Danger,
+        PieceKind::J => theme::Role::Command,
+        PieceKind::L => theme::Role::Running,
+    })
+}
+
+/// Game paint for the sidebar list region: header, well, hints, exactly
+/// `height` rows. Wide sidebars get double-width cells; narrow ones
+/// fall back to single-width so the default 16-column sidebar still
+/// plays. Short regions keep the header and the bottom of the well
+/// (where the stack lands) and shed hints first.
+pub fn tetris_lines(
+    game: &crate::tetris::TetrisGame,
+    width: u16,
+    height: u16,
+) -> Vec<Line<'static>> {
+    use crate::tetris::{HEIGHT, WIDTH};
+    let height = height as usize;
+    if height == 0 {
+        return Vec::new();
+    }
+    let wide = width.saturating_sub(2) >= 24;
+    let (kind, active) = game.active();
+    let well: Vec<Vec<Option<crate::tetris::PieceKind>>> = (0..HEIGHT)
+        .map(|y| {
+            (0..WIDTH)
+                .map(|x| {
+                    if active.contains(&(x as i8, y as i8)) {
+                        Some(kind)
+                    } else {
+                        game.settled()[y][x]
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let mut status = format!(" Tetris · {} pts · lv {}", game.score(), game.level());
+    if game.is_over() {
+        status.push_str(" · GAME OVER");
+    } else if game.is_paused() {
+        status.push_str(" · PAUSED");
+    }
+    let status: String = status.chars().take(width as usize).collect();
+    let hints: [String; 2] = if width >= 26 {
+        [
+            "  \u{2190} \u{2192} move \u{00b7} \u{2191} rotate \u{00b7} space drop".to_string(),
+            "  p pause \u{00b7} r restart".to_string(),
+        ]
+    } else {
+        ["  \u{2190}\u{2192}move \u{2191}turn".to_string(), "  SPC=drop p=pause r=new".to_string()]
+    };
+    // Narrow second hint needs 20 cells; shed it when it cannot fit.
+    let hints: Vec<String> = if width >= 26 || width >= 22 {
+        hints.to_vec()
+    } else {
+        hints[..1].to_vec()
+    };
+    let hint_rows = if height >= 16 {
+        hints.len()
+    } else if height >= 8 {
+        hints.len().min(1)
+    } else {
+        0
+    };
+    let well_take = height.saturating_sub(1 + hint_rows).min(HEIGHT);
+    let mut lines = vec![Line::from(Span::styled(
+        status,
+        theme::style(theme::Role::Brand),
+    ))];
+    let cell = if wide { "\u{2588}\u{2588}" } else { "\u{2588}" };
+    let blank = if wide { "  " } else { " " };
+    for row in well.iter().skip(HEIGHT - well_take) {
+        let mut spans = vec![Span::raw("  ")];
+        for filled in row {
+            match filled {
+                Some(k) => spans.push(Span::styled(cell.to_string(), tetris_kind_style(*k))),
+                None => spans.push(Span::raw(blank)),
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    for hint in hints.iter().take(hint_rows) {
+        lines.push(Line::from(Span::styled(
+            hint.clone(),
+            theme::style(theme::Role::KeyHint),
+        )));
+    }
+    while lines.len() < height {
+        lines.push(Line::from(""));
+    }
+    lines.truncate(height);
+    lines
+}
+
 /// Kanban button under a sidebar click, if any.
 pub fn board_at(area: &Rect, col: u16, row: u16) -> bool {
     area.width > 0 && row == area.y && col >= area.x && col < area.x + area.width
@@ -1817,6 +1962,10 @@ pub struct Chrome {
     pub mode: &'static str,
     /// Board view open: highlights the sidebar Kanban button.
     pub board_open: bool,
+    /// Tetris view open: highlights the sidebar Tetris button.
+    pub tetris_open: bool,
+    /// Live game snapshot; painted in the sidebar list region when open.
+    pub tetris: Option<crate::tetris::TetrisGame>,
     /// Global kanban content; painted in the main area when open.
     pub board: Option<BoardView>,
     /// "on" or "off": Telegram mobile transport state for the sidebar row.
@@ -2380,6 +2529,28 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
         if let Some(line) = lines.get_mut(kanban_row) {
             *line = Line::from("");
         }
+        // The Tetris button owns the row right below Kanban; the game
+        // itself replaces the list region above while open.
+        let tetris_area = tetris_button_area(areas.sidebar, &info, rich, chrome.pills);
+        let tetris_row = tetris_area.y.saturating_sub(areas.sidebar.y + 1) as usize;
+        if let Some(line) = lines.get_mut(tetris_row) {
+            *line = Line::from("");
+        }
+        if chrome.tetris_open {
+            if let Some(game) = chrome.tetris.as_ref() {
+                let footer_h = sidebar_footer_height(&info, rich) as usize;
+                let list_h = lines.len().saturating_sub(footer_h);
+                for (i, game_line) in
+                    tetris_lines(game, areas.sidebar.width, list_h as u16)
+                        .into_iter()
+                        .enumerate()
+                {
+                    if let Some(slot) = lines.get_mut(i) {
+                        *slot = game_line;
+                    }
+                }
+            }
+        }
         let side = Paragraph::new(Text::from(lines)).block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2404,6 +2575,24 @@ fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {
                     theme::style(theme::Role::Text)
                 };
                 ChromeButton::new("[Kanban]", style).view(frame, board_area);
+            }
+        }
+        if tetris_area.width > 0 && tetris_area.right() <= areas.sidebar.right().saturating_sub(1) {
+            if chrome.pills {
+                let (style, left, right) = theme::button_chrome(
+                    chrome.tetris_open,
+                    theme::style(theme::Role::TabActive),
+                    theme::style(theme::Role::TabInactive),
+                    Color::DarkGray,
+                );
+                render_pill(frame, tetris_area, "Tetris", style, left, right);
+            } else {
+                let style = if chrome.tetris_open {
+                    theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
+                } else {
+                    theme::style(theme::Role::Text)
+                };
+                ChromeButton::new("[Tetris]", style).view(frame, tetris_area);
             }
         }
         for (label, area, active) in [
@@ -2737,18 +2926,19 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &c)).unwrap();
         let rows = buffer_rows(&terminal);
-        // The pinned footer puts the button row at 20 with Kanban at
-        // 21; pills still replace the brackets there, and the fixed
-        // row stays blank.
+        // The pinned footer puts the button row at 19 with Kanban at
+        // 20 and Tetris at 21; pills still replace the brackets there,
+        // and the fixed row stays blank.
         assert!(!rows[11].contains("Off"), "no ghost row: {:?}", rows[11]);
-        assert!(rows[20].contains("Off"), "off pill: {:?}", rows[20]);
-        assert!(!rows[20].contains("[Off]"), "no legacy brackets");
-        assert!(rows[21].contains("Kanban"), "kanban pill: {:?}", rows[21]);
+        assert!(rows[19].contains("Off"), "off pill: {:?}", rows[19]);
+        assert!(!rows[19].contains("[Off]"), "no legacy brackets");
+        assert!(rows[20].contains("Kanban"), "kanban pill: {:?}", rows[20]);
+        assert!(rows[21].contains("Tetris"), "tetris pill: {:?}", rows[21]);
         let cancel_y = rows.iter().position(|r| r.contains("Cancel")).expect("cancel pill");
         assert!(rows[cancel_y].contains("\u{e0b6}"));
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(66, 20)].fg, Color::Yellow, "active off cap");
-        assert_eq!(buf[(67, 20)].bg, Color::Yellow, "active off fill");
+        assert_eq!(buf[(66, 19)].fg, Color::Yellow, "active off cap");
+        assert_eq!(buf[(67, 19)].bg, Color::Yellow, "active off fill");
         let cap_byte = rows[cancel_y].find("\u{e0b6}").expect("left cap");
         let cap_x = rows[cancel_y][..cap_byte].chars().count() as u16;
         assert_eq!(buf[(cap_x, cancel_y as u16)].fg, Color::Red, "destructive caps");
@@ -2801,15 +2991,17 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &chrome())).unwrap();
         let rows = buffer_rows(&terminal);
-        assert_eq!(rows[20].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
-        assert_eq!(rows[21].chars().skip(66).take(8).collect::<String>(), "[Kanban]");
+        assert_eq!(rows[19].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
+        assert_eq!(rows[20].chars().skip(66).take(8).collect::<String>(), "[Kanban]");
+        assert_eq!(rows[21].chars().skip(66).take(8).collect::<String>(), "[Tetris]");
         assert!(!rows[12].contains("[Off]"));
 
         let mut tall = Terminal::new(TestBackend::new(120, 40)).unwrap();
         tall.draw(|f| render(f, Rect::new(0, 0, 120, 40), &[], &chrome())).unwrap();
         let tall_rows = buffer_rows(&tall);
-        assert!(tall_rows[36].contains("[Off] [Yolo]"));
-        assert!(tall_rows[37].contains("[Kanban]"));
+        assert!(tall_rows[35].contains("[Off] [Yolo]"));
+        assert!(tall_rows[36].contains("[Kanban]"));
+        assert!(tall_rows[37].contains("[Tetris]"));
         assert!(!tall_rows[11].contains("[Off]"));
     }
 
@@ -2828,6 +3020,69 @@ mod tests {
         assert!(board_at(&area, area.x + 1, area.y), "label clicks");
         assert!(!board_at(&area, area.x + 1, area.y + 1), "row below is dead");
         assert!(!board_at(&area, area.x + area.width + 2, area.y), "past the edge is dead");
+    }
+
+    #[test]
+    fn tetris_button_sits_one_row_below_kanban_and_hit_tests() {
+        let info = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
+        let sidebar = Rect::new(64, 0, 16, 23);
+        let rich = sidebar_is_rich(sidebar);
+        let paint = sidebar_paint(&info, rich, sidebar.width, sidebar.height, false);
+        assert_eq!(paint.tetris_row, paint.kanban_row + 1, "tetris pins under kanban");
+        let row_text: String =
+            paint.lines[paint.tetris_row].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(row_text.contains("Tetris"), "tetris row paints: {row_text:?}");
+        let area = tetris_button_area(sidebar, &info, rich, false);
+        assert_eq!(area.y, sidebar.y + 1 + paint.tetris_row as u16, "hit row tracks paint");
+        assert!(board_at(&area, area.x + 1, area.y), "label clicks");
+        assert!(!board_at(&area, area.x + 1, area.y + 1), "row below is dead");
+        assert!(!board_at(&area, area.x + area.width + 2, area.y), "past the edge is dead");
+    }
+
+    #[test]
+    fn tetris_open_paints_game_in_sidebar_keeping_footer() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut c = sidebar_chrome();
+        c.tetris_open = true;
+        c.tetris = Some(crate::tetris::TetrisGame::new());
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(f, f.area(), &[], &c)).unwrap();
+        let buf = terminal.backend().buffer();
+        let areas = chrome_areas(Rect::new(0, 0, 120, 30));
+        let row_text = |y: u16| {
+            (areas.sidebar.x..areas.sidebar.right())
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let body: String = (0..30).map(row_text).collect::<Vec<_>>().join("\n");
+        assert!(body.contains("Tetris"), "game header paints");
+        assert!(body.contains("pts"), "score paints");
+        assert!(body.contains("\u{2588}"), "falling piece paints");
+        assert!(body.contains("Kanban"), "kanban button stays put");
+        // Fleet rows leave: no session block under the game header.
+        assert!(!body.contains("shell-1"), "fleet hides while playing");
+    }
+
+    #[test]
+    fn tetris_lines_honor_exact_height_and_degrade_narrow() {
+        let mut game = crate::tetris::TetrisGame::new();
+        let full = tetris_lines(&game, 32, 23);
+        assert_eq!(full.len(), 23, "paint fills the list region exactly");
+        let text: String = full.iter().flat_map(|l| l.spans.iter().map(|s| s.content.as_ref())).collect::<Vec<&str>>().join("");
+        assert!(text.contains("pts") && text.contains("lv 1"), "score header: {text:?}");
+        // Lock two pieces first: the compact slice shows the bottom
+        // of the well, where settled cells land (two tetrominoes can
+        // never clear a 10-wide row, so all 8 cells stay).
+        game.hard_drop();
+        game.hard_drop();
+        let narrow = tetris_lines(&game, 16, 17);
+        assert_eq!(narrow.len(), 17, "compact paint fills exactly");
+        let cells = narrow.iter().flat_map(|l| l.spans.iter()).map(|s| {
+            s.content.chars().filter(|c| *c == '\u{2588}').count()
+        }).sum::<usize>();
+        assert!(cells >= 6, "compact well shows the stack: {cells}");
+        let tiny = tetris_lines(&game, 16, 0);
+        assert!(tiny.is_empty(), "zero height paints nothing");
     }
 
     #[test]
@@ -2993,9 +3248,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
         terminal.draw(|f| render(f, Rect::new(0, 0, 80, 14), &[], &chrome())).unwrap();
         let rows = buffer_rows(&terminal);
-        // Taller sidebar earns its button row; the bottom border stays clean.
-        assert!(rows[10].contains("[Off]"), "buttons visible: {:?}", rows[10]);
-        assert!(rows[11].contains("[Kanban]"), "kanban follows: {:?}", rows[11]);
+        // Taller sidebar earns its button rows; the bottom border stays clean.
+        assert!(rows[9].contains("[Off]"), "buttons visible: {:?}", rows[9]);
+        assert!(rows[10].contains("[Kanban]"), "kanban follows: {:?}", rows[10]);
+        assert!(rows[11].contains("[Tetris]"), "tetris follows: {:?}", rows[11]);
         assert!(!rows[12].contains("[Off]"), "border clean: {:?}", rows[12]);
     }
 
@@ -3325,6 +3581,8 @@ mod tests {
             telegram_badge: None,
             board_open: false,
             board: None,
+            tetris_open: false,
+            tetris: None,
             grid: false,
             pills: true,
         }
@@ -3346,14 +3604,15 @@ mod tests {
                 .collect::<String>()
         };
         // The pinned footer owns the buttons now: Settings heads it
-        // at row 24 whatever the list above holds.
+        // at row 23 whatever the list above holds.
         assert!(!row_text(11).contains(PILL_LEFT), "no ghost row: {:?}", row_text(11));
-        assert!(row_text(24).contains("Settings"), "header visible: {:?}", row_text(24));
+        assert!(row_text(23).contains("Settings"), "header visible: {:?}", row_text(23));
         let pill_rows: Vec<u16> = (0..30)
             .filter(|y| row_text(*y).contains(PILL_LEFT))
             .collect();
-        // Mode pills, the Kanban pill, plus the timer Cancel: three.
-        assert_eq!(pill_rows.len(), 3, "buttons, kanban, cancel: {pill_rows:?}");
+        // Mode pills, the Kanban pill, the Tetris pill, plus the
+        // timer Cancel: four.
+        assert_eq!(pill_rows.len(), 4, "buttons, kanban, tetris, cancel: {pill_rows:?}");
         assert!(mode_at(
             &footer_mode_buttons(areas.sidebar, &sidebar_chrome_info(), false, true),
             areas.sidebar.x + 3,
@@ -4169,6 +4428,8 @@ mod tests {
             mode: "off",
             board_open: false,
             board: None,
+            tetris_open: false,
+            tetris: None,
             telegram: "off",
             telegram_badge: None,
             grid: false,

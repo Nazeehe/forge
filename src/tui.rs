@@ -486,6 +486,9 @@ fn loop_until_quit(
         state.settle_comms();
         state.drain_visual();
         state.drain_telegram_test();
+        // Sidebar Tetris gravity: steps at most once per interval and
+        // only while open, so idle agents never pay for the game.
+        state.tetris_tick(Instant::now());
         // Which-key clock: a prefix held past the delay earns its HUD;
         // a sequence finished fast never paints.
         state.dirty |= state.whichkey.poll(router.is_pending(), Instant::now());
@@ -555,6 +558,8 @@ fn loop_until_quit(
                 telegram_badge: info.telegram_badge,
                 board_open: state.board_open,
                 board: state.board_open.then(|| state.board_view()),
+                tetris_open: state.tetris_open,
+                tetris: state.tetris_open.then(|| state.tetris.clone()),
                 grid: state.grid_mode,
                 pills: state.pill_tabs,
             };
@@ -779,6 +784,16 @@ fn handle_key_at(
         handle_board_key(state, key);
         return;
     }
+    // The open Tetris game owns its movement keys so arrows play the
+    // game instead of typing into a pane; the prefix chord still
+    // escapes to the router so `Ctrl-b r` (and every other command)
+    // keeps working. Board keys win while the board is open, letters
+    // always fall through so typing to agents never breaks mid-game.
+    if state.tetris_open && !state.board_open && !InputRouter::is_prefix(&key) && !router.is_pending() {
+        if handle_tetris_key(state, key) {
+            return;
+        }
+    }
     match router.feed(key) {
         RoutedKey::Forward(k) => {
             state.whichkey.note_resolved();
@@ -939,6 +954,9 @@ fn fire_command(state: &mut AppState, cmd: UserCommand) {
                 fit_active_pane(state);
             }
         }
+        UserCommand::ToggleTetris => {
+            state.toggle_tetris();
+        }
         UserCommand::TelegramSettings => {
             state.open_telegram_dialog();
         }
@@ -984,6 +1002,48 @@ fn handle_walkthrough_key(state: &mut AppState, key: event::KeyEvent) {
         }
         WalkKey::Ignored => {}
     }
+}
+
+/// One key inside the open sidebar Tetris: arrows move, Up turns,
+/// Space drops, `p` pauses, `r` restarts. Ctrl/Alt chords never reach
+/// here — the dispatcher keeps them for the prefix path — and every
+/// other key (letters included) falls through to the agent pane, so
+/// typing to agents never breaks mid-game. True when consumed.
+fn handle_tetris_key(state: &mut AppState, key: event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META) {
+        return false;
+    }
+    if !key.modifiers.is_empty() {
+        return false;
+    }
+    match key.code {
+        KeyCode::Left => {
+            state.tetris.try_move(-1, 0);
+        }
+        KeyCode::Right => {
+            state.tetris.try_move(1, 0);
+        }
+        KeyCode::Down => {
+            state.tetris.try_move(0, 1);
+        }
+        KeyCode::Up => {
+            state.tetris.rotate_cw();
+        }
+        KeyCode::Char(' ') => {
+            state.tetris.hard_drop();
+        }
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            state.tetris.toggle_pause();
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            state.tetris.restart();
+            state.tetris_last_drop = None;
+        }
+        _ => return false,
+    }
+    state.dirty = true;
+    true
 }
 
 /// One key inside the open kanban board: the blueprint's clikan map
@@ -1521,7 +1581,11 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         match mev.kind {
             event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
                 // Wheel scrolls the fleet only over the list region;
-                // footer rows (settings and below) stay inert.
+                // footer rows (settings and below) stay inert. While
+                // Tetris owns the list region the wheel does nothing.
+                if state.tetris_open {
+                    return;
+                }
                 let info = state.sidebar_info();
                 let layout =
                     ui::sidebar_layout(areas.sidebar, ui::sidebar_footer_height(&info, rich));
@@ -1544,7 +1608,11 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
             }
             _ => {}
         }
-        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+        // While Tetris owns the list region, fleet clicks sleep: the
+        // game paint carries no session rows to hit.
+        if !state.tetris_open
+            && matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
+        {
             let info = state.sidebar_info();
             for (id, area) in ui::sidebar_session_rects(areas.sidebar, &info, rich) {
                 if ui::ChromeButton::new("[fleet]", ratatui::style::Style::default())
@@ -1558,8 +1626,11 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
             }
         }
         // Armed-timer Cancel buttons: same rects the render paints,
-        // recomputed live, so a repaint can never desync them.
-        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+        // recomputed live, so a repaint can never desync them. They
+        // sleep while Tetris owns the list region, like fleet clicks.
+        if !state.tetris_open
+            && matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left))
+        {
             let info = state.sidebar_info();
             for (timer_id, area) in ui::timer_cancel_rects(areas.sidebar, &info, state.pill_tabs) {
                 if ui::ChromeButton::new("[Cancel]", ratatui::style::Style::default())
@@ -1610,6 +1681,23 @@ fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                     .click(mev.column, mev.row, board)
             {
                 state.toggle_board();
+            }
+        }
+        // Tetris button, pinned under Kanban: same builder the render
+        // uses, so clicks track the paint exactly.
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+            let info = state.sidebar_info();
+            let game = ui::tetris_button_area(
+                areas.sidebar,
+                &info,
+                ui::sidebar_is_rich(areas.sidebar),
+                state.pill_tabs,
+            );
+            if ui::board_at(&game, mev.column, mev.row)
+                && ui::ChromeButton::new("[Tetris]", ratatui::style::Style::default())
+                    .click(mev.column, mev.row, game)
+            {
+                state.toggle_tetris();
             }
         }
         return;
@@ -2801,20 +2889,76 @@ mod tests {
     }
 
     #[test]
+    fn tetris_sidebar_click_toggles_game() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        // Compact footer: mode buttons at y=19, Kanban at y=20, the
+        // Tetris button one row below at y=21.
+        assert!(!state.tetris_open);
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 67,
+                row: 21,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(state.tetris_open, "tetris button opens the game");
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 67,
+                row: 21,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert!(!state.tetris_open, "same button switches back");
+    }
+
+    #[test]
+    fn tetris_arrows_drive_game_letters_fall_through() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        let mut router = InputRouter::new();
+        state.toggle_tetris();
+        let before = state.tetris.active_cells();
+        state.dirty = false;
+        handle_key_at(
+            &mut state,
+            &mut router,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            std::time::Instant::now(),
+        );
+        assert_ne!(state.tetris.active_cells(), before, "arrow moves the piece");
+        assert!(state.dirty, "game keys repaint");
+        let before = state.tetris.active_cells();
+        handle_key_at(
+            &mut state,
+            &mut router,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            std::time::Instant::now(),
+        );
+        assert_eq!(state.tetris.active_cells(), before, "typing never plays");
+    }
+
+    #[test]
     fn sidebar_click_switches_mode_hover_ignored() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
         // Sidebar is x=64..80; with nothing pending the footer
-        // shrinks and buttons sit at y=20, Off at x=66..71, the
-        // Kanban button one row below at y=21.
+        // shrinks and buttons sit at y=19, Off at x=66..71, the
+        // Kanban button one row below at y=20, Tetris at y=21.
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Yolo);
         forward_mouse(
             &mut state,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 67,
-                row: 20,
+                row: 19,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
@@ -2826,7 +2970,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 67,
-                row: 21,
+                row: 20,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
@@ -2839,19 +2983,19 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Moved,
                 column: 73,
-                row: 20,
+                row: 19,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
         assert_eq!(state.permission_mode, crate::config::PermissionMode::Off);
         assert!(!state.dirty, "hover leaves no work");
-        // Click Yolo to return (pill starts at x=74, footer row 20).
+        // Click Yolo to return (pill starts at x=74, footer row 19).
         forward_mouse(
             &mut state,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 75,
-                row: 20,
+                row: 19,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
