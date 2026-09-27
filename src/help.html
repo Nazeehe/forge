@@ -190,6 +190,7 @@
       <tr><td><kbd>t</kbd></td><td>Switch the session's tab (agent / terminal)</td></tr>
       <tr><td><kbd>w</kbd></td><td>Toggle grid: tile every session at once</td></tr>
       <tr><td><kbd>b</kbd></td><td>Kanban board: global workspace boards (sidebar button does the same). Inside: <kbd>a</kbd> add (board or card), <kbd>e</kbd> edit title, <kbd>h</kbd>/<kbd>l</kbd>/<kbd>j</kbd>/<kbd>k</kbd> move, <kbd>Space</kbd> shift card, <kbd>x</kbd> complete, <kbd>d</kbd> delete, <kbd>q</kbd> back</td></tr>
+      <tr><td><kbd>r</kbd></td><td>Tetris game: the sidebar shows a playable game instead of the fleet (sidebar button does the same). Inside: arrows move, <kbd>↑</kbd> rotates, <kbd>Space</kbd> drops, <kbd>p</kbd> pauses, <kbd>r</kbd> restarts</td></tr>
       <tr><td><kbd>y</kbd></td><td>Toggle permission mode Off / YOLO</td></tr>
       <tr><td><kbd>m</kbd></td><td>Telegram settings</td></tr>
       <tr><td><kbd>e</kbd></td><td>Theme picker</td></tr>
@@ -306,7 +307,9 @@ block = ["^rm -rf"]</code></pre>
     <p>The sidebar shows the focused session's detail (tool, directory, state,
     status) above the fleet: every session with its attention state. Idle
     sessions queue peer messages and timer pings; twenty silent minutes marks
-    you away to every live session, and your next keystroke announces the return.</p>
+    you away to every live session, and your next keystroke announces the return.
+    The Tetris button under Kanban swaps the fleet for a playable game while
+    you wait; the same button (or <kbd>Ctrl-b</kbd> <kbd>r</kbd>) switches back.</p>
   </section>
 
   <section id="cli">

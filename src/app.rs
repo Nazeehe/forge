@@ -173,6 +173,15 @@ pub struct AppState {
     /// area shows workspace boards instead of sessions. Never scoped to
     /// a session — boards outlive every session.
     pub board_open: bool,
+    /// Sidebar Tetris (`Ctrl-b r`, sidebar Tetris button): the sidebar
+    /// list region shows a playable game instead of the fleet. The game
+    /// is ephemeral — never persisted, never scoped to a session.
+    pub tetris_open: bool,
+    /// The live Tetris well. Ticks only while `tetris_open`; toggling
+    /// away keeps the game so waiting is never lost.
+    pub tetris: crate::tetris::TetrisGame,
+    /// Last gravity drop; `None` arms the timer without stepping.
+    pub tetris_last_drop: Option<std::time::Instant>,
     /// Workspace kanban boards, mutated by the human and by MCP tools.
     pub boards: crate::board::BoardStore,
     /// Boards changed since the last atomic save; the TUI loop flushes.
@@ -396,6 +405,9 @@ impl AppState {
             walkthroughs: std::collections::HashMap::new(),
             grid_mode: false,
             board_open: false,
+            tetris_open: false,
+            tetris: crate::tetris::TetrisGame::new(),
+            tetris_last_drop: None,
             boards: crate::board::BoardStore::new(),
             boards_dirty: false,
             board_focus: BoardFocus::default(),
@@ -439,6 +451,35 @@ impl AppState {
             self.board_notice = None;
         }
         self.dirty = true;
+    }
+
+    /// Flip the sidebar Tetris view. Opening arms the gravity timer
+    /// without stepping, so the piece never jumps on entry.
+    pub fn toggle_tetris(&mut self) {
+        self.tetris_open = !self.tetris_open;
+        if self.tetris_open {
+            self.tetris_last_drop = None;
+        }
+        self.dirty = true;
+    }
+
+    /// Advance gravity when due. Pure in `now` so tests never sleep:
+    /// first call arms the timer, later calls step once per interval.
+    pub fn tetris_tick(&mut self, now: std::time::Instant) {
+        if !self.tetris_open || self.tetris.is_over() || self.tetris.is_paused() {
+            return;
+        }
+        match self.tetris_last_drop {
+            None => self.tetris_last_drop = Some(now),
+            Some(last) => {
+                if now.duration_since(last).as_millis() >= self.tetris.drop_interval_ms() as u128
+                {
+                    self.tetris.step();
+                    self.tetris_last_drop = Some(now);
+                    self.dirty = true;
+                }
+            }
+        }
     }
 
     /// Point the focus at a live board, defaulting to the first one,
@@ -6991,6 +7032,40 @@ mod tests {
     }
 
     #[test]
+    fn tetris_toggle_flips_sidebar_game() {
+        let mut s = AppState::new();
+        assert!(!s.tetris_open);
+        s.dirty = false;
+        s.toggle_tetris();
+        assert!(s.tetris_open);
+        assert!(s.dirty);
+        s.toggle_tetris();
+        assert!(!s.tetris_open);
+    }
+
+    #[test]
+    fn tetris_tick_steps_gravity_when_due() {
+        let mut s = AppState::new();
+        let t0 = std::time::Instant::now();
+        s.toggle_tetris();
+        s.tetris_tick(t0);
+        assert!(s.tetris_last_drop.is_some(), "first tick arms the timer");
+        let before = s.tetris.active_cells();
+        s.dirty = false;
+        s.tetris_tick(t0 + std::time::Duration::from_millis(900));
+        assert_ne!(s.tetris.active_cells(), before, "gravity moves the piece");
+        assert!(s.dirty);
+    }
+
+    #[test]
+    fn tetris_tick_sleeps_while_closed() {
+        let mut s = AppState::new();
+        let t0 = std::time::Instant::now();
+        s.tetris_tick(t0 + std::time::Duration::from_secs(60));
+        assert!(s.tetris_last_drop.is_none(), "closed game never arms");
+    }
+
+    #[test]
     fn board_load_missing_starts_empty_without_notice() {
         let mut s = AppState::new();
         s.load_boards(&scratch_home());
@@ -9060,6 +9135,8 @@ mod tests {
             telegram_badge: None,
             board_open: false,
             board: None,
+            tetris_open: false,
+            tetris: None,
             grid: false,
             pills: true,
         };
