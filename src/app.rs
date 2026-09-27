@@ -7,6 +7,9 @@
 use crate::infra::event::AppEvent;
 use crate::session::SessionManager;
 
+#[cfg(test)]
+mod test_support;
+
 /// Restore outcome counts for the status line.
 pub struct RestoreReport {
     pub spawned: usize,
@@ -5282,6 +5285,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_support::*;
     use crate::infra::event::AppEvent;
     use crate::infra::ids::RunId;
     use crate::session::SessionId;
@@ -8320,18 +8324,6 @@ mod tests {
         assert!(state.manager.remove(id));
     }
 
-    fn comms_reply(state: &mut AppState, run: &str, tool: &str, args: &str) -> String {
-        let (tx, rx) = std::sync::mpsc::channel();
-        state.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
-            run_id: run.to_string(),
-            tool: tool.to_string(),
-            args: args.to_string(),
-            reply: tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
-        }));
-        rx.recv().expect("comms verdict arrives")
-    }
-
     fn bot_reply(
         state: &mut AppState,
         name: &str,
@@ -10509,24 +10501,6 @@ mod tests {
         assert!(state.manager.remove(b));
     }
 
-    fn message_user_agent() -> (AppState, crate::session::SessionId, String) {
-        std::env::set_var("CODEX_BIN", "cat");
-        let mut state = AppState::new();
-        let id = state
-            .manager
-            .spawn_agent(
-                "agent",
-                &std::env::temp_dir(),
-                "exec cat",
-                crate::infra::ids::RunId::generate(),
-                "codex",
-            )
-            .unwrap();
-        std::env::remove_var("CODEX_BIN");
-        let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
-        (state, id, live_run)
-    }
-
     #[test]
     fn message_user_badges_without_forward_when_disabled() {
         let (mut state, id, live_run) = message_user_agent();
@@ -10597,15 +10571,6 @@ mod tests {
             text: text.to_string(),
             reply_to_message_id: Some(reply_to),
         });
-    }
-
-    fn tg_outbox(state: &AppState) -> Vec<crate::telegram::OutboundMessage> {
-        let mut guard = state.telegram_outbox.lock().expect("outbox unlocks");
-        let mut out = Vec::new();
-        while let Some(m) = guard.pop_front() {
-            out.push(m);
-        }
-        out
     }
 
     #[test]
