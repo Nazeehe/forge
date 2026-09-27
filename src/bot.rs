@@ -99,7 +99,7 @@ impl BotError {
         format!(
             r#"{{"code":"{}","message":{}}}"#,
             self.code.as_str(),
-            crate::mcp::escape_json(&self.message),
+            crate::ipc::mcp::escape_json(&self.message),
         )
     }
 }
@@ -342,11 +342,11 @@ impl BotEvent {
         format!(
             r#"{{"event_id":{},"conversation_id":{},"kind":"{}","from":{{"session_id":{},"name":{}}},"text":{},"unix_ms":{},"truncated":{}}}"#,
             self.id,
-            crate::mcp::escape_json(&self.conv),
+            crate::ipc::mcp::escape_json(&self.conv),
             self.kind.api_name(),
-            crate::mcp::escape_json(&self.from_id),
-            crate::mcp::escape_json(&self.from_name),
-            crate::mcp::escape_json(&self.text),
+            crate::ipc::mcp::escape_json(&self.from_id),
+            crate::ipc::mcp::escape_json(&self.from_name),
+            crate::ipc::mcp::escape_json(&self.text),
             self.unix_ms,
             if self.truncated { "true" } else { "false" },
         )

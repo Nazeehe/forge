@@ -71,16 +71,16 @@ pub enum Activity {
 /// harness JSON under `body`; both layers reuse the dependency-free
 /// field scanner. Unknown shapes yield None rather than a guess.
 pub fn session_id_from_hook_body(body: &str) -> Option<String> {
-    let nested = crate::mcp::top_raw(body, "body")?;
-    crate::mcp::top_str(nested, "session_id")
-        .or_else(|| crate::mcp::top_str(nested, "thread_id"))
+    let nested = crate::ipc::mcp::top_raw(body, "body")?;
+    crate::ipc::mcp::top_str(nested, "session_id")
+        .or_else(|| crate::ipc::mcp::top_str(nested, "thread_id"))
 }
 
 /// Working directory from a hook envelope body, when the harness reports
 /// one (muse's `cwd`). Same nesting as the session ID above.
 pub fn cwd_from_hook_body(body: &str) -> Option<String> {
-    let nested = crate::mcp::top_raw(body, "body")?;
-    crate::mcp::top_str(nested, "cwd")
+    let nested = crate::ipc::mcp::top_raw(body, "body")?;
+    crate::ipc::mcp::top_str(nested, "cwd")
 }
 
 /// How long after spawn an unattributed SessionStart may still claim its

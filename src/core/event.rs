@@ -23,15 +23,15 @@ pub enum AppEvent {
     /// A synchronous hook record from the IPC listener. Policy sends the
     /// one-line decision through `reply`; dropping it leaves the relay to
     /// time out fail-open.
-    HookRequest(crate::listener::HookRequest),
+    HookRequest(crate::ipc::listener::HookRequest),
     /// A comms tool call from `mcp-serve`. The broker answers at once; the
     /// one-line verdict travels back through `reply`.
-    CommsRequest(crate::listener::CommsRequest),
+    CommsRequest(crate::ipc::listener::CommsRequest),
     /// An external bot call from the IPC listener. Auth is the client
     /// credential in the transport envelope; the broker answers at once
     /// and the handler relays the one-line verdict with a typed error
     /// object on failure.
-    BotRequest(crate::listener::BotRequest),
+    BotRequest(crate::ipc::listener::BotRequest),
     /// Telegram long-poll results. The poller thread sends only when
     /// there is something to act on (fresh inbound text or a poll
     /// failure); quiet polls stay silent so the loop never wakes.

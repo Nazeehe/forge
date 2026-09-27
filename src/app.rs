@@ -20,7 +20,7 @@ pub struct AppState {
     pub term_size: (u16, u16),
     /// Hook records awaiting a policy decision. Bounded: beyond the cap
     /// newcomers are dropped and their relays fail open on timeout.
-    pub pending_hooks: std::collections::VecDeque<crate::listener::HookRequest>,
+    pub pending_hooks: std::collections::VecDeque<crate::ipc::listener::HookRequest>,
     /// Open create-session dialog, if any. Captures all input while present.
     /// Telegram inbound texts awaiting routing (Phase 5 drains this).
     /// Bounded by [`crate::telegram::INBOX_CAP`]; overflow counts in
@@ -2307,13 +2307,13 @@ impl AppState {
     /// intact), blanked to missing.
     fn tool_arg(args: &str, name: &str) -> Option<String> {
         crate::hooks::policy::json_string_field(args.as_bytes(), &[name])
-            .map(|s| crate::mcp::decode_json_string(&s))
+            .map(|s| crate::ipc::mcp::decode_json_string(&s))
             .filter(|s| !s.is_empty())
     }
 
     /// One boolean tool arg from a bare JSON literal.
     fn tool_bool(args: &str, name: &str) -> Option<bool> {
-        match crate::mcp::top_raw(args, name)?.trim() {
+        match crate::ipc::mcp::top_raw(args, name)?.trim() {
             "true" => Some(true),
             "false" => Some(false),
             _ => None,
@@ -2323,7 +2323,7 @@ impl AppState {
     /// One integer tool arg: bare JSON numbers, quoted ones read
     /// liberally too. Fractions, negatives, and overflow never pass.
     fn tool_u32(args: &str, name: &str) -> Option<u32> {
-        let raw = crate::mcp::top_raw(args, name)?.trim();
+        let raw = crate::ipc::mcp::top_raw(args, name)?.trim();
         let bare = raw
             .strip_prefix('"')
             .and_then(|s| s.strip_suffix('"'))
@@ -2579,7 +2579,7 @@ impl AppState {
                                 self.ensure_board_focus();
                                 Ok(format!(
                                     "{{\"deleted\":true,\"card_id\":{}}}",
-                                    crate::mcp::escape_json(&card_id)
+                                    crate::ipc::mcp::escape_json(&card_id)
                                 ))
                             }
                             Err(e) => Err(e.to_string()),
@@ -2764,7 +2764,7 @@ impl AppState {
         let Some(board) = self.boards.board(name_or_id) else {
             return format!(
                 "{{\"error\":{}}}",
-                crate::mcp::escape_json(&format!("board not found: {name_or_id}"))
+                crate::ipc::mcp::escape_json(&format!("board not found: {name_or_id}"))
             );
         };
         serde_json::json!({
@@ -2841,8 +2841,8 @@ impl AppState {
         match crate::screenshot::capture(&app, focus) {
             Ok(shot) => Ok(format!(
                 "{{\"path\":{},\"app\":{},\"width\":{},\"height\":{}}}",
-                crate::mcp::escape_json(&shot.path),
-                crate::mcp::escape_json(&format!("{} — {}", shot.class, shot.title)),
+                crate::ipc::mcp::escape_json(&shot.path),
+                crate::ipc::mcp::escape_json(&format!("{} — {}", shot.class, shot.title)),
                 shot.width,
                 shot.height,
             )),
@@ -3242,7 +3242,7 @@ impl AppState {
         self.dirty = true;
         Ok(format!(
             r#"{{"session_id":"{id}","name":{}}}"#,
-            crate::mcp::escape_json(&name),
+            crate::ipc::mcp::escape_json(&name),
         ))
     }
 
@@ -3268,8 +3268,8 @@ impl AppState {
         self.dirty = true;
         Ok(format!(
             r#"{{"kind":{},"message":{}}}"#,
-            crate::mcp::escape_json(kind.as_str()),
-            crate::mcp::escape_json(&message),
+            crate::ipc::mcp::escape_json(kind.as_str()),
+            crate::ipc::mcp::escape_json(&message),
         ))
     }
 
@@ -5051,7 +5051,7 @@ impl AppState {
                 // up. Losing the claim means the handler already timed
                 // out, so the send is skipped and the retry guidance
                 // goes on the reply instead of a stale ok.
-                if !crate::listener::claim_execute(&req.claim) {
+                if !crate::ipc::listener::claim_execute(&req.claim) {
                     self.trace_comms(&format!(
                         "comms tool={} {} {} -> dropped reason=\"caller timed out; retry with the same idempotency_key\"",
                         req.tool,
@@ -5089,7 +5089,7 @@ impl AppState {
                     Ok(result) => format!("{{\"ok\":true,\"result\":{result}}}\n"),
                     Err(e) => format!(
                         "{{\"ok\":false,\"error\":{}}}\n",
-                        crate::mcp::escape_json(&e)
+                        crate::ipc::mcp::escape_json(&e)
                     ),
                 };
                 let _ = req.reply.send(line);
@@ -5098,7 +5098,7 @@ impl AppState {
             AppEvent::BotRequest(req) => {
                 // Same commit claim as comms requests: no bot mutation
                 // starts after its caller stopped waiting.
-                if !crate::listener::claim_execute(&req.claim) {
+                if !crate::ipc::listener::claim_execute(&req.claim) {
                     let mut line = String::from("{\"ok\":false,\"error\":");
                     line.push_str(
                         &crate::bot::BotError::new(
@@ -5171,7 +5171,7 @@ impl AppState {
                 // muse scrubs their environment, so it identifies the exact
                 // pane when several muse sessions share a cwd. Old relays do
                 // not send it; retain the conservative cwd/window fallback.
-                let source_sid = crate::mcp::top_raw(&req.body, "source_sid")
+                let source_sid = crate::ipc::mcp::top_raw(&req.body, "source_sid")
                     .and_then(|raw| raw.parse::<u32>().ok())
                     .filter(|sid| *sid != 0);
                 let source_session =
@@ -5265,7 +5265,7 @@ impl AppState {
                         ),
                     );
                 }
-                if self.pending_hooks.len() < crate::listener::MAX_PENDING_HOOKS {
+                if self.pending_hooks.len() < crate::ipc::listener::MAX_PENDING_HOOKS {
                     if let Some(id) = attributed {
                         self.last_hook_activity
                             .insert(id, std::time::Instant::now());
@@ -5304,7 +5304,7 @@ mod tests {
 
     fn hook_request(hook: &str, run_id: &str, body: &str) -> AppEvent {
         let (reply_tx, _) = std::sync::mpsc::channel();
-        AppEvent::HookRequest(crate::listener::HookRequest {
+        AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: hook.to_string(),
             body: body.to_string(),
             run_id: run_id.to_string(),
@@ -5349,7 +5349,7 @@ mod tests {
             .unwrap();
         let body = r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string();
         let (codex_tx, codex_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: body.clone(),
             run_id: codex_run.to_string(),
@@ -5358,7 +5358,7 @@ mod tests {
             timed_out: Default::default(),
         }));
         let (claude_tx, claude_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body,
             run_id: claude_run.to_string(),
@@ -5436,7 +5436,7 @@ mod tests {
         let mut yolo =
             crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
         let (allow_tx, allow_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PermissionRequest".to_string(),
             body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
             run_id: run.to_string(),
@@ -5454,7 +5454,7 @@ mod tests {
         // Off ask declines to decide so the native prompt continues.
         let mut off = crate::hooks::policy::Policy::new(PermissionMode::Off, &[], &[]).unwrap();
         let (ask_tx, ask_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PermissionRequest".to_string(),
             body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
             run_id: run.to_string(),
@@ -5511,7 +5511,7 @@ mod tests {
         use crate::session::Activity;
         let mut s = AppState::new();
         let cwd = std::env::temp_dir();
-        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let cwd_json = crate::ipc::mcp::escape_json(&cwd.to_string_lossy());
         let run = RunId::generate();
         let id = s
             .manager
@@ -5552,7 +5552,7 @@ mod tests {
         use crate::session::Activity;
         let mut s = AppState::new();
         let cwd = std::env::temp_dir();
-        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let cwd_json = crate::ipc::mcp::escape_json(&cwd.to_string_lossy());
         let run = RunId::generate();
         let id = s
             .manager
@@ -5581,7 +5581,7 @@ mod tests {
         // wait forever (comms.log: 486 holds, mu_1/mu_2 never delivered).
         let mut s = AppState::new();
         let cwd = std::env::temp_dir();
-        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let cwd_json = crate::ipc::mcp::escape_json(&cwd.to_string_lossy());
         let run_a = RunId::generate();
         let a = s
             .manager
@@ -5615,12 +5615,12 @@ mod tests {
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, m, "peers").unwrap();
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: "{\"target\":\"m\",\"text\":\"hello-m\"}".to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         assert_eq!(s.broker.queued(m), 1);
         s.last_hook_activity.remove(&m);
@@ -5638,7 +5638,7 @@ mod tests {
         let mut s = AppState::new();
         s.hook_trace = Some(log.clone());
         let cwd = std::env::temp_dir();
-        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let cwd_json = crate::ipc::mcp::escape_json(&cwd.to_string_lossy());
         let id = s
             .manager
             .spawn_agent("m", &cwd, "exec sleep 30", RunId::generate(), "muse")
@@ -5715,7 +5715,7 @@ mod tests {
         // runs now, so the record must follow it.
         let mut s = AppState::new();
         let cwd = std::env::temp_dir();
-        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let cwd_json = crate::ipc::mcp::escape_json(&cwd.to_string_lossy());
         let run = RunId::generate();
         let id = s
             .manager
@@ -5742,7 +5742,7 @@ mod tests {
     fn resumed_same_cwd_muse_hooks_bind_by_pty_process_session_after_window() {
         let mut s = AppState::new();
         let cwd = std::env::temp_dir();
-        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let cwd_json = crate::ipc::mcp::escape_json(&cwd.to_string_lossy());
         let a = s
             .manager
             .spawn_agent("a", &cwd, "exec sleep 30", RunId::generate(), "muse")
@@ -5780,7 +5780,7 @@ mod tests {
     fn process_attributed_hook_conflict_never_spills_to_same_cwd_session() {
         let mut s = AppState::new();
         let cwd = std::env::temp_dir();
-        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let cwd_json = crate::ipc::mcp::escape_json(&cwd.to_string_lossy());
         let a = s
             .manager
             .spawn_agent("a", &cwd, "exec sleep 30", RunId::generate(), "muse")
@@ -5822,7 +5822,7 @@ mod tests {
         // may claim an unbound session.
         let mut s = AppState::new();
         let cwd = std::env::temp_dir();
-        let cwd_json = crate::mcp::escape_json(&cwd.to_string_lossy());
+        let cwd_json = crate::ipc::mcp::escape_json(&cwd.to_string_lossy());
         let run = RunId::generate();
         let id = s
             .manager
@@ -5952,7 +5952,7 @@ mod tests {
         let mut s = AppState::new();
         s.dirty = false;
         let (reply_tx, _reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: "{}".to_string(),
             run_id: String::new(),
@@ -5962,9 +5962,9 @@ mod tests {
         }));
         assert!(s.dirty);
         assert_eq!(s.pending_hooks.len(), 1);
-        for _ in 0..crate::listener::MAX_PENDING_HOOKS + 10 {
+        for _ in 0..crate::ipc::listener::MAX_PENDING_HOOKS + 10 {
             let (tx, _rx) = std::sync::mpsc::channel();
-            s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
                 hook: "Stop".to_string(),
                 body: "{}".to_string(),
                 run_id: String::new(),
@@ -5973,7 +5973,7 @@ mod tests {
                 timed_out: Default::default(),
             }));
         }
-        assert_eq!(s.pending_hooks.len(), crate::listener::MAX_PENDING_HOOKS);
+        assert_eq!(s.pending_hooks.len(), crate::ipc::listener::MAX_PENDING_HOOKS);
     }
 
     #[test]
@@ -5990,7 +5990,7 @@ mod tests {
         let mut yolo = crate::hooks::policy::Policy::new(PermissionMode::Yolo, &[], &[]).unwrap();
         let mut s = AppState::new();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
             run_id: String::new(),
@@ -6039,7 +6039,7 @@ mod tests {
         .unwrap();
         let mut s = AppState::new();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
             run_id: String::new(),
@@ -6067,7 +6067,7 @@ mod tests {
         )
         .unwrap();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: "{}".to_string(),
             run_id: String::new(),
@@ -6105,7 +6105,7 @@ mod tests {
         assert!(!s.dirty, "idle settle must leave the frame clean");
         // A real verdict still repaints (counters/audit change).
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#.to_string(),
             run_id: String::new(),
@@ -6136,12 +6136,12 @@ mod tests {
         assert!(s.manager.set_activity(a, crate::session::Activity::Idle));
         let schedule = |s: &mut AppState, prompt: &str| {
             let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id: run_a.to_string(),
                 tool: "schedule_prompt".to_string(),
                 args: format!("{{\"prompt\":{prompt:?},\"delay_seconds\":0}}"),
                 reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
             let line = reply_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
@@ -6199,7 +6199,7 @@ mod tests {
         .unwrap();
         let mut s = AppState::new();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: r#"{"tool_name":"Bash","tool_input":{"command":"doom"}}"#.to_string(),
             run_id: String::new(),
@@ -6234,12 +6234,12 @@ mod tests {
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "ask_session".to_string(),
             args: r#"{"target":"b","message":"ready?"}"#.to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -6271,12 +6271,12 @@ mod tests {
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "ask_session".to_string(),
             args: r#"{"target":"b","message":"ready?"}"#.to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_TIMED_OUT)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_TIMED_OUT)),
         }));
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -6292,12 +6292,12 @@ mod tests {
     fn comms_rejections_are_single_line_json() {
         let mut s = AppState::new();
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: "f".repeat(32),
             tool: "ask_session".to_string(),
             args: "{}".to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         let line = reply_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -6322,12 +6322,12 @@ mod tests {
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "ask_session".to_string(),
             args: r#"{"target":"b","message":"q?"}"#.to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         assert!(s.manager.kill(b));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -6370,12 +6370,12 @@ mod tests {
             .unwrap();
         let comms = |s: &mut AppState, run_id: String, tool: &str, args: &str| {
             let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id,
                 tool: tool.to_string(),
                 args: args.to_string(),
                 reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
         };
         // No shared group: the rejection lands in the trace with the cause.
@@ -6425,12 +6425,12 @@ mod tests {
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         // Busy target: the hold names the pane activity, not just silence.
         assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
@@ -6471,12 +6471,12 @@ mod tests {
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
         s.settle_comms();
@@ -6509,12 +6509,12 @@ mod tests {
         // Busy target: the injection waits.
         assert!(s.manager.set_activity(b, crate::session::Activity::ToolUse));
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"text\":\"hello-b\"}".to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 1, "busy target waits");
@@ -6561,7 +6561,7 @@ mod tests {
         s.broker.join(&s.manager, b, "peers").unwrap();
         let hook = |s: &mut AppState, hook: &str, run_id: String| {
             let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
                 hook: hook.to_string(),
                 body: "{}".to_string(),
                 run_id,
@@ -6572,12 +6572,12 @@ mod tests {
         };
         let comms = |s: &mut AppState, run_id: String, tool: &str, args: &str| -> String {
             let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id,
                 tool: tool.to_string(),
                 args: args.to_string(),
                 reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
             reply_rx
                 .recv_timeout(std::time::Duration::from_secs(5))
@@ -6662,7 +6662,7 @@ mod tests {
         s.broker.join(&s.manager, b, "peers").unwrap();
         let hook = |s: &mut AppState, hook: &str, run_id: String| {
             let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
                 hook: hook.to_string(),
                 body: "{}".to_string(),
                 run_id,
@@ -6679,12 +6679,12 @@ mod tests {
             crate::session::Activity::Thinking
         );
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_b.to_string(),
             tool: "tell_session".to_string(),
             args: "{\"target\":\"a\",\"text\":\"hold\"}".to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(a), 1, "generating target waits");
@@ -6756,12 +6756,12 @@ mod tests {
         }
         raw.clear();
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: "{\"target\":\"b\",\"message\":\"ping-body\"}".to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         s.settle_comms();
         assert_eq!(s.broker.queued(b), 0, "raw session is idle: body delivered");
@@ -6871,12 +6871,12 @@ mod tests {
         raw.clear();
         let tell = |s: &mut AppState, text: &str| {
             let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id: run_a.to_string(),
                 tool: "tell_session".to_string(),
                 args: format!("{{\"target\":\"b\",\"text\":{text:?}}}"),
                 reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
         };
         tell(&mut s, "first-one");
@@ -6950,12 +6950,12 @@ mod tests {
         s.broker.join(&s.manager, b, "peers").unwrap();
         assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","text":"held"}"#.to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         // Kill the writer while the record stays idle (exit undrained):
         // every write now fails deterministically.
@@ -6989,12 +6989,12 @@ mod tests {
         s.broker.join(&s.manager, b, "peers").unwrap();
         assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","text":"held"}"#.to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         s.settle_comms();
         assert!(s.pending_enter.contains_key(&b), "enter staged");
@@ -7032,12 +7032,12 @@ mod tests {
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","message":"wait"}"#.to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         // Typing debounces the typed-in pane only (never its neighbors).
         s.note_human_input(b);
@@ -7072,13 +7072,13 @@ mod tests {
         s.broker.join(&s.manager, a, "peers").unwrap();
         s.broker.join(&s.manager, b, "peers").unwrap();
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","message":"wait"}"#.to_string(),
             reply: reply_tx,
             claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
-                crate::listener::CLAIM_PENDING,
+                crate::ipc::listener::CLAIM_PENDING,
             )),
         }));
         s.settle_comms();
@@ -7111,13 +7111,13 @@ mod tests {
         s.broker.join(&s.manager, b, "peers").unwrap();
         let mut converse = |run: &str, tool: &str, args: String| {
             let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id: run.to_string(),
                 tool: tool.to_string(),
                 args,
                 reply: reply_tx,
                 claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
-                    crate::listener::CLAIM_PENDING,
+                    crate::ipc::listener::CLAIM_PENDING,
                 )),
             }));
             reply_rx
@@ -7180,7 +7180,7 @@ mod tests {
             .unwrap();
         s.manager.set_harness_session(a, "h-1".to_string());
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: r#"{"body":{"session_id":"h-1"}}"#.to_string(),
             run_id: "unknown-run".to_string(),
@@ -7265,12 +7265,12 @@ mod tests {
         assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
         let tell = |s: &mut AppState| {
             let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+            s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
                 run_id: run_a.to_string(),
                 tool: "tell_session".to_string(),
                 args: r#"{"target":"b","message":"wait"}"#.to_string(),
                 reply: reply_tx,
-                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+                claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
             }));
         };
         // Human typing in A leaves B's delivery alone.
@@ -7292,7 +7292,7 @@ mod tests {
         // Hook traffic attributed to A leaves B's delivery alone.
         tell(&mut s);
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: "{}".to_string(),
             run_id: run_a.to_string(),
@@ -7323,12 +7323,12 @@ mod tests {
         s.broker.join(&s.manager, b, "peers").unwrap();
         assert!(s.manager.set_activity(b, crate::session::Activity::Idle));
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run_a.to_string(),
             tool: "tell_session".to_string(),
             args: r#"{"target":"b","message":"wait"}"#.to_string(),
             reply: reply_tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         // Fresh hook activity holds delivery even to an idle target.
         s.last_hook_activity.insert(b, std::time::Instant::now());
@@ -7358,7 +7358,7 @@ mod tests {
             .unwrap();
         assert!(s.last_hook_activity.is_empty());
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: "{}".to_string(),
             run_id: run_a.to_string(),
@@ -7727,7 +7727,7 @@ mod tests {
             .unwrap();
         fn hook(s: &mut AppState, hook: &str, run_id: String) {
             let (reply_tx, _) = std::sync::mpsc::channel();
-            s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
                 hook: hook.to_string(),
                 body: "{}".to_string(),
                 run_id,
@@ -8194,7 +8194,7 @@ mod tests {
             .unwrap();
         // Tool-gated hook: activity flips to ToolUse, hook queued.
         let (reply_tx, _) = std::sync::mpsc::channel();
-        s.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".to_string(),
             body: "{}".to_string(),
             run_id: run.to_string(),
@@ -8322,12 +8322,12 @@ mod tests {
 
     fn comms_reply(state: &mut AppState, run: &str, tool: &str, args: &str) -> String {
         let (tx, rx) = std::sync::mpsc::channel();
-        state.apply(AppEvent::CommsRequest(crate::listener::CommsRequest {
+        state.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
             run_id: run.to_string(),
             tool: tool.to_string(),
             args: args.to_string(),
             reply: tx,
-            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::listener::CLAIM_PENDING)),
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
         }));
         rx.recv().expect("comms verdict arrives")
     }
@@ -8340,14 +8340,14 @@ mod tests {
         args: &str,
     ) -> String {
         let (tx, rx) = std::sync::mpsc::channel();
-        state.apply(AppEvent::BotRequest(crate::listener::BotRequest {
+        state.apply(AppEvent::BotRequest(crate::ipc::listener::BotRequest {
             name: name.to_string(),
             token: token.to_string(),
             tool: tool.to_string(),
             args: args.to_string(),
             reply: tx,
             claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
-                crate::listener::CLAIM_PENDING,
+                crate::ipc::listener::CLAIM_PENDING,
             )),
         }));
         rx.recv().expect("bot verdict arrives")
@@ -8359,14 +8359,14 @@ mod tests {
         // mutation runs, and the reply guides the retry to its key.
         let mut state = bot_state();
         let (tx, rx) = std::sync::mpsc::channel();
-        state.apply(AppEvent::BotRequest(crate::listener::BotRequest {
+        state.apply(AppEvent::BotRequest(crate::ipc::listener::BotRequest {
             name: "skippy".to_string(),
             token: BOT_TOKEN.to_string(),
             tool: "list_sessions".to_string(),
             args: "{}".to_string(),
             reply: tx,
             claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
-                crate::listener::CLAIM_TIMED_OUT,
+                crate::ipc::listener::CLAIM_TIMED_OUT,
             )),
         }));
         let line = rx
@@ -10108,7 +10108,7 @@ mod tests {
         ).unwrap();
         let args = format!(
             r#"{{"file":{},"steps":"1:3:first\n5:5:second"}}"#,
-            crate::mcp::escape_json(&path.to_string_lossy()),
+            crate::ipc::mcp::escape_json(&path.to_string_lossy()),
         );
         let started = comms_reply(&mut state, &live_run, "walkthrough_start", &args);
         assert!(started.contains(r#""ok":true"#), "started: {started}");
@@ -10184,7 +10184,7 @@ mod tests {
             &mut state,
             &live_run,
             "card_move",
-            &format!(r#"{{"card_id":{},"column":"Done"}}"#, crate::mcp::escape_json(&id)),
+            &format!(r#"{{"card_id":{},"column":"Done"}}"#, crate::ipc::mcp::escape_json(&id)),
         );
         assert!(moved.contains(r#""progress":100"#), "done sets 100: {moved}");
         let got = comms_reply(
@@ -10199,14 +10199,14 @@ mod tests {
             &mut state,
             &live_run,
             "card_assign",
-            &format!(r#"{{"card_id":{}}}"#, crate::mcp::escape_json(&id)),
+            &format!(r#"{{"card_id":{}}}"#, crate::ipc::mcp::escape_json(&id)),
         );
         assert!(assigned.contains("agent"), "caller session named: {assigned}");
         let deleted = comms_reply(
             &mut state,
             &live_run,
             "card_delete",
-            &format!(r#"{{"card_id":{}}}"#, crate::mcp::escape_json(&id)),
+            &format!(r#"{{"card_id":{}}}"#, crate::ipc::mcp::escape_json(&id)),
         );
         assert!(deleted.contains(r#""deleted":true"#), "deleted: {deleted}");
         assert!(state.boards_dirty, "tool mutations persist");
@@ -10285,7 +10285,7 @@ mod tests {
             "card_update",
             &format!(
                 r#"{{"card_id":{},"title":"t2","progress":250}}"#,
-                crate::mcp::escape_json(&id)
+                crate::ipc::mcp::escape_json(&id)
             ),
         );
         assert!(updated.contains(r#""title":"t2""#), "renamed: {updated}");
@@ -10300,7 +10300,7 @@ mod tests {
             &mut state,
             &live_run,
             "board_get",
-            &format!(r#"{{"board_id":{}}}"#, crate::mcp::escape_json(&id)),
+            &format!(r#"{{"board_id":{}}}"#, crate::ipc::mcp::escape_json(&id)),
         );
         assert!(by_id.contains("Backlog"), "by id: {by_id}");
         let bare = comms_reply(&mut state, &live_run, "board_get", r#"{}"#);
@@ -10339,7 +10339,7 @@ mod tests {
             "card_update",
             &format!(
                 r#"{{"card_id":{},"title":"full2","description":"d2","column":"Todo","assignee":"sam","priority":"low","tags":["c"],"start_date":"2026-09-02","due_date":"2026-11-01","estimate":8,"progress":40}}"#,
-                crate::mcp::escape_json(&id)
+                crate::ipc::mcp::escape_json(&id)
             ),
         );
         assert!(updated.contains(r#""ok":true"#), "updated: {updated}");
@@ -10360,7 +10360,7 @@ mod tests {
             "card_update",
             &format!(
                 r#"{{"card_id":{},"assignee":"","start_date":"","due_date":"","estimate":""}}"#,
-                crate::mcp::escape_json(&id)
+                crate::ipc::mcp::escape_json(&id)
             ),
         );
         assert!(cleared.contains(r#""ok":true"#), "cleared: {cleared}");
@@ -10383,7 +10383,7 @@ mod tests {
             "card_update",
             &format!(
                 r#"{{"card_id":{},"estimate":"lots"}}"#,
-                crate::mcp::escape_json(&id)
+                crate::ipc::mcp::escape_json(&id)
             ),
         );
         assert!(bad.contains("estimate must be a number"), "bad estimate: {bad}");
@@ -11273,7 +11273,7 @@ mod tests {
         ).unwrap();
         let start = format!(
             r#"{{"file":{},"steps":"1:3:first\n5:5:second"}}"#,
-            crate::mcp::escape_json(&path.to_string_lossy()),
+            crate::ipc::mcp::escape_json(&path.to_string_lossy()),
         );
         comms_reply(&mut state, &live_run, "walkthrough_start", &start);
         let added = comms_reply(
@@ -11386,7 +11386,7 @@ mod tests {
         let run = crate::core::ids::RunId::generate();
         let id = state.manager.spawn_agent("agent", &std::env::temp_dir(), "exec cat", run.clone(), "codex").unwrap();
         let (reply, _) = std::sync::mpsc::channel();
-        state.apply(AppEvent::HookRequest(crate::listener::HookRequest {
+        state.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
             hook: "PreToolUse".into(), body: "{}".into(), run_id: run.as_str().into(),
             sync: false, reply, timed_out: Default::default(),
         }));

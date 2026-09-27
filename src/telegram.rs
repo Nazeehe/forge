@@ -165,7 +165,7 @@ pub fn send_payload(chat_id: i64, text: &str) -> String {
     let cut = truncate_text(text, MAX_TEXT);
     format!(
         r#"{{"chat_id":{chat_id},"text":{}}}"#,
-        crate::mcp::escape_json(cut)
+        crate::ipc::mcp::escape_json(cut)
     )
 }
 

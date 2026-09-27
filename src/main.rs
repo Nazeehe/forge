@@ -15,8 +15,7 @@ mod groups;
 mod help;
 mod hooks;
 mod input;
-mod listener;
-mod mcp;
+mod ipc;
 mod oobe;
 mod quit;
 mod telegram;
@@ -327,15 +326,15 @@ fn main() {
                     std::process::exit(2);
                 }
             }
-            let srv = mcp::ServerCtx {
+            let srv = ipc::mcp::ServerCtx {
                 instructions_extra: String::new(),
             };
-            let cc = mcp::CallCtx {
-                endpoint: mcp::resolve_endpoint(explicit.as_deref()),
+            let cc = ipc::mcp::CallCtx {
+                endpoint: ipc::mcp::resolve_endpoint(explicit.as_deref()),
                 run_id: std::env::var("FORGE_RUN_ID").unwrap_or_default(),
                 timeout: std::time::Duration::from_secs(3),
             };
-            std::process::exit(mcp::serve_stdio(&srv, &cc));
+            std::process::exit(ipc::mcp::serve_stdio(&srv, &cc));
         }
         Some(other) => {
             eprintln!("error: unexpected argument `{other}`");

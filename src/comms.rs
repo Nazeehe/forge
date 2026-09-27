@@ -136,10 +136,10 @@ pub fn summarize_call(tool: &str, args: &str) -> String {
         },
         "schedule_prompt" => {
             let mut out = log_text_part(text());
-            if let Some(raw) = crate::mcp::top_raw(args, "delay_seconds") {
+            if let Some(raw) = crate::ipc::mcp::top_raw(args, "delay_seconds") {
                 out.push_str(&format!(" delay={}", crate::core::logging::truncate(raw.trim(), 32)));
             }
-            if let Some(raw) = crate::mcp::top_raw(args, "clear_context") {
+            if let Some(raw) = crate::ipc::mcp::top_raw(args, "clear_context") {
                 out.push_str(&format!(" clear={}", crate::core::logging::truncate(raw.trim(), 8)));
             }
             out
@@ -727,7 +727,7 @@ impl Broker {
     /// digits. Absent reads as missing; present-but-garbled is a
     /// client bug, never silent.
     fn arg_u64(args: &str, name: &str) -> Option<Result<u64, BotError>> {
-        let raw = crate::mcp::top_raw(args, name)?.trim();
+        let raw = crate::ipc::mcp::top_raw(args, name)?.trim();
         let bare = raw
             .strip_prefix('"')
             .and_then(|s| s.strip_suffix('"'))
@@ -1030,7 +1030,7 @@ impl Broker {
             .unwrap_or_default();
         let mut out = format!(
             r#"{{"you":{},"epoch":{},"sessions":["#,
-            crate::mcp::escape_json(client),
+            crate::ipc::mcp::escape_json(client),
             self.epoch,
         );
         let mut first = true;
@@ -1051,11 +1051,11 @@ impl Broker {
             let activity = Self::activity_label(rec.activity);
             let group = self
                 .primary_group(id)
-                .map(crate::mcp::escape_json)
+                .map(crate::ipc::mcp::escape_json)
                 .unwrap_or_else(|| "null".to_string());
             out.push_str(&format!(
                 r#"{{"id":"{id}","name":{},"activity":"{activity}","group":{group}}}"#,
-                crate::mcp::escape_json(&rec.name),
+                crate::ipc::mcp::escape_json(&rec.name),
             ));
         }
         out.push_str("]}");
@@ -1746,7 +1746,7 @@ impl Broker {
     /// Raw numeric arg: JSON numbers arrive bare, quoted ones read
     /// liberally too. Non-finite values never pass.
     fn arg_num(args: &str, name: &str) -> Option<f64> {
-        let raw = crate::mcp::top_raw(args, name)?.trim();
+        let raw = crate::ipc::mcp::top_raw(args, name)?.trim();
         let bare = raw
             .strip_prefix('"')
             .and_then(|s| s.strip_suffix('"'))
@@ -1755,7 +1755,7 @@ impl Broker {
     }
 
     fn arg_bool(args: &str, name: &str) -> Option<bool> {
-        match crate::mcp::top_raw(args, name)?.trim() {
+        match crate::ipc::mcp::top_raw(args, name)?.trim() {
             "true" => Some(true),
             "false" => Some(false),
             _ => None,
@@ -1808,7 +1808,7 @@ impl Broker {
     ) -> Result<String, String> {
         let prompt = Self::arg(args, "prompt").filter(|s| !s.is_empty())
             .ok_or_else(|| "schedule_prompt needs a prompt".to_string())?;
-        if crate::mcp::top_raw(args, "delay_seconds").is_some()
+        if crate::ipc::mcp::top_raw(args, "delay_seconds").is_some()
             && Self::arg_num(args, "delay_seconds").is_none()
         {
             return Err("delay_seconds must be a number of seconds".to_string());
@@ -1817,7 +1817,7 @@ impl Broker {
         if !(0.0..=MAX_SCHEDULE_DELAY_SECS).contains(&delay) {
             return Err("delay_seconds must sit between 0 and 86400".to_string());
         }
-        if crate::mcp::top_raw(args, "clear_context").is_some()
+        if crate::ipc::mcp::top_raw(args, "clear_context").is_some()
             && Self::arg_bool(args, "clear_context").is_none()
         {
             return Err("clear_context must be true or false".to_string());
@@ -2290,7 +2290,7 @@ impl Broker {
     fn list_sessions(&self, sessions: &SessionManager, caller: SessionId) -> String {
         let mut out = format!(
             r#"{{"you":{},"sessions":["#,
-            crate::mcp::escape_json(&self.names(sessions, caller)),
+            crate::ipc::mcp::escape_json(&self.names(sessions, caller)),
         );
         let mut first = true;
         for &id in sessions.order() {
@@ -2307,11 +2307,11 @@ impl Broker {
             let activity = Self::activity_label(rec.activity);
             let group = self
                 .primary_group(id)
-                .map(crate::mcp::escape_json)
+                .map(crate::ipc::mcp::escape_json)
                 .unwrap_or_else(|| "null".to_string());
             out.push_str(&format!(
                 r#"{{"name":{},"live":true,"activity":"{activity}","group":{group}}}"#,
-                crate::mcp::escape_json(&rec.name),
+                crate::ipc::mcp::escape_json(&rec.name),
             ));
         }
         // Bot peers sharing a group with the caller ride along, marked,
@@ -2331,7 +2331,7 @@ impl Broker {
                 .and_then(|mine| {
                     self.clients.get(&name).and_then(|c| {
                         mine.iter().find(|g| c.groups.contains(g)).map(|g| {
-                            crate::mcp::escape_json(g)
+                            crate::ipc::mcp::escape_json(g)
                         })
                     })
                 })
@@ -2342,7 +2342,7 @@ impl Broker {
             first = false;
             out.push_str(&format!(
                 r#"{{"name":{},"live":true,"activity":"Idle","group":{group},"bot":true}}"#,
-                crate::mcp::escape_json(&name),
+                crate::ipc::mcp::escape_json(&name),
             ));
         }
         out.push_str("]}");
@@ -3168,7 +3168,7 @@ mod tests {
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll: {poll}");
         assert!(poll.contains(r#""kind":"response""#), "poll: {poll}");
-        let epoch = crate::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
+        let epoch = crate::ipc::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
         p.bcall(
             "skippy",
             "bot_ack",
@@ -3195,7 +3195,7 @@ mod tests {
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
         assert!(poll.contains(&conv), "poll: {poll}");
         assert!(poll.contains(r#""kind":"ask""#), "poll: {poll}");
-        let epoch = crate::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
+        let epoch = crate::ipc::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
         p.bcall(
             "skippy",
             "bot_ack",
@@ -3258,7 +3258,7 @@ mod tests {
         let mut p = live_pair().grouped();
         p.register_bot("skippy", vec!["peers"]);
         let first = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-        let epoch = crate::mcp::top_raw(&first, "epoch").expect("epoch echoed");
+        let epoch = crate::ipc::mcp::top_raw(&first, "epoch").expect("epoch echoed");
         let err = p
             .bcall(
                 "skippy",
@@ -4002,7 +4002,7 @@ mod tests {
     /// steps reach exactly 256 (the cap).
     fn drain_inbox(p: &mut Pair, client: &str) {
         let first = p.bcall(client, "bot_poll", "{}").expect("poll validates");
-        let epoch = crate::mcp::top_raw(&first, "epoch").expect("epoch echoed");
+        let epoch = crate::ipc::mcp::top_raw(&first, "epoch").expect("epoch echoed");
         for step in 1..=13 {
             let cursor = (step * 20).min(crate::bot::INBOX_CAP as u64);
             p.bcall(client, "bot_poll", "{}").expect("poll validates");
@@ -4307,7 +4307,7 @@ mod tests {
         // Receive and ack the ask so the pads below start past it;
         // the epoch rides along for the later cursor polls and acks.
         let poll1 = p.bcall("skippy", "bot_poll", "{}").expect("poll receives");
-        let epoch = crate::mcp::top_raw(&poll1, "epoch").expect("epoch echoed");
+        let epoch = crate::ipc::mcp::top_raw(&poll1, "epoch").expect("epoch echoed");
         p.bcall("skippy", "bot_ack", &format!(r#"{{"cursor":1,"epoch":{epoch}}}"#))
             .expect("ack advances");
         // Fill the inbox to the cap: the exit notice must park.
@@ -4745,7 +4745,7 @@ mod tests {
         )
         .expect("target answers");
         let poll = p.bcall("skippy", "bot_poll", "{}").expect("poll validates");
-        let epoch = crate::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
+        let epoch = crate::ipc::mcp::top_raw(&poll, "epoch").expect("epoch echoed");
         let ack = format!(r#"{{"cursor":1,"epoch":{epoch}}}"#);
         let first = p.bcall("skippy", "bot_ack", &ack).expect("ack validates");
         assert!(first.contains(r#""acknowledged":1"#), "first: {first}");

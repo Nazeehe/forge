@@ -138,13 +138,13 @@ pub struct BotParts {
 /// Parse the bot object out of a comms envelope. `None` when no bot
 /// object rides along (a harness call, not a bot call).
 pub fn bot_parts(text: &str) -> Option<BotParts> {
-    let bot = crate::mcp::top_raw(text, "bot")?;
-    let name = crate::mcp::top_str(bot, "name").filter(|s| !s.is_empty())?;
+    let bot = crate::ipc::mcp::top_raw(text, "bot")?;
+    let name = crate::ipc::mcp::top_str(bot, "name").filter(|s| !s.is_empty())?;
     // The credential forwards verbatim: absent reads as failed auth at
     // the broker, never as a second parse error (no oracle either way).
-    let token = crate::mcp::top_str(bot, "token").unwrap_or_default();
-    let tool = crate::mcp::top_str(text, "tool").unwrap_or_default();
-    let args = crate::mcp::top_raw(text, "args").unwrap_or("{}").to_string();
+    let token = crate::ipc::mcp::top_str(bot, "token").unwrap_or_default();
+    let tool = crate::ipc::mcp::top_str(text, "tool").unwrap_or_default();
+    let args = crate::ipc::mcp::top_raw(text, "args").unwrap_or("{}").to_string();
     Some(BotParts {
         name,
         token,
@@ -165,7 +165,7 @@ pub fn instance_pinned_ok(pinned: u32, own: u32) -> bool {
 /// hook envelopes then match as before.
 pub fn classify(line: &[u8]) -> Route {
     if let Ok(text) = std::str::from_utf8(line) {
-        if crate::mcp::top_str(text, "kind").as_deref() == Some("comms") {
+        if crate::ipc::mcp::top_str(text, "kind").as_deref() == Some("comms") {
             return Route::Comms;
         }
     }
@@ -364,8 +364,8 @@ fn handle_conn<S: std::io::Read + std::io::Write>(
 /// One hook-trace line for a record the listener accepted or dropped.
 fn hook_record_trace(line: &[u8], hook: &str, verdict: &str) -> String {
     let text = String::from_utf8_lossy(line);
-    let run_id = crate::mcp::top_str(&text, "run_id").unwrap_or_default();
-    let raw = |key: &str| crate::mcp::top_raw(&text, key).unwrap_or("-").to_string();
+    let run_id = crate::ipc::mcp::top_str(&text, "run_id").unwrap_or_default();
+    let raw = |key: &str| crate::ipc::mcp::top_raw(&text, key).unwrap_or("-").to_string();
     format!(
         "listener hook={hook} run_id={} forge_pid={} source_sid={} -> {verdict}",
         if run_id.is_empty() { "empty" } else { "set" },
@@ -381,10 +381,10 @@ fn handle_hook<S: std::io::Read + std::io::Write>(
     tx: &std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
 ) {
     let body = String::from_utf8_lossy(line).into_owned();
-    let run_id = crate::mcp::top_str(&body, "run_id").unwrap_or_default();
+    let run_id = crate::ipc::mcp::top_str(&body, "run_id").unwrap_or_default();
     // Records resolved through the endpoint file carry their owner's pid;
     // another live instance's relays must not land in this loop.
-    let forge_pid: u32 = crate::mcp::top_raw(&body, "forge_pid")
+    let forge_pid: u32 = crate::ipc::mcp::top_raw(&body, "forge_pid")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(0);
     if forge_pid != 0 && forge_pid != std::process::id() {
@@ -478,21 +478,21 @@ fn handle_comms<S: std::io::Read + std::io::Write>(
     tx: &std::sync::mpsc::SyncSender<crate::core::event::AppEvent>,
 ) {
     let text = String::from_utf8_lossy(line).into_owned();
-    if crate::mcp::top_raw(&text, "bot").is_some() {
+    if crate::ipc::mcp::top_raw(&text, "bot").is_some() {
         return handle_bot(conn, &text, tx);
     }
     let (Some(run_id), Some(tool)) = (
-        crate::mcp::top_str(&text, "run_id"),
-        crate::mcp::top_str(&text, "tool"),
+        crate::ipc::mcp::top_str(&text, "run_id"),
+        crate::ipc::mcp::top_str(&text, "tool"),
     ) else {
         crate::core::logging::comms_trace_global(&comms_record_trace(
-            &crate::mcp::top_str(&text, "tool").unwrap_or_default(),
-            &crate::mcp::top_str(&text, "run_id").unwrap_or_default(),
+            &crate::ipc::mcp::top_str(&text, "tool").unwrap_or_default(),
+            &crate::ipc::mcp::top_str(&text, "run_id").unwrap_or_default(),
             "malformed: missing run_id/tool",
         ));
         return;
     };
-    let args = crate::mcp::top_raw(&text, "args").unwrap_or("{}").to_string();
+    let args = crate::ipc::mcp::top_raw(&text, "args").unwrap_or("{}").to_string();
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     let claim = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CLAIM_PENDING));
     if tx
@@ -563,7 +563,7 @@ fn handle_bot<S: std::io::Read + std::io::Write>(
     // Every bot request pins its instance: a missing, zero, or
     // unparsable pin is malformed, a well-formed foreign pin routes
     // nowhere and refuses as unavailable.
-    let pinned = crate::mcp::top_raw(text, "forge_pid")
+    let pinned = crate::ipc::mcp::top_raw(text, "forge_pid")
         .map(|r| r.trim().trim_matches('"').to_string())
         .and_then(|r| r.parse::<u32>().ok())
         .filter(|p| *p > 0);

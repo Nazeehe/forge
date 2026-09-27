@@ -23,8 +23,6 @@ const FLAT_ALLOWED: &[&str] = &[
     "groups.rs",
     "help.rs",
     "input.rs",
-    "listener.rs",
-    "mcp.rs",
     "oobe.rs",
     "quit.rs",
     "screenshot.rs",

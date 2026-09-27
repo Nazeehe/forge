@@ -165,11 +165,11 @@ pub fn run(
     let audit_path = audit_path.to_path_buf();
     // Bounded: a stalled owner must exert backpressure (handlers drop
     // to caller timeouts), never grow this queue without limit.
-    let (ipc_tx, ipc_rx) = std::sync::mpsc::sync_channel(crate::listener::IPC_QUEUE_CAP);
+    let (ipc_tx, ipc_rx) = std::sync::mpsc::sync_channel(crate::ipc::listener::IPC_QUEUE_CAP);
     // The IPC listener is fail-soft: without it, hook relays simply find
     // no endpoint and exit zero. Children inherit the endpoint by env;
     // harnesses that scrub hook environments (muse) use the endpoint file.
-    let _ipc = match crate::listener::spawn_all(ipc_tx.clone()) {
+    let _ipc = match crate::ipc::listener::spawn_all(ipc_tx.clone()) {
         Ok(spawned) => {
             std::env::set_var("FORGE_IPC_ENDPOINT", &spawned.sock_path);
             if let Err(e) = crate::hooks::relay::write_endpoint_file(

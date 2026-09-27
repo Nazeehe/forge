@@ -33,7 +33,7 @@ pub fn write_endpoint_file(
     }
     let text = format!(
         "{{\"pid\":{pid},\"sock\":{}}}",
-        crate::mcp::escape_json(&sock.to_string_lossy())
+        crate::ipc::mcp::escape_json(&sock.to_string_lossy())
     );
     crate::core::fs_atomic::write_atomic(&endpoint_file_path(home), text.as_bytes())
 }
@@ -53,7 +53,7 @@ fn file_owner_pid(text: &str) -> Option<u32> {
 
 /// [`file_owner_pid`] with the rejection reason, for the hook trace.
 fn file_owner(text: &str) -> Result<u32, String> {
-    let raw = crate::mcp::top_raw(text, "pid").ok_or("no pid field")?;
+    let raw = crate::ipc::mcp::top_raw(text, "pid").ok_or("no pid field")?;
     let pid: u32 = raw.parse().map_err(|_| format!("bad pid {raw:?}"))?;
     if pid == 0 {
         return Err("pid 0".to_string());
@@ -97,7 +97,7 @@ fn file_endpoint_traced() -> Result<(u32, String), String> {
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("{} unreadable: {e}", path.display()))?;
     let pid = file_owner(&text)?;
-    match crate::mcp::top_str(&text, "sock") {
+    match crate::ipc::mcp::top_str(&text, "sock") {
         Some(sock) if !sock.is_empty() => Ok((pid, sock)),
         _ => Err("no sock field".to_string()),
     }
@@ -302,7 +302,7 @@ pub fn trace_line(input: &[u8], run_id: &str, endpoint: &str, sock: &str, outcom
         "relay pid={} ppid={ppid} sid={sid} hook={} session_id={} run_id={} endpoint={endpoint} sock={sock} -> {outcome}",
         std::process::id(),
         hook_name(input).unwrap_or_else(|| "-".to_string()),
-        crate::mcp::top_str(&text, "session_id").unwrap_or_else(|| "-".to_string()),
+        crate::ipc::mcp::top_str(&text, "session_id").unwrap_or_else(|| "-".to_string()),
         if run_id.is_empty() { "empty" } else { "set" },
     )
 }
