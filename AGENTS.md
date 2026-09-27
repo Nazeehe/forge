@@ -120,3 +120,39 @@ Rules:
   (forged run ID, missing group, full queue, corrupt save, hostile text).
 - Manual smoke from Phase 2 on: launch, 2 sessions, prefix commands, kill one,
   `kill -9` recovery.
+
+## 8. Source layout (binding for all new code)
+
+`src/` is organized by feature; `main.rs` is the only top-level file. New
+code goes in the folder that owns its concern:
+
+| Folder | Owns |
+|---|---|
+| `infra/` | dependency-free plumbing: branding, ids, events, atomic fs, path jail, safe text, logging, config |
+| `session/` | session identity/lifecycle, PTY, status, checkpoints, harness + agent registry, runtime adapters |
+| `comms/` | the Broker (groups, queue, calls, conversations, clients, timers, lifecycle) + external bot clients |
+| `hooks/` | hook relay, permission policy, audit, harness installers (`install/`) |
+| `ipc/` | TUI listener socket, `mcp-serve` |
+| `telegram/`, `kanban/`, `visual/`, `tetris/`, `walkthrough/` | that feature's domain state and logic |
+| `ui/` | all painting and layout; theme, which-key, help; dialogs in `ui/dialogs/` |
+| `tui/` | event loop, terminal guard, key/mouse dispatch, input routing |
+| `app/` | `AppState`, split into one `impl AppState` file per feature (`app/board.rs`, `app/visual/`, …) |
+
+Rules:
+
+- **Feature folders own state and logic; `ui/` owns painting; `tui/` owns
+  input dispatch.** A new feature gets its own folder (`src/<feature>/mod.rs`
+  opening with a `//!` line saying what it owns), its paint code in `ui/`,
+  and its `AppState` methods in `app/<feature>.rs`.
+- **No new top-level files in `src/`, and no `.rs` file over 1,500 lines**
+  (tests included). `tests/structure.rs` enforces both. When a file nears
+  the cap, turn it into a folder (`x.rs` → `x/mod.rs` + children) split along
+  method groups; if the tests alone overflow, move them to `x/tests.rs`.
+- **Splitting a type's `impl` across child modules:** keep the struct in
+  `mod.rs` — children already see its private fields. Widen only cross-file
+  helper methods, and only to `pub(super)`; `pub(crate)` only when a caller
+  outside the folder truly needs it.
+- **Shared test fixtures** live in `<folder>/test_support.rs`
+  (`#[cfg(test)] pub(super)`). Never copy helpers between test modules.
+- **No path-alias re-exports** (`pub use new::path as old_name`); fix call
+  sites. A `mod.rs` may re-export its children as the folder's public API.
