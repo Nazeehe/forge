@@ -33,6 +33,73 @@ pub(super) fn message_user_agent() -> (AppState, crate::session::SessionId, Stri
     (state, id, live_run)
 }
 
+pub(super) fn tg_agent(name: &str) -> (AppState, crate::session::SessionId, String) {
+    std::env::set_var("CODEX_BIN", "cat");
+    let mut state = AppState::new();
+    let id = state
+        .manager
+        .spawn_agent(
+            name,
+            &std::env::temp_dir(),
+            "exec cat",
+            crate::infra::ids::RunId::generate(),
+            "codex",
+        )
+        .unwrap();
+    std::env::remove_var("CODEX_BIN");
+    let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+    (state, id, live_run)
+}
+
+pub(super) fn tg_inbox(state: &mut AppState, chat: i64, texts: &[&str]) {
+    for text in texts {
+        state.telegram_inbox.push_back(crate::telegram::InboundMessage {
+            user_id: 11,
+            chat_id: chat,
+            text: text.to_string(),
+            reply_to_message_id: None,
+        });
+    }
+}
+
+pub(super) fn tg_inbox_reply(state: &mut AppState, chat: i64, text: &str, reply_to: i64) {
+    state.telegram_inbox.push_back(crate::telegram::InboundMessage {
+        user_id: 11,
+        chat_id: chat,
+        text: text.to_string(),
+        reply_to_message_id: Some(reply_to),
+    });
+}
+
+pub(super) fn tg_home() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "forge-tg-form-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(crate::infra::branding::config_dir(&dir)).unwrap();
+    dir
+}
+
+pub(super) fn board_live_state() -> (AppState, String) {
+    let mut state = AppState::new();
+    let id = state
+        .manager
+        .spawn_agent(
+            "agent",
+            &std::env::temp_dir(),
+            "exec cat",
+            crate::infra::ids::RunId::generate(),
+            "codex",
+        )
+        .unwrap();
+    let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
+    (state, live_run)
+}
+
 pub(super) fn hook_request(hook: &str, run_id: &str, body: &str) -> AppEvent {
     let (reply_tx, _) = std::sync::mpsc::channel();
     AppEvent::HookRequest(crate::ipc::listener::HookRequest {

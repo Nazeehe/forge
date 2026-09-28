@@ -158,10 +158,10 @@ fn forge_binary_path() -> String {
 }
 
 /// One first-run outcome: Setup installs hooks for the pick. A clean
-/// sweep (every pick installed) closes at once; anything else (a skip
-/// like pi, an already-set-up entry, an error) reopens the dialog in
-/// results mode so the miss is visible instead of silent. Esc closes
-/// bare. `install-*` remains the repair path.
+/// sweep (every pick installed) closes at once; anything else (a skip,
+/// an already-set-up entry, an error) reopens the dialog in results
+/// mode so the miss is visible instead of silent. Esc closes bare.
+/// `install-*` remains the repair path.
 fn settle_oobe_outcome(
     state: &mut AppState,
     home: &std::path::Path,
@@ -460,15 +460,23 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
+        // Pre-install claude's hooks so Setup yields an `unchanged` miss
+        // instead of a clean sweep: the miss must reopen in results mode.
+        let pre = crate::ui::dialogs::oobe::install_selected(
+            &home,
+            &["claude".to_string()],
+            &forge_binary_path(),
+        );
+        assert!(pre.iter().all(|o| o.installed), "pre-installs: {pre:?}");
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
         state.open_oobe_dialog();
         assert!(state.oobe_dialog.is_some(), "first run opens setup");
-        // Uncheck codex, muse, and copilot: claude installs from a pure
-        // home-relative path, pi skips, and the test never
-        // consults CODEX_HOME, COPILOT_HOME, or real config paths.
+        // Uncheck codex and muse: claude submits from a pure
+        // home-relative path, and the test never consults CODEX_HOME
+        // or real config paths.
         let none = KeyModifiers::NONE;
-        for _ in 0..3 {
+        for _ in 0..2 {
             handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
             handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Char(' '), none));
         }
@@ -477,26 +485,19 @@ mod tests {
             &home,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
-        // Pi skips, so Setup lands on the results screen instead of
-        // closing: the skip must be visible, not silent.
+        // Already set up is a miss, so Setup lands on the results screen
+        // instead of closing: the miss must be visible, not silent.
         assert!(state.oobe_dialog.is_some(), "results open");
         assert!(
             state.oobe_dialog.as_ref().is_some_and(|d| d.done()),
             "results mode"
         );
-        let text =
-            std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-        assert!(text.contains("hook-relay"), "hooks installed: {text}");
         assert!(
             !home.join(".codex/hooks.json").exists(),
             "unchecked CLI untouched"
         );
         assert!(
             !home.join(".config/muse/settings.json").exists(),
-            "unchecked CLI untouched"
-        );
-        assert!(
-            !home.join(".copilot/hooks/forge.json").exists(),
             "unchecked CLI untouched"
         );
         // Done closes the results.
@@ -523,7 +524,7 @@ mod tests {
         state.open_oobe_dialog();
         // Uncheck everything but claude: a clean install closes at once.
         let none = KeyModifiers::NONE;
-        for _ in 0..4 {
+        for _ in 0..2 {
             handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Down, none));
             handle_oobe_key(&mut state, &home, KeyEvent::new(KeyCode::Char(' '), none));
         }

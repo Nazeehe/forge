@@ -142,46 +142,16 @@ pub fn command_of(body: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Harness-aware decision rendering. Codex accepts a bare
-/// `permissionDecision:"allow"` only with an `updatedInput` rewrite (which
-/// forge never emits) and rejects `ask` on PreToolUse outright ("unsupported
-/// permissionDecision:allow"); both must be silent (empty stdout, exit 0) so
-/// Codex's own approval flow decides. Only an attributed codex sender goes
-/// silent; unattributed senders keep the long-standing explicit shape so
-/// existing behavior (and its tests) is unchanged. Deny keeps the explicit
-/// deny shape all harnesses accept.
-///
-/// Codex approvals gate on a second event, `PermissionRequest`: allow there
-/// skips the approval prompt, deny blocks, and silence declines to decide
-/// (the normal approval flow continues). That envelope is the only verdict
-/// that can auto-approve a Codex call, so forge YOLO rides on it; other
-/// harnesses keep the legacy shape they already accept there.
+/// Render a verdict through the agent adapter for `cli_tool`
+/// (verdict details live in each adapter's `render_decision`).
 pub fn decision_line_for(cli_tool: &str, hook: &str, decision: Decision, reason: &str) -> String {
-    if cli_tool.eq_ignore_ascii_case("codex") {
-        if hook == "PreToolUse" && matches!(decision, Decision::Allow | Decision::Ask) {
-            return String::new();
-        }
-        if hook == "PermissionRequest" {
-            return match decision {
-                Decision::Allow => "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}\n"
-                    .to_string(),
-                Decision::Deny => {
-                    let message = escape_reason(reason);
-                    let message = if message.is_empty() { "denied".to_string() } else { message };
-                    format!(
-                        "{{\"hookSpecificOutput\":{{\"hookEventName\":\"PermissionRequest\",\"decision\":{{\"behavior\":\"deny\",\"message\":\"{message}\"}}}}}}\n"
-                    )
-                }
-                Decision::Ask => String::new(),
-            };
-        }
-    }
-    decision_line(hook, decision, reason)
+    crate::agents::adapter_for(cli_tool).render_decision(hook, decision, reason)
 }
 
 /// Escape one reason string for embedding in a JSON double-quoted value:
 /// quotes/backslashes gain a backslash, controls become spaces.
-fn escape_reason(reason: &str) -> String {
+/// Shared with the codex adapter's verdict rendering.
+pub(crate) fn escape_reason(reason: &str) -> String {
     let mut safe = String::with_capacity(reason.len());
     for c in reason.chars() {
         match c {

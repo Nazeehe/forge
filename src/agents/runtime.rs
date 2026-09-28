@@ -8,13 +8,11 @@
 //! agent CLI, strongest mechanism first:
 //!
 //! 1. native system/developer instruction injection (`claude
-//!    --append-system-prompt-file`, `codex -c developer_instructions=`,
-//!    `pi --append-system-prompt`)
+//!    --append-system-prompt-file`, `codex -c developer_instructions=`)
 //! 2. agent-supported context files (none currently: every file transport
 //!    we verified either replaces the built-in prompt or needs user-config
 //!    surgery, so no agent uses this tier yet)
-//! 3. startup prompt injection fallback (`gemini`/`muse`/`agy`
-//!    positional prompt, `copilot -i`)
+//! 3. startup prompt injection fallback (`muse`/`agy` positional prompt)
 //!
 //! Unknown or user-added agents get MCP server instructions only, never a
 //! guessed argv shape.
@@ -75,12 +73,8 @@ pub enum RuntimeMechanism {
     /// Developer-role instruction override (`codex -c
     /// developer_instructions=`).
     DeveloperInstructions,
-    /// Inline append-to-system-prompt flag (`pi --append-system-prompt`).
-    AppendSystemPromptInline,
-    /// Trailing positional prompt (`gemini`, `muse`, `agy`).
+    /// Trailing positional prompt (`muse`, `agy`).
     StartupPromptPositional,
-    /// Prompt-taking flag (`copilot -i` / `--interactive`).
-    StartupPromptFlag,
     /// No launch-time transport: MCP server instructions only. Used for
     /// unknown and user-added agents rather than guessing an argv shape.
     McpInstructionsOnly,
@@ -96,35 +90,13 @@ pub struct RuntimeAdapter {
 
 impl RuntimeAdapter {
     pub fn for_agent(agent: &str) -> Self {
-        // Static table: adding a harness is a row here, never a refactor.
-        // Names match the agent registry (`agents.json`) and the installer
-        // harness keys. Anything unlisted resolves to MCP-instructions-only
+        // Agents resolve through the adapter layer (the single name-match
+        // site); anything unlisted resolves to MCP-instructions-only
         // rather than a guessed argv shape.
-        const TABLE: &[(&str, RuntimeMechanism)] = &[
-            ("claude", RuntimeMechanism::SystemPromptFile),
-            ("codex", RuntimeMechanism::DeveloperInstructions),
-            ("pi", RuntimeMechanism::AppendSystemPromptInline),
-            ("gemini", RuntimeMechanism::StartupPromptPositional),
-            ("muse", RuntimeMechanism::StartupPromptPositional),
-            ("agy", RuntimeMechanism::StartupPromptPositional),
-            ("copilot", RuntimeMechanism::StartupPromptFlag),
-        ];
-        let mut matched: Option<(&'static str, RuntimeMechanism)> = None;
-        for (name, mechanism) in TABLE {
-            if *name == agent {
-                matched = Some((name, *mechanism));
-                break;
-            }
-        }
-        match matched {
-            Some((name, mechanism)) => RuntimeAdapter {
-                agent: name,
-                mechanism,
-            },
-            None => RuntimeAdapter {
-                agent: "unknown",
-                mechanism: RuntimeMechanism::McpInstructionsOnly,
-            },
+        let adapter = super::adapter_for(agent);
+        RuntimeAdapter {
+            agent: adapter.name(),
+            mechanism: adapter.runtime_mechanism(),
         }
     }
 
@@ -151,15 +123,8 @@ impl RuntimeAdapter {
                     toml_basic_string(FORGE_RUNTIME_CONTRACT)
                 ),
             ],
-            RuntimeMechanism::AppendSystemPromptInline => vec![
-                "--append-system-prompt".to_string(),
-                FORGE_RUNTIME_CONTRACT.to_string(),
-            ],
             RuntimeMechanism::StartupPromptPositional => {
                 vec![FORGE_RUNTIME_CONTRACT.to_string()]
-            }
-            RuntimeMechanism::StartupPromptFlag => {
-                vec!["-i".to_string(), FORGE_RUNTIME_CONTRACT.to_string()]
             }
             RuntimeMechanism::McpInstructionsOnly => Vec::new(),
         }
@@ -263,24 +228,12 @@ mod tests {
             RuntimeMechanism::DeveloperInstructions
         );
         assert_eq!(
-            RuntimeAdapter::for_agent("pi").mechanism(),
-            RuntimeMechanism::AppendSystemPromptInline
-        );
-        assert_eq!(
-            RuntimeAdapter::for_agent("gemini").mechanism(),
-            RuntimeMechanism::StartupPromptPositional
-        );
-        assert_eq!(
             RuntimeAdapter::for_agent("muse").mechanism(),
             RuntimeMechanism::StartupPromptPositional
         );
         assert_eq!(
             RuntimeAdapter::for_agent("agy").mechanism(),
             RuntimeMechanism::StartupPromptPositional
-        );
-        assert_eq!(
-            RuntimeAdapter::for_agent("copilot").mechanism(),
-            RuntimeMechanism::StartupPromptFlag
         );
         assert_eq!(
             RuntimeAdapter::for_agent("something-custom").mechanism(),
@@ -343,24 +296,8 @@ mod tests {
     }
 
     #[test]
-    fn pi_extras_append_inline_contract() {
-        let file = Path::new("/home/tester/.forge/runtime.md");
-        assert_eq!(
-            RuntimeAdapter::for_agent("pi").launch_extras(file),
-            vec![
-                "--append-system-prompt".to_string(),
-                FORGE_RUNTIME_CONTRACT.to_string(),
-            ]
-        );
-    }
-
-    #[test]
     fn startup_fallbacks_carry_contract_as_first_prompt() {
         let file = Path::new("/home/tester/.forge/runtime.md");
-        assert_eq!(
-            RuntimeAdapter::for_agent("gemini").launch_extras(file),
-            vec![FORGE_RUNTIME_CONTRACT.to_string()]
-        );
         assert_eq!(
             RuntimeAdapter::for_agent("muse").launch_extras(file),
             vec![FORGE_RUNTIME_CONTRACT.to_string()]
@@ -368,10 +305,6 @@ mod tests {
         assert_eq!(
             RuntimeAdapter::for_agent("agy").launch_extras(file),
             vec![FORGE_RUNTIME_CONTRACT.to_string()]
-        );
-        assert_eq!(
-            RuntimeAdapter::for_agent("copilot").launch_extras(file),
-            vec!["-i".to_string(), FORGE_RUNTIME_CONTRACT.to_string()]
         );
     }
 

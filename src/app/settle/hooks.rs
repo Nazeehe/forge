@@ -36,7 +36,7 @@ impl AppState {
                 .and_then(|id| self.manager.get(id))
                 .map(|rec| rec.cli_tool.as_str())
                 .unwrap_or("");
-            let line = crate::hooks::policy::decision_line_for(cli_tool, &req.hook, decision, reason);
+            let line = crate::agents::adapter_for(cli_tool).render_decision(&req.hook, decision, reason);
             let _ = req.reply.send(line);
             // The verdict races bodies only in its own pane: stamp the
             // attributed session, never the whole app.

@@ -1,119 +1,26 @@
 //! First-run setup (OOBE): greet a fresh `~/.forge` owner, offer every
-//! known agent CLI with checkboxes (all checked), and install hooks for
-//! the picked set. Each CLI is a [`Cli`] plugin: adding one is a new
-//! struct plus one entry in [`all_clis`].
+//! hook-capable registry agent with checkboxes (all checked), and install
+//! hooks for the picked set. Rows come from the agent registry filtered by
+//! its `supports_hooks` capability: adding an agent is one `agents.json`
+//! entry plus one adapter file, never an OOBE edit.
 
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 
+use crate::agents::harness::Harness;
 use crate::hooks::install::Outcome;
 
-/// One known agent CLI: identity plus its install behavior. Thin
-/// delegates over [`crate::hooks::install`]; the registry list below is what
-/// the OOBE dialog and bulk installers drive.
-pub trait Cli: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn display_name(&self) -> &'static str;
-    fn setup(&self, home: &Path, forge_bin: &str) -> Outcome;
-    fn uninstall(&self, home: &Path) -> Outcome;
-}
-
-pub struct ClaudeCli;
-pub struct CodexCli;
-pub struct MuseCli;
-pub struct CopilotCli;
-pub struct PiCli;
-
-impl Cli for ClaudeCli {
-    fn id(&self) -> &'static str {
-        "claude"
-    }
-    fn display_name(&self) -> &'static str {
-        "claude"
-    }
-    fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
-    }
-    fn uninstall(&self, home: &Path) -> Outcome {
-        crate::hooks::install::uninstall_one_hooks(home, self.id())
-    }
-}
-
-impl Cli for CodexCli {
-    fn id(&self) -> &'static str {
-        "codex"
-    }
-    fn display_name(&self) -> &'static str {
-        "codex"
-    }
-    fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
-    }
-    fn uninstall(&self, home: &Path) -> Outcome {
-        crate::hooks::install::uninstall_one_hooks(home, self.id())
-    }
-}
-
-impl Cli for MuseCli {
-    fn id(&self) -> &'static str {
-        "muse"
-    }
-    fn display_name(&self) -> &'static str {
-        "muse"
-    }
-    fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
-    }
-    fn uninstall(&self, home: &Path) -> Outcome {
-        crate::hooks::install::uninstall_one_hooks(home, self.id())
-    }
-}
-
-impl Cli for CopilotCli {
-    fn id(&self) -> &'static str {
-        "copilot"
-    }
-    fn display_name(&self) -> &'static str {
-        "copilot"
-    }
-    fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
-    }
-    fn uninstall(&self, home: &Path) -> Outcome {
-        crate::hooks::install::uninstall_one_hooks(home, self.id())
-    }
-}
-
-impl Cli for PiCli {
-    fn id(&self) -> &'static str {
-        "pi"
-    }
-    fn display_name(&self) -> &'static str {
-        "pi"
-    }
-    fn setup(&self, home: &Path, forge_bin: &str) -> Outcome {
-        crate::hooks::install::install_one_hooks(home, self.id(), forge_bin)
-    }
-    fn uninstall(&self, home: &Path) -> Outcome {
-        crate::hooks::install::uninstall_one_hooks(home, self.id())
-    }
-}
-
-static CLAUDE: ClaudeCli = ClaudeCli;
-static CODEX: CodexCli = CodexCli;
-static MUSE: MuseCli = MuseCli;
-static COPILOT: CopilotCli = CopilotCli;
-static PI: PiCli = PiCli;
-
-/// Every known CLI, in display order. Adding a CLI is a new [`Cli`]
-/// struct plus one entry here.
-pub fn all_clis() -> &'static [&'static dyn Cli] {
-    // agy stays out: it is a supported session harness but documents
-    // no hook surface, so setup could only ever report skipped.
-    static ALL: &[&dyn Cli] = &[&CLAUDE, &CODEX, &MUSE, &COPILOT, &PI];
-    ALL
+/// Every hook-capable registry agent id, in `agents.json` file order.
+/// Agents without a hook surface (like agy) stay excluded via the
+/// registry's `supports_hooks` capability, not a name.
+pub fn all_clis() -> Vec<&'static str> {
+    Harness::all()
+        .into_iter()
+        .filter(|h| h.supports_hooks())
+        .map(|h| h.as_str())
+        .collect()
 }
 
 /// First run means no `~/.forge` yet: the config dir is only created
@@ -129,10 +36,12 @@ pub fn install_selected(
     ids: &[String],
     forge_bin: &str,
 ) -> Vec<Outcome> {
-    all_clis()
-        .iter()
-        .filter(|cli| ids.iter().any(|id| id == cli.id()))
-        .map(|cli| cli.setup(home, forge_bin))
+    // Any registered agent installs (agy reports skipped through its
+    // adapter); unknown ids are ignored.
+    crate::agents::harness::Harness::all()
+        .into_iter()
+        .filter(|h| ids.iter().any(|id| id == h.as_str()))
+        .map(|h| crate::hooks::install::install_one_hooks(home, h.as_str(), forge_bin))
         .collect()
 }
 
@@ -288,7 +197,7 @@ impl OobeDialog {
             .iter()
             .enumerate()
             .filter(|(i, _)| self.is_checked(*i))
-            .map(|(_, cli)| cli.id().to_string())
+            .map(|(_, id)| id.to_string())
             .collect()
     }
 
@@ -455,7 +364,7 @@ impl OobeDialog {
                         Span::raw("  ")
                     },
                     Span::styled(box_glyph, box_style),
-                    Span::styled(cli.display_name(), row_style),
+                    Span::styled((*cli).to_string(), row_style),
                 ]);
                 frame.render_widget(Paragraph::new(line), Rect::new(cx, row, cw, 1));
                 row += 1;
@@ -535,11 +444,14 @@ mod tests {
 
     #[test]
     fn known_clis_listed_in_registry_order() {
-        let ids: Vec<_> = all_clis().iter().map(|c| c.id()).collect();
-        assert_eq!(
-            ids,
-            vec!["claude", "codex", "muse", "copilot", "pi"]
-        );
+        let ids: Vec<_> = all_clis();
+        assert_eq!(ids, vec!["claude", "codex", "muse"]);
+    }
+
+    #[test]
+    fn hookless_agents_stay_out_of_oobe() {
+        // agy is a supported session harness without a hook surface.
+        assert!(!all_clis().contains(&"agy"));
     }
 
     #[test]
@@ -547,7 +459,7 @@ mod tests {
         let dialog = OobeDialog::new(true);
         assert_eq!(
             dialog.selected_ids(),
-            vec!["claude", "codex", "muse", "copilot", "pi"]
+            vec!["claude", "codex", "muse"]
         );
     }
 
@@ -557,10 +469,7 @@ mod tests {
         dialog.key(&key(KeyCode::Char(' ')));
         assert!(!dialog.is_checked(0), "first row toggled off");
         assert!(dialog.is_checked(1), "other rows stay checked");
-        assert_eq!(
-            dialog.selected_ids(),
-            vec!["codex", "muse", "copilot", "pi"]
-        );
+        assert_eq!(dialog.selected_ids(), vec!["codex", "muse"]);
     }
 
     #[test]
@@ -579,12 +488,7 @@ mod tests {
         dialog.key(&key(KeyCode::Char(' ')));
         assert_eq!(
             dialog.key(&key(KeyCode::Enter)),
-            OobeOutcome::Submitted(vec![
-                "claude".to_string(),
-                "muse".to_string(),
-                "copilot".to_string(),
-                "pi".to_string(),
-            ])
+            OobeOutcome::Submitted(vec!["claude".to_string(), "muse".to_string(),])
         );
     }
 
@@ -619,7 +523,7 @@ mod tests {
         let home = scratch_home("results-paint");
         let outs = install_selected(
             &home,
-            &["claude".to_string(), "pi".to_string()],
+            &["claude".to_string(), "agy".to_string()],
             "/tmp/forge-under-test",
         );
         assert_eq!(outs.len(), 2);
@@ -633,7 +537,7 @@ mod tests {
         let text: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
         assert!(text.contains("claude"), "row: {text}");
         assert!(text.contains("installed"), "status: {text}");
-        assert!(text.contains("pi"), "row: {text}");
+        assert!(text.contains("agy"), "row: {text}");
         assert!(text.contains("skipped"), "status: {text}");
         assert!(text.contains("Done"), "action: {text}");
         let _ = std::fs::remove_dir_all(&home);
@@ -642,12 +546,12 @@ mod tests {
     #[test]
     fn results_enter_and_esc_close_other_keys_stay() {
         let home = scratch_home("results-keys");
-        let outs = install_selected(&home, &["pi".to_string()], "/tmp/forge-under-test");
+        let outs = install_selected(&home, &["agy".to_string()], "/tmp/forge-under-test");
         let mut dialog = OobeDialog::results(outs, true);
         assert_eq!(dialog.key(&key(KeyCode::Char(' '))), OobeOutcome::Pending);
         assert_eq!(dialog.cursor(), 0, "no cursor in results");
         assert_eq!(dialog.key(&key(KeyCode::Enter)), OobeOutcome::Dismissed);
-        let outs = install_selected(&home, &["pi".to_string()], "/tmp/forge-under-test");
+        let outs = install_selected(&home, &["agy".to_string()], "/tmp/forge-under-test");
         let mut dialog = OobeDialog::results(outs, true);
         assert_eq!(dialog.key(&key(KeyCode::Esc)), OobeOutcome::Dismissed);
         let _ = std::fs::remove_dir_all(&home);
@@ -657,7 +561,7 @@ mod tests {
     fn results_click_done_closes() {
         use ratatui::{backend::TestBackend, Terminal};
         let home = scratch_home("results-click");
-        let outs = install_selected(&home, &["pi".to_string()], "/tmp/forge-under-test");
+        let outs = install_selected(&home, &["agy".to_string()], "/tmp/forge-under-test");
         let mut dialog = OobeDialog::results(outs, true);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
@@ -671,15 +575,15 @@ mod tests {
     }
 
     #[test]
-    fn pi_setup_skips_without_touching_home() {
-        // Pi (pi-mono) has no native hook or MCP surface: setup reports
-        // skipped instead of erroring, and writes nothing.
-        let home = scratch_home("pi-skip");
-        let outs = install_selected(&home, &["pi".to_string()], "/tmp/forge-under-test");
+    fn hookless_agent_setup_skips_without_touching_home() {
+        // agy documents no hook surface: setup reports skipped instead of
+        // erroring, and writes nothing.
+        let home = scratch_home("agy-skip");
+        let outs = install_selected(&home, &["agy".to_string()], "/tmp/forge-under-test");
         assert_eq!(outs.len(), 1, "one outcome: {outs:?}");
         assert!(outs[0].skipped, "out: {:?}", outs[0]);
         assert!(outs[0].error.is_none(), "skip is not failure: {:?}", outs[0]);
-        assert!(!home.join(".pi").exists(), "nothing written");
+        assert_eq!(outs[0].harness, "agy", "registry name labels: {:?}", outs[0]);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -694,7 +598,7 @@ mod tests {
         let buf = terminal.backend().buffer();
         let text: String = buf.content.iter().map(|c| c.symbol().to_string()).collect();
         assert!(text.contains("Welcome"), "greets: {text}");
-        for name in ["claude", "codex", "muse", "copilot", "pi"] {
+        for name in ["claude", "codex", "muse"] {
             assert!(text.contains(name), "lists {name}");
         }
         assert!(text.contains("Setup"), "action button");
@@ -723,12 +627,7 @@ mod tests {
         let (sx, sy) = find_cell(&buf2, "Setup").expect("Setup painted");
         assert_eq!(
             dialog.click(sx, sy, area),
-            OobeOutcome::Submitted(vec![
-                "claude".to_string(),
-                "muse".to_string(),
-                "copilot".to_string(),
-                "pi".to_string(),
-            ])
+            OobeOutcome::Submitted(vec!["claude".to_string(), "muse".to_string(),])
         );
         let _ = buf;
     }

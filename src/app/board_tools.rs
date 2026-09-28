@@ -383,25 +383,8 @@ impl AppState {
     }
 }
 
-pub(super) fn board_live_state() -> (AppState, String) {
-    let mut state = AppState::new();
-    let id = state
-        .manager
-        .spawn_agent(
-            "agent",
-            &std::env::temp_dir(),
-            "exec cat",
-            crate::infra::ids::RunId::generate(),
-            "codex",
-        )
-        .unwrap();
-    let live_run = state.manager.get(id).unwrap().run_id.as_str().to_string();
-    (state, live_run)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::app::test_support::*;
 
     #[test]

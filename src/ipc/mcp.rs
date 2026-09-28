@@ -406,6 +406,23 @@ struct ToolDef {
     schema: &'static str,
 }
 
+/// `start_session` harness list, built from the registry at runtime so the
+/// description can never drift from `agents.json`.
+fn start_session_description() -> &'static str {
+    static DESC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DESC.get_or_init(|| {
+        let names: Vec<_> = crate::agents::registry::registry()
+            .iter()
+            .map(|def| def.name.as_str())
+            .collect();
+        format!(
+            "Create a local agent session: harness is {}; path defaults to your cwd; an opening prompt queues as the first idle injection. Remote flavors are unsupported.",
+            names.join(", ")
+        )
+    })
+    .as_str()
+}
+
 /// Phase 4 serves the five comms tools on every platform, plus the
 /// walkthrough trio for agent-led file tours. Unix terminal tools join
 /// this list in Phase 7.
@@ -484,7 +501,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "start_session",
-            description: "Create a local agent session: harness is claude, codex, or muse; path defaults to your cwd; an opening prompt queues as the first idle injection. Remote flavors are unsupported.",
+            description: start_session_description(),
             schema: r#"{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"},"harness":{"type":"string"},"prompt":{"type":"string"},"communication_group":{"type":"string"}}}"#,
         },
         ToolDef {

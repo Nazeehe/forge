@@ -3,17 +3,14 @@
 use super::*;
 
 /// Install the forge skill for one harness. Only harnesses with grounded
-/// skills paths are written; the rest report skipped.
+/// skills paths (see each adapter's `skills_dir`) are written; the rest
+/// report skipped.
 pub fn install_one_skills(home: &std::path::Path, harness: &str) -> Outcome {
-    let dir = match harness {
-        "claude" => home.join(".claude/skills/forge"),
-        "codex" => home.join(".codex/skills/forge"),
-        _ => {
-            return Outcome::skipped(
-                harness,
-                "no grounded skills path for this harness".to_string(),
-            );
-        }
+    let Some(dir) = crate::agents::adapter_for(harness).skills_dir(home) else {
+        return Outcome::skipped(
+            harness,
+            "no grounded skills path for this harness".to_string(),
+        );
     };
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return Outcome::error(harness, format!("cannot create {}: {e}", dir.display()));
@@ -26,13 +23,10 @@ pub fn install_one_skills(home: &std::path::Path, harness: &str) -> Outcome {
 
 /// Remove the forge skill for one harness.
 pub fn uninstall_one_skills(home: &std::path::Path, harness: &str) -> Outcome {
-    let file = match harness {
-        "claude" => home.join(".claude/skills/forge/SKILL.md"),
-        "codex" => home.join(".codex/skills/forge/SKILL.md"),
-        _ => {
-            return Outcome::skipped(harness, "no grounded skills path".to_string());
-        }
+    let Some(dir) = crate::agents::adapter_for(harness).skills_dir(home) else {
+        return Outcome::skipped(harness, "no grounded skills path".to_string());
     };
+    let file = dir.join("SKILL.md");
     match std::fs::remove_file(&file) {
         Ok(()) => {
             let _ = std::fs::remove_dir(file.parent().expect("skill has a dir"));

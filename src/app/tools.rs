@@ -263,9 +263,19 @@ impl AppState {
         if Self::tool_bool(args, "internet").unwrap_or(false) {
             return Err("internet sessions are unsupported (local sessions only)".to_string());
         }
-        let harness_name = Self::tool_arg(args, "harness").unwrap_or_else(|| "claude".to_string());
-        let harness = crate::session::harness::Harness::from_name(&harness_name)
-            .ok_or_else(|| format!("unknown harness {harness_name:?} (claude/codex/muse)"))?;
+        let harness_name = Self::tool_arg(args, "harness").unwrap_or_else(|| {
+            crate::agents::registry::registry()
+                .first()
+                .map(|def| def.name.clone())
+                .unwrap_or_default()
+        });
+        let harness = crate::agents::harness::Harness::from_name(&harness_name).ok_or_else(|| {
+            let known: Vec<_> = crate::agents::registry::registry()
+                .iter()
+                .map(|def| def.name.as_str())
+                .collect();
+            format!("unknown harness {harness_name:?} ({})", known.join("/"))
+        })?;
         let cwd = match Self::tool_arg(args, "path") {
             Some(path) => {
                 let cwd = std::path::PathBuf::from(&path);

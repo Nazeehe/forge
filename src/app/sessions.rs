@@ -26,7 +26,7 @@ impl AppState {
                 // Fresh launches carry the Forge runtime contract through
                 // the agent's strongest injection mechanism. Materialization
                 // fails open: a session without injection still launches.
-                let argv = match crate::session::runtime::ensure_materialized(
+                let argv = match crate::agents::runtime::ensure_materialized(
                     &crate::infra::branding::home_dir(),
                 ) {
                     Ok(file) => h.launch_argv_with_runtime(&binary, model, &file),
@@ -77,7 +77,7 @@ impl AppState {
                 if !rec.state.is_live() {
                     return None;
                 }
-                if crate::session::harness::Harness::from_name(&rec.cli_tool).is_none() {
+                if crate::agents::harness::Harness::from_name(&rec.cli_tool).is_none() {
                     return None;
                 }
                 Some(crate::session::checkpoint::SavedSession {
@@ -101,7 +101,7 @@ impl AppState {
             skipped: Vec::new(),
         };
         for saved in &entry.sessions {
-            let Some(harness) = crate::session::harness::Harness::from_name(&saved.cli_tool) else {
+            let Some(harness) = crate::agents::harness::Harness::from_name(&saved.cli_tool) else {
                 report.skipped.push(format!("{}: unknown tool {}", saved.name, saved.cli_tool));
                 continue;
             };
@@ -514,14 +514,18 @@ impl AppState {
             .collect()
     }
 
-    /// First free `shell-N` name for the dialog prefill.
+    /// First free `<default-agent>-N` name for the dialog prefill.
     /// Prefill name for the create dialog. The dialog defaults to the
-    /// claude tool, so the prefix matches; the user can rename freely.
+    /// first registry tool, so the prefix matches; the user can rename freely.
     pub fn suggested_session_name(&self) -> String {
+        let prefix = crate::agents::registry::registry()
+            .first()
+            .map(|def| def.name.as_str())
+            .unwrap_or("agent");
         let taken = self.live_names();
         let mut n = self.manager.len() + 1;
         loop {
-            let candidate = format!("claude-{n}");
+            let candidate = format!("{prefix}-{n}");
             if !taken.iter().any(|t| t == &candidate) {
                 return candidate;
             }
@@ -742,7 +746,7 @@ mod tests {
         let mut s = AppState::new();
         let spec = crate::ui::dialogs::create::SessionSpec {
             kind: crate::ui::dialogs::create::SessionKind::Agent(
-                crate::session::harness::Harness::from_name("codex").unwrap(),
+                crate::agents::harness::Harness::from_name("codex").unwrap(),
             ),
             name: "coder".to_string(),
             cwd: std::env::temp_dir(),
@@ -768,7 +772,7 @@ mod tests {
         let agent = s
             .create_session(&crate::ui::dialogs::create::SessionSpec {
                 kind: crate::ui::dialogs::create::SessionKind::Agent(
-                    crate::session::harness::Harness::from_name("codex").unwrap(),
+                    crate::agents::harness::Harness::from_name("codex").unwrap(),
                 ),
                 name: "codex-1".to_string(),
                 cwd: std::env::temp_dir(),

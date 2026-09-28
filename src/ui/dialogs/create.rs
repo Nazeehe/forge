@@ -15,7 +15,7 @@ use tuirealm::command::{Cmd, Direction};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
-use crate::session::harness::Harness;
+use crate::agents::harness::Harness;
 
 /// Which agent (if any) a new session runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -767,7 +767,7 @@ mod tests {
     }
 
     fn agent(name: &str) -> SessionKind {
-        SessionKind::Agent(crate::session::harness::Harness::from_name(name).unwrap())
+        SessionKind::Agent(crate::agents::harness::Harness::from_name(name).unwrap())
     }
 
     fn typed(dialog: &mut CreateDialog, text: &str, names: &[String]) {
@@ -964,7 +964,7 @@ mod tests {
         let (d, _) = fresh();
         assert_eq!(
             d.tool_choice(),
-            SessionKind::Agent(crate::session::harness::Harness::from_name("claude").unwrap())
+            SessionKind::Agent(crate::agents::harness::Harness::from_name("claude").unwrap())
         );
         assert_eq!(d.spec().name, "claude-1");
         assert_eq!(d.spec().cwd, std::env::temp_dir());

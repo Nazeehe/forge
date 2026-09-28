@@ -28,7 +28,7 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    fn installed(harness: &str, detail: String) -> Self {
+    pub(crate) fn installed(harness: &str, detail: String) -> Self {
         Outcome {
             harness: harness.to_string(),
             installed: true,
@@ -39,7 +39,7 @@ impl Outcome {
         }
     }
 
-    fn removed(harness: &str, detail: String) -> Self {
+    pub(crate) fn removed(harness: &str, detail: String) -> Self {
         Outcome {
             harness: harness.to_string(),
             installed: false,
@@ -50,7 +50,7 @@ impl Outcome {
         }
     }
 
-    fn skipped(harness: &str, detail: String) -> Self {
+    pub(crate) fn skipped(harness: &str, detail: String) -> Self {
         Outcome {
             harness: harness.to_string(),
             installed: false,
@@ -61,7 +61,7 @@ impl Outcome {
         }
     }
 
-    fn error(harness: &str, error: String) -> Self {
+    pub(crate) fn error(harness: &str, error: String) -> Self {
         Outcome {
             harness: harness.to_string(),
             installed: false,
@@ -72,7 +72,7 @@ impl Outcome {
         }
     }
 
-    fn unchanged(harness: &str, detail: String) -> Self {
+    pub(crate) fn unchanged(harness: &str, detail: String) -> Self {
         Outcome {
             harness: harness.to_string(),
             installed: false,
@@ -84,39 +84,17 @@ impl Outcome {
     }
 }
 
-fn hook_command(forge_bin: &str) -> String {
+pub(crate) fn hook_command(forge_bin: &str) -> String {
     format!("{forge_bin} hook-relay")
 }
 
-/// Codex reads CODEX_HOME, defaulting to ~/.codex. Hooks must land where
-/// the MCP subprocess looks, so both consult this.
-fn codex_home(home: &std::path::Path) -> std::path::PathBuf {
-    std::env::var("CODEX_HOME")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home.join(".codex"))
-}
-
-/// Copilot reads COPILOT_HOME for its user hooks directory, defaulting
-/// to ~/.copilot (official hooks reference). The MCP user config path
-/// is documented at ~/.copilot unconditionally, so only hooks consult
-/// this.
-fn copilot_home(home: &std::path::Path) -> std::path::PathBuf {
-    std::env::var("COPILOT_HOME")
-        .ok()
-        .filter(|p| !p.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| home.join(".copilot"))
-}
-
-fn is_ours(cmd: &str) -> bool {
+pub(crate) fn is_ours(cmd: &str) -> bool {
     cmd.contains("hook-relay")
 }
 
 /// Read JSON, preserving everything we do not touch. Missing file is an
 /// empty object; corrupt files are an error and are never clobbered.
-fn read_json(path: &std::path::Path) -> Result<serde_json::Value, String> {
+pub(crate) fn read_json(path: &std::path::Path) -> Result<serde_json::Value, String> {
     match std::fs::read_to_string(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok(serde_json::Value::Object(Default::default()))
@@ -127,7 +105,7 @@ fn read_json(path: &std::path::Path) -> Result<serde_json::Value, String> {
     }
 }
 
-fn write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
+pub(crate) fn write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -138,7 +116,7 @@ fn write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), S
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-fn obj_mut<'v>(
+pub(crate) fn obj_mut<'v>(
     value: &'v mut serde_json::Value,
     key: &str,
 ) -> &'v mut serde_json::Map<String, serde_json::Value> {
@@ -152,7 +130,7 @@ fn obj_mut<'v>(
 /// top-level `hooks` object keyed by event, each an array of
 /// `{matcher, hooks: [...]}` groups. Everything else is preserved.
 /// Returns the number of events gained an entry.
-fn merge_hook_groups(
+pub(crate) fn merge_hook_groups(
     v: &mut serde_json::Value,
     path: &std::path::Path,
     events: &[&str],
@@ -188,7 +166,7 @@ fn merge_hook_groups(
 
 /// Drop every hook group that invokes this installer's relay, across all
 /// events. Foreign entries are kept. Returns the drop count.
-fn drop_hook_groups(v: &mut serde_json::Value) -> usize {
+pub(crate) fn drop_hook_groups(v: &mut serde_json::Value) -> usize {
     let mut dropped = 0;
     if let Some(hooks) = v.get_mut("hooks").and_then(|h| h.as_object_mut()) {
         for arr in hooks.values_mut().filter_map(|v| v.as_array_mut()) {
@@ -208,87 +186,82 @@ fn drop_hook_groups(v: &mut serde_json::Value) -> usize {
     dropped
 }
 
-/// Cross-harness aggregates in registry order.
+/// Cross-harness aggregates in `agents.json` file order.
+fn registry_names() -> Vec<&'static str> {
+    crate::agents::harness::Harness::all()
+        .into_iter()
+        .map(|h| h.as_str())
+        .collect()
+}
+
 pub fn install_hooks(home: &std::path::Path, forge_bin: &str) -> Vec<Outcome> {
-    ["claude", "codex", "muse"]
+    registry_names()
         .into_iter()
         .map(|h| install_one_hooks(home, h, forge_bin))
         .collect()
 }
 
 pub fn uninstall_hooks(home: &std::path::Path) -> Vec<Outcome> {
-    ["claude", "codex", "muse"]
+    registry_names()
         .into_iter()
         .map(|h| uninstall_one_hooks(home, h))
         .collect()
 }
 
 pub fn install_mcp(home: &std::path::Path, forge_bin: &str) -> Vec<Outcome> {
-    ["claude", "codex", "muse"]
+    registry_names()
         .into_iter()
         .map(|h| install_one_mcp(home, h, forge_bin))
         .collect()
 }
 
 pub fn uninstall_mcp(home: &std::path::Path) -> Vec<Outcome> {
-    ["claude", "codex", "muse"]
+    registry_names()
         .into_iter()
         .map(|h| uninstall_one_mcp(home, h))
         .collect()
 }
 
 pub fn install_skills(home: &std::path::Path) -> Vec<Outcome> {
-    ["claude", "codex", "muse"]
+    registry_names()
         .into_iter()
         .map(|h| install_one_skills(home, h))
         .collect()
 }
 
 pub fn uninstall_skills(home: &std::path::Path) -> Vec<Outcome> {
-    ["claude", "codex", "muse"]
+    registry_names()
         .into_iter()
         .map(|h| uninstall_one_skills(home, h))
         .collect()
 }
 
-/// Map a per-harness subcommand name to installer keys. `metamate` is the
-/// blueprint name for the muse CLI.
-fn keys_for(harness: &str) -> Option<&'static str> {
-    match harness {
-        "codex" => Some("codex"),
-        "gemini" => Some("gemini"),
-        "copilot" => Some("copilot"),
-        "pi" => Some("pi"),
-        "metamate" | "muse" => Some("muse"),
-        "claude" => Some("claude"),
-        _ => None,
-    }
-}
-
-/// Full per-harness install for `install-codex` and friends.
+/// Full per-harness install for `install-<agent>`. Names resolve through
+/// the agent registry; unknown names are an error (the `metamate` blueprint
+/// alias is dropped: `muse` is the registry name).
 pub fn install_one(
     home: &std::path::Path,
     harness: &str,
     forge_bin: &str,
 ) -> Vec<Outcome> {
-    let Some(key) = keys_for(harness) else {
+    if crate::agents::harness::Harness::from_name(harness).is_none() {
         return vec![Outcome::error(harness, format!("unknown harness {harness:?}"))];
-    };
+    }
     vec![
-        install_one_hooks(home, key, forge_bin),
-        install_one_mcp(home, key, forge_bin),
-        install_one_skills(home, key),
+        install_one_hooks(home, harness, forge_bin),
+        install_one_mcp(home, harness, forge_bin),
+        install_one_skills(home, harness),
     ]
 }
 
 pub fn uninstall_one(home: &std::path::Path, harness: &str) -> Vec<Outcome> {
-    let Some(key) = keys_for(harness) else {
+    if crate::agents::harness::Harness::from_name(harness).is_none() {
         return vec![Outcome::error(harness, format!("unknown harness {harness:?}"))];
-    };
+    }
     vec![
-        uninstall_one_hooks(home, key),
-        uninstall_one_mcp(home, key),
-        uninstall_one_skills(home, key),
+        uninstall_one_hooks(home, harness),
+        uninstall_one_mcp(home, harness),
+        uninstall_one_skills(home, harness),
     ]
 }
 
@@ -296,23 +269,6 @@ pub fn uninstall_one(home: &std::path::Path, harness: &str) -> Vec<Outcome> {
 mod tests {
     use super::*;
     use super::test_support::*;
-
-    #[test]
-    fn pi_hooks_mcp_and_skills_skip() {
-        // Pi (pi-mono) exposes no native hook or MCP surface (only
-        // extension-bus events), so every installer reports skipped and
-        // writes nothing. Skips are not errors.
-        let home = scratch_home();
-        for out in install_one(&home, "pi", FORGE_BIN) {
-            assert!(out.skipped, "out: {out:?}");
-            assert!(out.error.is_none(), "skip is not failure: {out:?}");
-        }
-        assert!(!home.join(".pi").exists(), "nothing written");
-        for out in uninstall_one(&home, "pi") {
-            assert!(out.error.is_none(), "out: {out:?}");
-        }
-        let _ = std::fs::remove_dir_all(&home);
-    }
 
     #[test]
     fn per_harness_installer_composes_all_three() {
@@ -344,9 +300,9 @@ mod tests {
         assert!(outs.iter().all(|o| o.error.is_none()), "outs: {outs:?}");
         let text = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
         assert!(text.contains("env_vars"), "passthrough patched: {text}");
+        // The `metamate` blueprint alias is dropped: `muse` is the name.
         let outs = install_one(&home, "metamate", FORGE_BIN);
-        assert_eq!(outs.len(), 3);
-        assert!(outs.iter().all(|o| o.error.is_none()), "outs: {outs:?}");
+        assert!(outs.iter().all(|o| o.error.is_some()));
         let outs = install_one(&home, "bogus", FORGE_BIN);
         assert!(outs.iter().all(|o| o.error.is_some()));
         let _ = std::fs::remove_dir_all(&home);
@@ -357,10 +313,11 @@ mod tests {
         let _pin = ClearCodexHome::pin();
         let home = scratch_home();
         let outs = install_hooks(&home, FORGE_BIN);
-        assert_eq!(outs.len(), 3);
+        assert_eq!(outs.len(), 4);
         assert!(outs.iter().any(|o| o.harness == "claude" && o.installed));
         assert!(outs.iter().any(|o| o.harness == "codex" && o.installed));
         assert!(outs.iter().any(|o| o.harness == "muse" && o.installed));
+        assert!(outs.iter().any(|o| o.harness == "agy" && o.skipped));
         let _ = std::fs::remove_dir_all(&home);
     }
 }

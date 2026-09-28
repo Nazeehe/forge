@@ -4,6 +4,7 @@
 // phases land and re-address whatever it unhides.
 #![allow(dead_code)]
 
+mod agents;
 mod app;
 mod comms;
 mod hooks;
@@ -66,7 +67,7 @@ fn print_help() {
     println!("  mcp-serve [--endpoint PATH]  JSON-RPC comms server on stdio for harnesses");
     println!("  install-hooks | install-mcp | install-skills  register forge with all harnesses");
     println!("  uninstall-hooks | uninstall-mcp | uninstall-skills  remove forge registration");
-    println!("  install-codex|gemini|copilot|pi|metamate  full per-harness install (uninstall-* reverses)");
+    println!("  install-<agent>|uninstall-<agent>  full per-harness install (agents.json names)");
 }
 
 /// Print installer outcomes, one line each. Skips are not failures; only
@@ -157,12 +158,12 @@ fn startup(force_oobe: bool) -> i32 {
     // with the wrong argv is worse than not launching.
     let agents_path = infra::branding::agents_file(&home);
     if !agents_path.exists() {
-        if let Err(e) = std::fs::write(&agents_path, crate::session::agents::DEFAULT_AGENTS_JSON) {
+        if let Err(e) = std::fs::write(&agents_path, crate::agents::registry::DEFAULT_AGENTS_JSON) {
             eprintln!("error: cannot write agents file: {e}");
             return 1;
         }
     }
-    if let Err(e) = crate::session::agents::load_registry(&agents_path) {
+    if let Err(e) = crate::agents::registry::load_registry(&agents_path) {
         eprintln!("error: {e}");
         return 1;
     }
@@ -174,7 +175,7 @@ fn startup(force_oobe: bool) -> i32 {
     // inject at launch (see `runtime.rs`). Forge-owned and refreshed every
     // boot; a failed write warns instead of blocking startup because fresh
     // launches re-ensure it (fail-open without injection).
-    if let Err(e) = crate::session::runtime::ensure_materialized(&home) {
+    if let Err(e) = crate::agents::runtime::ensure_materialized(&home) {
         eprintln!("warning: cannot write Forge runtime contract: {e}");
     }
     // Configuration guide for AI agents: docs only, so a failed drop
@@ -272,35 +273,26 @@ fn main() {
         Some("uninstall-skills") => {
             std::process::exit(report_install(hooks::install::uninstall_skills(&home_dir())));
         }
-        Some("install-codex") => {
-            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "codex", &forge_binary())));
-        }
-        Some("uninstall-codex") => {
-            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "codex")));
-        }
-        Some("install-gemini") => {
-            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "gemini", &forge_binary())));
-        }
-        Some("uninstall-gemini") => {
-            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "gemini")));
-        }
-        Some("install-copilot") => {
-            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "copilot", &forge_binary())));
-        }
-        Some("uninstall-copilot") => {
-            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "copilot")));
-        }
-        Some("install-pi") => {
-            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "pi", &forge_binary())));
-        }
-        Some("uninstall-pi") => {
-            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "pi")));
-        }
-        Some("install-metamate") => {
-            std::process::exit(report_install(hooks::install::install_one(&home_dir(), "metamate", &forge_binary())));
-        }
-        Some("uninstall-metamate") => {
-            std::process::exit(report_install(hooks::install::uninstall_one(&home_dir(), "metamate")));
+        Some(other) if other.starts_with("install-") || other.starts_with("uninstall-") => {
+            // Generic per-agent arms: names resolve through the registry,
+            // so adding an agent needs no CLI edit.
+            let (op, name) = other.split_once('-').expect("prefix has a dash");
+            if crate::agents::harness::Harness::from_name(name).is_none() {
+                eprintln!("error: unknown agent `{name}`");
+                std::process::exit(2);
+            }
+            if op == "install" {
+                std::process::exit(report_install(hooks::install::install_one(
+                    &home_dir(),
+                    name,
+                    &forge_binary(),
+                )));
+            } else {
+                std::process::exit(report_install(hooks::install::uninstall_one(
+                    &home_dir(),
+                    name,
+                )));
+            }
         }
         Some("mcp-serve") => {
             let mut explicit: Option<String> = None;

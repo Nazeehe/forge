@@ -1,17 +1,17 @@
 //! Sessions and their runtime: identity, lifecycle, PTY panes, launch
-//! plumbing, snapshots, and the agent registry.
+//! plumbing, and snapshots.
 //!
 //! Session identity and lifecycle states.
 //!
 //! Pure types only: PTY ownership and the manager live here in later steps.
 //! A session moves `Starting -> Running -> Exited`; exited sessions stay
 //! visible until explicitly deleted.
+//!
+//! Agent registry, harness handles, and runtime adapters live in
+//! [`crate::agents`].
 
-pub mod agents;
 pub mod checkpoint;
-pub mod harness;
 pub mod pty;
-pub mod runtime;
 pub mod status;
 
 use std::fmt;
@@ -504,7 +504,7 @@ impl SessionManager {
         let Some(rec) = self.sessions.get(&id) else {
             return false;
         };
-        if !crate::session::harness::Harness::from_name(&rec.cli_tool)
+        if !crate::agents::harness::Harness::from_name(&rec.cli_tool)
             .is_some_and(|h| h.cwd_window_attribution())
         {
             return false;
@@ -549,7 +549,7 @@ impl SessionManager {
         let hook_cwd = std::path::Path::new(cwd);
         let mut candidates = self.sessions.iter().filter(|(_, rec)| {
             rec.state.is_live()
-                && crate::session::harness::Harness::from_name(&rec.cli_tool)
+                && crate::agents::harness::Harness::from_name(&rec.cli_tool)
                     .is_some_and(|h| h.cwd_window_attribution())
                 && rec.harness_session_id.is_none()
                 && rec.cwd.as_path() == hook_cwd

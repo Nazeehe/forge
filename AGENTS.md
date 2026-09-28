@@ -129,7 +129,8 @@ code goes in the folder that owns its concern:
 | Folder | Owns |
 |---|---|
 | `infra/` | dependency-free plumbing: branding, ids, events, atomic fs, path jail, safe text, logging, config |
-| `session/` | session identity/lifecycle, PTY, status, checkpoints, harness + agent registry, runtime adapters |
+| `agents/` | agent registry, Harness handle, runtime injection, per-agent adapters |
+| `session/` | session identity/lifecycle, PTY, status, checkpoints |
 | `comms/` | the Broker (groups, queue, calls, conversations, clients, timers, lifecycle) + external bot clients |
 | `hooks/` | hook relay, permission policy, audit, harness installers (`install/`) |
 | `ipc/` | TUI listener socket, `mcp-serve` |
