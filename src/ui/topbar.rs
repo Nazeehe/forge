@@ -132,7 +132,7 @@ pub(super) fn render_topbar(frame: &mut Frame, bar: Rect, tabs: &[TopTab], pills
         let area = Rect::new(button.start, bar.y, button.end - button.start, 1);
         if pills {
             let (style, left, right) = topbar_pill(tab);
-            render_pill(frame, area, &safe_text::encode_for_display(&tab.label), style, left, right);
+            render_pill(frame, area, &safe_text::encode_for_display(&tab.label), style, left, right, false);
         } else {
             let style = if tab.active {
                 theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)

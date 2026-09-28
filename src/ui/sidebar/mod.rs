@@ -765,7 +765,7 @@ pub(super) fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Ch
                     theme::style(theme::Role::TabInactive),
                     Color::DarkGray,
                 );
-                render_pill(frame, board_area, "Kanban", style, left, right);
+                render_pill(frame, board_area, "Kanban", style, left, right, false);
             } else {
                 let style = if info.board_open {
                     theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
@@ -783,7 +783,7 @@ pub(super) fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Ch
                     theme::style(theme::Role::TabInactive),
                     Color::DarkGray,
                 );
-                render_pill(frame, tetris_area, "Tetris", style, left, right);
+                render_pill(frame, tetris_area, "Tetris", style, left, right, false);
             } else {
                 let style = if chrome.tetris_open {
                     theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
@@ -805,7 +805,7 @@ pub(super) fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Ch
                         theme::style(theme::Role::TabInactive),
                         Color::DarkGray,
                     );
-                    render_pill(frame, area, label, style, left, right);
+                    render_pill(frame, area, label, style, left, right, false);
                 } else {
                     let style = if active {
                         theme::style(theme::Role::Focus).add_modifier(Modifier::REVERSED)
@@ -827,6 +827,7 @@ pub(super) fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Ch
                     Style::default().fg(Color::Black).bg(Color::Red),
                     Color::Red,
                     Color::Red,
+                    false,
                 );
             } else {
                 ChromeButton::new(

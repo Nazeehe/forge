@@ -242,7 +242,11 @@ pub fn session_at(buttons: &[SessionButton], col: u16) -> Option<usize> {
 /// symmetric inner padding so the text sits centered in the container.
 /// The padding inherits the label style, keeping filled pills solid.
 /// Left and right bookends take separate colors so `Left`-highlight
-/// themes can light only the leading edge.
+/// themes can light only the leading edge. `flush_left` squares the
+/// left edge (`▐` fills the cell's right half) so a pill starting
+/// directly under a pane border meets its stroke instead of indenting
+/// half a cell; it only applies to the builtin half-circle cap, never
+/// to square-theme brackets.
 pub(super) fn render_pill(
     frame: &mut Frame,
     area: Rect,
@@ -250,12 +254,16 @@ pub(super) fn render_pill(
     style: Style,
     left_cap: Color,
     right_cap: Color,
+    flush_left: bool,
 ) {
+    let left_glyph = theme::pill_left();
+    let left_symbol = if flush_left && left_glyph == theme::BUILTIN_PILL_LEFT {
+        "▐".to_string()
+    } else {
+        left_glyph.to_string()
+    };
     let line = Line::from(vec![
-        Span::styled(
-            crate::ui::theme::pill_left().to_string(),
-            Style::default().fg(left_cap),
-        ),
+        Span::styled(left_symbol, Style::default().fg(left_cap)),
         Span::styled(" ".to_string(), style),
         Span::styled(text.to_string(), style),
         Span::styled(" ".to_string(), style),
@@ -271,7 +279,7 @@ pub(super) fn render_session_bar(frame: &mut Frame, areas: &ChromeAreas, chrome:
     if areas.session_bar.height > 0 {
         let segments = session_bar_segments_for_area(&chrome.tabs, areas.session_bar, chrome.pills);
         let buttons = layout_session_bar(areas.session_bar, &segments);
-        for (button, segment) in buttons.iter().zip(segments.iter()) {
+        for (n, (button, segment)) in buttons.iter().zip(segments.iter()).enumerate() {
             let area = Rect::new(button.start, areas.session_bar.y, button.end - button.start, 1);
             if button.index.is_some() {
                 if let Some(left) = segment.cap {
@@ -283,7 +291,10 @@ pub(super) fn render_session_bar(frame: &mut Frame, areas: &ChromeAreas, chrome:
                         .and_then(|n| chrome.tabs.get(n))
                         .map(|tab| pill_chrome(tab).2)
                         .unwrap_or(left);
-                    render_pill(frame, area, &segment.text, segment.style, left, right);
+                    // The first pill sits directly under the pane's left
+                    // border, so its left edge goes flush; mid-bar pills
+                    // keep rounded caps on both sides.
+                    render_pill(frame, area, &segment.text, segment.style, left, right, n == 0);
                 } else {
                     ChromeButton::new(&button.label, segment.style).view(frame, area);
                 }
@@ -497,14 +508,37 @@ mod tests {
         c.pills = true;
         terminal.draw(|f| render(f, area(), &[pane("sh", "body", true)], &c)).unwrap();
         let buf = terminal.backend().buffer();
-        // chrome() tab "sh" focused: `cap sp 1 sp sh sp cap` on row 23.
-        assert_eq!(buf[(0, 23)].symbol(), "");
+        // chrome() tab "sh" focused: `edge sp 1 sp sh sp cap` on row
+        // 23. The first pill's left edge is flush (`▐`) under the pane
+        // border; only mid-bar pills open with the rounded cap.
+        assert_eq!(buf[(0, 23)].symbol(), "▐");
         assert_eq!(buf[(0, 23)].fg, Color::Yellow);
         assert_eq!(buf[(1, 23)].symbol(), " ");
         assert_eq!(buf[(1, 23)].bg, Color::Yellow, "pad fills container");
         assert_eq!(buf[(7, 23)].symbol(), "");
         let row: String = (0..8).map(|x| buf[(x, 23)].symbol()).collect();
-        assert_eq!(row, " 1 sh ");
+        assert_eq!(row, "▐ 1 sh ");
+    }
+
+    #[test]
+    fn first_pill_left_edge_sits_flush_under_the_pane_border() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut c = chrome();
+        c.pills = true;
+        c.tabs = vec![tab("sh", true), tab("work", false)];
+        terminal.draw(|f| render(f, area(), &[pane("sh", "body", true)], &c)).unwrap();
+        let buf = terminal.backend().buffer();
+        // The pane border above runs down column 0; the bar's first pill
+        // must meet it with a flush edge. `▐` fills the cell's right
+        // half, starting exactly under the border stroke — the rounded
+        // `` would put the container edge half a cell right.
+        assert_eq!(buf[(0, 21)].symbol(), "│");
+        assert_eq!(buf[(0, 22)].symbol(), "└");
+        assert_eq!(buf[(0, 23)].symbol(), "▐");
+        assert_eq!(buf[(0, 23)].fg, Color::Yellow, "cap keeps the focus color");
+        // Mid-bar pills keep rounded caps on both sides: "1 sh" spans
+        // 8 cells plus a 2-cell gap, so the second pill opens at x=10.
+        assert_eq!(buf[(10, 23)].symbol(), "");
     }
 
 }
