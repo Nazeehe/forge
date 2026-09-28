@@ -471,12 +471,12 @@ mod tests {
         state.apply(AppEvent::Resize(24, 80));
         spawn_shell_cmd(&mut state, "exec sleep 30");
         spawn_shell_cmd(&mut state, "exec sleep 30");
-        // Session bar owns the last row; caps plus centering pads push
-        // the second button to column 15, so this click lands on its
-        // left cap.
+        // Session bar owns the last row; the one-cell inset plus caps
+        // and centering pads push the second button to column 16, so
+        // this click lands on its left cap.
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 15,
+            column: 16,
             row: 23,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
