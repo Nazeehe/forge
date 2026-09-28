@@ -9,6 +9,16 @@ use super::AgentAdapter;
 /// Stateless adapter for the `codex` CLI.
 pub struct CodexAdapter;
 
+/// Events forge registers in `hooks.json`. Shared by the installer and
+/// the setup check so the two can never drift apart.
+const HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "PreToolUse",
+    "PermissionRequest",
+    "Stop",
+    "UserPromptSubmit",
+];
+
 /// Codex reads CODEX_HOME, defaulting to ~/.codex. Hooks must land where
 /// the MCP subprocess looks, so both consult this.
 pub(crate) fn codex_home(home: &Path) -> PathBuf {
@@ -144,13 +154,7 @@ impl AgentAdapter for CodexAdapter {
         // prompted session still looks Stopped while it generates, so
         // injections land mid-turn where Enter is eaten and the text
         // sits as an unsubmitted draft.
-        for event in [
-            "SessionStart",
-            "PreToolUse",
-            "PermissionRequest",
-            "Stop",
-            "UserPromptSubmit",
-        ] {
+        for event in HOOK_EVENTS {
             let slot = v["hooks"]
                 .as_object_mut()
                 .expect("hooks just normalized to object")
@@ -306,5 +310,20 @@ impl AgentAdapter for CodexAdapter {
 
     fn skills_dir(&self, home: &Path) -> Option<PathBuf> {
         Some(home.join(".codex/skills/forge"))
+    }
+
+    fn hooks_installed(&self, home: &Path) -> bool {
+        use crate::hooks::install::{hook_events_present, read_json_opt};
+        read_json_opt(&codex_home(home).join("hooks.json"))
+            .is_some_and(|v| hook_events_present(&v, HOOK_EVENTS))
+    }
+
+    fn mcp_installed(&self, home: &Path) -> bool {
+        // Same header match the env-passthrough patch looks for: the
+        // section `codex mcp add forge` writes. A text scan, never a
+        // subprocess, so the create-time check stays instant.
+        let path = codex_home(home).join("config.toml");
+        std::fs::read_to_string(&path)
+            .is_ok_and(|text| text.lines().any(|l| l.trim() == "[mcp_servers.forge]"))
     }
 }

@@ -8,6 +8,16 @@ use super::AgentAdapter;
 /// Stateless adapter for the `muse` CLI.
 pub struct MuseAdapter;
 
+/// Events forge registers in `settings.json`. Shared by the installer
+/// and the setup check so the two can never drift apart.
+const HOOK_EVENTS: &[&str] = &[
+    "SessionStart",
+    "PreToolUse",
+    "UserPromptSubmit",
+    "Stop",
+    "SessionEnd",
+];
+
 /// Drop forge from muse 1.2.1's `mcp_servers` block (and the block itself
 /// once empty): muse 1.4 rejects the key. True when anything was removed.
 fn remove_stale_muse_mcp(v: &mut serde_json::Value) -> bool {
@@ -68,19 +78,7 @@ impl AgentAdapter for MuseAdapter {
             "command": hook_command(forge_bin),
             "timeout": 10,
         });
-        let added = match merge_hook_groups(
-            &mut v,
-            &path,
-            &[
-                "SessionStart",
-                "PreToolUse",
-                "UserPromptSubmit",
-                "Stop",
-                "SessionEnd",
-            ],
-            &handler,
-            forge_bin,
-        ) {
+        let added = match merge_hook_groups(&mut v, &path, HOOK_EVENTS, &handler, forge_bin) {
             Ok(added) => added,
             Err(e) => return Outcome::error(harness, e),
         };
@@ -171,5 +169,19 @@ impl AgentAdapter for MuseAdapter {
             Ok(()) => Outcome::removed(harness, path.display().to_string()),
             Err(e) => Outcome::error(harness, e),
         }
+    }
+
+    fn hooks_installed(&self, home: &Path) -> bool {
+        use crate::hooks::install::{hook_events_present, read_json_opt};
+        read_json_opt(&home.join(".config/muse/settings.json"))
+            .is_some_and(|v| hook_events_present(&v, HOOK_EVENTS))
+    }
+
+    fn mcp_installed(&self, home: &Path) -> bool {
+        use crate::hooks::install::{mcp_server_present, read_json_opt};
+        // Only the 1.4 `mcpServers` key counts: 1.4 rejects the 1.2.1
+        // `mcp_servers` key and disables MCP entirely.
+        read_json_opt(&home.join(".config/muse/settings.json"))
+            .is_some_and(|v| mcp_server_present(&v))
     }
 }

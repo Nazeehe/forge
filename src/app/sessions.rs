@@ -9,6 +9,22 @@ impl AppState {
         &mut self,
         spec: &crate::ui::dialogs::create::SessionSpec,
     ) -> std::io::Result<crate::session::SessionId> {
+        let home = crate::infra::branding::home_dir();
+        let forge_bin = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "forge".to_string());
+        self.create_session_with_home(&home, &forge_bin, spec)
+    }
+
+    /// [`AppState::create_session`] against an explicit home and forge
+    /// binary, so tests heal scratch homes instead of the developer's
+    /// real config. Production callers use [`AppState::create_session`].
+    fn create_session_with_home(
+        &mut self,
+        home: &std::path::Path,
+        forge_bin: &str,
+        spec: &crate::ui::dialogs::create::SessionSpec,
+    ) -> std::io::Result<crate::session::SessionId> {
         use crate::ui::dialogs::create::SessionKind;
         let (cmd, cli_tool) = match spec.kind {
             SessionKind::Shell => {
@@ -16,6 +32,12 @@ impl AppState {
                 (format!("exec {shell} -i"), "shell".to_string())
             }
             SessionKind::Agent(h) => {
+                // A CLI installed after forge (or with wiped config) is
+                // set up here, before its first launch, so the user never
+                // has to run install-hooks by hand. Fail-open like the
+                // runtime materialization below: setup problems never
+                // block the session.
+                let _ = crate::hooks::install::ensure_installed(home, h.as_str(), forge_bin);
                 let hs = h.spec();
                 let model = if spec.model.is_empty() {
                     None
@@ -26,9 +48,7 @@ impl AppState {
                 // Fresh launches carry the Forge runtime contract through
                 // the agent's strongest injection mechanism. Materialization
                 // fails open: a session without injection still launches.
-                let argv = match crate::agents::runtime::ensure_materialized(
-                    &crate::infra::branding::home_dir(),
-                ) {
+                let argv = match crate::agents::runtime::ensure_materialized(home) {
                     Ok(file) => h.launch_argv_with_runtime(&binary, model, &file),
                     Err(_) => hs.launch_argv(&binary, model),
                 };
@@ -96,6 +116,21 @@ impl AppState {
     /// groups, and fit the main pane. Unknown tools and vanished working
     /// directories skip with a reason instead of failing the batch.
     pub fn restore_entry(&mut self, entry: &crate::session::checkpoint::SavedEntry) -> RestoreReport {
+        let home = crate::infra::branding::home_dir();
+        let forge_bin = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "forge".to_string());
+        self.restore_entry_with_home(&home, &forge_bin, entry)
+    }
+
+    /// [`AppState::restore_entry`] against an explicit home and forge
+    /// binary. Same seam as [`AppState::create_session_with_home`].
+    fn restore_entry_with_home(
+        &mut self,
+        home: &std::path::Path,
+        forge_bin: &str,
+        entry: &crate::session::checkpoint::SavedEntry,
+    ) -> RestoreReport {
         let mut report = RestoreReport {
             spawned: 0,
             skipped: Vec::new(),
@@ -110,6 +145,10 @@ impl AppState {
                 report.skipped.push(format!("{}: missing directory {}", saved.name, saved.cwd));
                 continue;
             }
+            // Same create-time repair as fresh sessions: a restored agent
+            // whose CLI arrived after forge still needs hooks/MCP before
+            // its resume argv runs. Fail-open: never blocks the restore.
+            let _ = crate::hooks::install::ensure_installed(home, &saved.cli_tool, forge_bin);
             let spec = harness.spec();
             let argv = harness.resume_argv(&spec.resolve_binary(), saved.harness_session_id.as_deref());
             let mut cmd = String::from("exec ");
@@ -1079,5 +1118,107 @@ mod tests {
             .unwrap();
         assert!(s.manager.get(id).is_some());
         assert!(s.manager.remove(id));
+    }
+
+    fn scratch_home(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-create-heal-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn muse_spec(name: &str) -> crate::ui::dialogs::create::SessionSpec {
+        crate::ui::dialogs::create::SessionSpec {
+            kind: crate::ui::dialogs::create::SessionKind::Agent(
+                crate::agents::harness::Harness::from_name("muse").unwrap(),
+            ),
+            name: name.to_string(),
+            cwd: std::env::temp_dir(),
+            model: String::new(),
+            group: None,
+        }
+    }
+
+    #[test]
+    fn create_session_heals_missing_agent_setup_before_launch() {
+        // A CLI installed after forge (no hooks/MCP anywhere) is repaired
+        // at create time: the session launches AND the config is fixed,
+        // with no manual install-hooks run.
+        let saved = std::env::var("METAMATE_BIN").ok();
+        std::env::set_var("METAMATE_BIN", "/bin/true");
+        let home = scratch_home("muse");
+        let mut s = AppState::new();
+        // The heal runs before the spawn, so it holds whether or not the
+        // runner permits PTYs (sandboxes deny openpty; the assertions
+        // below are spawn-agnostic).
+        match s.create_session_with_home(&home, "/tmp/forge-under-test", &muse_spec("m")) {
+            Ok(id) => {
+                assert_eq!(s.manager.get(id).unwrap().cli_tool, "muse");
+                assert!(s.manager.remove(id));
+            }
+            Err(_) => {}
+        }
+        let text =
+            std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        assert!(text.contains("hook-relay"), "hooks healed: {text}");
+        assert!(text.contains("mcpServers"), "mcp healed: {text}");
+        match saved {
+            Some(v) => std::env::set_var("METAMATE_BIN", v),
+            None => std::env::remove_var("METAMATE_BIN"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn create_session_leaves_present_setup_untouched() {
+        let saved = std::env::var("METAMATE_BIN").ok();
+        std::env::set_var("METAMATE_BIN", "/bin/true");
+        let home = scratch_home("muse-set");
+        crate::hooks::install::install_one(&home, "muse", "/tmp/forge-under-test");
+        let before =
+            std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        let mut s = AppState::new();
+        // Spawn-agnostic like the heal test above: the setup check runs
+        // before the spawn either way.
+        if let Ok(id) = s.create_session_with_home(&home, "/tmp/forge-under-test", &muse_spec("m")) {
+            assert!(s.manager.remove(id));
+        }
+        let after =
+            std::fs::read_to_string(home.join(".config/muse/settings.json")).unwrap();
+        assert_eq!(before, after, "setup present means byte-identical config");
+        match saved {
+            Some(v) => std::env::set_var("METAMATE_BIN", v),
+            None => std::env::remove_var("METAMATE_BIN"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn create_session_shells_never_touch_agent_setup() {
+        let home = scratch_home("shell");
+        let mut s = AppState::new();
+        if let Ok(id) = s.create_session_with_home(
+            &home,
+            "/tmp/forge-under-test",
+            &crate::ui::dialogs::create::SessionSpec {
+                kind: crate::ui::dialogs::create::SessionKind::Shell,
+                name: "sh".to_string(),
+                cwd: std::env::temp_dir(),
+                model: String::new(),
+                group: None,
+            },
+        ) {
+            assert_eq!(s.manager.get(id).unwrap().cli_tool, "shell");
+            assert!(s.manager.remove(id));
+        }
+        assert!(
+            !home.join(".config/muse/settings.json").exists(),
+            "shells heal nothing"
+        );
+        assert!(!home.join(".claude/settings.json").exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

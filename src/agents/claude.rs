@@ -8,6 +8,10 @@ use super::AgentAdapter;
 /// Stateless adapter for the `claude` CLI.
 pub struct ClaudeAdapter;
 
+/// Events forge registers in `.claude/settings.json`. Shared by the
+/// installer and the setup check so the two can never drift apart.
+const HOOK_EVENTS: &[&str] = &["PreToolUse", "PermissionRequest", "Stop", "UserPromptSubmit"];
+
 impl AgentAdapter for ClaudeAdapter {
     fn name(&self) -> &'static str {
         "claude"
@@ -43,13 +47,7 @@ impl AgentAdapter for ClaudeAdapter {
         // sits as an unsubmitted draft.
         let handler =
             serde_json::json!({"type": "command", "command": hook_command(forge_bin)});
-        let added = match merge_hook_groups(
-            &mut v,
-            &path,
-            &["PreToolUse", "PermissionRequest", "Stop", "UserPromptSubmit"],
-            &handler,
-            forge_bin,
-        ) {
+        let added = match merge_hook_groups(&mut v, &path, HOOK_EVENTS, &handler, forge_bin) {
             Ok(added) => added,
             Err(e) => return Outcome::error(harness, e),
         };
@@ -127,5 +125,16 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn skills_dir(&self, home: &Path) -> Option<PathBuf> {
         Some(home.join(".claude/skills/forge"))
+    }
+
+    fn hooks_installed(&self, home: &Path) -> bool {
+        use crate::hooks::install::{hook_events_present, read_json_opt};
+        read_json_opt(&home.join(".claude/settings.json"))
+            .is_some_and(|v| hook_events_present(&v, HOOK_EVENTS))
+    }
+
+    fn mcp_installed(&self, home: &Path) -> bool {
+        use crate::hooks::install::{mcp_server_present, read_json_opt};
+        read_json_opt(&home.join(".claude.json")).is_some_and(|v| mcp_server_present(&v))
     }
 }

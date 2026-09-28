@@ -83,6 +83,25 @@ pub trait AgentAdapter: Sync {
         None
     }
 
+    /// True when forge hooks are registered for this agent. Read-only:
+    /// missing or corrupt config reads as not installed, never an error.
+    /// Default true: agents without a hook surface need no repair.
+    fn hooks_installed(&self, _home: &Path) -> bool {
+        true
+    }
+
+    /// True when the forge MCP server is registered for this agent.
+    /// Same fail-closed read as [`AgentAdapter::hooks_installed`].
+    fn mcp_installed(&self, _home: &Path) -> bool {
+        true
+    }
+
+    /// True when the agent needs no repair before launch: hooks and MCP
+    /// both present (or both surfaceless). The create-time check.
+    fn is_setup(&self, home: &Path) -> bool {
+        self.hooks_installed(home) && self.mcp_installed(home)
+    }
+
     /// One-line verdict for the relay to print to the harness. Defaults to
     /// the shared explicit shape; codex overrides (see `codex.rs` in step 3).
     fn render_decision(
