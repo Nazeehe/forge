@@ -133,12 +133,13 @@ pub fn sidebar_is_rich(sidebar: Rect) -> bool {
     sidebar.width >= 30 && sidebar.height >= 30
 }
 
-/// Pinned footer height: settings rows, the Kanban row under the mode
-/// buttons, the Tetris row under Kanban, plus the badge row when
-/// present. Compact also spends a pending row, hidden when there is
-/// nothing pending (rich pending lives in the focused block instead).
+/// Pinned footer height: settings rows, the mode buttons, a blank gap
+/// row, the Kanban row, another blank gap row, the Tetris row, plus
+/// the badge row when present. Compact also spends a pending row,
+/// hidden when there is nothing pending (rich pending lives in the
+/// focused block instead).
 pub fn sidebar_footer_height(info: &SidebarInfo, rich: bool) -> u16 {
-    let base = if rich { 8 } else { 7 };
+    let base = if rich { 10 } else { 9 };
     base + u16::from(info.telegram_badge.is_some())
         - u16::from(!rich && info.pending == 0)
 }
@@ -273,11 +274,11 @@ pub struct SidebarPaint {
     pub lines: Vec<Line<'static>>,
     /// Content row of the mode-button widgets (footer-relative).
     pub btn_row: usize,
-    /// Content row of the Kanban button: always `btn_row + 1`, pinned
-    /// directly under the autopilot buttons.
+    /// Content row of the Kanban button: always `btn_row + 2`, with a
+    /// blank gap row breathing between it and the autopilot buttons.
     pub kanban_row: usize,
-    /// Content row of the Tetris button: always `kanban_row + 1`,
-    /// pinned directly under Kanban.
+    /// Content row of the Tetris button: always `kanban_row + 2`,
+    /// with a blank gap row breathing between it and Kanban.
     pub tetris_row: usize,
 }
 
@@ -317,13 +318,13 @@ pub fn sidebar_paint(
     lines.extend(footer_lines(info, rich, pills));
     SidebarPaint {
         lines,
-        kanban_row: btn_row + 1,
-        tetris_row: btn_row + 2,
+        kanban_row: btn_row + 2,
+        tetris_row: btn_row + 4,
         btn_row,
     }
 }
 
-/// Kanban button row, pinned directly under the mode buttons. The
+/// Kanban button row, one blank gap row below the mode buttons. The
 /// line carries the same text the overlay widget paints, so content
 /// readers agree with the buffer; an open board fills like the active
 /// mode pill.
@@ -354,9 +355,10 @@ fn kanban_line(info: &SidebarInfo, pills: bool) -> Line<'static> {
 }
 
 /// Pinned footer rows, exactly `sidebar_footer_height` long: settings,
-/// mode buttons, Kanban, Tetris, shortcuts, transport, badge. The
-/// button lines carry the same text the overlay widgets paint, so
-/// content readers agree with the buffer.
+/// mode buttons, a blank gap row, Kanban, another blank gap row,
+/// Tetris, shortcuts, transport, badge. The button lines carry the
+/// same text the overlay widgets paint, so content readers agree with
+/// the buffer.
 fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if rich {
@@ -411,7 +413,9 @@ fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static
             Span::styled("[Yolo]", yolo_style),
         ])
     });
+    lines.push(Line::from(""));
     lines.push(kanban_line(info, pills));
+    lines.push(Line::from(""));
     lines.push(tetris_line(pills));
     if rich {
         lines.push(Line::from(Span::styled(
@@ -630,9 +634,11 @@ pub(crate) fn timer_cancel_rects(
 
 /// Mode-button hit areas: `[Off]`/`[Yolo]` legacy, pill containers
 /// (` Off ` 7 wide, ` Yolo ` 8 wide) when `pills`. Rows never move.
+/// Tall sidebars sit six rows above the bottom edge: gap, Kanban,
+/// gap, Tetris, shortcuts, and transport fill the rows below.
 pub fn mode_button_areas(sidebar: Rect, pills: bool) -> ModeButtons {
     let y = if sidebar.height >= 30 {
-        sidebar.bottom().saturating_sub(4)
+        sidebar.bottom().saturating_sub(6)
     } else {
         sidebar.y + SETTINGS_ROW
     };
@@ -669,22 +675,24 @@ pub fn mode_at(buttons: &ModeButtons, col: u16, row: u16) -> Option<&'static str
     }
 }
 
-/// Kanban button hit area: the content row right below the mode
-/// buttons under the same visibility gate, so clicks never desync
-/// from the paint. Legacy `[Kanban]` is 8 wide, the pill 10.
+/// Kanban button hit area: two content rows below the mode buttons
+/// (a blank gap row breathes between) under the same visibility gate,
+/// so clicks never desync from the paint. Legacy `[Kanban]` is 8
+/// wide, the pill 10.
 pub fn board_button_area(sidebar: Rect, info: &SidebarInfo, rich: bool, pills: bool) -> Rect {
     let mode = footer_mode_buttons(sidebar, info, rich, pills);
     let visible = sidebar.height >= SETTINGS_ROW + 2 && sidebar.width >= 16;
-    Rect::new(sidebar.x + 2, mode.off.y + 1, if visible { if pills { 10 } else { 8 } } else { 0 }, 1)
+    Rect::new(sidebar.x + 2, mode.off.y + 2, if visible { if pills { 10 } else { 8 } } else { 0 }, 1)
 }
 
-/// Tetris button hit area: the content row right below Kanban under
-/// the same visibility gate, so clicks never desync from the paint.
-/// Legacy `[Tetris]` is 8 wide, the pill 10, exactly like Kanban.
+/// Tetris button hit area: two content rows below Kanban (another
+/// blank gap row breathes between) under the same visibility gate,
+/// so clicks never desync from the paint. Legacy `[Tetris]` is 8
+/// wide, the pill 10, exactly like Kanban.
 pub fn tetris_button_area(sidebar: Rect, info: &SidebarInfo, rich: bool, pills: bool) -> Rect {
     let mode = footer_mode_buttons(sidebar, info, rich, pills);
     let visible = sidebar.height >= SETTINGS_ROW + 2 && sidebar.width >= 16;
-    Rect::new(sidebar.x + 2, mode.off.y + 2, if visible { if pills { 10 } else { 8 } } else { 0 }, 1)
+    Rect::new(sidebar.x + 2, mode.off.y + 4, if visible { if pills { 10 } else { 8 } } else { 0 }, 1)
 }
 
 /// Sidebar panel with mode buttons and timer cancels.
@@ -721,14 +729,15 @@ pub(super) fn render_sidebar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Ch
         if let Some(line) = lines.get_mut(btn_row) {
             *line = Line::from(""); // the controls below own this row
         }
-        // The Kanban button owns the row right below the mode buttons.
+        // The Kanban button owns its gap-separated row below the mode
+        // buttons.
         let board_area = board_button_area(areas.sidebar, &info, rich, chrome.pills);
         let kanban_row = board_area.y.saturating_sub(areas.sidebar.y + 1) as usize;
         if let Some(line) = lines.get_mut(kanban_row) {
             *line = Line::from("");
         }
-        // The Tetris button owns the row right below Kanban; the game
-        // itself replaces the list region above while open.
+        // The Tetris button owns its gap-separated row below Kanban;
+        // the game itself replaces the list region above while open.
         let tetris_area = tetris_button_area(areas.sidebar, &info, rich, chrome.pills);
         let tetris_row = tetris_area.y.saturating_sub(areas.sidebar.y + 1) as usize;
         if let Some(line) = lines.get_mut(tetris_row) {
@@ -855,7 +864,8 @@ mod tests {
     fn tall_sidebar_keeps_mode_buttons_near_bottom() {
         let sidebar = chrome_areas(Rect::new(0, 0, 120, 40)).sidebar;
         let buttons = mode_button_areas(sidebar, false);
-        assert_eq!(buttons.off.y, sidebar.bottom() - 4);
+        // Six rows below: gap, Kanban, gap, Tetris, shortcuts, transport.
+        assert_eq!(buttons.off.y, sidebar.bottom() - 6);
         assert_eq!(mode_at(&buttons, buttons.yolo.x, buttons.yolo.y), Some("yolo"));
     }
 
@@ -892,19 +902,21 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &c)).unwrap();
         let rows = buffer_rows(&terminal);
-        // The pinned footer puts the button row at 19 with Kanban at
-        // 20 and Tetris at 21; pills still replace the brackets there,
-        // and the fixed row stays blank.
+        // The pinned footer puts the button row at 17 with a blank gap
+        // at 18, Kanban at 19, another blank gap at 20, and Tetris at
+        // 21; pills still replace the brackets there, and the fixed row
+        // stays blank.
         assert!(!rows[11].contains("Off"), "no ghost row: {:?}", rows[11]);
-        assert!(rows[19].contains("Off"), "off pill: {:?}", rows[19]);
-        assert!(!rows[19].contains("[Off]"), "no legacy brackets");
-        assert!(rows[20].contains("Kanban"), "kanban pill: {:?}", rows[20]);
+        assert!(rows[17].contains("Off"), "off pill: {:?}", rows[17]);
+        assert!(!rows[17].contains("[Off]"), "no legacy brackets");
+        assert!(!rows[18].contains("Kanban"), "gap stays blank: {:?}", rows[18]);
+        assert!(rows[19].contains("Kanban"), "kanban pill: {:?}", rows[19]);
         assert!(rows[21].contains("Tetris"), "tetris pill: {:?}", rows[21]);
         let cancel_y = rows.iter().position(|r| r.contains("Cancel")).expect("cancel pill");
         assert!(rows[cancel_y].contains("\u{e0b6}"));
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(66, 19)].fg, Color::Yellow, "active off cap");
-        assert_eq!(buf[(67, 19)].bg, Color::Yellow, "active off fill");
+        assert_eq!(buf[(66, 17)].fg, Color::Yellow, "active off cap");
+        assert_eq!(buf[(67, 17)].bg, Color::Yellow, "active off fill");
         let cap_byte = rows[cancel_y].find("\u{e0b6}").expect("left cap");
         let cap_x = rows[cancel_y][..cap_byte].chars().count() as u16;
         assert_eq!(buf[(cap_x, cancel_y as u16)].fg, Color::Red, "destructive caps");
@@ -933,27 +945,54 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| render(f, area(), &[], &chrome())).unwrap();
         let rows = buffer_rows(&terminal);
-        assert_eq!(rows[19].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
-        assert_eq!(rows[20].chars().skip(66).take(8).collect::<String>(), "[Kanban]");
+        assert_eq!(rows[17].chars().skip(66).take(12).collect::<String>(), "[Off] [Yolo]");
+        assert!(rows[18].chars().skip(66).take(8).collect::<String>().trim().is_empty(), "gap blank: {:?}", rows[18]);
+        assert_eq!(rows[19].chars().skip(66).take(8).collect::<String>(), "[Kanban]");
         assert_eq!(rows[21].chars().skip(66).take(8).collect::<String>(), "[Tetris]");
         assert!(!rows[12].contains("[Off]"));
 
         let mut tall = Terminal::new(TestBackend::new(120, 40)).unwrap();
         tall.draw(|f| render(f, Rect::new(0, 0, 120, 40), &[], &chrome())).unwrap();
         let tall_rows = buffer_rows(&tall);
-        assert!(tall_rows[35].contains("[Off] [Yolo]"));
-        assert!(tall_rows[36].contains("[Kanban]"));
+        assert!(tall_rows[33].contains("[Off] [Yolo]"));
+        assert!(tall_rows[35].contains("[Kanban]"));
         assert!(tall_rows[37].contains("[Tetris]"));
         assert!(!tall_rows[11].contains("[Off]"));
     }
 
     #[test]
-    fn kanban_button_sits_one_row_below_mode_buttons_and_hit_tests() {
+    fn footer_separates_mode_kanban_and_tetris_with_blank_rows() {
+        // Breathing room: a blank gap row sits between the mode
+        // buttons and Kanban, and another between Kanban and Tetris.
+        // Hit areas track the paint, and the gap rows hit nothing.
+        let info = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
+        for rich in [false, true] {
+            let (w, h) = if rich { (36u16, 40u16) } else { (16u16, 23u16) };
+            let sidebar = Rect::new(64, 0, w, h);
+            let paint = sidebar_paint(&info, rich, sidebar.width, sidebar.height, false);
+            assert_eq!(paint.kanban_row, paint.btn_row + 2, "gap above kanban (rich {rich})");
+            assert_eq!(paint.tetris_row, paint.kanban_row + 2, "gap above tetris (rich {rich})");
+            for gap in [paint.btn_row + 1, paint.kanban_row + 1] {
+                let text: String =
+                    paint.lines[gap].spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(text.trim().is_empty(), "gap paints blank (rich {rich}): {text:?}");
+            }
+            let board = board_button_area(sidebar, &info, rich, false);
+            assert_eq!(board.y, sidebar.y + 1 + paint.kanban_row as u16, "kanban hit tracks paint (rich {rich})");
+            let game = tetris_button_area(sidebar, &info, rich, false);
+            assert_eq!(game.y, sidebar.y + 1 + paint.tetris_row as u16, "tetris hit tracks paint (rich {rich})");
+            assert!(!board_at(&board, board.x + 1, board.y - 1), "gap above kanban is dead (rich {rich})");
+            assert!(!board_at(&game, game.x + 1, game.y - 1), "gap above tetris is dead (rich {rich})");
+        }
+    }
+
+    #[test]
+    fn kanban_button_sits_two_rows_below_mode_buttons_and_hit_tests() {
         let info = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
         let sidebar = Rect::new(64, 0, 16, 23);
         let rich = sidebar_is_rich(sidebar);
         let paint = sidebar_paint(&info, rich, sidebar.width, sidebar.height, false);
-        assert_eq!(paint.kanban_row, paint.btn_row + 1, "kanban pins under autopilot");
+        assert_eq!(paint.kanban_row, paint.btn_row + 2, "gap row breathes above kanban");
         let row_text: String =
             paint.lines[paint.kanban_row].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(row_text.contains("Kanban"), "kanban row paints: {row_text:?}");
@@ -965,12 +1004,12 @@ mod tests {
     }
 
     #[test]
-    fn tetris_button_sits_one_row_below_kanban_and_hit_tests() {
+    fn tetris_button_sits_two_rows_below_kanban_and_hit_tests() {
         let info = SidebarInfo { session: None, sessions: Vec::new(), active: None, fleet_cursor: None, fleet_scroll: 0, other_timers: 0, pending: 0, mode: "off", telegram: "off", telegram_badge: None, board_open: false };
         let sidebar = Rect::new(64, 0, 16, 23);
         let rich = sidebar_is_rich(sidebar);
         let paint = sidebar_paint(&info, rich, sidebar.width, sidebar.height, false);
-        assert_eq!(paint.tetris_row, paint.kanban_row + 1, "tetris pins under kanban");
+        assert_eq!(paint.tetris_row, paint.kanban_row + 2, "gap row breathes above tetris");
         let row_text: String =
             paint.lines[paint.tetris_row].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(row_text.contains("Tetris"), "tetris row paints: {row_text:?}");
@@ -1012,7 +1051,7 @@ mod tests {
         let rows = buffer_rows(&terminal);
         let mode_y = rows.iter().position(|r| r.contains("[Off]")).expect("mode paints");
         let kanban_y = rows.iter().position(|r| r.contains("[Kanban]")).expect("kanban paints");
-        assert_eq!(kanban_y, mode_y + 1, "kanban sits directly under autopilot buttons");
+        assert_eq!(kanban_y, mode_y + 2, "gap row sits between autopilot buttons and kanban");
         let areas = chrome_areas(Rect::new(0, 0, 80, 24));
         let rich = sidebar_is_rich(areas.sidebar);
         let c = chrome();
@@ -1029,9 +1068,9 @@ mod tests {
         terminal.draw(|f| render(f, Rect::new(0, 0, 80, 14), &[], &chrome())).unwrap();
         let rows = buffer_rows(&terminal);
         // Taller sidebar earns its button rows; the bottom border stays clean.
-        assert!(rows[9].contains("[Off]"), "buttons visible: {:?}", rows[9]);
-        assert!(rows[10].contains("[Kanban]"), "kanban follows: {:?}", rows[10]);
-        assert!(rows[11].contains("[Tetris]"), "tetris follows: {:?}", rows[11]);
+        assert!(rows[7].contains("[Off]"), "buttons visible: {:?}", rows[7]);
+        assert!(rows[9].contains("[Kanban]"), "kanban follows the gap: {:?}", rows[9]);
+        assert!(rows[11].contains("[Tetris]"), "tetris follows the gap: {:?}", rows[11]);
         assert!(!rows[12].contains("[Off]"), "border clean: {:?}", rows[12]);
     }
 
@@ -1075,9 +1114,9 @@ mod tests {
                 .collect::<String>()
         };
         // The pinned footer owns the buttons now: Settings heads it
-        // at row 23 whatever the list above holds.
+        // at row 21 whatever the list above holds.
         assert!(!row_text(11).contains(PILL_LEFT), "no ghost row: {:?}", row_text(11));
-        assert!(row_text(23).contains("Settings"), "header visible: {:?}", row_text(23));
+        assert!(row_text(21).contains("Settings"), "header visible: {:?}", row_text(21));
         let pill_rows: Vec<u16> = (0..30)
             .filter(|y| row_text(*y).contains(PILL_LEFT))
             .collect();

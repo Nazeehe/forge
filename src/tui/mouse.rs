@@ -218,8 +218,8 @@ pub(super) fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                 None => {}
             }
         }
-        // Kanban button, pinned under the autopilot buttons: same
-        // builder the render uses, so clicks track the paint exactly.
+        // Kanban button, gap-separated below the autopilot buttons:
+        // same builder the render uses, so clicks track the paint exactly.
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let info = state.sidebar_info();
             let board = ui::sidebar::board_button_area(
@@ -235,8 +235,8 @@ pub(super) fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
                 state.toggle_board();
             }
         }
-        // Tetris button, pinned under Kanban: same builder the render
-        // uses, so clicks track the paint exactly.
+        // Tetris button, gap-separated below Kanban: same builder the
+        // render uses, so clicks track the paint exactly.
         if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
             let info = state.sidebar_info();
             let game = ui::sidebar::tetris_button_area(
@@ -914,8 +914,8 @@ mod tests {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
-        // Compact footer: mode buttons at y=19, Kanban at y=20, the
-        // Tetris button one row below at y=21.
+        // Compact footer: mode buttons at y=17, a blank gap at y=18,
+        // Kanban at y=19, another gap at y=20, Tetris at y=21.
         assert!(!state.tetris_open);
         forward_mouse(
             &mut state,
@@ -945,15 +945,15 @@ mod tests {
         let mut state = AppState::new();
         state.apply(AppEvent::Resize(24, 80));
         // Sidebar is x=64..80; with nothing pending the footer
-        // shrinks and buttons sit at y=19, Off at x=66..71, the
-        // Kanban button one row below at y=20, Tetris at y=21.
+        // shrinks and buttons sit at y=17, Off at x=66..71, a blank
+        // gap at y=18, the Kanban button at y=19, Tetris at y=21.
         assert_eq!(state.permission_mode, crate::infra::config::PermissionMode::Yolo);
         forward_mouse(
             &mut state,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 67,
-                row: 19,
+                row: 17,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
@@ -965,7 +965,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 67,
-                row: 20,
+                row: 19,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
@@ -978,19 +978,19 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Moved,
                 column: 73,
-                row: 19,
+                row: 17,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );
         assert_eq!(state.permission_mode, crate::infra::config::PermissionMode::Off);
         assert!(!state.dirty, "hover leaves no work");
-        // Click Yolo to return (pill starts at x=74, footer row 19).
+        // Click Yolo to return (pill starts at x=74, footer row 17).
         forward_mouse(
             &mut state,
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 75,
-                row: 19,
+                row: 17,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
         );

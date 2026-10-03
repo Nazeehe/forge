@@ -449,7 +449,9 @@ mod tests {
             .map(text_of)
             .find(|l| l.starts_with(" Fleet ("))
             .expect("fleet header");
-        assert!(header.contains("· 1–2"), "partial window shows position: {header:?}");
+        // The taller footer (gap rows around Kanban/Tetris) leaves one
+        // fewer list row here, so the partial window shows a single item.
+        assert!(header.contains("· 1–1"), "partial window shows position: {header:?}");
         let full = sidebar_paint(&info, false, 24, 60, false).lines;
         let header = full
             .iter()
