@@ -85,8 +85,9 @@ impl AppState {
     }
 
     /// Fresh snapshot for the group dialog: groups with live member
-    /// counts, sessions in bar order, and the selected group's current
-    /// members for the checkbox pre-check.
+    /// counts, sessions in bar order (each with its group names for the
+    /// `Add sessions` suffix), and the selected group's current members
+    /// for the checkbox pre-check.
     pub fn group_ctx(&self) -> crate::ui::dialogs::groups::GroupCtx {
         let groups = self
             .broker
@@ -110,6 +111,7 @@ impl AppState {
                 self.manager.get(id).map(|rec| crate::ui::dialogs::groups::SessionRow {
                     id,
                     name: rec.name.clone(),
+                    groups: self.broker.groups_of(id),
                 })
             })
             .collect();
@@ -261,6 +263,30 @@ mod tests {
         assert!(line.is_empty(), "ask defers silently: {line:?}");
         assert!(s.manager.remove(id));
         let _ = std::fs::remove_file(&audit);
+    }
+
+    #[test]
+    fn group_ctx_carries_session_groups_for_picker_suffix() {
+        let mut s = AppState::new();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        let b = s
+            .manager
+            .spawn("b", &std::env::temp_dir(), "exec sleep 30", RunId::generate(), "shell")
+            .unwrap();
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, b, "other").unwrap();
+        s.broker.join(&s.manager, b, "peers").unwrap();
+        let ctx = s.group_ctx();
+        let row_a = ctx.sessions.iter().find(|r| r.id == a).expect("a row");
+        let row_b = ctx.sessions.iter().find(|r| r.id == b).expect("b row");
+        assert_eq!(row_a.groups, vec!["peers".to_string()]);
+        assert!(row_b.groups.contains(&"other".to_string()), "b groups: {:?}", row_b.groups);
+        assert!(row_b.groups.contains(&"peers".to_string()), "b groups: {:?}", row_b.groups);
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(b));
     }
 
     #[test]

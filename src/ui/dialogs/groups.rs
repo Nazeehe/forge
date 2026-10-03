@@ -2,8 +2,9 @@
 //!
 //! Groups are human-only organization: no MCP tool exposes them, agents
 //! only feel them through ask/tell gating. `n` news a group (typed name),
-//! `a` edits members (checkbox list), `r` renames (typed name), `d`
-//! deletes, arrows/`j`/`k` move, Enter applies, Esc steps out or closes.
+//! `a` adds sessions (unchecked checkbox list, add-only), `r` renames
+//! (typed name) or removes the member under the cursor, `d` deletes,
+//! arrows/`j`/`k` move, Enter applies, Esc steps out or closes.
 
 use std::collections::HashSet;
 
@@ -24,16 +25,19 @@ pub struct GroupRow {
     pub color: usize,
 }
 
-/// One session row: identity plus display name, in bar order.
+/// One session row: identity plus display name, in bar order, plus the
+/// names of every group the session belongs to (for the `Add sessions`
+/// picker suffix).
 #[derive(Clone, Debug)]
 pub struct SessionRow {
     pub id: SessionId,
     pub name: String,
+    pub groups: Vec<String>,
 }
 
 /// Live snapshot the dialog reads but never owns: group list, session
-/// list, and the current members of the dialog's selected group (for the
-/// checkbox pre-check).
+/// list, and the current members of the dialog's selected group (the
+/// add-only baseline on confirm, and the removal baseline for `r`).
 #[derive(Clone, Debug)]
 pub struct GroupCtx {
     pub groups: Vec<GroupRow>,
@@ -108,6 +112,21 @@ impl GroupDialog {
             .iter()
             .find(|g| g.name == self.selected)
             .map(|g| g.name.as_str())
+    }
+
+    /// Existing members of the selected group, robust to a stale
+    /// `ctx.members` snapshot: unions it with the group's `member_names`
+    /// resolved through the live session list (session names are unique).
+    fn existing_members(&self, ctx: &GroupCtx) -> HashSet<SessionId> {
+        let mut out: HashSet<SessionId> = ctx.members.iter().copied().collect();
+        if let Some(group) = ctx.groups.iter().find(|g| g.name == self.selected) {
+            for name in &group.member_names {
+                if let Some(id) = ctx.sessions.iter().find(|s| s.name == *name).map(|s| s.id) {
+                    out.insert(id);
+                }
+            }
+        }
+        out
     }
 
     /// Reconcile selection with a fresh snapshot: a deleted selection
@@ -236,10 +255,11 @@ impl GroupDialog {
                         self.error = Some(format!("{member:?} already left"));
                         return GroupOutcome::Pending;
                     };
-                    let members: Vec<SessionId> = ctx
-                        .members
-                        .iter()
-                        .copied()
+                    // Baseline through `existing_members` so a stale
+                    // `ctx.members` snapshot cannot clear the group.
+                    let members: Vec<SessionId> = self
+                        .existing_members(ctx)
+                        .into_iter()
                         .filter(|kept| kept != &id)
                         .collect();
                     self.snap_to_header(ctx);
@@ -282,7 +302,12 @@ impl GroupDialog {
                 };
                 self.mode = Mode::Members;
                 self.cursor = 0;
-                self.checked = ctx.members.iter().copied().collect();
+                // The Add picker never pre-checks: one session may belong
+                // to many groups, so existing membership stays visible
+                // through the `(group)` suffix instead of a checked box.
+                // Confirming unions the toggled set with the existing
+                // members (add-only); `r` removes.
+                self.checked.clear();
                 self.error = None;
                 return GroupOutcome::Pending;
             }
@@ -367,10 +392,15 @@ impl GroupDialog {
             }
             KeyCode::Enter => {
                 let group = self.selected.clone();
+                // Add-only: union the checkbox set with the group's
+                // existing members so confirming never drops what was
+                // already there. Explicit removal stays on `r` over the
+                // member row in the overview.
+                let baseline = self.existing_members(ctx);
                 let members: Vec<SessionId> = ctx
                     .sessions
                     .iter()
-                    .filter(|s| self.checked.contains(&s.id))
+                    .filter(|s| self.checked.contains(&s.id) || baseline.contains(&s.id))
                     .map(|s| s.id)
                     .collect();
                 self.mode = Mode::List;
@@ -610,7 +640,9 @@ impl GroupDialog {
                     }
                     let checked = self.checked.contains(&s.id);
                     let focused = i == self.cursor;
-                    let name = fit_row(&safe_name(&s.name), cw as usize - 8);
+                    let suffix = session_groups_suffix(s);
+                    let (name, suffix) =
+                        fit_name_with_suffix(&safe_name(&s.name), &suffix, (cw as usize).saturating_sub(8));
                     let (box_glyph, box_style, name_style) = if focused {
                         ("[√] ", focus_row(), focus_row())
                     } else if checked {
@@ -625,7 +657,16 @@ impl GroupDialog {
                     } else {
                         (box_glyph, box_style)
                     };
-                    let line = Line::from(vec![
+                    // Suffix stays muted (a different color from the name)
+                    // even on the focused row; reverse keeps it readable
+                    // under the focus background.
+                    let suffix_style = if focused {
+                        style(Role::Muted)
+                            .add_modifier(ratatui::style::Modifier::REVERSED)
+                    } else {
+                        style(Role::Muted)
+                    };
+                    let mut spans = vec![
                         if focused {
                             Span::styled("> ", focus_row())
                         } else {
@@ -633,7 +674,11 @@ impl GroupDialog {
                         },
                         Span::styled(box_glyph, box_style),
                         Span::styled(name, name_style),
-                    ]);
+                    ];
+                    if !suffix.is_empty() {
+                        spans.push(Span::styled(suffix, suffix_style));
+                    }
+                    let line = Line::from(spans);
                     frame.render_widget(
                         Paragraph::new(line),
                         Rect::new(cx, row, cw, 1),
@@ -712,6 +757,32 @@ fn pad_top_for(inner_height: u16) -> u16 {
 
 fn safe_name(raw: &str) -> String {
     crate::infra::safe_text::encode_for_display(raw)
+}
+
+/// ` (g1, g2)` suffix for the `Add sessions` picker, empty when the
+/// session belongs to no group. Group names are display-escaped like
+/// session names.
+fn session_groups_suffix(session: &SessionRow) -> String {
+    if session.groups.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = session.groups.iter().map(|g| safe_name(g)).collect();
+    format!(" ({})", names.join(", "))
+}
+
+/// Split a session name and its groups suffix into a fixed cell width:
+/// the name truncates first so the suffix stays visible; when even the
+/// suffix alone overflows, the combined text truncates with an ellipsis.
+fn fit_name_with_suffix(name: &str, suffix: &str, width: usize) -> (String, String) {
+    let total = name.chars().count() + suffix.chars().count();
+    if total <= width {
+        return (name.to_string(), suffix.to_string());
+    }
+    if suffix.chars().count() >= width {
+        return (fit_row(&format!("{name}{suffix}"), width), String::new());
+    }
+    let name_width = width.saturating_sub(suffix.chars().count());
+    (fit_row(name, name_width), suffix.to_string())
 }
 
 /// Truncate a row to a cell width, marking cuts with an ellipsis so
@@ -799,8 +870,8 @@ mod tests {
                 GroupRow { name: "other".to_string(), members: 0, member_names: vec![], color: 1 },
             ],
             sessions: vec![
-                SessionRow { id: a, name: "a1".to_string() },
-                SessionRow { id: b, name: "a2".to_string() },
+                SessionRow { id: a, name: "a1".to_string(), groups: vec!["codex-proj".to_string()] },
+                SessionRow { id: b, name: "a2".to_string(), groups: vec![] },
             ],
             members: vec![a],
         };
@@ -948,22 +1019,24 @@ mod tests {
     }
 
     #[test]
-    fn a_checkbox_prechecks_toggle_and_applies_exact_membership() {
+    fn a_starts_unchecked_and_space_checks_to_add() {
+        // `a` opens unchecked (a session may sit in many groups) and is
+        // add-only: checking `b` adds it while the baseline keeps `a`;
+        // `r` removes instead.
         let (a, b, ctx) = fixture();
         let mut d = GroupDialog::new();
         assert!(matches!(d.key(&ch('a'), &ctx), GroupOutcome::Pending));
-        // `a` was pre-checked (sole member): uncheck it, check `b` instead.
-        assert!(matches!(d.key(&key(KeyCode::Char(' ')), &ctx), GroupOutcome::Pending));
+        // Cursor starts on a1: move to a2 and check it.
         assert!(matches!(d.key(&key(KeyCode::Down), &ctx), GroupOutcome::Pending));
         assert!(matches!(d.key(&key(KeyCode::Char(' ')), &ctx), GroupOutcome::Pending));
         match d.key(&key(KeyCode::Enter), &ctx) {
             GroupOutcome::SetMembers { group, members } => {
                 assert_eq!(group, "codex-proj");
-                assert_eq!(members, vec![b], "exact membership, a dropped");
+                assert!(members.contains(&a), "existing a kept, got {members:?}");
+                assert!(members.contains(&b), "new b added, got {members:?}");
             }
             other => panic!("expected members, got {other:?}"),
         }
-        let _ = a;
     }
 
     #[test]
@@ -1000,9 +1073,11 @@ mod tests {
     #[test]
     fn member_picker_matches_add_sessions_reference() {
         // screens/group_select.jpeg: dotted "Add sessions" header,
-        // `> [√] name` rows, and an ↑↓/Space/Enter/Esc footer. The
-        // tui-realm Checkbox glyphs (☑/☐) were replaced to match it,
-        // and the UI guidance mandates `>` (not `▸`) for focus.
+        // `> [ ] name` rows on entry (never pre-checked: a session may
+        // sit in many groups), `[√]` once toggled, and an
+        // ↑↓/Space/Enter/Esc footer. The tui-realm Checkbox glyphs
+        // (☑/☐) were replaced to match it, and the UI guidance mandates
+        // `>` (not `▸`) for focus.
         use ratatui::{backend::TestBackend, Terminal};
         let (_, _, ctx) = fixture();
         let mut d = GroupDialog::new();
@@ -1012,13 +1087,20 @@ mod tests {
         let text = terminal.backend().buffer().content.iter()
             .map(|cell| cell.symbol()).collect::<String>();
         assert!(text.contains("Add sessions"), "header: {text:?}");
-        assert!(text.contains("[√]"), "checked box: {text:?}");
+        assert!(!text.contains("[√]"), "nothing pre-checked: {text:?}");
         assert!(text.contains("[ ]"), "unchecked box: {text:?}");
         assert!(!text.contains("▸"), "old marker is gone: {text:?}");
-        assert!(text.contains("> [√]"), "focused row: {text:?}");
+        assert!(text.contains("> [ ]"), "focused row: {text:?}");
         for hint in ["navigate", "toggle", "confirm"] {
             assert!(text.contains(hint), "footer {hint:?}: {text:?}");
         }
+        // Toggling the focused row checks it: the checked glyph still
+        // renders per the reference.
+        let _ = d.key(&key(KeyCode::Char(' ')), &ctx);
+        terminal.draw(|f| d.view(f, group_area(f.area()), &ctx)).unwrap();
+        let text = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(text.contains("> [√]"), "toggled row checks: {text:?}");
     }
 
     #[test]
@@ -1027,7 +1109,7 @@ mod tests {
         let mut ctx = empty_ctx();
         ctx.groups.push(GroupRow { name: "team".into(), members: 0, member_names: vec![], color: 0 });
         for n in 0..25 {
-            ctx.sessions.push(SessionRow { id: SessionId::fresh(), name: format!("member-{n}") });
+            ctx.sessions.push(SessionRow { id: SessionId::fresh(), name: format!("member-{n}"), groups: vec![] });
         }
         let mut d = GroupDialog::new();
         let _ = d.key(&ch('a'), &ctx);
@@ -1177,6 +1259,93 @@ mod tests {
                 "key {c}: {:?}",
                 d.error()
             );
+        }
+    }
+
+    #[test]
+    fn member_picker_adds_instead_of_replacing_stale_members() {
+        // The checked set starts empty by design (see the unchecked test
+        // above), so confirming unions it with the baseline resolved
+        // from `member_names`: a stale empty `members` snapshot can never
+        // clear the group.
+        let (a, b, mut ctx) = fixture();
+        ctx.members.clear();
+        assert_eq!(ctx.groups[0].member_names, vec!["a1".to_string()]);
+        let mut d = GroupDialog::new();
+        assert!(matches!(d.key(&ch('a'), &ctx), GroupOutcome::Pending));
+        // Cursor starts on a1: move to a2 and check it.
+        assert!(matches!(d.key(&key(KeyCode::Down), &ctx), GroupOutcome::Pending));
+        assert!(matches!(d.key(&key(KeyCode::Char(' ')), &ctx), GroupOutcome::Pending));
+        match d.key(&key(KeyCode::Enter), &ctx) {
+            GroupOutcome::SetMembers { group, members } => {
+                assert_eq!(group, "codex-proj");
+                assert!(members.contains(&a), "existing a1 must be kept, got {members:?}");
+                assert!(members.contains(&b), "new a2 must be added, got {members:?}");
+            }
+            other => panic!("expected members, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_sessions_picker_opens_with_all_unchecked() {
+        // A session may belong to many groups, so the Add picker never
+        // pre-checks: membership stays visible through the `(group)`
+        // suffix, and confirming only adds what was toggled.
+        use ratatui::{backend::TestBackend, Terminal};
+        let (_, _, ctx) = fixture();
+        let mut d = GroupDialog::new();
+        let _ = d.key(&ch('a'), &ctx);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, group_area(f.area()), &ctx)).unwrap();
+        let text = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(text.contains("[ ]"), "unchecked rows: {text:?}");
+        assert!(!text.contains("[√]"), "nothing pre-checked: {text:?}");
+    }
+
+    #[test]
+    fn member_picker_shows_session_groups_suffix_in_different_color() {
+        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::style::Color;
+        let (a, b, mut ctx) = fixture();
+        ctx.sessions[0].groups = vec!["codex-proj".to_string()];
+        ctx.sessions[1].groups = vec!["other".to_string()];
+        let mut d = GroupDialog::new();
+        let _ = d.key(&ch('a'), &ctx);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| d.view(f, group_area(f.area()), &ctx)).unwrap();
+        let text = terminal.backend().buffer().content.iter()
+            .map(|cell| cell.symbol()).collect::<String>();
+        assert!(text.contains("a1 (codex-proj)"), "suffix for a1: {text:?}");
+        assert!(text.contains("a2 (other)"), "suffix for a2: {text:?}");
+        let _ = (a, b);
+        // Find '(' of the first suffix and check its color is muted gray,
+        // not the white/focus name color.
+        let mut paren_fg = None;
+        for cell in terminal.backend().buffer().content.iter() {
+            if cell.symbol() == "(" {
+                paren_fg = Some(cell.fg);
+                break;
+            }
+        }
+        let fg = paren_fg.expect("suffix paren must render");
+        assert_eq!(fg, Color::DarkGray, "suffix must be muted, got {fg:?}");
+    }
+
+    #[test]
+    fn member_picker_empty_confirm_keeps_existing() {
+        // `a` opens unchecked and confirms add-only: confirming with
+        // nothing toggled keeps the baseline instead of clearing the
+        // group; removal stays on `r` over the member row.
+        let (a, b, ctx) = fixture();
+        let mut d = GroupDialog::new();
+        assert!(matches!(d.key(&ch('a'), &ctx), GroupOutcome::Pending));
+        match d.key(&key(KeyCode::Enter), &ctx) {
+            GroupOutcome::SetMembers { members, .. } => {
+                assert!(members.contains(&a), "baseline kept, got {members:?}");
+                assert!(!members.contains(&b), "nothing added, got {members:?}");
+            }
+            other => panic!("expected members, got {other:?}"),
         }
     }
 }

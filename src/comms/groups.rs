@@ -263,6 +263,30 @@ mod tests {
     }
 
     #[test]
+    fn one_session_in_many_groups_shares_any_overlap() {
+        // One session may belong to many groups: `join` never drops the
+        // other memberships, and comms gating passes on ANY shared group.
+        let mut p = live_pair();
+        p.state.broker.join(&p.state.manager, p.a, "g1").unwrap();
+        p.state.broker.join(&p.state.manager, p.a, "g2").unwrap();
+        p.state.broker.join(&p.state.manager, p.b, "g2").unwrap();
+        assert_eq!(p.state.broker.groups_of(p.a), vec!["g1".to_string(), "g2".to_string()]);
+        assert!(p.state.broker.is_member(p.a, "g1"));
+        assert!(p.state.broker.is_member(p.a, "g2"));
+        assert!(p.state.broker.shares_group(p.a, p.b), "g2 overlaps");
+        p.call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"hi"}"#)
+            .expect("any shared group allows ask");
+        // No overlap at all still blocks.
+        assert!(p.state.broker.leave(p.b, "g2"));
+        p.state.broker.join(&p.state.manager, p.b, "g3").unwrap();
+        assert!(!p.state.broker.shares_group(p.a, p.b), "g1/g2 vs g3");
+        let err = p
+            .call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"hi"}"#)
+            .expect_err("disjoint groups must fail");
+        assert!(err.contains("shared group"), "err: {err}");
+    }
+
+    #[test]
     fn response_after_group_leave_is_refused() {
         // Leaving the shared group revokes the answer channel: the
         // response must fail closed, not ride the old conversation ID.
