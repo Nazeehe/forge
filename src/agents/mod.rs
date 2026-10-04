@@ -35,6 +35,17 @@ pub trait AgentAdapter: Sync {
         Vec::new()
     }
 
+    /// Extra argv for a *resume* launch carrying the contract. Empty
+    /// unless the agent has a verified resume-safe transport. Codex
+    /// stays empty (`-c developer_instructions` on `codex resume` is
+    /// unverified); muse and agy stay empty (their contract is a
+    /// positional prompt, which on resume would arrive as a new user
+    /// turn instead of instructions). Claude overrides: it rebuilds
+    /// its system prompt on every launch, resume included.
+    fn resume_runtime_injection(&self, _runtime_file: &Path) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Install harness hooks. Skipped by default (no grounded surface).
     /// Callers label the outcome with the registry name; the default
     /// uses the adapter name only as a fallback.

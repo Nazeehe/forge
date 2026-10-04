@@ -28,6 +28,13 @@ impl AgentAdapter for ClaudeAdapter {
         ]
     }
 
+    fn resume_runtime_injection(&self, runtime_file: &Path) -> Vec<String> {
+        // Same file flag as a fresh launch: Claude rebuilds its system
+        // prompt on every launch, so a resumed session without it has
+        // no contract and no other transport can reach it.
+        self.runtime_injection(runtime_file)
+    }
+
     fn hook_install(&self, home: &Path, forge_bin: &str) -> crate::hooks::install::Outcome {
         use crate::hooks::install::{
             Outcome, hook_command, merge_hook_groups, read_json, write_json,

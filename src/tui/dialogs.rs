@@ -619,7 +619,11 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let none = KeyModifiers::NONE;
         // The dialog only offers agents now; stand in a binary that exits
-        // at once so the submit path stays hermetic.
+        // at once so the submit path stays hermetic. Serialized against
+        // every other CLAUDE_BIN mutator (see CLAUDE_BIN_LOCK).
+        let _claude_bin = crate::app::test_support::CLAUDE_BIN_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("CLAUDE_BIN").ok();
         std::env::set_var("CLAUDE_BIN", "/bin/true");
         let mut state = AppState::new();

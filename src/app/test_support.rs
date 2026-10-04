@@ -3,6 +3,14 @@
 use super::*;
 use crate::infra::event::AppEvent;
 
+/// Serializes every test that mutates `CLAUDE_BIN`. Parallel tests
+/// racing the override resolve the wrong binary (a recorder test
+/// flakes with "recorder never ran") or, worse, remove the var
+/// mid-test and launch the real agent CLI from a unit test. Hold the
+/// guard across set → spawn/assert → restore.
+#[cfg(test)]
+pub(crate) static CLAUDE_BIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(super) fn comms_reply(state: &mut AppState, run: &str, tool: &str, args: &str) -> String {
     let (tx, rx) = std::sync::mpsc::channel();
     state.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {

@@ -150,7 +150,18 @@ impl AppState {
             // its resume argv runs. Fail-open: never blocks the restore.
             let _ = crate::hooks::install::ensure_installed(home, &saved.cli_tool, forge_bin);
             let spec = harness.spec();
-            let argv = harness.resume_argv(&spec.resolve_binary(), saved.harness_session_id.as_deref());
+            let binary = spec.resolve_binary();
+            // Resumed sessions need the contract too (Claude rebuilds
+            // its system prompt on every launch): materialize fail-open
+            // like the fresh path, falling back to plain resume argv.
+            let argv = match crate::agents::runtime::ensure_materialized(home) {
+                Ok(file) => harness.resume_argv_with_runtime(
+                    &binary,
+                    saved.harness_session_id.as_deref(),
+                    &file,
+                ),
+                Err(_) => harness.resume_argv(&binary, saved.harness_session_id.as_deref()),
+            };
             let mut cmd = String::from("exec ");
             cmd.push_str(&crate::ui::dialogs::create::shell_join(&argv));
             let run = crate::infra::ids::RunId::generate();
@@ -686,6 +697,78 @@ mod tests {
             None => std::env::remove_var("CODEX_BIN"),
         }
         assert!(s.manager.remove(id));
+    }
+
+    #[test]
+    fn restore_carries_runtime_flag_for_claude() {
+        use std::os::unix::fs::PermissionsExt;
+        // Serialize CLAUDE_BIN against every other test mutating it:
+        // a parallel override would resolve the wrong binary here.
+        let _claude_bin = crate::app::test_support::CLAUDE_BIN_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Recorder stand-in for the claude binary: logs its argv so the
+        // test observes the restored command line.
+        let dir = std::env::temp_dir().join(format!(
+            "forge-restore-flag-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("argv.log");
+        let script = dir.join("claude-recorder");
+        std::fs::write(&script, format!("#!/bin/sh\necho \"$@\" >> '{}'\n", log.display()))
+            .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let saved = std::env::var("CLAUDE_BIN").ok();
+        std::env::set_var("CLAUDE_BIN", &script);
+        let mut s = AppState::new();
+        let entry = crate::session::checkpoint::SavedEntry {
+            label: "c".to_string(),
+            saved_at_unix: 1_700_000_000,
+            sessions: vec![crate::session::checkpoint::SavedSession {
+                name: "c".to_string(),
+                cli_tool: "claude".to_string(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                groups: vec![],
+                harness_session_id: Some("abc".to_string()),
+            }],
+        };
+        let report = s.restore_entry_with_home(&home, "forge", &entry);
+        assert_eq!(report.spawned, 1, "report: {:?}", report.skipped);
+        // The recorder runs async after spawn: poll for its argv line.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let argv = loop {
+            if let Ok(text) = std::fs::read_to_string(&log) {
+                if !text.trim().is_empty() {
+                    break text;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "recorder never ran");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!(argv.contains("--resume abc"), "resume ID rides along: {argv:?}");
+        assert!(
+            argv.contains("--append-system-prompt-file"),
+            "resumed claude keeps its contract: {argv:?}"
+        );
+        let want = home.join(".forge").join("runtime.md").display().to_string();
+        assert!(
+            argv.contains(want.as_str()),
+            "flag points at the materialized contract: {argv:?}"
+        );
+        match saved {
+            Some(v) => std::env::set_var("CLAUDE_BIN", v),
+            None => std::env::remove_var("CLAUDE_BIN"),
+        }
+        let id = s.manager.order().to_vec().pop().unwrap();
+        assert!(s.manager.remove(id));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

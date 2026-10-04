@@ -75,9 +75,13 @@ impl Harness {
 
     /// Interactive argv plus the runtime-contract injection for a fresh
     /// launch: binary, model, registry extra args, then the adapter extras.
-    /// Resume argv intentionally skips this: resumed sessions keep their
-    /// recorded instructions (Claude snapshots the system prompt; Codex
-    /// keeps thread developer instructions).
+    /// Resume is a separate path ([`Harness::resume_argv_with_runtime`]):
+    /// only agents with a verified resume-safe transport carry the
+    /// contract on resume — today just Claude, whose system-prompt file
+    /// is re-read on every launch (verified: a resumed session without
+    /// the flag has no contract). Codex keeps thread developer
+    /// instructions from its own session; muse/agy take none because a
+    /// positional prompt would land as a user turn.
     pub fn launch_argv_with_runtime(
         self,
         binary: &str,
@@ -117,6 +121,21 @@ impl Harness {
             None => argv.extend(def.resume.without_id.iter().cloned()),
         }
         argv.extend(def.extra_args.iter().cloned());
+        argv
+    }
+
+    /// Resume argv plus the agent's resume-safe runtime injection.
+    /// Mirrors [`Harness::launch_argv_with_runtime`]: agents without a
+    /// verified resume transport contribute nothing, so this equals
+    /// plain [`Harness::resume_argv`] for them.
+    pub fn resume_argv_with_runtime(
+        self,
+        binary: &str,
+        harness_session_id: Option<&str>,
+        runtime_file: &std::path::Path,
+    ) -> Vec<String> {
+        let mut argv = self.resume_argv(binary, harness_session_id);
+        argv.extend(self.adapter().resume_runtime_injection(runtime_file));
         argv
     }
 }
@@ -203,6 +222,52 @@ mod tests {
             assert!(!arg.contains("yolo"), "no bypass flags: {arg}");
             assert!(!arg.contains("dangerously"), "no bypass flags: {arg}");
         }
+    }
+
+    #[test]
+    fn resume_argv_with_runtime_carries_contract_only_for_claude() {
+        // Claude rebuilds its system prompt on every launch, so the
+        // file flag must ride on resume too — verified live, a resumed
+        // session without it has no contract.
+        let file = std::path::Path::new("/home/tester/.forge/runtime.md");
+        let claude = Harness::from_name("claude").expect("packaged claude");
+        assert_eq!(
+            claude.resume_argv_with_runtime("claude", Some("abc"), file),
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "abc".to_string(),
+                "--append-system-prompt-file".to_string(),
+                "/home/tester/.forge/runtime.md".to_string(),
+            ]
+        );
+        assert_eq!(
+            claude.resume_argv_with_runtime("claude", None, file),
+            vec![
+                "claude".to_string(),
+                "--continue".to_string(),
+                "--append-system-prompt-file".to_string(),
+                "/home/tester/.forge/runtime.md".to_string(),
+            ],
+            "the no-ID fallback carries it too"
+        );
+        // codex (`-c` on `codex resume` unverified), muse/agy (a
+        // positional prompt would land as a new user turn), and unknown
+        // agents ride plain resume argv.
+        for name in ["codex", "muse", "agy"] {
+            let h = Harness::from_name(name).expect("packaged harness");
+            assert_eq!(
+                h.resume_argv_with_runtime("bin", Some("id-1"), file),
+                h.resume_argv("bin", Some("id-1")),
+                "{name} resume carries no injection"
+            );
+        }
+        assert!(
+            crate::agents::adapter_for("something-custom")
+                .resume_runtime_injection(file)
+                .is_empty(),
+            "unknown agents inject nothing on resume"
+        );
     }
 
     #[test]

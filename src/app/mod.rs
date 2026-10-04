@@ -18,7 +18,7 @@ pub mod tools;
 pub mod visual;
 pub mod walkthrough;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 /// Restore outcome counts for the status line.
 pub struct RestoreReport {
