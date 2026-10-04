@@ -111,6 +111,22 @@ impl Broker {
     pub(crate) fn clear_queue(&mut self, id: SessionId) -> usize {
         self.queue.remove(&id).map(|q| q.len()).unwrap_or(0)
     }
+
+    /// Drop queued injections for `id` matching `pred`, keeping the rest
+    /// in order and returning the drop count. Only queued, undelivered
+    /// entries can match: anything already written to the pane has left
+    /// the queue. Pressure follows the live queue length, exactly like
+    /// [`Broker::clear_queue`]: dropped entries stop counting, kept ones
+    /// are untouched.
+    pub(crate) fn drop_queued(&mut self, id: SessionId, pred: impl Fn(&Injection) -> bool) -> usize {
+        let Some(q) = self.queue.get_mut(&id) else {
+            return 0;
+        };
+        let (kept, dropped): (VecDeque<_>, VecDeque<_>) =
+            q.drain(..).partition(|inj| !pred(inj));
+        *q = kept;
+        dropped.len()
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +258,56 @@ mod tests {
         assert_eq!(p.state.broker.take_due(p.a, 200).len(), crate::comms::QUEUE_CAP);
         p.call(&p.run_a.clone(), "ask_session", r#"{"target":"b","message":"again"}"#)
             .expect("drained caller sends");
+    }
+
+    #[test]
+    fn drop_queued_removes_only_matches_keeping_order() {
+        let mut p = live_pair();
+        for conv in ["keep-1", "drop-1", "keep-2"] {
+            p.state.broker.push(
+                p.a,
+                crate::comms::Injection {
+                    conv: conv.to_string(),
+                    kind: crate::comms::InjectKind::Command,
+                    from: "forge".to_string(),
+                    text: conv.to_string(),
+                },
+            );
+        }
+        p.state.broker.push(
+            p.b,
+            crate::comms::Injection {
+                conv: "drop-9".to_string(),
+                kind: crate::comms::InjectKind::Command,
+                from: "forge".to_string(),
+                text: "other session".to_string(),
+            },
+        );
+        assert_eq!(p.state.broker.pressure(&p.state.manager, p.a), 3);
+        assert_eq!(
+            p.state.broker.drop_queued(p.a, |inj| inj.conv.starts_with("drop-")),
+            1
+        );
+        assert_eq!(p.state.broker.queued(p.a), 2);
+        assert_eq!(
+            p.state.broker.pressure(&p.state.manager, p.a),
+            2,
+            "pressure follows the live queue"
+        );
+        let due: Vec<String> = p
+            .state
+            .broker
+            .take_due(p.a, 10)
+            .into_iter()
+            .map(|inj| inj.conv)
+            .collect();
+        assert_eq!(due, vec!["keep-1".to_string(), "keep-2".to_string()]);
+        assert_eq!(p.state.broker.queued(p.b), 1, "other sessions untouched");
+        assert_eq!(
+            p.state.broker.drop_queued(p.a, |inj| inj.conv.starts_with("drop-")),
+            0,
+            "second sweep drops nothing"
+        );
     }
 
     #[test]

@@ -287,7 +287,9 @@ impl AppState {
     /// stamps the clock and, when coming back, announces the return;
     /// twenty input-free minutes announce the departure. Both notices
     /// go to every live session with room, exactly once per flip —
-    /// exited panes and full queues are skipped, never grown.
+    /// exited panes and full queues are skipped, never grown, and a
+    /// flip landing while its opposite notice is still queued cancels
+    /// that notice instead of stacking a contradictory one.
     pub fn settle_presence(&mut self, input_this_tick: bool, now: std::time::Instant) {
         if input_this_tick {
             self.last_input = now;
@@ -305,15 +307,34 @@ impl AppState {
 
     /// Queue `text` as an operator-from-forge injection on every live
     /// session with queue room. Best-effort by design: skipped sessions
-    /// simply miss the notice.
+    /// simply miss the notice. A still-queued notice from the opposite
+    /// flip cancels out instead of stacking: it is dropped and nothing
+    /// is pushed, since the agent's last delivered presence is already
+    /// correct. Only queued entries can cancel; text already written to
+    /// the pane has left the queue and is untouched, as are peer tells
+    /// and asks around the notice.
     fn broadcast_presence(&mut self, text: &str) {
-        let mut pushed = false;
+        let mut changed = false;
         for &id in self.manager.order() {
             let live = self
                 .manager
                 .get(id)
                 .is_some_and(|rec| rec.state.is_live());
-            if !live || self.broker.queued(id) >= crate::comms::QUEUE_CAP {
+            if !live {
+                continue;
+            }
+            // Cancellation only removes entries, so it runs regardless
+            // of the cap: a full queue holding a stale notice still
+            // drops it. Only the push below respects the cap.
+            if self
+                .broker
+                .drop_queued(id, crate::comms::Injection::is_presence_notice)
+                > 0
+            {
+                changed = true;
+                continue;
+            }
+            if self.broker.queued(id) >= crate::comms::QUEUE_CAP {
                 continue;
             }
             self.telegram_seq += 1;
@@ -326,9 +347,9 @@ impl AppState {
                     text: text.to_string(),
                 },
             );
-            pushed = true;
+            changed = true;
         }
-        if pushed {
+        if changed {
             self.dirty = true;
         }
     }
@@ -552,19 +573,112 @@ mod tests {
     fn presence_back_clears_on_input() {
         let (mut state, id, _run) = tg_agent("agent");
         let t0 = std::time::Instant::now();
+        // (a) Away queues, but back before delivery cancels it: the two
+        // flips cancel out and nothing stays queued.
         state.settle_presence(false, t0 + std::time::Duration::from_secs(21 * 60));
         assert!(state.away);
+        assert_eq!(state.broker.queued(id), 1);
         state.settle_presence(true, t0 + std::time::Duration::from_secs(22 * 60));
         assert!(!state.away, "any input ends away");
-        assert_eq!(state.broker.queued(id), 2);
+        assert_eq!(state.broker.queued(id), 0, "undelivered away cancels on flip");
+        // (b) Away delivered, then back queues exactly the back notice.
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(43 * 60));
+        assert!(state.away, "idle flips away again");
+        assert_eq!(state.broker.queued(id), 1);
         state.broker.take_due(id, 1);
+        state.settle_presence(true, t0 + std::time::Duration::from_secs(44 * 60));
+        assert!(!state.away, "any input ends away");
+        assert_eq!(state.broker.queued(id), 1, "delivered away is answered");
         let head = state.broker.peek_due(id).expect("back notice queued");
         assert!(head.text.contains("user is back"), "body: {}", head.text);
         assert!(head.text.contains("don't use message_user"), "stand-down: {}", head.text);
         // Further input is just presence, never another notice.
-        state.settle_presence(true, t0 + std::time::Duration::from_secs(23 * 60));
+        state.settle_presence(true, t0 + std::time::Duration::from_secs(45 * 60));
         assert_eq!(state.broker.queued(id), 1, "back announced once");
         state.broker.take_due(id, 1);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn presence_away_cancels_undelivered_back() {
+        // Mirror flip: back queued but undelivered, then away again —
+        // the two cancel out and nothing stays queued.
+        let (mut state, id, _run) = tg_agent("agent");
+        let t0 = std::time::Instant::now();
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(21 * 60));
+        state.broker.take_due(id, 1);
+        state.settle_presence(true, t0 + std::time::Duration::from_secs(22 * 60));
+        assert_eq!(state.broker.queued(id), 1, "back notice queued");
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(43 * 60));
+        assert!(state.away, "idle flips away again");
+        assert_eq!(state.broker.queued(id), 0, "undelivered back cancels on flip");
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn presence_back_drops_queued_away_on_full_queue() {
+        // Cancellation only removes entries, so it runs even when the
+        // queue is full: the stale away drops, and the back flip pushes
+        // nothing (the queue has no room to grow into anyway).
+        let (mut state, id, _run) = tg_agent("agent");
+        let t0 = std::time::Instant::now();
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(21 * 60));
+        for i in 0..(crate::comms::QUEUE_CAP - 1) {
+            state.broker.push(
+                id,
+                crate::comms::Injection {
+                    conv: format!("pad-{i}"),
+                    kind: crate::comms::InjectKind::Command,
+                    from: "pad".to_string(),
+                    text: "pad".to_string(),
+                },
+            );
+        }
+        assert_eq!(state.broker.queued(id), crate::comms::QUEUE_CAP);
+        state.settle_presence(true, t0 + std::time::Duration::from_secs(22 * 60));
+        assert!(!state.away, "any input ends away");
+        assert_eq!(
+            state.broker.queued(id),
+            crate::comms::QUEUE_CAP - 1,
+            "stale away drops even when full"
+        );
+        let due = state.broker.take_due(id, crate::comms::QUEUE_CAP + 1);
+        assert_eq!(due.len(), crate::comms::QUEUE_CAP - 1);
+        assert!(
+            !due.iter().any(|inj| inj.conv.starts_with("presence-")),
+            "no presence entry survives the flip"
+        );
+        assert!(
+            !due.iter().any(|inj| inj.text.contains("user is back")),
+            "back is never pushed onto a full queue"
+        );
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn presence_flip_keeps_peer_messages_in_order() {
+        // A peer tell queued between the flips survives the
+        // cancellation, in order: only presence entries can drop.
+        let (mut state, id, _run) = tg_agent("agent");
+        let t0 = std::time::Instant::now();
+        state.settle_presence(false, t0 + std::time::Duration::from_secs(21 * 60));
+        state.broker.push(
+            id,
+            crate::comms::Injection {
+                conv: "conv-7".to_string(),
+                kind: crate::comms::InjectKind::Tell,
+                from: "peer".to_string(),
+                text: "hello".to_string(),
+            },
+        );
+        assert_eq!(state.broker.queued(id), 2);
+        state.settle_presence(true, t0 + std::time::Duration::from_secs(22 * 60));
+        assert_eq!(state.broker.queued(id), 1, "away drops, tell survives");
+        let head = state.broker.peek_due(id).expect("tell still queued");
+        assert_eq!(head.text, "hello", "tell is head: {}", head.text);
+        let due = state.broker.take_due(id, 10);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].text, "hello");
         assert!(state.manager.remove(id));
     }
 

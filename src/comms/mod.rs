@@ -248,6 +248,13 @@ pub struct Injection {
 }
 
 impl Injection {
+    /// True for operator presence pings: Forge's own `presence-<seq>`
+    /// conversation from `forge`. Matched on the envelope, never the
+    /// notice text, so rewording a notice cannot strand or over-drop.
+    pub(crate) fn is_presence_notice(&self) -> bool {
+        self.from == "forge" && self.conv.starts_with("presence-")
+    }
+
     /// Per-kind reply guidance: Ask takes `send_response`, Tell takes
     /// `tell_session` follow-ups from either party, while terminal kinds
     /// (Response, Ack, Reminder, Failed) carry none because replying to
