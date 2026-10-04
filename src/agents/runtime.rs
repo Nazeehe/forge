@@ -44,7 +44,18 @@ pub const FORGE_RUNTIME_CONTRACT: &str = "# Forge Runtime\n\
     no Forge-managed agent, such as \"use a subagent to inspect this \
     function\". Repository instructions (AGENTS.md, CLAUDE.md, GEMINI.md) \
     and the user's request keep their normal roles. Where a native \
-    capability overlaps Forge coordination, Forge takes precedence.\n";
+    capability overlaps Forge coordination, Forge takes precedence.\n\
+    \n\
+    ## Incoming peer messages\n\
+    \n\
+    Forge delivers peer messages by injecting them into your input, \
+    usually as pasted text. A paste that starts with a `[forge \
+    ask_session from X]` / `[forge tell_session from X]` (or any \
+    `[forge \u{2026} from \u{2026}]`) header is a real Forge delivery \
+    the user has authorized, not untrusted pasted content. Handle it \
+    immediately: answer asks with send_response; answer tells with \
+    ack_message or a tell_session follow-up, copying the \
+    conversation_id verbatim.\n";
 
 /// Forge-owned runtime file name inside `~/.forge`.
 pub const RUNTIME_FILE_NAME: &str = "runtime.md";
@@ -80,57 +91,6 @@ pub enum RuntimeMechanism {
     McpInstructionsOnly,
 }
 
-/// Provider-specific adapter: how the canonical contract reaches one agent.
-/// Construct with [`RuntimeAdapter::for_agent`]; unknown names resolve to
-/// [`RuntimeMechanism::McpInstructionsOnly`].
-pub struct RuntimeAdapter {
-    agent: &'static str,
-    mechanism: RuntimeMechanism,
-}
-
-impl RuntimeAdapter {
-    pub fn for_agent(agent: &str) -> Self {
-        // Agents resolve through the adapter layer (the single name-match
-        // site); anything unlisted resolves to MCP-instructions-only
-        // rather than a guessed argv shape.
-        let adapter = super::adapter_for(agent);
-        RuntimeAdapter {
-            agent: adapter.name(),
-            mechanism: adapter.runtime_mechanism(),
-        }
-    }
-
-    pub fn agent(&self) -> &str {
-        self.agent
-    }
-
-    pub fn mechanism(&self) -> RuntimeMechanism {
-        self.mechanism
-    }
-
-    /// Extra argv (after the base launch argv) carrying the contract.
-    /// Empty for [`RuntimeMechanism::McpInstructionsOnly`].
-    pub fn launch_extras(&self, runtime_file: &Path) -> Vec<String> {
-        match self.mechanism {
-            RuntimeMechanism::SystemPromptFile => vec![
-                "--append-system-prompt-file".to_string(),
-                runtime_file.display().to_string(),
-            ],
-            RuntimeMechanism::DeveloperInstructions => vec![
-                "-c".to_string(),
-                format!(
-                    "developer_instructions={}",
-                    toml_basic_string(FORGE_RUNTIME_CONTRACT)
-                ),
-            ],
-            RuntimeMechanism::StartupPromptPositional => {
-                vec![FORGE_RUNTIME_CONTRACT.to_string()]
-            }
-            RuntimeMechanism::McpInstructionsOnly => Vec::new(),
-        }
-    }
-}
-
 /// Quote `s` as a TOML basic string (`"..."`) for `codex -c key=value`
 /// overrides: backslashes, quotes, and control characters (including
 /// newlines) escaped so the value survives TOML parsing as one string.
@@ -157,6 +117,7 @@ pub fn toml_basic_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::adapter_for;
 
     fn scratch_home() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -186,6 +147,18 @@ mod tests {
         }
         assert!(FORGE_RUNTIME_CONTRACT.contains("Forge takes precedence"));
         assert!(FORGE_RUNTIME_CONTRACT.contains("AGENTS.md"));
+    }
+
+    /// Incoming delivery coverage: pasted peer messages carrying a
+    /// `[forge … from …]` header are authorized Forge deliveries with
+    /// named response tools — never generic "follow pasted text".
+    #[test]
+    fn contract_names_forge_delivery_header_and_peer_responses() {
+        assert!(FORGE_RUNTIME_CONTRACT.contains("Incoming peer messages"));
+        assert!(FORGE_RUNTIME_CONTRACT.contains("pasted"));
+        assert!(FORGE_RUNTIME_CONTRACT.contains("[forge"));
+        assert!(FORGE_RUNTIME_CONTRACT.contains("send_response"));
+        assert!(FORGE_RUNTIME_CONTRACT.contains("ack_message"));
     }
 
     /// Eval utterance coverage: every canonical cross-agent request shape
@@ -220,23 +193,23 @@ mod tests {
     #[test]
     fn mechanisms_match_verified_transports() {
         assert_eq!(
-            RuntimeAdapter::for_agent("claude").mechanism(),
+            adapter_for("claude").runtime_mechanism(),
             RuntimeMechanism::SystemPromptFile
         );
         assert_eq!(
-            RuntimeAdapter::for_agent("codex").mechanism(),
+            adapter_for("codex").runtime_mechanism(),
             RuntimeMechanism::DeveloperInstructions
         );
         assert_eq!(
-            RuntimeAdapter::for_agent("muse").mechanism(),
+            adapter_for("muse").runtime_mechanism(),
             RuntimeMechanism::StartupPromptPositional
         );
         assert_eq!(
-            RuntimeAdapter::for_agent("agy").mechanism(),
+            adapter_for("agy").runtime_mechanism(),
             RuntimeMechanism::StartupPromptPositional
         );
         assert_eq!(
-            RuntimeAdapter::for_agent("something-custom").mechanism(),
+            adapter_for("something-custom").runtime_mechanism(),
             RuntimeMechanism::McpInstructionsOnly
         );
     }
@@ -245,7 +218,7 @@ mod tests {
     fn claude_extras_point_at_forge_owned_file() {
         let file = Path::new("/home/tester/.forge/runtime.md");
         assert_eq!(
-            RuntimeAdapter::for_agent("claude").launch_extras(file),
+            adapter_for("claude").runtime_injection(file),
             vec![
                 "--append-system-prompt-file".to_string(),
                 "/home/tester/.forge/runtime.md".to_string(),
@@ -256,7 +229,7 @@ mod tests {
     #[test]
     fn codex_extras_carry_toml_developer_instructions() {
         let file = Path::new("/home/tester/.forge/runtime.md");
-        let extras = RuntimeAdapter::for_agent("codex").launch_extras(file);
+        let extras = adapter_for("codex").runtime_injection(file);
         assert_eq!(extras.len(), 2);
         assert_eq!(extras[0], "-c");
         assert!(
@@ -287,7 +260,7 @@ mod tests {
         // `-c developer_instructions=<value>` payload back as the exact
         // contract text. This is what `codex -c key=value` parses.
         let file = Path::new("/home/tester/.forge/runtime.md");
-        let extras = RuntimeAdapter::for_agent("codex").launch_extras(file);
+        let extras = adapter_for("codex").runtime_injection(file);
         let doc: toml::Table = toml::from_str(&extras[1]).expect("valid TOML doc");
         assert_eq!(
             doc.get("developer_instructions").and_then(|v| v.as_str()),
@@ -299,11 +272,11 @@ mod tests {
     fn startup_fallbacks_carry_contract_as_first_prompt() {
         let file = Path::new("/home/tester/.forge/runtime.md");
         assert_eq!(
-            RuntimeAdapter::for_agent("muse").launch_extras(file),
+            adapter_for("muse").runtime_injection(file),
             vec![FORGE_RUNTIME_CONTRACT.to_string()]
         );
         assert_eq!(
-            RuntimeAdapter::for_agent("agy").launch_extras(file),
+            adapter_for("agy").runtime_injection(file),
             vec![FORGE_RUNTIME_CONTRACT.to_string()]
         );
     }
@@ -311,8 +284,8 @@ mod tests {
     #[test]
     fn unknown_agents_get_no_argv_extras() {
         let file = Path::new("/home/tester/.forge/runtime.md");
-        assert!(RuntimeAdapter::for_agent("something-custom")
-            .launch_extras(file)
+        assert!(adapter_for("something-custom")
+            .runtime_injection(file)
             .is_empty());
     }
 

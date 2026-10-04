@@ -228,6 +228,16 @@ impl InjectKind {
     }
 }
 
+/// Forge-controlled typed line emitted raw ahead of a bracketed-paste
+/// delivery: the receiving CLI sees real keystrokes naming the paste
+/// that follows, so the `[forge … from …]` header inside the paste is
+/// recognizable as an authorized Forge delivery rather than pasted
+/// instructions. Single line, no control bytes, and never shaped like
+/// a slash command (`/`, `!`, `#` would arm the wrong parser). Peer
+/// text still never travels outside the paste.
+const PEER_MESSAGE_PREFIX: &str =
+    "Forge peer message (pasted below) - handle it per the Forge runtime instructions: ";
+
 /// One queued prompt for a session, delivered when it is idle/debounced.
 #[derive(Clone, Debug)]
 pub struct Injection {
@@ -272,18 +282,23 @@ impl Injection {
         out.into_bytes()
     }
 
-    /// Delivery bytes for one injection: the whole payload in a single
-    /// bracketed-paste transaction (`ESC[200~` … `ESC[201~`) when the pane
-    /// opted into paste mode, raw otherwise. Embedded terminators are
-    /// stripped from framed payloads so hostile text cannot break out of
-    /// the paste early and leave the tail to execute. Either way the
-    /// result goes out through exactly one `write_all`.
+    /// Delivery bytes for one injection: a Forge-controlled typed line
+    /// first, then the whole payload in a single bracketed-paste transaction
+    /// (`ESC[200~` … `ESC[201~`) when the pane opted into paste mode,
+    /// raw otherwise. The typed prefix is real keystrokes outside the
+    /// paste, so the `[forge … from …]` header inside the paste reads as
+    /// an authorized Forge delivery rather than pasted instructions.
+    /// Embedded terminators are stripped from framed payloads so hostile
+    /// text cannot break out of the paste early and leave the tail to
+    /// execute. Either way the result goes out through exactly one
+    /// `write_all`.
     pub fn render_framed(&self, bracketed: bool) -> Vec<u8> {
         let body = self.render_body();
         if !bracketed {
             return body;
         }
-        let mut framed = Vec::with_capacity(body.len() + 12);
+        let mut framed = Vec::with_capacity(PEER_MESSAGE_PREFIX.len() + body.len() + 12);
+        framed.extend_from_slice(PEER_MESSAGE_PREFIX.as_bytes());
         framed.extend_from_slice(b"\x1b[200~");
         let mut rest = body.as_slice();
         while let Some(pos) = rest
@@ -452,12 +467,16 @@ mod tests {
         };
         // Unbracketed panes take the raw body, byte for byte.
         assert_eq!(tell.render_framed(false), tell.render_body());
-        // Bracketed panes take one paste transaction around the body.
+        // Bracketed panes take the Forge-typed prefix, then one paste
+        // transaction around the body.
         let framed = tell.render_framed(true);
-        assert!(framed.starts_with(b"\x1b[200~"), "opens paste");
+        let lead = PEER_MESSAGE_PREFIX.len();
+        assert_eq!(&framed[..lead], PEER_MESSAGE_PREFIX.as_bytes(), "prefix leads");
+        let pasted = &framed[lead..];
+        assert!(pasted.starts_with(b"\x1b[200~"), "opens paste");
         assert!(framed.ends_with(b"\x1b[201~"), "closes paste");
         assert_eq!(
-            &framed[6..framed.len() - 6],
+            &pasted[6..pasted.len() - 6],
             tell.render_body().as_slice(),
             "payload intact inside"
         );
@@ -470,14 +489,54 @@ mod tests {
             text: "part1\x1b[201~; rm -rf ~".to_string(),
         };
         let bytes = hostile.render_framed(true);
-        assert!(bytes.starts_with(b"\x1b[200~"));
+        assert_eq!(&bytes[..lead], PEER_MESSAGE_PREFIX.as_bytes(), "prefix leads");
+        let hostile_pasted = &bytes[lead..];
+        assert!(hostile_pasted.starts_with(b"\x1b[200~"));
         assert!(bytes.ends_with(b"\x1b[201~"));
-        let inner = &bytes[6..bytes.len() - 6];
+        let inner = &hostile_pasted[6..hostile_pasted.len() - 6];
         assert!(
             !inner.windows(6).any(|w| w == b"\x1b[201~"),
             "no inner terminator: {inner:?}"
         );
         assert!(inner.windows(8).any(|w| w == b"; rm -rf"), "tail kept, only the break removed");
+    }
+
+    #[test]
+    fn framed_prefix_types_real_text_before_the_paste() {
+        let tell = Injection {
+            conv: "conv-9".to_string(),
+            kind: InjectKind::Tell,
+            from: "a".to_string(),
+            text: "fyi".to_string(),
+        };
+        let framed = tell.render_framed(true);
+        let prefix = PEER_MESSAGE_PREFIX.as_bytes();
+        assert!(
+            framed.starts_with(prefix),
+            "Forge-typed prefix leads the delivery"
+        );
+        let after = &framed[prefix.len()..];
+        assert!(after.starts_with(b"\x1b[200~"), "paste opens after the prefix");
+        assert!(framed.ends_with(b"\x1b[201~"), "paste still closes");
+        // The prefix is inert typed text: single line, no control
+        // bytes, never shaped like a slash command.
+        assert!(!PEER_MESSAGE_PREFIX.contains('\n'), "single line");
+        assert!(
+            !PEER_MESSAGE_PREFIX.bytes().any(|b| b < 0x20 || b == 0x7f),
+            "no control bytes"
+        );
+        assert!(
+            !matches!(
+                PEER_MESSAGE_PREFIX.chars().next(),
+                Some('/') | Some('!') | Some('#')
+            ),
+            "must not arm a slash-command parser"
+        );
+        // Peer text never travels outside the paste.
+        assert!(
+            !framed[..prefix.len()].windows(3).any(|w| w == b"fyi"),
+            "peer text stays inside the paste"
+        );
     }
 
     #[test]

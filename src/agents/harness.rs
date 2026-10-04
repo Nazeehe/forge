@@ -73,12 +73,6 @@ impl Harness {
         crate::agents::adapter_for(self.as_str())
     }
 
-    /// Provider-specific runtime adapter: how the canonical Forge runtime
-    /// contract reaches this agent at launch (see [`crate::agents::runtime`]).
-    pub fn runtime_adapter(self) -> crate::agents::runtime::RuntimeAdapter {
-        crate::agents::runtime::RuntimeAdapter::for_agent(self.as_str())
-    }
-
     /// Interactive argv plus the runtime-contract injection for a fresh
     /// launch: binary, model, registry extra args, then the adapter extras.
     /// Resume argv intentionally skips this: resumed sessions keep their
