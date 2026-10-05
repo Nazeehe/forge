@@ -28,6 +28,10 @@ pub const MAX_PROPOSAL_CHARS: usize = 32_000;
 /// Most document text returned by one read, in chars (spec §6).
 pub const MAX_READ_CHARS: usize = 64_000;
 
+/// Most Assistant thread entries kept per document; oldest evicted (spec §6).
+/// In the slice every entry is a finished answer.
+pub const MAX_THREAD_ENTRIES: usize = 64;
+
 /// Most pending proposals per document; the next is refused (spec §4.4).
 pub const MAX_PENDING_PROPOSALS: usize = 16;
 

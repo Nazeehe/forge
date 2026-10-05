@@ -544,7 +544,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "writer_propose",
-            description: "Suggest an edit to the open Writer document as a reviewable proposal: full replacement text plus either request_id (uses exactly that request's range) or start_line/end_line (insert: end_line = start_line - 1; append: start_line = total lines + 1). The human accepts or rejects; bad ranges, oversize text, and over-cap proposals are refused.",
+            description: "Suggest an edit to the open Writer document as a reviewable proposal: full replacement text plus either request_id (uses exactly that request's range) or start_line/end_line (insert: end_line = start_line - 1; append: start_line = total lines + 1). Line-addressed inserts and appends are line-granular (newlines added as needed); line replaces apply verbatim. The human accepts or rejects; bad ranges, oversize text, and over-cap proposals are refused.",
             schema: r#"{"type":"object","properties":{"text":{"type":"string"},"request_id":{"type":"integer"},"start_line":{"type":"integer"},"end_line":{"type":"integer"},"note":{"type":"string"}},"required":["text"]}"#,
         },
         ToolDef {

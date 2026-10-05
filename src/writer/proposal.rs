@@ -141,6 +141,34 @@ impl Proposals {
         self.evict_old_settled();
     }
 
+    /// Record a proposal that arrived after its text drifted: keeps the
+    /// request-time `original` as the snapshot and lands Stale, so it
+    /// stays visible but the snapshot check refuses every accept (§4.4).
+    /// The range may no longer address the current text; that is what
+    /// makes it stale. Settled eviction still applies.
+    pub fn propose_stale(
+        &mut self,
+        request_id: Option<u64>,
+        range: Range<usize>,
+        original: String,
+        text: String,
+        note: Option<String>,
+    ) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.items.push(Proposal {
+            id,
+            request_id,
+            range,
+            original,
+            text,
+            note,
+            state: ProposalState::Stale,
+        });
+        self.evict_old_settled();
+        id
+    }
+
     /// Look up a proposal by id.
     pub fn get(&self, id: u64) -> Option<&Proposal> {
         self.items.iter().find(|p| p.id == id)
@@ -391,6 +419,21 @@ mod tests {
             .collect();
         assert_eq!(settled.len(), 64);
         assert!(settled.windows(2).all(|w| w[0] < w[1]), "settled not newest-first-ordered");
+    }
+
+    #[test]
+    fn stale_arrival_keeps_request_snapshot_and_refuses_accept() {
+        let mut d = doc("abcdef");
+        let mut p = Proposals::default();
+        let id = p.propose_stale(Some(9), 0..3, "XXX".to_string(), "Y".to_string(), None);
+        let got = p.get(id).unwrap();
+        assert_eq!(got.original, "XXX");
+        assert_eq!(got.state, ProposalState::Stale);
+        assert_eq!(
+            p.accept(&mut d, id).unwrap_err(),
+            WriterError::StaleProposal(id)
+        );
+        assert_eq!(d.text, "abcdef", "refused accept changes nothing");
     }
 
     #[test]
