@@ -66,6 +66,7 @@ impl Proposals {
             note,
             state: ProposalState::Pending,
         });
+        self.evict_old_settled();
         Ok(id)
     }
 
@@ -85,23 +86,36 @@ impl Proposals {
             ProposalState::Pending => {}
         }
         let range = self.items[index].range.clone();
+        let original = self.items[index].original.clone();
         let text = self.items[index].text.clone();
+        // Snapshot check: the text under the range must still be what the
+        // proposal was made against. Any caller that changed the document
+        // without going through on_edit lands here; refuse instead of
+        // overwriting the human's newer text.
+        let current = byte_range_of(&doc.text, range.clone())
+            .map(|bytes| doc.text[bytes].to_string());
+        if current.as_deref() != Some(original.as_str()) {
+            self.items[index].state = ProposalState::Stale;
+            return Err(WriterError::StaleProposal(id));
+        }
         let rev = doc.apply_edit(range.clone(), &text)?;
         self.items[index].state = ProposalState::Accepted;
         self.on_edit(&range);
+        self.evict_old_settled();
         Ok(rev)
     }
 
     /// Discard a pending or stale proposal.
     pub fn reject(&mut self, id: u64) -> Result<(), WriterError> {
-        let item = self
+        let index = self
             .items
-            .iter_mut()
-            .find(|p| p.id == id)
+            .iter()
+            .position(|p| p.id == id)
             .ok_or(WriterError::UnknownProposal(id))?;
-        match item.state {
+        match self.items[index].state {
             ProposalState::Pending | ProposalState::Stale => {
-                item.state = ProposalState::Rejected;
+                self.items[index].state = ProposalState::Rejected;
+                self.evict_old_settled();
                 Ok(())
             }
             ProposalState::Accepted | ProposalState::Rejected => {
@@ -124,11 +138,33 @@ impl Proposals {
                 item.state = ProposalState::Stale;
             }
         }
+        self.evict_old_settled();
     }
 
     /// Look up a proposal by id.
     pub fn get(&self, id: u64) -> Option<&Proposal> {
         self.items.iter().find(|p| p.id == id)
+    }
+
+    /// Drop the oldest settled proposals past [`MAX_SETTLED_PROPOSALS`].
+    /// Pending proposals are never evicted.
+    fn evict_old_settled(&mut self) {
+        use super::MAX_SETTLED_PROPOSALS;
+        let mut settled: Vec<u64> = self
+            .items
+            .iter()
+            .filter(|p| p.state != ProposalState::Pending)
+            .map(|p| p.id)
+            .collect();
+        if settled.len() <= MAX_SETTLED_PROPOSALS {
+            return;
+        }
+        settled.sort_unstable();
+        let drop_count = settled.len() - MAX_SETTLED_PROPOSALS;
+        let drop: std::collections::HashSet<u64> =
+            settled.into_iter().take(drop_count).collect();
+        self.items
+            .retain(|p| p.state == ProposalState::Pending || !drop.contains(&p.id));
     }
 
     /// Number of proposals still awaiting a decision.
@@ -289,6 +325,72 @@ mod tests {
             p.reject(id).unwrap_err(),
             WriterError::AlreadySettled(id)
         );
+    }
+
+    #[test]
+    fn accept_refuses_when_text_changed_without_on_edit() {
+        let mut d = doc("abcdef");
+        let mut p = Proposals::default();
+        let id = p.propose(&d, Some(1), 0..3, "X".to_string(), None).unwrap();
+        // Direct change, no on_edit call (S4 adapter bug or reload path).
+        d.apply_edit(0..1, "Z").unwrap();
+        assert_eq!(d.text, "Zbcdef");
+        assert_eq!(
+            p.accept(&mut d, id).unwrap_err(),
+            WriterError::StaleProposal(id)
+        );
+        // The proposal went stale and the human's text is untouched.
+        assert_eq!(p.get(id).unwrap().state, ProposalState::Stale);
+        assert_eq!(d.text, "Zbcdef");
+    }
+
+    #[test]
+    fn accept_refuses_when_range_shrank_away() {
+        let mut d = doc("abcdef");
+        let mut p = Proposals::default();
+        let id = p.propose(&d, None, 4..6, "X".to_string(), None).unwrap();
+        d.apply_edit(0..6, "hi").unwrap();
+        assert_eq!(
+            p.accept(&mut d, id).unwrap_err(),
+            WriterError::StaleProposal(id)
+        );
+        assert_eq!(p.get(id).unwrap().state, ProposalState::Stale);
+    }
+
+    #[test]
+    fn settled_proposals_are_bounded_pending_survive() {
+        let mut d = doc("aaa");
+        let mut p = Proposals::default();
+        let mut keepers = Vec::new();
+        for _ in 0..3 {
+            keepers.push(p.propose(&d, None, 0..0, "k".to_string(), None).unwrap());
+        }
+        // Loop edits land after the keepers so interim staleness
+        // (any preceding edit stales) never touches them.
+        for i in 0..70u64 {
+            let id = p
+                .propose(&d, None, 3..3, format!("v{i}").repeat(100), None)
+                .unwrap();
+            p.accept(&mut d, id).unwrap();
+        }
+        // 3 pending + newest 64 settled; oldest settled evicted.
+        assert_eq!(p.items.len(), 67, "len: {}", p.items.len());
+        for id in &keepers {
+            assert_eq!(
+                p.get(*id).unwrap().state,
+                ProposalState::Pending,
+                "pending {id} evicted"
+            );
+        }
+        assert_eq!(p.pending_count(), 3);
+        let settled: Vec<u64> = p
+            .items
+            .iter()
+            .filter(|item| item.state != ProposalState::Pending)
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(settled.len(), 64);
+        assert!(settled.windows(2).all(|w| w[0] < w[1]), "settled not newest-first-ordered");
     }
 
     #[test]

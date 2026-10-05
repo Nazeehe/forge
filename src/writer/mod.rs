@@ -28,6 +28,10 @@ pub const MAX_PROPOSAL_CHARS: usize = 32_000;
 /// Most pending proposals per document; the next is refused (spec §4.4).
 pub const MAX_PENDING_PROPOSALS: usize = 16;
 
+/// Most settled (accepted/rejected/stale) proposals kept per document;
+/// the oldest settled are evicted. Pending proposals are never evicted.
+pub const MAX_SETTLED_PROPOSALS: usize = 64;
+
 /// Marker appended when a selection is cut for the agent (spec §4.8).
 pub const TRUNCATION_MARKER: &str = "[…truncated, call writer_read for full text]";
 
@@ -42,6 +46,9 @@ pub enum WriterError {
     TooLarge(u64),
     /// File is not valid UTF-8 (never rewritten lossily).
     InvalidUtf8,
+    /// Path is a symlink, directory, FIFO, or other non-regular file.
+    /// The jail rejects special files before any read (AGENTS.md §3).
+    NotRegularFile(String),
     /// On-disk content changed since load/last save; save refused.
     ConflictOnSave,
     /// Filesystem I/O failure; carries the message.
@@ -69,6 +76,7 @@ impl std::fmt::Display for WriterError {
             WriterError::NotMarkdown(p) => write!(f, "not a Markdown file: {p}"),
             WriterError::TooLarge(n) => write!(f, "file too large ({n} bytes)"),
             WriterError::InvalidUtf8 => write!(f, "file is not valid UTF-8"),
+            WriterError::NotRegularFile(p) => write!(f, "not a regular file: {p}"),
             WriterError::ConflictOnSave => write!(f, "file changed on disk; save refused"),
             WriterError::Io(m) => write!(f, "i/o error: {m}"),
             WriterError::RangeOutOfBounds => write!(f, "range outside the document"),
@@ -146,20 +154,35 @@ fn byte_index_of(text: &str, offset: usize) -> Option<usize> {
 }
 
 /// 1-based line number of a char offset; `None` when out of bounds.
+/// The end of the document counts as its last line (the cursor sits there).
 pub(crate) fn line_of(text: &str, offset: usize) -> Option<u32> {
-    let byte = byte_index_of(text, offset)?;
-    if offset == char_count(text) && !text.is_empty() {
+    let total = char_count(text);
+    if offset > total {
         return None;
     }
+    if offset == total {
+        if total == 0 {
+            return Some(1);
+        }
+        return Some(text.chars().filter(|&c| c == '\n').count() as u32 + 1);
+    }
+    let byte = byte_index_of(text, offset)?;
     Some(text[..byte].chars().filter(|&c| c == '\n').count() as u32 + 1)
 }
 
 /// 1-based (line, col) of a char offset; `None` when out of bounds.
+/// The end of the document maps to one past the last character.
 pub(crate) fn line_col_of(text: &str, offset: usize) -> Option<(u32, u32)> {
-    let byte = byte_index_of(text, offset)?;
-    if offset == char_count(text) && !text.is_empty() {
+    let total = char_count(text);
+    if offset > total {
         return None;
     }
+    if offset == total && total > 0 {
+        let line = text.chars().filter(|&c| c == '\n').count() as u32 + 1;
+        let col = text.rsplit('\n').next().unwrap_or("").chars().count() as u32 + 1;
+        return Some((line, col));
+    }
+    let byte = byte_index_of(text, offset)?;
     let prefix = &text[..byte];
     let line = prefix.chars().filter(|&c| c == '\n').count() as u32 + 1;
     let col = prefix.rsplit('\n').next().unwrap_or("").chars().count() as u32 + 1;
@@ -168,8 +191,12 @@ pub(crate) fn line_col_of(text: &str, offset: usize) -> Option<(u32, u32)> {
 
 /// Char range of the paragraph (block between blank lines) containing
 /// `offset`; `None` when out of bounds. Blank means empty or whitespace-only.
+/// An offset on a line's terminating `\n` belongs to that line, and the end
+/// of the document belongs to its last non-blank line — after typing, the
+/// cursor sits exactly on those spots.
 pub(crate) fn paragraph_at(text: &str, offset: usize) -> Option<Range<usize>> {
-    if text.is_empty() || offset >= char_count(text) {
+    let total = char_count(text);
+    if text.is_empty() || offset > total {
         return None;
     }
     // Char ranges of each line (without the newline).
@@ -181,30 +208,50 @@ pub(crate) fn paragraph_at(text: &str, offset: usize) -> Option<Range<usize>> {
             start = idx + 1;
         }
     }
-    if start <= char_count(text) {
-        lines.push(start..char_count(text));
-    }
+    lines.push(start..total);
     let is_blank = |r: &Range<usize>| {
         byte_range_of(text, r.clone())
             .map(|b| text[b].trim().is_empty())
             .unwrap_or(true)
     };
-    let mut line_idx = lines
-        .iter()
-        .position(|r| r.start <= offset && offset < r.end || (r.is_empty() && offset == r.start))?;
-    // An offset on a blank line has no paragraph.
-    if is_blank(&lines[line_idx]) {
-        // Unless it is the trailing newline edge; keep it simple: no para.
-        return None;
+    // Resolve the offset to a line: inside it, on its gap (empty line), on
+    // its terminating newline, or at the end of the document.
+    let mut line_idx = lines.iter().position(|r| {
+        (r.start <= offset && offset < r.end) || (r.is_empty() && offset == r.start)
+    });
+    if line_idx.is_none() {
+        if offset < total && text.chars().nth(offset) == Some('\n') {
+            line_idx = lines.iter().position(|r| r.end == offset);
+        } else if offset == total {
+            line_idx = Some(lines.len() - 1);
+            let mut back = line_idx.unwrap();
+            while is_blank(&lines[back]) && back > 0 {
+                back -= 1;
+            }
+            line_idx = if is_blank(&lines[back]) { None } else { Some(back) };
+        }
     }
-    while line_idx > 0 && !is_blank(&lines[line_idx - 1]) {
-        line_idx -= 1;
+    let mut idx = line_idx?;
+    if is_blank(&lines[idx]) {
+        // End of document past a trailing newline walks back to real text.
+        if offset != total {
+            return None;
+        }
+        while idx > 0 && is_blank(&lines[idx]) {
+            idx -= 1;
+        }
+        if is_blank(&lines[idx]) {
+            return None;
+        }
     }
-    let mut end_idx = line_idx;
+    while idx > 0 && !is_blank(&lines[idx - 1]) {
+        idx -= 1;
+    }
+    let mut end_idx = idx;
     while end_idx + 1 < lines.len() && !is_blank(&lines[end_idx + 1]) {
         end_idx += 1;
     }
-    Some(lines[line_idx].start..lines[end_idx].end)
+    Some(lines[idx].start..lines[end_idx].end)
 }
 
 #[cfg(test)]
@@ -237,7 +284,16 @@ mod tests {
         assert_eq!(line_of(text, 2), Some(1));
         assert_eq!(line_of(text, 3), Some(2));
         assert_eq!(line_of(text, 7), Some(3));
-        assert_eq!(line_of(text, 8), None);
+        // End of document maps to the last line (cursor sits there).
+        assert_eq!(line_of(text, 8), Some(3));
+        assert_eq!(line_of(text, 9), None);
+    }
+
+    #[test]
+    fn line_col_at_end_of_document() {
+        assert_eq!(line_col_of("ab", 2), Some((1, 3)));
+        assert_eq!(line_col_of("a\nbc", 4), Some((2, 3)));
+        assert_eq!(line_col_of("a\nbc", 5), None);
     }
 
     #[test]
@@ -248,7 +304,9 @@ mod tests {
         // Offset 3 is the newline itself: end of line 1.
         assert_eq!(line_col_of(text, 3), Some((1, 4)));
         assert_eq!(line_col_of(text, 4), Some((2, 1)));
-        assert_eq!(line_col_of(text, 6), None);
+        // End of document is one past the last character.
+        assert_eq!(line_col_of(text, 6), Some((2, 3)));
+        assert_eq!(line_col_of(text, 7), None);
     }
 
     #[test]
@@ -267,6 +325,36 @@ mod tests {
         assert_eq!(paragraph_at("", 0), None);
         let single = paragraph_at("only", 2).unwrap();
         assert_eq!(single, 0..4);
-        assert_eq!(paragraph_at("only", 4), None);
+        // End of document selects the last paragraph (cursor sits there).
+        assert_eq!(paragraph_at("only", 4), Some(0..4));
+        assert_eq!(paragraph_at("only", 5), None);
+    }
+
+    #[test]
+    fn paragraph_at_end_of_line() {
+        let text = "head\n\nfirst para\nsecond line\n\ntail";
+        // Offset on the '\n' ending "head" (char 4) belongs to that line.
+        assert_eq!(paragraph_at(text, 4), Some(0..4));
+        // Offset on the '\n' ending "second line" selects the whole block.
+        assert_eq!(paragraph_at(text, 28), Some(6..28));
+        // Offset on a blank line's gap selects nothing.
+        assert_eq!(paragraph_at(text, 5), None);
+    }
+
+    #[test]
+    fn paragraph_at_trailing_newline() {
+        // Cursor past the final newline still finds the last paragraph.
+        assert_eq!(paragraph_at("para\n", 5), Some(0..4));
+        assert_eq!(paragraph_at("para\n", 6), None);
+    }
+
+    #[test]
+    fn paragraph_at_end_of_multiline_document() {
+        // Adjacent lines are one block: end of doc selects the whole text.
+        let text = "abc\ndef";
+        assert_eq!(paragraph_at(text, 7), Some(0..7));
+        // With a blank separator, only the last block is selected.
+        let split = "abc\n\ndef";
+        assert_eq!(paragraph_at(split, 8), Some(5..8));
     }
 }
