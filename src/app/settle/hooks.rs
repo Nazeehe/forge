@@ -273,6 +273,90 @@ mod tests {
     }
 
     #[test]
+    fn late_tool_hook_after_stop_never_strands_a_pane_busy() {
+        // Grounded: claude fired PreToolUse 2.3 s after its turn's Stop
+        // with the same session_id, then went silent; the pane sat at
+        // ToolUse for 5+ min while a queued tell waited (comms.log holds
+        // with hook_ms_ago climbing past 10 min). A tool-gate hook with
+        // no intervening UserPromptSubmit is background work, not a new
+        // turn: it must not pull a Stopped pane back to ToolUse.
+        let mut s = AppState::new();
+        let run_a = RunId::generate();
+        let a = s
+            .manager
+            .spawn("a", &std::env::temp_dir(), "exec sleep 30", run_a.clone(), "shell")
+            .unwrap();
+        let run_m = RunId::generate();
+        let m = s
+            .manager
+            .spawn("m", &std::env::temp_dir(), "exec sleep 30", run_m.clone(), "shell")
+            .unwrap();
+        fn hook(s: &mut AppState, hook: &str, run_id: String) {
+            let (reply_tx, _) = std::sync::mpsc::channel();
+            s.apply(AppEvent::HookRequest(crate::ipc::listener::HookRequest {
+                hook: hook.to_string(),
+                body: "{}".to_string(),
+                run_id,
+                sync: false,
+                reply: reply_tx,
+                timed_out: Default::default(),
+            }));
+        }
+        hook(&mut s, "UserPromptSubmit", run_m.to_string());
+        assert_eq!(
+            s.manager.get(m).unwrap().activity,
+            crate::session::Activity::Thinking
+        );
+        hook(&mut s, "Stop", run_m.to_string());
+        assert_eq!(
+            s.manager.get(m).unwrap().activity,
+            crate::session::Activity::Stopped
+        );
+        // The late post-turn tool hook: same run, no new prompt since.
+        hook(&mut s, "PreToolUse", run_m.to_string());
+        assert_eq!(
+            s.manager.get(m).unwrap().activity,
+            crate::session::Activity::Stopped,
+            "post-Stop tool hook without a new prompt must not mark the pane busy"
+        );
+        // End to end: a tell queued for the pane delivers once the hook
+        // debounce settles, instead of waiting forever.
+        s.broker.join(&s.manager, a, "peers").unwrap();
+        s.broker.join(&s.manager, m, "peers").unwrap();
+        let (reply_tx, _) = std::sync::mpsc::channel();
+        s.apply(AppEvent::CommsRequest(crate::ipc::listener::CommsRequest {
+            run_id: run_a.to_string(),
+            tool: "tell_session".to_string(),
+            args: "{\"target\":\"m\",\"text\":\"hello-m\"}".to_string(),
+            reply: reply_tx,
+            claim: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::ipc::listener::CLAIM_PENDING)),
+        }));
+        assert_eq!(s.broker.queued(m), 1);
+        s.last_hook_activity.insert(
+            m,
+            std::time::Instant::now()
+                - crate::comms::INJECT_HOOK_DEBOUNCE
+                - std::time::Duration::from_millis(100),
+        );
+        s.settle_comms();
+        assert_eq!(s.broker.queued(m), 0, "stopped pane receives the tell");
+        // A genuine new turn still latches: prompt first, then tool use.
+        hook(&mut s, "UserPromptSubmit", run_m.to_string());
+        assert_eq!(
+            s.manager.get(m).unwrap().activity,
+            crate::session::Activity::Thinking
+        );
+        hook(&mut s, "PreToolUse", run_m.to_string());
+        assert_eq!(
+            s.manager.get(m).unwrap().activity,
+            crate::session::Activity::ToolUse,
+            "prompted tool use still marks the pane busy"
+        );
+        assert!(s.manager.remove(a));
+        assert!(s.manager.remove(m));
+    }
+
+    #[test]
     fn hook_trace_records_attribution_and_snapshot() {
         let dir = std::env::temp_dir().join(format!("forge-hook-trace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

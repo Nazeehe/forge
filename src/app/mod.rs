@@ -724,7 +724,21 @@ impl AppState {
                     });
                 if let Some(activity) = crate::session::activity_for_hook(&req.hook) {
                     if let Some(id) = attributed.filter(|_| own_session) {
-                        self.manager.set_activity(id, activity);
+                        // A tool-gate hook landing on a Stopped pane with
+                        // no intervening prompt is background work, not a
+                        // new turn, so it must not mark the pane busy:
+                        // otherwise the settle gate holds queued messages
+                        // forever (comms.log: post-Stop PreToolUse, 5+ min
+                        // of holds). Genuine turns open with
+                        // UserPromptSubmit/SessionStart, which moves the
+                        // pane off Stopped first.
+                        let tool_gate_after_stop = activity == crate::session::Activity::ToolUse
+                            && self.manager.get(id).is_some_and(|rec| {
+                                rec.activity == crate::session::Activity::Stopped
+                            });
+                        if !tool_gate_after_stop {
+                            self.manager.set_activity(id, activity);
+                        }
                     }
                 }
                 // SessionStart carries the harness-side conversation ID the
