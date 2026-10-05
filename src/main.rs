@@ -19,6 +19,7 @@ mod ui;
 #[cfg(feature = "visual")]
 mod visual;
 mod walkthrough;
+mod writer;
 
 const VERSION: &str = "1.0.0";
 
