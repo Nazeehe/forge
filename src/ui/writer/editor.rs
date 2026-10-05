@@ -167,9 +167,11 @@ fn paint_doc(
         EditorView::new(editor).wrap(true).theme(theme),
         layout.editor,
     );
-    // Page keys move by the last painted editor height; the adapter
-    // cannot see the viewport, so the paint layer reports it here.
+    // Page keys move by the last painted editor height, vertical
+    // moves wrap by its width; the adapter cannot see the viewport,
+    // so the paint layer reports both here.
     session.editor_rows = layout.editor.height;
+    session.editor_cols = layout.editor.width;
     // Wrap-exact gutter mapping, anchored on the cursor: screen rows
     // of every doc row are counted from the cursor with the same
     // greedy wrap EdTUI's LineWrapper uses, so wrapped rows can never
@@ -293,58 +295,7 @@ fn range_mark_end(text: &str, range: &std::ops::Range<usize>) -> (usize, usize) 
     (row_of(text, end), col_of(text, end))
 }
 
-/// EdTUI's tab stop: its view state default, which we never change.
-const WRAP_TAB_WIDTH: usize = 2;
-
-/// Cell width of one char under EdTUI's wrap, mirroring its
-/// `LineWrapper` greedy fill (`helper::char_width`).
-fn wrap_cell_width(ch: char) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    if ch == '\t' {
-        WRAP_TAB_WIDTH
-    } else {
-        ch.width().unwrap_or(0)
-    }
-}
-
-/// Screen rows one doc line occupies at `width` cells: the chunk
-/// count of EdTUI's `wrap_line` (empty lines still take one row).
-fn wrapped_height(line: &str, width: usize) -> usize {
-    let width = width.max(1);
-    let mut rows = 0usize;
-    let mut used = 0usize;
-    let mut chars = 0usize;
-    for ch in line.chars() {
-        chars += 1;
-        let cw = wrap_cell_width(ch);
-        if used + cw > width {
-            rows += 1;
-            used = 0;
-        }
-        used += cw;
-    }
-    if chars > 0 {
-        rows += 1;
-    }
-    rows.max(1)
-}
-
-/// Which wrapped chunk holds the char at column `col`: the split
-/// count EdTUI's `wrap_line` would have emitted before it.
-fn chunk_of(line: &str, col: usize, width: usize) -> usize {
-    let width = width.max(1);
-    let mut chunk = 0usize;
-    let mut used = 0usize;
-    for (i, ch) in line.chars().enumerate() {
-        if i >= col {
-            break;
-        }
-        let cw = wrap_cell_width(ch);
-        if used + cw > width {
-            chunk += 1;
-            used = 0;
-        }
-        used += cw;
-    }
-    chunk
-}
+/// Wrap math lives in the adapter (`nav`): the key layer's vertical
+/// moves count the same screen rows the gutter marks, so the two can
+/// never desync.
+use crate::app::writer::adapter::nav::{chunk_of, wrapped_height};

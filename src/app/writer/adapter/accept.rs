@@ -75,6 +75,7 @@ impl AppState {
             session.selection = editor_selection_to_range(session.editor.as_ref().expect("checked above"));
         }
         session.sel_anchor = None;
+        session.nav_goal = None;
         session.selected_proposal = None;
         session.evict_finished();
         self.dirty = true;

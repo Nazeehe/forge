@@ -10,7 +10,7 @@
 use super::{
     changed_range, editor_selection_to_range, index2_to_offset, offset_to_index2,
 };
-use super::nav::{nav_target, NavMove};
+use super::nav::{nav_target, vertical_target, NavMove};
 use crate::app::writer::{MAX_PATH_CHARS, WriterFocus, WriterOpenPrompt};
 use crate::app::AppState;
 use edtui::{
@@ -37,6 +37,7 @@ impl AppState {
         session.editor = Some(editor);
         session.selection = None;
         session.sel_anchor = None;
+        session.nav_goal = None;
         self.dirty = true;
     }
 
@@ -59,6 +60,7 @@ impl AppState {
                     editor.mode = EditorMode::Insert;
                 }
                 session.sel_anchor = None;
+                session.nav_goal = None;
             }
             self.writer_sync_editor(id);
             self.dirty = true;
@@ -108,6 +110,7 @@ impl AppState {
             // forwards the key for the normal insert. (Two undo
             // steps for now; E6 groups them.)
             session.sel_anchor = None;
+            session.nav_goal = None;
             if editor.selection.is_some()
                 && matches!(
                     (key.code, key.modifiers),
@@ -128,6 +131,8 @@ impl AppState {
                 return;
             };
             let page = session.editor_rows.max(1) as usize;
+            let width = session.editor_cols as usize;
+            let goal = session.nav_goal;
             let Some(editor) = session.editor.as_mut() else {
                 return;
             };
@@ -160,8 +165,27 @@ impl AppState {
             if let Some(motion) = nav {
                 let buffer = editor.lines.to_string();
                 let total = buffer.chars().count();
-                let target = nav_target(&buffer, total, cursor_off, page, motion);
-                editor.cursor = offset_to_index2(&buffer, target);
+                let vertical = matches!(
+                    motion,
+                    NavMove::Up | NavMove::Down | NavMove::PageUp | NavMove::PageDown
+                );
+                if vertical {
+                    let delta = match motion {
+                        NavMove::Up => -1,
+                        NavMove::Down => 1,
+                        NavMove::PageUp => -(page as isize),
+                        _ => page as isize,
+                    };
+                    let (target, kept) =
+                        vertical_target(&buffer, total, cursor_off, width, delta, goal);
+                    editor.cursor = offset_to_index2(&buffer, target);
+                    session.nav_goal = Some(kept);
+                } else {
+                    let target = nav_target(&buffer, total, cursor_off, motion);
+                    editor.cursor = offset_to_index2(&buffer, target);
+                    // Any horizontal move drops the visual-column goal.
+                    session.nav_goal = None;
+                }
             }
             if !selecting {
                 // Plain moves collapse, the way every text field
@@ -228,6 +252,7 @@ impl AppState {
             _ => {}
         }
         session.sel_anchor = None;
+        session.nav_goal = None;
         self.writer_sync_editor(id);
         self.dirty = true;
     }
@@ -494,6 +519,7 @@ impl AppState {
                 }
                 editor.execute(InsertChar(c));
             }
+            session.nav_goal = None;
         }
         self.writer_sync_editor(id);
         self.dirty = true;

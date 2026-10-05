@@ -109,6 +109,14 @@ pub struct WriterSession {
     /// PageUp/PageDown move by this; the adapter cannot see the
     /// viewport, so the paint layer reports it here.
     pub editor_rows: u16,
+    /// Last painted editor width in cells (0 before the first paint).
+    /// Vertical moves wrap by this; the paint layer reports it.
+    pub editor_cols: u16,
+    /// Visual-column goal for consecutive vertical moves
+    /// (Up/Down/PgUp/PgDn, Shift variants included): kept across
+    /// them, reset by any horizontal move, edit or click. `None`
+    /// means "take the current column".
+    pub nav_goal: Option<usize>,
 }
 
 /// Most finished requests kept; oldest evicted. Open requests and

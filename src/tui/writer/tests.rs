@@ -839,6 +839,90 @@
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn right_n(state: &mut AppState, n: usize) {
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        for _ in 0..n {
+            handle_key_at(state, &mut router, key(event::KeyCode::Right), now);
+        }
+    }
+
+    fn down(state: &mut AppState) {
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(state, &mut router, key(event::KeyCode::Down), now);
+    }
+
+    #[test]
+    fn goal_column_survives_short_lines() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "0123456789AB\nabc\n0123456789CD").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        right_n(&mut state, 10);
+        assert_eq!(cursor_offset(&state, id), 10);
+        down(&mut state);
+        assert_eq!(cursor_offset(&state, id), 16, "short line clamps");
+        down(&mut state);
+        assert_eq!(cursor_offset(&state, id), 27, "goal column returns");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn vertical_moves_follow_wrapped_screen_rows() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "seed").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let w = editor_area(&state).width as usize;
+        assert!(w > 10, "sane editor width: {w}");
+        let text = format!("{}\nzzz", "y".repeat(2 * w + 5));
+        std::fs::write(dir.join("wrap.md"), &text).unwrap();
+        open_doc(&mut state, id, "wrap.md");
+        state.open_writer_overlay();
+        // Paint once: the real loop always paints before input, and
+        // the paint reports the editor width vertical moves wrap by.
+        paint_full(&mut state, id);
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        assert_eq!(cursor_offset(&state, id), w, "second wrapped row");
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        assert_eq!(cursor_offset(&state, id), 2 * w, "third wrapped row");
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        assert_eq!(cursor_offset(&state, id), 2 * w + 6, "next line");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn goal_resets_on_horizontal_move() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(
+            dir.join("d.md"),
+            "0123456789ABCDEFGHIJ\n0123456789ABCDEFGHIJ\n0123456789ABCDEFGHIJ",
+        )
+        .unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        right_n(&mut state, 10);
+        down(&mut state);
+        assert_eq!(cursor_offset(&state, id), 31);
+        // One step left: the goal is gone, Down keeps col 9.
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Left), now);
+        assert_eq!(cursor_offset(&state, id), 30);
+        down(&mut state);
+        assert_eq!(cursor_offset(&state, id), 51, "col 9, not the old 10");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn prefix_escapes_while_editing() {
         let (mut state, id, dir) = writer_agent();
