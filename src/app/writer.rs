@@ -54,8 +54,8 @@ pub struct WriterSession {
     pub title: Option<String>,
 }
 
-/// Most finished (answered/cancelled) requests kept; oldest evicted.
-/// Open, proposed, and answered-plus-proposed requests are never evicted.
+/// Most finished requests kept; oldest evicted. Open requests and
+/// Proposed requests with a still-pending proposal are never evicted.
 const MAX_FINISHED_REQUESTS: usize = 64;
 
 impl WriterSession {
@@ -95,37 +95,47 @@ impl WriterSession {
             _ => false,
         };
         if cancelled {
-            Self::evict_finished_requests(self);
+            self.evict_finished();
         }
         cancelled
     }
 
-    /// Drop the oldest answered/cancelled requests past the cap.
-    fn evict_finished_requests(session: &mut WriterSession) {
-        let mut finished: Vec<u64> = session
+    /// A request is finished when the agent owes it nothing more: answered,
+    /// cancelled, answered-plus-proposed, or proposed with every tied
+    /// proposal settled (accepted, rejected, or stale).
+    fn is_request_finished(&self, id: u64) -> bool {
+        match self.requests.iter().find(|r| r.id == id) {
+            Some(rec) => match rec.state {
+                WriterRequestState::Open => false,
+                WriterRequestState::Answered
+                | WriterRequestState::Cancelled
+                | WriterRequestState::Both => true,
+                WriterRequestState::Proposed => !self.proposals.has_pending_for(id),
+            },
+            None => true,
+        }
+    }
+
+    /// Drop the oldest finished requests past the cap. Open requests and
+    /// Proposed requests with a still-pending proposal always survive.
+    /// Runs after every request/proposal mutation, including accept and
+    /// reject, which the S4 adapter performs through the domain store.
+    pub fn evict_finished(&mut self) {
+        let finished: Vec<u64> = self
             .requests
             .iter()
-            .filter(|r| {
-                matches!(
-                    r.state,
-                    WriterRequestState::Answered | WriterRequestState::Cancelled
-                )
-            })
+            .filter(|r| self.is_request_finished(r.id))
             .map(|r| r.id)
             .collect();
         if finished.len() <= MAX_FINISHED_REQUESTS {
             return;
         }
-        finished.sort_unstable();
-        let drop_count = finished.len() - MAX_FINISHED_REQUESTS;
+        let mut ordered = finished;
+        ordered.sort_unstable();
+        let drop_count = ordered.len() - MAX_FINISHED_REQUESTS;
         let drop: std::collections::HashSet<u64> =
-            finished.into_iter().take(drop_count).collect();
-        session.requests.retain(|r| {
-            !matches!(
-                r.state,
-                WriterRequestState::Answered | WriterRequestState::Cancelled
-            ) || !drop.contains(&r.id)
-        });
+            ordered.into_iter().take(drop_count).collect();
+        self.requests.retain(|r| !drop.contains(&r.id));
     }
 }
 
@@ -389,6 +399,7 @@ impl AppState {
                     _ => WriterRequestState::Proposed,
                 };
             }
+            session.evict_finished();
         }
         self.dirty = true;
         if stale {
@@ -437,7 +448,7 @@ impl AppState {
         while session.thread.len() > crate::writer::MAX_THREAD_ENTRIES {
             session.thread.remove(0);
         }
-        WriterSession::evict_finished_requests(session);
+        session.evict_finished();
         self.dirty = true;
         Ok(r#"{"answered":true}"#.to_string())
     }
@@ -823,6 +834,67 @@ mod tests {
                 "open {rid} evicted"
             );
         }
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn finished_requests_evict_both_and_settled_proposed() {
+        let (mut state, id, run, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "hello").unwrap();
+        assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+        // 70 rephrase-style requests: propose, then accept or reject.
+        // Every tenth also gets an answer (Both). Proposal ids run 1..=70
+        // in order: exactly one proposal is recorded per iteration.
+        for i in 0..70u64 {
+            let text = state.writers.get(&id).unwrap().doc.as_ref().unwrap().text.clone();
+            let rid = state.writers.get_mut(&id).unwrap()
+                .new_request(WriterAction::Rephrase, &text, 0..0, 0).unwrap();
+            let proposed = comms_reply(
+                &mut state, &run, "writer_propose",
+                &format!(r#"{{"request_id":{rid},"text":"v{i}"}}"#),
+            );
+            assert!(proposed.contains(r#""proposed":true"#), "iter {i}: {proposed}");
+            if i % 10 == 0 {
+                let answered = comms_reply(
+                    &mut state, &run, "writer_answer",
+                    &format!(r#"{{"request_id":{rid},"answer":"a"}}"#),
+                );
+                assert!(answered.contains(r#""answered":true"#));
+            }
+            let pid = (i + 1) as u64;
+            let session = state.writers.get_mut(&id).unwrap();
+            if i % 2 == 0 {
+                let doc = session.doc.as_mut().unwrap();
+                session.proposals.accept(doc, pid).unwrap();
+            } else {
+                session.proposals.reject(pid).unwrap();
+            }
+            session.evict_finished();
+        }
+        // One more request stays Proposed with a pending proposal.
+        let text = state.writers.get(&id).unwrap().doc.as_ref().unwrap().text.clone();
+        let keeper = state.writers.get_mut(&id).unwrap()
+            .new_request(WriterAction::Ask, &text, 0..0, 0).unwrap();
+        let kept = comms_reply(
+            &mut state, &run, "writer_propose",
+            &format!(r#"{{"request_id":{keeper},"text":"k"}}"#),
+        );
+        assert!(kept.contains(r#""proposed":true"#), "keeper: {kept}");
+        state.writers.get_mut(&id).unwrap().evict_finished();
+        // 64 finished (Accepted/Rejected/Both mixed) + the pending keeper.
+        let session = state.writers.get(&id).unwrap();
+        assert_eq!(session.requests.len(), 65, "bounded");
+        let kept_rec = session.requests.iter().find(|r| r.id == keeper).unwrap();
+        assert_eq!(kept_rec.state, WriterRequestState::Proposed);
+        assert!(session.requests.iter().all(|r| r.id > 6 || r.id == keeper || {
+            !matches!(
+                r.state,
+                WriterRequestState::Answered
+                    | WriterRequestState::Cancelled
+                    | WriterRequestState::Both
+            )
+        }), "oldest finished evicted first");
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }

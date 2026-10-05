@@ -174,6 +174,13 @@ impl Proposals {
         self.items.iter().find(|p| p.id == id)
     }
 
+    /// True when a still-pending proposal carries this request id.
+    pub fn has_pending_for(&self, request_id: u64) -> bool {
+        self.items
+            .iter()
+            .any(|p| p.request_id == Some(request_id) && p.state == ProposalState::Pending)
+    }
+
     /// Drop the oldest settled proposals past [`MAX_SETTLED_PROPOSALS`].
     /// Pending proposals are never evicted.
     fn evict_old_settled(&mut self) {
