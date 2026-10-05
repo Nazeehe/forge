@@ -465,7 +465,7 @@ mod tests {
         // The big group stacks; a pair only where it still fits.
         let session = plan.groups.iter().find(|g| g.name == "Session").expect("session group");
         assert_eq!(session.cols, 1, "the wide group must stack at 40");
-        assert_eq!(plan.height, 28, "pinned plan height at 40 (with the Tetris row)");
+        assert_eq!(plan.height, 29, "pinned plan height at 40 (Tetris row + Writer row)");
     }
 
     #[test]

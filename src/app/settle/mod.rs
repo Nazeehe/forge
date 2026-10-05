@@ -147,6 +147,9 @@ impl AppState {
             }
         }
         self.settle_enters(now);
+        // Writer request bodies ride the same gates through their own
+        // per-session queues (cap 8, never drops).
+        self.settle_writer_queues(now);
     }
 
     /// Send staged Enters whose beat has elapsed. Same gates as bodies —
@@ -230,7 +233,11 @@ impl AppState {
     /// passed. Until then the pane only looks idle. Panes that never
     /// hooked (plain shells) report no turns, so they never wait.
     /// Saturating, since Enters may be stamped with a supplied `now`.
-    fn turn_registered(&self, id: crate::session::SessionId, now: std::time::Instant) -> bool {
+    pub(crate) fn turn_registered(
+        &self,
+        id: crate::session::SessionId,
+        now: std::time::Instant,
+    ) -> bool {
         let Some(&sent) = self.enter_sent.get(&id) else {
             return true;
         };
@@ -246,7 +253,7 @@ impl AppState {
     /// Delivery gate for bodies and staged Enters alike, per target:
     /// quiet human hands plus quiet hooks for that session only. Either
     /// recent activity holds that target, never its neighbors.
-    fn injection_settled_for(
+    pub(crate) fn injection_settled_for(
         &self,
         id: crate::session::SessionId,
         now: std::time::Instant,

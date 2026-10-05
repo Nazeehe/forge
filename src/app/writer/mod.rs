@@ -1,14 +1,20 @@
-//! AppState Writer dispatch (vertical slice S3): per-session document,
-//! proposals, requests, and thread answers behind the four writer_* tools.
+//! AppState Writer state (S3+S4): per-session document, proposals,
+//! requests, thread answers, the EdTUI editor behind the adapter, and
+//! the view state the overlay paints.
 //!
-//! Slice notes: there is no Writer overlay tab yet (S4), so `writer_open`
-//! never touches `overlay_view` — it opens silently per the Q1 resolution.
-//! Human-side request creation, the editor adapter, and rendering land in S4.
+//! `writer_open` never touches `overlay_view` (Q1): it switches to the
+//! Writer tab only when the human is already looking at it, which needs
+//! no call at all — otherwise the document opens silently.
 
 use super::*;
 use crate::writer::document::Document;
 use crate::writer::proposal::Proposals;
 use crate::writer::request::WriterAction;
+
+pub mod adapter;
+pub mod tools;
+#[cfg(test)]
+mod tests;
 
 /// A human → agent request. Proposals and answers arrive independently,
 /// in either order; only a cancelled request refuses both.
@@ -40,23 +46,72 @@ pub struct WriterThreadEntry {
     pub answer: String,
 }
 
+/// Keyboard focus inside the Writer overlay: the editor, the chat
+/// box, or the thread (proposal selection). Tab cycles all three.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WriterFocus {
+    #[default]
+    Editor,
+    Chat,
+    Thread,
+}
+
+/// The empty-state path prompt: typed path plus which pill opened it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WriterOpenPrompt {
+    pub buffer: String,
+    /// True from `(*New document)`, false from `(Open…)`; both submit
+    /// through `writer_open`, only the prompt title differs.
+    pub create: bool,
+}
+
 /// Per-session Writer state: the open document plus everything about it.
-#[derive(Clone, Debug, Default)]
+///
+/// `EditorState` is `Clone` but not `Debug`, so this struct keeps `Clone`
+/// and skips `Debug`.
+#[derive(Clone, Default)]
 pub struct WriterSession {
     pub doc: Option<Document>,
     pub proposals: Proposals,
     pub requests: Vec<WriterRequestRecord>,
     pub thread: Vec<WriterThreadEntry>,
-    /// Editor selection as a char range; set by the S4 adapter.
+    /// Editor selection as an exclusive char range; synced from the
+    /// editor after every event by the adapter.
     pub selection: Option<std::ops::Range<usize>>,
+    /// Keyboard-selection anchor as a char offset: set when a
+    /// Shift+arrow gesture starts, cleared by any other key, the
+    /// mouse, or a buffer rebuild. Lets one gesture cross back over
+    /// its start without losing where it began.
+    pub sel_anchor: Option<usize>,
     pub next_request_id: u64,
-    /// Optional label from `writer_open`; titles the S4 tab.
+    /// Optional label from `writer_open`; titles the Writer tab.
     pub title: Option<String>,
+    /// The live EdTUI buffer; `None` until a document opens.
+    pub editor: Option<edtui::EditorState>,
+    /// Forge-owned clipboard backing the editor (save/restore on Accept).
+    pub clip: adapter::SharedClipboard,
+    /// Where typing goes: editor or chat box.
+    pub focus: WriterFocus,
+    /// Chat box input (chars) plus cursor as a char index into it.
+    pub chat_input: String,
+    pub chat_cursor: usize,
+    /// Proposal selected by clicking its thread entry, if any.
+    pub selected_proposal: Option<u64>,
+    /// Fixed error slot text; `None` renders the slot empty.
+    pub error: Option<String>,
+    /// Outbound request bodies awaiting the settle flush; cap 8, never drops.
+    pub queue: std::collections::VecDeque<String>,
+    /// Empty-state typed-path prompt, if open.
+    pub open_prompt: Option<WriterOpenPrompt>,
 }
 
 /// Most finished requests kept; oldest evicted. Open requests and
 /// Proposed requests with a still-pending proposal are never evicted.
 const MAX_FINISHED_REQUESTS: usize = 64;
+
+/// Typed-path prompt bound: long enough for any sane relative path,
+/// short enough to stay one line.
+pub const MAX_PATH_CHARS: usize = 256;
 
 impl WriterSession {
     /// Record a human request over a char range of the current document
@@ -82,6 +137,40 @@ impl WriterSession {
             state: WriterRequestState::Open,
         });
         Ok(id)
+    }
+
+    /// Scope-reset open shared by the agent tool and the human prompt:
+    /// same path reopens in place, a dirty different document refuses,
+    /// otherwise the old scope (proposals, requests, thread, selection)
+    /// drops with the previous text. Returns the opened revision.
+    /// The caller owns the editor rebuild.
+    pub(super) fn open_document_path(
+        &mut self,
+        cwd: &std::path::Path,
+        path: &str,
+    ) -> Result<u64, String> {
+        if let Some(doc) = self.doc.as_ref() {
+            if doc.path_rel == path {
+                return Ok(doc.revision);
+            }
+            if doc.dirty {
+                return Err(format!(
+                    "unsaved document open: {} (save it before opening another)",
+                    doc.path_rel,
+                ));
+            }
+        }
+        let doc = Document::open(cwd, path).map_err(|e| e.to_string())?;
+        let rev = doc.revision;
+        self.doc = Some(doc);
+        self.proposals = Proposals::default();
+        self.requests.clear();
+        self.thread.clear();
+        self.selection = None;
+        self.sel_anchor = None;
+        self.selected_proposal = None;
+        self.error = None;
+        Ok(rev)
     }
 
     /// Withdraw an open request; true when one was open.
@@ -140,6 +229,49 @@ impl WriterSession {
 }
 
 impl AppState {
+    /// Absolute topbar index of the Writer overlay slot for one
+    /// session, or `None` for an unknown session.
+    pub(super) fn writer_slot(&self, id: crate::session::SessionId) -> Option<usize> {
+        let rec = self.manager.get(id)?;
+        OVERLAY_TABS
+            .iter()
+            .position(|tab| *tab == "Writer")
+            .map(|slot| rec.tabs.len() + slot)
+    }
+
+    /// The focused Writer overlay, if the human is looking at one:
+    /// the active session whose overlay slot is the Writer tab.
+    pub fn writer_overlay_active(&self) -> Option<crate::session::SessionId> {
+        let active = self.manager.active()?;
+        let (view_id, index) = self.overlay_view?;
+        if view_id != active || Some(index) != self.writer_slot(active) {
+            return None;
+        }
+        Some(active)
+    }
+
+    /// Open the active session's Writer tab (`Ctrl-b d`). Always
+    /// switches: this is the human asking, not an agent opening
+    /// silently (Q1). No document need be open yet.
+    pub fn open_writer_overlay(&mut self) {
+        let Some(active) = self.manager.active() else {
+            return;
+        };
+        if let Some(slot) = self.writer_slot(active) {
+            // The entry exists from here on: even the empty state
+            // paints and takes keys through it.
+            self.writers.entry(active).or_default();
+            self.overlay_view = Some((active, slot));
+            self.dirty = true;
+        }
+    }
+
+    /// True while Writer keys own input: the overlay slot is focused.
+    /// A document need not be open (the empty state takes keys too).
+    pub fn writer_keys_active(&self) -> bool {
+        self.writer_overlay_active().is_some()
+    }
+
     /// Execute one Writer MCP tool. `None` when the name is not a
     /// Writer tool and the broker should answer instead.
     pub(super) fn writer_tool(
@@ -164,7 +296,3 @@ impl AppState {
         }
     }
 }
-
-pub mod tools;
-#[cfg(test)]
-mod tests;

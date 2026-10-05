@@ -10,6 +10,7 @@ pub mod input;
 pub mod keys;
 pub mod mouse;
 pub mod visual;
+pub mod writer;
 
 #[cfg(test)]
 mod test_support;
@@ -397,6 +398,12 @@ fn loop_until_quit(
                             // The open card editor takes the paste like
                             // typing; the panes behind it never see it.
                             state.board_card_edit_paste(&text);
+                        } else if let Some(id) = state.writer_overlay_active() {
+                            // The Writer overlay takes the paste like
+                            // typing: prompt, chat box, or editor buffer.
+                            // The agent pane behind it never sees it.
+                            state.writer_paste(id, &text);
+                            state.dirty = true;
                         } else if state.board_draft.is_some() {
                             // An open board draft takes the paste
                             // single-line like typing; the panes behind
@@ -506,10 +513,11 @@ fn loop_until_quit(
                 grid: state.grid_mode,
                 pills: state.pill_tabs,
             };
-            let cursor_visible = views.iter().any(|v| v.focused && v.cursor.is_some());
+            let pane_cursor = views.iter().any(|v| v.focused && v.cursor.is_some());
             // Board mutations flush within a frame; the dirty flag keeps
             // clean frames free of filesystem work.
             state.flush_boards(home);
+            let mut writer_cursor = None;
             terminal.draw(|f| {
                 let area = f.area();
                 ui::render(f, area, &views, &chrome);
@@ -553,6 +561,27 @@ fn loop_until_quit(
                 if let Some(dialog) = state.oobe_dialog.as_ref() {
                     dialog.view(f, crate::ui::dialogs::oobe::oobe_area(area));
                 }
+                // The Writer overlay paints its live editor above the
+                // chrome but below every modal: a direct widget render,
+                // since PaneView spans cannot host an editor. The tour
+                // arm below still wins when both are open.
+                if let Some(id) = state.writer_overlay_active() {
+                    let activity = state
+                        .manager
+                        .get(id)
+                        .map(|rec| rec.activity)
+                        .unwrap_or(crate::session::Activity::Idle);
+                    if let Some(session) = state.writers.get_mut(&id) {
+                        let (_, term_cols) = state.term_size;
+                        writer_cursor = crate::ui::writer::paint(
+                            f,
+                            crate::walkthrough::walk_area(area),
+                            session,
+                            activity,
+                            term_cols,
+                        );
+                    }
+                }
                 // The tour takes over the main area above every dialog:
                 // it is opaque and owns input while open.
                 if let Some(tour) = state.walkthrough_overlay() {
@@ -561,6 +590,12 @@ fn loop_until_quit(
             })?;
             #[cfg(feature = "visual")]
             sync_visual_terminal(state, &mut *terminal)?;
+            // The Writer overlay positions the terminal cursor itself;
+            // its cursor joins the pane one for the visibility toggle.
+            if let Some(pos) = writer_cursor {
+                terminal.set_cursor_position(pos)?;
+            }
+            let cursor_visible = pane_cursor || writer_cursor.is_some();
             if cursor_visible != cursor_shown {
                 if cursor_visible {
                     terminal.show_cursor()?;

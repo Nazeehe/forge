@@ -29,6 +29,14 @@ pub(super) fn handle_key_at(
         handle_walkthrough_key(state, key);
         return;
     }
+    // The focused Writer tab owns plain keys so typing edits the
+    // document instead of reaching the agent pane; the prefix chord
+    // still escapes to the router so `Ctrl-b d` (and every other
+    // command) keeps working.
+    if state.writer_keys_active() && !InputRouter::is_prefix(&key) && !router.is_pending() {
+        super::writer::handle_writer_key(state, key);
+        return;
+    }
     // A focused Visual tab owns its viewport keys the same way, so
     // arrows pan the diagram instead of reaching the agent pane.
     #[cfg(feature = "visual")]
@@ -193,6 +201,9 @@ fn fire_command(state: &mut AppState, cmd: UserCommand) {
                 }
                 state.dirty = true;
             }
+        }
+        UserCommand::OpenWriter => {
+            state.open_writer_overlay();
         }
         UserCommand::TogglePermissionMode => {
             state.toggle_permission_mode();

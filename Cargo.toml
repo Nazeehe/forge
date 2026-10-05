@@ -5,6 +5,10 @@ edition = "2021"
 
 [dependencies]
 crossterm = "0.29"
+# Writer editor widget (S1 probe): no arboard display-server clipboard and
+# no syntect; mouse selection support stays on. Theme and clipboard are
+# Forge-owned through the adapter.
+edtui = { version = "0.11", default-features = false, features = ["mouse-support"] }
 libc = "0.2"
 # Markdown answers in the walkthrough Q&A panel (its code fences take
 # the stylesheet code style; tour source highlighting is syntect below).

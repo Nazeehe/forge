@@ -561,3 +561,556 @@ fn terminate_drops_writer_state() {
     assert!(!state.writers.contains_key(&id), "writer state drops with the session");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+fn open_editor(state: &mut AppState, id: crate::session::SessionId) {
+    state.writer_open_editor(id);
+    assert!(
+        state.writers.get(&id).unwrap().editor.is_some(),
+        "editor opens with Insert mode and the Forge clipboard"
+    );
+    assert_eq!(
+        state.writers.get(&id).unwrap().editor.as_ref().unwrap().mode,
+        edtui::EditorMode::Insert
+    );
+}
+
+fn feed(state: &mut AppState, id: crate::session::SessionId, code: crossterm::event::KeyCode) {
+    state.writer_feed_key(
+        id,
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
+    );
+}
+
+#[test]
+fn typing_edits_the_document_and_bumps_revision() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    feed(&mut state, id, crossterm::event::KeyCode::Char('X'));
+    feed(&mut state, id, crossterm::event::KeyCode::Char('Y'));
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.doc.as_ref().unwrap().text, "XYhello");
+    assert_eq!(session.doc.as_ref().unwrap().revision, 2);
+    assert!(session.doc.as_ref().unwrap().dirty);
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn typing_stales_intersecting_proposals() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello world").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    let rid = state.writers.get_mut(&id).unwrap()
+        .new_request(crate::writer::request::WriterAction::Rephrase, "hello world", 6..11, 0).unwrap();
+    let proposed = comms_reply(
+        &mut state, &run, "writer_propose",
+        &format!(r#"{{"request_id":{rid},"text":"Forge"}}"#),
+    );
+    assert!(proposed.contains(r#""proposed":true"#), "proposed: {proposed}");
+    // Typing at the start shifts nothing in the slice: the edit
+    // precedes the range, so the proposal goes stale through the
+    // real typing path (diff + on_edit, no test-only hooks).
+    feed(&mut state, id, crossterm::event::KeyCode::Char('!'));
+    let session = state.writers.get(&id).unwrap();
+    use crate::writer::proposal::ProposalState;
+    assert_eq!(session.proposals.get(1).unwrap().state, ProposalState::Stale);
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn selection_conversion_boundaries() {
+    use adapter::editor_selection_to_range;
+    use edtui::{actions::SwitchMode, EditorMode, EditorState, Index2, Lines};
+    // Empty document: no selection, no range.
+    let empty = EditorState::new(Lines::from(""));
+    assert_eq!(editor_selection_to_range(&empty), None);
+    // Zero-width visual selection is a cursor, not a range.
+    let mut plain = EditorState::new(Lines::from("hello"));
+    plain.execute(SwitchMode(EditorMode::Visual));
+    assert_eq!(editor_selection_to_range(&plain), None);
+    // ASCII range: inclusive end becomes exclusive.
+    let mut ascii = EditorState::new(Lines::from("hello"));
+    ascii.execute(SwitchMode(EditorMode::Visual));
+    ascii.execute(edtui::actions::MoveForward(2));
+    assert_eq!(editor_selection_to_range(&ascii), Some(0..3));
+    // Multibyte: offsets count chars, not bytes.
+    let mut wide = EditorState::new(Lines::from("aéc"));
+    wide.execute(SwitchMode(EditorMode::Visual));
+    wide.execute(edtui::actions::MoveForward(2));
+    assert_eq!(editor_selection_to_range(&wide), Some(0..3));
+    // Multi-line across a newline (down extends past the line end;
+    // plain forward motion stops there).
+    let mut multi = EditorState::new(Lines::from("ab\ncd"));
+    multi.cursor = Index2::new(0, 1);
+    multi.execute(SwitchMode(EditorMode::Visual));
+    multi.execute(edtui::actions::MoveDown(1));
+    assert_eq!(editor_selection_to_range(&multi), Some(1..5));
+    // End of line: selecting down to the next line's start takes the
+    // newline with it (chars 1..3 are "b\n").
+    let mut eol = EditorState::new(Lines::from("ab\ncd"));
+    eol.cursor = Index2::new(0, 1);
+    eol.execute(SwitchMode(EditorMode::Visual));
+    eol.execute(edtui::actions::MoveDown(1));
+    eol.execute(edtui::actions::MoveBackward(1));
+    assert_eq!(editor_selection_to_range(&eol), Some(1..4));
+}
+
+#[test]
+fn shift_arrows_select_without_reaching_edtui() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    let shift = crossterm::event::KeyModifiers::SHIFT;
+    for _ in 0..2 {
+        state.writer_feed_key(
+            id,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Right, shift),
+        );
+    }
+    // Text-field counts: two presses select two chars, not three.
+    // (EdTUI visual counts the anchor char; the adapter compensates.)
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..2));
+    // Shift+Ctrl+Right runs to the next word start (EdTUI word motion),
+    // taking the separating space: standard Ctrl+Shift+Right behavior.
+    let word = crossterm::event::KeyModifiers::SHIFT | crossterm::event::KeyModifiers::CONTROL;
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("e.md"), "aaa bbb").unwrap();
+    assert!(open_doc(&mut state, &run, "e.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    state.writer_feed_key(
+        id,
+        crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Right, word),
+    );
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..4));
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn plain_arrow_collapses_the_selection() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    shift_select(&mut state, id, 3);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..3));
+    // A plain arrow drops the selection instead of leaving a stale
+    // mirror behind for the next Rephrase to act on.
+    feed(&mut state, id, crossterm::event::KeyCode::Right);
+    assert_eq!(state.writers.get(&id).unwrap().selection, None);
+    // A new gesture anchors fresh from the cursor.
+    shift_select(&mut state, id, 2);
+    let selection = state.writers.get(&id).unwrap().selection.clone();
+    assert!(selection.is_some(), "selects again, got {selection:?}");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn propose_for_accept(state: &mut AppState, id: crate::session::SessionId, run: &str, rid: u64, text: &str) -> u64 {
+    let reply = comms_reply(
+        state, run, "writer_propose",
+        &format!(r#"{{"request_id":{rid},"text":"{text}"}}"#),
+    );
+    assert!(reply.contains(r#""proposed":true"#), "proposed: {reply}");
+    // The tool reports the id the same way an agent learns it.
+    let _ = id;
+    reply
+        .split("\"proposal\":")
+        .nth(1)
+        .and_then(|tail| tail.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .expect("reply carries the proposal id")
+}
+
+#[test]
+fn accept_replaces_exactly_with_one_undo_and_clipboard_intact() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello world, hello").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    // The user copied something before the accept arrived.
+    state.writers.get(&id).unwrap().clip.0.borrow_mut().push_str("USER");
+    let rid = state.writers.get_mut(&id).unwrap()
+        .new_request(crate::writer::request::WriterAction::Rephrase, "hello world, hello", 13..18, 0).unwrap();
+    let pid = propose_for_accept(&mut state, id, &run, rid, "bye");
+    state.writer_accept(id, pid).unwrap();
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.doc.as_ref().unwrap().text, "hello world, bye");
+    assert_eq!(session.doc.as_ref().unwrap().revision, 1);
+    assert_eq!(
+        session.editor.as_ref().unwrap().lines.to_string(),
+        "hello world, bye",
+        "editor buffer matches the document"
+    );
+    // The clipboard survived the DeleteSelection inside Accept.
+    assert_eq!(session.clip.0.borrow().as_str(), "USER");
+    // One editor undo restores the pre-accept text.
+    let editor = state.writers.get_mut(&id).unwrap().editor.as_mut().unwrap();
+    editor.undo();
+    assert_eq!(editor.lines.to_string(), "hello world, hello");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn accept_insert_range_is_one_undo_step() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "ac").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    let rid = state.writers.get_mut(&id).unwrap()
+        .new_request(crate::writer::request::WriterAction::Rephrase, "ac", 1..1, 0).unwrap();
+    let pid = propose_for_accept(&mut state, id, &run, rid, "b");
+    state.writer_accept(id, pid).unwrap();
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.doc.as_ref().unwrap().text, "abc");
+    assert_eq!(session.editor.as_ref().unwrap().lines.to_string(), "abc");
+    let editor = state.writers.get_mut(&id).unwrap().editor.as_mut().unwrap();
+    editor.undo();
+    assert_eq!(editor.lines.to_string(), "ac");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn accept_refuses_stale_and_reject_settles() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaaa bbbb").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    let rid = state.writers.get_mut(&id).unwrap()
+        .new_request(crate::writer::request::WriterAction::Rephrase, "aaaa bbbb", 5..9, 0).unwrap();
+    let pid = propose_for_accept(&mut state, id, &run, rid, "B");
+    // Change the text under the range without on_edit (reload path): the
+    // S2 snapshot inside accept refuses even though the record reads Pending.
+    state.writers.get_mut(&id).unwrap().doc.as_mut().unwrap()
+        .apply_edit(5..6, "X").unwrap();
+    let err = state.writer_accept(id, pid).unwrap_err();
+    assert!(err.contains("stale"), "accept stale: {err}");
+    assert_eq!(state.writers.get(&id).unwrap().doc.as_ref().unwrap().text, "aaaa Xbbb");
+    // Reject works on stale and settles it.
+    state.writer_reject(id, pid).unwrap();
+    use crate::writer::proposal::ProposalState;
+    assert_eq!(
+        state.writers.get(&id).unwrap().proposals.get(pid).unwrap().state,
+        ProposalState::Rejected
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn save_writes_and_conflicts_land_in_the_slot() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    feed(&mut state, id, crossterm::event::KeyCode::Char('!'));
+    state.writer_save(id);
+    assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "!hello");
+    assert_eq!(state.writers.get(&id).unwrap().error, None);
+    // External change, then save: conflict goes to the fixed slot.
+    std::fs::write(dir.join("d.md"), "theirs").unwrap();
+    feed(&mut state, id, crossterm::event::KeyCode::Char('?'));
+    state.writer_save(id);
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.error.as_deref(), Some("save conflict: file changed on disk"));
+    assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "theirs");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+fn shift_select(state: &mut AppState, id: crate::session::SessionId, count: usize) {
+    let shift = crossterm::event::KeyModifiers::SHIFT;
+    for _ in 0..count {
+        state.writer_feed_key(
+            id,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Right, shift),
+        );
+    }
+}
+
+#[test]
+fn rephrase_uses_the_live_selection_range() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb ccc").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    // Cursor to 4, then select 4..7.
+    for _ in 0..4 {
+        feed(&mut state, id, crossterm::event::KeyCode::Right);
+    }
+    shift_select(&mut state, id, 3);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(4..7));
+    state.writer_rephrase(id);
+    let session = state.writers.get(&id).unwrap();
+    let record = session.requests.last().expect("request recorded");
+    assert_eq!(record.range, 4..7);
+    assert_eq!(record.action, crate::writer::request::WriterAction::Rephrase);
+    let body = session.queue.back().expect("request queued");
+    assert!(body.contains("action=rephrase"), "body: {body}");
+    assert!(body.contains("chars 4-7"), "body: {body}");
+    assert!(body.contains("<selection>\nbbb\n</selection>"), "body: {body}");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rephrase_without_selection_takes_the_paragraph() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "head\n\nfirst para\nsecond line\n\ntail").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    // Cursor into "second line" (char 20), no selection.
+    let editor = state.writers.get_mut(&id).unwrap().editor.as_mut().unwrap();
+    editor.cursor = adapter::offset_to_index2("head\n\nfirst para\nsecond line\n\ntail", 20);
+    state.writer_rephrase(id);
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.requests.last().expect("request").range, 6..28);
+    let body = session.queue.back().expect("queued");
+    assert!(body.contains("first para\nsecond line"), "body: {body}");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn busy_agent_holds_requests_without_pane_writes() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    state.manager.get_mut(id).unwrap().activity = crate::session::Activity::Thinking;
+    state.writer_rephrase(id);
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.queue.len(), 1, "held, not dropped");
+    state.settle_writer_queues(std::time::Instant::now());
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.queue.len(), 1, "still held while busy");
+    assert!(!state.pending_enter.contains_key(&id), "no staged Enter while busy");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn idle_agent_gets_inject_plus_staged_enter() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    state.writer_rephrase(id);
+    assert_eq!(state.writers.get(&id).unwrap().queue.len(), 1);
+    state.settle_writer_queues(std::time::Instant::now());
+    let session = state.writers.get(&id).unwrap();
+    assert!(session.queue.is_empty(), "delivered");
+    assert!(state.pending_enter.contains_key(&id), "staged Enter follows the inject");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn ninth_queued_request_is_refused_without_dropping() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    // Hold the agent so nothing drains while filling the queue.
+    state.manager.get_mut(id).unwrap().activity = crate::session::Activity::Thinking;
+    for _ in 0..8 {
+        state.writer_rephrase(id);
+    }
+    assert_eq!(state.writers.get(&id).unwrap().queue.len(), 8);
+    let records = state.writers.get(&id).unwrap().requests.len();
+    state.writer_rephrase(id);
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.queue.len(), 8, "nothing dropped, nothing added");
+    assert_eq!(session.requests.len(), records, "no orphan record");
+    assert_eq!(
+        session.error.as_deref(),
+        Some("request queue full (8); wait for delivery")
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn chat_sends_with_and_without_selection() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    // With a selection: the request covers it.
+    shift_select(&mut state, id, 3);
+    state.writers.get_mut(&id).unwrap().chat_input = "why?".to_string();
+    state.writer_chat_send(id);
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.requests.last().expect("request").range, 0..3);
+    let body = session.queue.back().expect("queued");
+    assert!(body.contains("action=chat"), "body: {body}");
+    assert!(body.contains("<instruction>why?</instruction>"), "body: {body}");
+    assert!(session.chat_input.is_empty(), "chat box clears on send");
+    // Without a selection: the whole document goes.
+    state.writers.get_mut(&id).unwrap().editor.as_mut().unwrap().selection = None;
+    state.writers.get_mut(&id).unwrap().chat_input = "sum up".to_string();
+    state.writer_chat_send(id);
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.requests.last().expect("request").range, 0..7);
+    assert!(session.queue.back().expect("queued").contains("aaa bbb"));
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn chat_box_input_is_bounded_with_a_movable_cursor() {
+    let (mut state, id, _run, dir) = writer_agent();
+    state.writers.entry(id).or_default();
+    for _ in 0..crate::writer::MAX_INPUT_CHARS + 10 {
+        state.writer_chat_char(id, 'z');
+    }
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.chat_input.chars().count(), crate::writer::MAX_INPUT_CHARS);
+    assert_eq!(session.chat_cursor, crate::writer::MAX_INPUT_CHARS);
+    // Control chars never enter the box.
+    state.writer_chat_char(id, '\n');
+    assert_eq!(
+        state.writers.get(&id).unwrap().chat_input.chars().count(),
+        crate::writer::MAX_INPUT_CHARS
+    );
+    state.writer_chat_move(id, -4_000_000);
+    assert_eq!(state.writers.get(&id).unwrap().chat_cursor, 0);
+    state.writer_chat_backspace(id);
+    assert_eq!(state.writers.get(&id).unwrap().chat_cursor, 0, "nothing to delete");
+    state.writer_chat_move(id, 4_000_000);
+    state.writer_chat_backspace(id);
+    assert_eq!(
+        state.writers.get(&id).unwrap().chat_input.chars().count(),
+        crate::writer::MAX_INPUT_CHARS - 1
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn paste_lands_in_the_editor_not_the_pane() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    state.writer_paste(id, "XY");
+    assert_eq!(
+        state.writers.get(&id).unwrap().doc.as_ref().unwrap().text,
+        "XYaaa bbb"
+    );
+    // Prompt paste fills the bounded buffer instead.
+    state.writers.get_mut(&id).unwrap().doc = None;
+    state.writer_prompt_open(id, false);
+    state.writer_paste(id, "d.md");
+    assert_eq!(
+        state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().buffer,
+        "d.md"
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn detach_chip_clears_the_editor_selection() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    shift_select(&mut state, id, 3);
+    assert!(state.writers.get(&id).unwrap().selection.is_some());
+    state.writer_clear_selection(id);
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.selection, None);
+    assert!(session.editor.as_ref().unwrap().selection.is_none());
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prompt_submit_opens_and_failures_keep_the_prompt() {
+    let (mut state, id, _run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello").unwrap();
+    // Empty submit refuses without opening.
+    state.writer_prompt_open(id, false);
+    state.writer_submit_open(id);
+    let session = state.writers.get(&id).unwrap();
+    assert!(session.open_prompt.is_some(), "prompt stays");
+    assert_eq!(session.error.as_deref(), Some("type a path first"));
+    // A non-markdown path keeps the prompt with the reason slotted
+    // (missing .md paths open as empty documents, by design).
+    for c in "notes.json".chars() {
+        state.writer_prompt_char(id, c);
+    }
+    state.writer_submit_open(id);
+    let session = state.writers.get(&id).unwrap();
+    assert!(session.open_prompt.is_some(), "prompt stays");
+    assert!(session.error.is_some(), "reason slotted");
+    assert!(session.doc.is_none(), "nothing opened");
+    // Control chars never enter the path.
+    state.writer_prompt_char(id, '\n');
+    assert_eq!(
+        state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().buffer,
+        "notes.json"
+    );
+    // Bound: typing past MAX_PATH_CHARS stops.
+    for _ in 0..crate::app::writer::MAX_PATH_CHARS {
+        state.writer_prompt_char(id, 'x');
+    }
+    assert_eq!(
+        state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().buffer.chars().count(),
+        crate::app::writer::MAX_PATH_CHARS,
+    );
+    // Backspace, cancel, then a good submit.
+    state.writer_prompt_cancel(id);
+    assert!(state.writers.get(&id).unwrap().open_prompt.is_none());
+    state.writer_prompt_open(id, false);
+    for c in "d.md".chars() {
+        state.writer_prompt_char(id, c);
+    }
+    state.writer_submit_open(id);
+    let session = state.writers.get(&id).unwrap();
+    assert!(session.open_prompt.is_none(), "prompt closes");
+    assert_eq!(session.doc.as_ref().unwrap().text, "hello");
+    assert!(session.editor.is_some(), "editor builds");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rephrase_without_a_live_agent_tab_errors_without_writing() {
+    let (mut state, _id, _run, dir) = writer_agent();
+    // A writer entry with no session record behind it: no agent tab,
+    // so the request is refused before any record or queue write.
+    let ghost = crate::session::SessionId::fresh();
+    state.writers.entry(ghost).or_default();
+    state.writer_rephrase(ghost);
+    let session = state.writers.get(&ghost).unwrap();
+    assert_eq!(session.requests.len(), 0, "no record without a live tab");
+    assert!(session.queue.is_empty(), "no write without a live tab");
+    assert_eq!(session.error.as_deref(), Some("no live agent tab"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn writer_open_keeps_whatever_view_is_showing() {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "hello").unwrap();
+    let slot = state.writer_slot(id).expect("writer slot exists");
+    // Human on the Writer tab: stays there (the switch is a no-op).
+    state.overlay_view = Some((id, slot));
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    assert_eq!(state.overlay_view, Some((id, slot)));
+    // Human elsewhere: the open stays silent.
+    state.overlay_view = None;
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    assert_eq!(state.overlay_view, None);
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}

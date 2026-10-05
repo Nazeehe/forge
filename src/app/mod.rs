@@ -346,11 +346,11 @@ pub const DEFAULT_VISUAL_BUDGET_BYTES: usize = 48 * 1024 * 1024;
 #[cfg(feature = "visual")]
 pub const DEFAULT_VISUAL_BUDGET_COUNT: usize = 8;
 
-/// Overlay slot past the PTY tabs: Visual, Walkthrough. Agent
-/// sessions always carry exactly three PTY tabs, so absolute indices
-/// stay stable (3/4); other overlays are unreachable on single-tab
-/// shells by the same gate as the topbar.
-pub const OVERLAY_TABS: [&str; 2] = ["Visual", "Walkthrough"];
+/// Overlay slot past the PTY tabs: Visual, Walkthrough, Writer.
+/// Agent sessions always carry exactly three PTY tabs, so absolute
+/// indices stay stable (3/4/5); other overlays are unreachable on
+/// single-tab shells by the same gate as the topbar.
+pub const OVERLAY_TABS: [&str; 3] = ["Visual", "Walkthrough", "Writer"];
 
 /// Kanban selection: picked board (by id — names rename) plus the
 /// column cursor and the card cursor inside that column.

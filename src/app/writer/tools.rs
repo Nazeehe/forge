@@ -1,8 +1,6 @@
 //! Writer MCP tool handlers (S3): open/read/propose/answer plus line addressing.
 
 use super::*;
-use crate::writer::document::Document;
-use crate::writer::proposal::Proposals;
 
 impl AppState {
     /// Open or create a Markdown file under the session cwd. A different
@@ -18,32 +16,22 @@ impl AppState {
             .map(|rec| rec.cwd.clone())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let session = self.writers.entry(id).or_default();
-        if let Some(doc) = session.doc.as_ref() {
-            if doc.path_rel == path {
-                let rev = doc.revision;
-                return Ok(format!(
-                    r#"{{"opened":true,"path":{},"revision":{rev}}}"#,
-                    crate::ipc::mcp::escape_json(&path),
-                ));
+        let missing_editor = session.editor.is_none();
+        if session.doc.as_ref().is_some_and(|doc| doc.path_rel == path) {
+            let rev = session.doc.as_ref().expect("checked above").revision;
+            if missing_editor {
+                self.writer_open_editor(id);
             }
-            if doc.dirty {
-                return Err(format!(
-                    "unsaved document open: {} (save it before opening another)",
-                    doc.path_rel,
-                ));
-            }
+            return Ok(format!(
+                r#"{{"opened":true,"path":{},"revision":{rev}}}"#,
+                crate::ipc::mcp::escape_json(&path),
+            ));
         }
-        let doc = Document::open(&cwd, &path).map_err(|e| e.to_string())?;
-        let rev = doc.revision;
-        // A new document scope drops the old one's proposals, requests,
-        // thread, and selection; they addressed the previous text.
-        session.doc = Some(doc);
-        session.proposals = Proposals::default();
-        session.requests.clear();
-        session.thread.clear();
-        session.selection = None;
+        session.open_document_path(&cwd, &path)?;
         session.title = title;
+        let rev = session.doc.as_ref().expect("opened above").revision;
         self.dirty = true;
+        self.writer_open_editor(id);
         Ok(format!(
             r#"{{"opened":true,"path":{},"revision":{rev}}}"#,
             crate::ipc::mcp::escape_json(&path),

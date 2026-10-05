@@ -300,6 +300,15 @@ pub(super) fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
         }
         return;
     }
+    // A focused Writer tab owns main-area clicks the same way: pills
+    // fire, thread rows select, the editor takes cursor/drag/wheel,
+    // and nothing falls through to the agent pane behind the overlay.
+    // Chrome above (tabs, sidebar, session bar) already returned, so
+    // those clicks keep working. The tour arm above wins when both.
+    if state.writer_keys_active() {
+        super::writer::handle_writer_mouse(state, mev);
+        return;
+    }
     // Grid mode owns the main area: a left-click focuses the clicked
     // tile and the wheel scrolls the focused pane's scrollback. App
     // mouse protocols stay quiet here: tile coordinates don't map onto

@@ -50,7 +50,7 @@ impl AppState {
         // (no VS16, no ambiguous-width glyphs) and `Line::width`
         // measures the buttons exactly.
         if self.term_size.1 >= 100 {
-            for (tab, icon) in tabs.iter_mut().zip(["🤖", "💻", "🔀", "📷", "📖"]) {
+            for (tab, icon) in tabs.iter_mut().zip(["🤖", "💻", "🔀", "📷", "📖", "📝"]) {
                 tab.label = format!("{icon} {}", tab.label);
             }
         }
@@ -110,7 +110,7 @@ impl AppState {
                 }
                 if let Some((view_id, index)) = self.overlay_view {
                     if focused && view_id == id {
-                        let label = ["", "", "", "Visual", "Walkthrough"]
+                        let label = ["", "", "", "Visual", "Walkthrough", "Writer"]
                             .get(index).copied().unwrap_or("View");
                         if label == "Walkthrough" {
                             return self.walkthrough_view(id);
@@ -118,6 +118,18 @@ impl AppState {
                         #[cfg(feature = "visual")]
                         if label == "Visual" {
                             return self.visual_view(id, crate::visual::kitty_supported_env());
+                        }
+                        if label == "Writer" {
+                            // The Writer overlay paints itself directly
+                            // in the draw closure (live EdTUI widget);
+                            // the main area stays empty behind it.
+                            return crate::ui::PaneView {
+                                title: format!("{} · Writer", rec.name),
+                                lines: Vec::new(),
+                                live,
+                                focused: true,
+                                cursor: None,
+                            };
                         }
                         return crate::ui::PaneView {
                             title: format!("{} · {label}", rec.name),
@@ -550,7 +562,7 @@ mod tests {
             crate::infra::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
+        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough", "📝 Writer"]);
         assert!(state.select_top_tab(3));
         assert!(state.topbar().tabs[3].active);
         let view = state.views().into_iter().find(|v| v.focused).unwrap();
@@ -570,7 +582,7 @@ mod tests {
             crate::infra::ids::RunId::generate(), "codex",
         ).unwrap();
         let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
-        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough"]);
+        assert_eq!(labels, ["🤖 Codex", "💻 Terminal", "🔀 SCM", "📷 Visual", "📖 Walkthrough", "📝 Writer"]);
         assert!(state.manager.remove(id));
     }
 
@@ -614,9 +626,9 @@ mod tests {
             "agent", &std::env::temp_dir(), "exec cat",
             crate::infra::ids::RunId::generate(), "codex",
         ).unwrap();
-        assert_eq!(state.topbar().tabs.len(), 5);
+        assert_eq!(state.topbar().tabs.len(), 6);
         let bar = crate::ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 120, 30)).topbar;
-        assert_eq!(crate::ui::topbar::layout_topbar(bar, &state.topbar().tabs, false).len(), 5);
+        assert_eq!(crate::ui::topbar::layout_topbar(bar, &state.topbar().tabs, false).len(), 6);
         assert!(state.manager.remove(id));
     }
 

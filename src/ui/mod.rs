@@ -16,6 +16,7 @@ pub mod theme;
 pub mod topbar;
 pub mod visual;
 pub mod whichkey;
+pub mod writer;
 
 #[cfg(test)]
 mod test_support;

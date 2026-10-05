@@ -32,6 +32,9 @@ pub const MAX_READ_CHARS: usize = 64_000;
 /// In the slice every entry is a finished answer.
 pub const MAX_THREAD_ENTRIES: usize = 64;
 
+/// Most chat-box input chars; further typing is ignored (spec §6).
+pub const MAX_INPUT_CHARS: usize = 4_000;
+
 /// Most pending proposals per document; the next is refused (spec §4.4).
 pub const MAX_PENDING_PROPOSALS: usize = 16;
 

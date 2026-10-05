@@ -209,6 +209,14 @@ impl Proposals {
             .filter(|p| p.state == ProposalState::Pending)
             .count()
     }
+
+    /// Proposals still awaiting a decision, oldest first. The panel
+    /// renders these with their Accept/Reject pills.
+    pub fn pending(&self) -> impl Iterator<Item = &Proposal> {
+        self.items
+            .iter()
+            .filter(|p| p.state == ProposalState::Pending)
+    }
 }
 
 #[cfg(test)]
@@ -460,5 +468,16 @@ mod tests {
             p.reject(77).unwrap_err(),
             WriterError::UnknownProposal(77)
         );
+    }
+
+    #[test]
+    fn pending_lists_only_undecided_oldest_first() {
+        let d = doc("aaaa bbbb");
+        let mut p = Proposals::default();
+        let first = p.propose(&d, None, 0..4, "A".to_string(), None).unwrap();
+        let second = p.propose(&d, None, 5..9, "B".to_string(), None).unwrap();
+        p.reject(first).unwrap();
+        let ids: Vec<u64> = p.pending().map(|proposal| proposal.id).collect();
+        assert_eq!(ids, vec![second]);
     }
 }

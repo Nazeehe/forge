@@ -69,6 +69,7 @@ pub static PREFIX_BINDINGS: &[PrefixBinding] = &[
     PrefixBinding { label: "x", desc: "Terminate session", group: "Session", invokes: PrefixInvoke::Command('x', UserCommand::TerminateSession) },
     PrefixBinding { label: "g", desc: "Manage groups", group: "Groups", invokes: PrefixInvoke::Command('g', UserCommand::ManageGroups) },
     PrefixBinding { label: "t", desc: "Switch tab", group: "View", invokes: PrefixInvoke::Command('t', UserCommand::SwitchTab) },
+    PrefixBinding { label: "d", desc: "Writer document", group: "View", invokes: PrefixInvoke::Command('d', UserCommand::OpenWriter) },
     PrefixBinding { label: "w", desc: "Toggle grid", group: "View", invokes: PrefixInvoke::Command('w', UserCommand::ToggleGrid) },
     PrefixBinding { label: "b", desc: "Kanban board", group: "View", invokes: PrefixInvoke::Command('b', UserCommand::ToggleBoard) },
     PrefixBinding { label: "r", desc: "Tetris game", group: "View", invokes: PrefixInvoke::Command('r', UserCommand::ToggleTetris) },
@@ -99,6 +100,9 @@ pub enum UserCommand {
     /// Cycle the active session's visible tab (agent <-> terminal).
     /// No-op for single-tab shell sessions.
     SwitchTab,
+    /// Open the active session's Writer overlay tab, creating the
+    /// empty state when no document is open yet.
+    OpenWriter,
     /// Toggle the permission mode Off <-> Yolo (sidebar buttons set each
     /// directly with the mouse).
     TogglePermissionMode,
