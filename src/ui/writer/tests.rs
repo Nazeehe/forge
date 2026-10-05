@@ -462,7 +462,7 @@
         ];
         let buf = paint_empty_to(&session, 120, 30);
         let text = buffer_text(&buf);
-        assert!(text.contains("New document — path:"), "prompt head");
+        assert!(text.contains("New document in /s/"), "prompt head with cwd");
         assert!(text.contains("notes/d"), "typed prefix");
         assert!(text.contains("notes/demo.md"), "first suggestion");
         assert!(text.contains("notes/design.md"), "second suggestion");
@@ -494,6 +494,55 @@
         assert!(row.contains("b.md exists:"), "message: {row:?}");
         assert!(row.contains("*Overwrite"), "default first action: {row:?}");
         assert!(row.contains("Cancel"), "cancel: {row:?}");
+    }
+
+    #[test]
+    fn tip_sits_in_a_fixed_slot_with_zero_or_eight_recents() {
+        use std::time::SystemTime;
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let tip_y = layout.body.y + layout.body.height - 1;
+        // Zero recents: the Tip still sits on the body bottom row.
+        let bare = paint_empty_to(&WriterSession::default(), 120, 30);
+        let row = row_text(&bare, tip_y, layout.body.x, layout.body.x + 40);
+        assert!(row.contains("Tip"), "fixed slot when empty: {row:?}");
+        // Eight recents: the same row, not shoved down.
+        let mut session = WriterSession::default();
+        session.recent_cache = (0..8)
+            .map(|i| crate::writer::recent::RecentEntry {
+                rel: format!("f{i}.md"),
+                mtime: SystemTime::now(),
+                opened_this_run: false,
+            })
+            .collect();
+        let full = paint_empty_to(&session, 120, 30);
+        let row = row_text(&full, tip_y, layout.body.x, layout.body.x + 40);
+        assert!(row.contains("Tip"), "fixed slot when full: {row:?}");
+        // And the last recent row sits exactly one row above it.
+        let above = row_text(&full, tip_y - 1, layout.body.x, layout.body.x + 40);
+        assert!(above.contains("f7.md"), "eight rows fit above: {above:?}");
+    }
+
+    #[test]
+    fn prompt_head_names_the_session_folder() {
+        let mut session = WriterSession::default();
+        session.recent_cwd = Some(std::path::PathBuf::from("/s"));
+        session.open_prompt = Some(crate::app::writer::WriterOpenPrompt {
+            buffer: String::new(),
+            kind: crate::app::writer::PromptKind::New,
+        });
+        let buf = paint_empty_to(&session, 120, 30);
+        assert!(
+            buffer_text(&buf).contains("New document in /s/"),
+            "cwd in the head"
+        );
+        // Overlong folders middle-ellipsize instead of clipping.
+        let long = format!("/{}", "deep/".repeat(30));
+        session.recent_cwd = Some(std::path::PathBuf::from(&long));
+        let buf = paint_empty_to(&session, 120, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("New document in"), "head survives");
+        assert!(text.contains("…"), "ellipsis marks the cut");
+        assert!(!text.contains(&long), "the middle is what goes");
     }
 
     #[test]

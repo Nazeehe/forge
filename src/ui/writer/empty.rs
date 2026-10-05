@@ -60,18 +60,20 @@ pub fn paint_empty(
     paint_separator(f, col, layout.body.y);
     paint_header(f, x0, width, layout.body.y.saturating_add(2), session);
     let mut cursor = None;
-    let mut next = layout.body.y.saturating_add(PROMPT_ORIGIN_OFF);
+    let block_y = layout.body.y.saturating_add(PROMPT_ORIGIN_OFF);
     if let Some(prompt) = session.open_prompt.as_ref() {
-        let (after, pos) = paint_prompt_block(f, x0, width, next, session, prompt);
+        let (_, pos) = paint_prompt_block(f, x0, width, block_y, session, prompt);
         cursor = pos;
-        next = after;
     } else {
-        next = paint_start(f, x0, width, next);
+        let after_start = paint_start(f, x0, width, block_y);
         // Rows 0..9 above plus the Tip below: what remains fits rows.
         let room = layout.body.height.saturating_sub(11) as usize;
-        next = paint_recent(f, x0, width, next, session, room);
+        paint_recent(f, x0, width, after_start, session, room);
     }
-    paint_tip(f, x0, width, next);
+    // The Tip owns the last body row whatever the content above
+    // holds (0 or 8 recents, prompt or Start): conditional rows never
+    // shove the chrome around.
+    paint_tip(f, x0, width, layout.body.y.saturating_add(layout.body.height).saturating_sub(1));
     paint_empty_hints(f, layout.status);
     if session.panel_visible {
         paint_panel(f, layout.panel, session, "");
@@ -227,6 +229,13 @@ fn paint_empty_hints(f: &mut Frame, status: Rect) {
     );
 }
 
+/// Session folder for the prompt head, middle-ellipsized to fit.
+fn folder_display(cwd: &std::path::Path, width: u16) -> String {
+    let text = cwd.to_string_lossy();
+    // Room for the head verb plus the trailing slash.
+    ellipsize_middle(&text, (width as usize).saturating_sub(18).max(4))
+}
+
 /// Path prompt block replacing Start: head, `> ` input, up to 4
 /// clickable suggestions, submit + Cancel, hint row. Shared with the
 /// document-state overlay. Returns the next free row plus the input
@@ -239,10 +248,16 @@ pub(super) fn paint_prompt_block(
     session: &WriterSession,
     prompt: &WriterOpenPrompt,
 ) -> (u16, Option<ratatui::layout::Position>) {
-    let head = match prompt.kind {
-        PromptKind::New => "New document — path:",
-        PromptKind::Open => "Open document — path:",
-        PromptKind::SaveAs => "Save as — path:",
+    // The head names the session folder (wireframe §7.0.2); the
+    // folder comes from the last recent refresh, which always runs
+    // before the prompt can open. Unset only in unit-built sessions.
+    let head = match (&prompt.kind, session.recent_cwd.as_ref()) {
+        (PromptKind::New, Some(cwd)) => format!("New document in {}/", folder_display(cwd, width)),
+        (PromptKind::Open, Some(cwd)) => format!("Open document in {}/", folder_display(cwd, width)),
+        (PromptKind::SaveAs, Some(cwd)) => format!("Save as in {}/", folder_display(cwd, width)),
+        (PromptKind::New, None) => "New document — path:".to_string(),
+        (PromptKind::Open, None) => "Open document — path:".to_string(),
+        (PromptKind::SaveAs, None) => "Save as — path:".to_string(),
     };
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(head.to_string(), style(Role::Muted))])),

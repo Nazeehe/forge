@@ -15,12 +15,12 @@ use crate::app::writer::{MAX_PATH_CHARS, WriterFocus, WriterOpenPrompt};
 use crate::app::AppState;
 use edtui::{
     actions::{DeleteSelection, InsertChar, SwitchMode},
-    EditorEventHandler, EditorMode, EditorState, Lines,
+    EditorMode, EditorState, Lines,
 };
 
 impl AppState {
-    /// (Re)create the editor from the open document: emacs map with
-    /// Insert mode at open, Forge clipboard from the start.
+    /// (Re)create the editor from the open document: the CUA
+    /// register with Insert mode at open, Forge clipboard from the start.
     /// `pub(crate)`: test seam for the TUI input layer, which never
     /// opens editors itself (agents do, through `writer_open`).
     pub(crate) fn writer_open_editor(&mut self, id: crate::session::SessionId) {
@@ -45,14 +45,14 @@ impl AppState {
     /// adapter-owned on top of char offsets, because EdTUI's char
     /// motions stop at line ends and can never cross `\n`, its word
     /// jumps stop at word ends (vim-style, not CUA starts), its page
-    /// keys move only the viewport, and several CUA keys have no
-    /// emacs-map binding at all. Everything else is forwarded as-is.
+    /// keys move only the viewport, and the CUA register binds text
+    /// entry only. Everything else is forwarded as-is.
     pub fn writer_feed_key(&mut self, id: crate::session::SessionId, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
         // Esc always returns the editor to the known-good state: no
         // selection, Insert mode. EdTUI would park in vim Normal
-        // (its emacs map, mouse Down while Visual, all strand there)
-        // with nothing ever returning, so the adapter owns this.
+        // (mouse Down while Visual strands there) with nothing ever
+        // returning, so the adapter owns this.
         if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::empty() {
             if let Some(session) = self.writers.get_mut(&id) {
                 if let Some(editor) = session.editor.as_mut() {
@@ -65,6 +65,32 @@ impl AppState {
             self.writer_sync_editor(id);
             self.dirty = true;
             return;
+        }
+        // CUA text ops, above navigation: Tab indents, Ctrl+A selects,
+        // Ctrl+Backspace/Delete kill words. They need adapter
+        // selection/offset state, so they never reach the register.
+        match (key.code, key.modifiers) {
+            (KeyCode::Tab, KeyModifiers::NONE) => {
+                self.writer_indent(id);
+                return;
+            }
+            (KeyCode::Tab, KeyModifiers::SHIFT) => {
+                self.writer_outdent(id);
+                return;
+            }
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
+                self.writer_select_all(id);
+                return;
+            }
+            (KeyCode::Backspace, KeyModifiers::CONTROL) => {
+                self.writer_delete_word(id, true);
+                return;
+            }
+            (KeyCode::Delete, KeyModifiers::CONTROL) => {
+                self.writer_delete_word(id, false);
+                return;
+            }
+            _ => {}
         }
         let shift = KeyModifiers::SHIFT;
         let shift_ctrl = KeyModifiers::SHIFT | KeyModifiers::CONTROL;
@@ -105,10 +131,9 @@ impl AppState {
             };
             // Any other key ends the keyboard-selection gesture. A
             // live selection with a text-producing key replaces it
-            // first (CUA): EdTUI's emacs map has no Visual-char
-            // behavior we can rely on, so the adapter deletes, then
-            // forwards the key for the normal insert. (Two undo
-            // steps for now; E6 groups them.)
+            // first (CUA): the register has no Visual-char behavior,
+            // so the adapter deletes, then forwards the key for the
+            // normal insert. (Two undo steps for now; E6 groups them.)
             session.sel_anchor = None;
             session.nav_goal = None;
             if editor.selection.is_some()
@@ -124,7 +149,21 @@ impl AppState {
                 editor.execute(DeleteSelection);
                 editor.mode = EditorMode::Insert;
             }
-            let mut handler = EditorEventHandler::emacs_mode();
+            // Only convertible codes reach the register: EdTUI's
+            // crossterm conversion panics on the rest (F-keys, media,
+            // …), so anything else dies here after ending the gesture.
+            if !matches!(
+                key.code,
+                KeyCode::Char(_)
+                    | KeyCode::Enter
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+            ) {
+                self.writer_sync_editor(id);
+                self.dirty = true;
+                return;
+            }
+            let mut handler = super::cua::cua_handler();
             handler.on_event(crossterm::event::Event::Key(key), editor);
         } else {
             let Some(session) = self.writers.get_mut(&id) else {
@@ -234,7 +273,7 @@ impl AppState {
         let Some(editor) = session.editor.as_mut() else {
             return;
         };
-        let handler = EditorEventHandler::emacs_mode();
+        let handler = super::cua::cua_handler();
         handler.on_mouse_event(mouse, editor);
         // Clicks and clean releases land back in Insert: EdTUI parks
         // Down in vim Normal while a Visual selection is live, and
@@ -260,7 +299,7 @@ impl AppState {
     /// Diff the buffer against the document and apply the change.
     /// The document stays the single source of truth; proposals hear
     /// about every edit exactly once, whether typed or accepted.
-    fn writer_sync_editor(&mut self, id: crate::session::SessionId) {
+    pub(super) fn writer_sync_editor(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;
         };

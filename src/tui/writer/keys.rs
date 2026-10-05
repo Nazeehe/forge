@@ -86,8 +86,25 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
         state.writer_rephrase(id);
         return;
     }
-    if key.code == KeyCode::Tab {
+    // The Assistant toggle rides beside Rephrase: Alt+A is free in
+    // the CUA register and outside the Forge prefix.
+    if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('a') {
+        state.writer_toggle_assistant(id);
+        return;
+    }
+    // F6 owns focus cycling (Editor → Chat → Thread) now that Tab
+    // indents. The prompt keeps its own keys above.
+    if key.code == KeyCode::F(6) {
         state.writer_cycle_focus(id);
+        return;
+    }
+    // Tab indents in the editor (Shift+Tab outdents) and is ignored
+    // everywhere else: Tab never focus-cycles. The prompt keeps its
+    // own Tab (completion) above.
+    if key.code == KeyCode::Tab {
+        if focus == Some(crate::app::writer::WriterFocus::Editor) {
+            state.writer_feed_key(id, key);
+        }
         return;
     }
     match focus {

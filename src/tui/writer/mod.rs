@@ -10,6 +10,8 @@
 pub mod keys;
 pub mod mouse;
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use keys::handle_writer_key;

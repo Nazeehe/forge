@@ -35,7 +35,7 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// Start of the next word run at or after `cursor`, else the doc end.
-fn word_right(chars: &[char], cursor: usize) -> usize {
+pub(super) fn word_right(chars: &[char], cursor: usize) -> usize {
     let total = chars.len();
     let mut i = cursor.min(total);
     while i < total && is_word_char(chars[i]) {
@@ -49,7 +49,7 @@ fn word_right(chars: &[char], cursor: usize) -> usize {
 
 /// Start of the word run before `cursor` (or the run holding it),
 /// else 0.
-fn word_left(chars: &[char], cursor: usize) -> usize {
+pub(super) fn word_left(chars: &[char], cursor: usize) -> usize {
     let mut i = cursor.min(chars.len());
     while i > 0 && !is_word_char(chars[i - 1]) {
         i -= 1;

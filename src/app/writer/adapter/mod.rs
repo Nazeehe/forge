@@ -10,6 +10,7 @@
 use edtui::{clipboard::ClipboardTrait, EditorState, Index2, Lines};
 
 pub mod accept;
+pub mod cua;
 pub mod keys;
 pub mod nav;
 pub mod requests;
