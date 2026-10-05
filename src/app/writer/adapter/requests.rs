@@ -1,10 +1,74 @@
 //! Adapter request plumbing: Rephrase/chat request building over
 //! live text, the bounded per-session queue, and the settle-path
-//! flush under the same gate as comms.
+//! flush under the same gate as comms. Also the recent-documents
+//! bookkeeping (opened-this-run list plus the cached scan).
 
 use super::{editor_selection_to_range, index2_to_offset, MAX_WRITER_QUEUE};
 use crate::app::AppState;
 use crate::writer::request::WriterAction;
+
+/// Session working folder; "." when the record is gone.
+pub(super) fn writer_cwd(state: &AppState, id: crate::session::SessionId) -> std::path::PathBuf {
+    state
+        .manager
+        .get(id)
+        .map(|rec| rec.cwd.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+impl AppState {
+    /// Remember `abs` as opened this run (most-recent first, deduped,
+    /// capped) and refresh the recent cache so the list shows it now.
+    /// `pub(crate)`: the agent tool path in `tools.rs` shares it.
+    pub(crate) fn writer_note_opened(
+        &mut self,
+        id: crate::session::SessionId,
+        abs: std::path::PathBuf,
+    ) {
+        if let Some(sess) = self.writers.get_mut(&id) {
+            sess.opened.retain(|p| p != &abs);
+            sess.opened.insert(0, abs);
+            while sess.opened.len() > super::MAX_OPENED_THIS_RUN {
+                sess.opened.pop();
+            }
+        }
+        self.writer_refresh_recent(id);
+    }
+
+    /// Re-scan the session folder and rebuild the recent cache:
+    /// opened-this-run first, then the bounded mtime walk. Newest
+    /// scans reset the selection when it points outside the list.
+    /// A live doc with no file on disk yet (New, not yet saved) has
+    /// no disk mtime, so the scan drops it; it heads the cache
+    /// anyway, stamped now, since it IS open this run.
+    pub(crate) fn writer_refresh_recent(&mut self, id: crate::session::SessionId) {
+        let cwd = writer_cwd(self, id);
+        let Some(sess) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let mut cache = crate::writer::recent::scan(&cwd, &sess.opened);
+        let live_abs = sess.doc.as_ref().map(|d| d.abs_path.clone());
+        if let Some(abs) = live_abs {
+            let listed = cache.iter().any(|e| cwd.join(&e.rel) == abs);
+            if !listed {
+                if let Ok(rel) = abs.strip_prefix(&cwd) {
+                    cache.insert(
+                        0,
+                        crate::writer::recent::RecentEntry {
+                            rel: rel.to_string_lossy().into_owned(),
+                            mtime: std::time::SystemTime::now(),
+                            opened_this_run: true,
+                        },
+                    );
+                }
+            }
+        }
+        sess.recent_cache = cache;
+        sess.recent_cwd = Some(cwd);
+        let len = sess.recent_cache.len();
+        sess.recent_sel = sess.recent_sel.min(len.saturating_sub(1));
+    }
+}
 
 impl AppState {
     /// Rephrase the live selection, or the paragraph under the cursor.

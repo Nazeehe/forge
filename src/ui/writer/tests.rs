@@ -1,5 +1,5 @@
+    use super::empty::paint_empty;
     use super::*;
-    use super::editor::paint_empty;
     use crate::app::writer::WriterSession;
     use ratatui::layout::Rect;
     use ratatui::{backend::TestBackend, Terminal};
@@ -12,7 +12,7 @@
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal
             .draw(|f| {
-                paint_empty(f, f.area(), session);
+                paint_empty(f, f.area(), session, w);
             })
             .unwrap();
         terminal.backend().buffer().clone()
@@ -70,7 +70,7 @@
         assert!(text.contains("Idle"), "agent activity word");
         assert!(!text.contains("unsaved"), "clean doc hides it");
         assert!(text.contains("Rephrase"), "action row");
-        assert!(text.contains("Save"), "action row");
+        assert!(text.contains("Save as"), "toolbar Save-as");
         assert!(text.contains("no selection"), "chat chip");
         assert!(text.contains("proposals and answers land here"), "panel placeholder");
     }
@@ -239,7 +239,10 @@
         // helper, mirroring the topbar/dialog pills.
         let buf = paint_empty_to(&WriterSession::default(), 120, 30);
         let layout = writer_layout(Rect::new(0, 0, 120, 30), true);
-        let (_, open_rect) = empty_pill_rects(layout.body);
+        let open_rect = super::start_open_rect(
+            layout.body.x + super::EMPTY_INDENT,
+            layout.body.y + 7,
+        );
         assert!(open_rect.height > 0, "open pill paints");
         let left_cap = buf[(open_rect.x, open_rect.y)].fg;
         let right_cap =
@@ -254,7 +257,7 @@
         let mut session = WriterSession::default();
         session.open_prompt = Some(crate::app::writer::WriterOpenPrompt {
             buffer: "zz9".to_string(),
-            create: false,
+            kind: crate::app::writer::PromptKind::Open,
         });
         let buf = paint_empty_to(&session, 120, 30);
         let text: String = buf
@@ -264,6 +267,265 @@
             .collect();
         assert!(text.contains("Open document — path:"), "prompt title");
         assert!(text.contains("zz9"), "buffer text");
+    }
+
+    #[test]
+    fn toolbar_geometry_pinned_at_100_and_200() {
+        use super::layout::{toolbar_narrow, toolbar_pill_rects, ToolbarButton};
+        for width in [100u16, 200u16] {
+            assert!(!toolbar_narrow(width), "full set at {width}");
+            let layout = writer_layout(Rect::new(0, 0, width, 30), false);
+            let session = WriterSession::default();
+            let rects = toolbar_pill_rects(layout.title, false, &session);
+            let buttons: Vec<ToolbarButton> = rects.iter().map(|(_, b)| *b).collect();
+            assert_eq!(
+                buttons,
+                vec![
+                    ToolbarButton::New,
+                    ToolbarButton::Open,
+                    ToolbarButton::Save,
+                    ToolbarButton::SaveAs,
+                    ToolbarButton::Close,
+                    ToolbarButton::Preview,
+                    ToolbarButton::Assistant,
+                ],
+                "order at {width}"
+            );
+            // Left-aligned from the row edge with 1-cell gaps and the
+            // `│` separator between Close and Preview.
+            let mut x = layout.title.x;
+            for (rect, _) in rects.iter().take(5) {
+                assert_eq!(rect.x, x, "pill x at {width}");
+                assert_eq!(rect.y, layout.title.y);
+                x += rect.width + 1;
+            }
+            // Separator occupies one cell with a gap on each side.
+            assert_eq!(rects[5].0.x, x + 2, "preview past the separator at {width}");
+        }
+    }
+
+    #[test]
+    fn toolbar_narrow_collapses_to_more_with_menu_below() {
+        use super::layout::{toolbar_narrow, toolbar_pill_rects, ToolbarButton};
+        assert!(toolbar_narrow(80), "narrow below 100 cols");
+        let layout = writer_layout(Rect::new(0, 0, 80, 30), false);
+        let session = WriterSession::default();
+        let rects = toolbar_pill_rects(layout.title, true, &session);
+        let buttons: Vec<ToolbarButton> = rects.iter().map(|(_, b)| *b).collect();
+        assert_eq!(
+            buttons,
+            vec![
+                ToolbarButton::New,
+                ToolbarButton::Open,
+                ToolbarButton::Save,
+                ToolbarButton::Close,
+                ToolbarButton::More,
+            ],
+            "short set plus More"
+        );
+        let (more_rect, _) = rects.last().copied().unwrap();
+        let menu = super::layout::more_menu_rect(more_rect);
+        assert_eq!(menu.x, more_rect.x, "menu under the More pill");
+        assert_eq!(menu.y, layout.title.y + 1);
+        assert_eq!(menu.height, 3, "Save as, Preview, Assistant");
+    }
+
+    #[test]
+    fn confirm_pills_pin_after_the_message() {
+        use super::layout::{confirm_label, confirm_pill_rects, pill_width};
+        use crate::app::writer::ConfirmAction;
+        let slot = Rect::new(3, 28, 114, 1);
+        let actions = vec![ConfirmAction::Overwrite("/x/b.md".into()), ConfirmAction::Cancel];
+        let rects = confirm_pill_rects(slot, "b.md exists:", &actions);
+        assert_eq!(rects.len(), 2);
+        let msg_w = "b.md exists:".chars().count() as u16;
+        assert_eq!(rects[0].x, slot.x + msg_w + 2, "two cells past the message");
+        assert_eq!(rects[0].width, pill_width(confirm_label(&actions[0]), true));
+        assert_eq!(
+            rects[1].x,
+            rects[0].x + rects[0].width + 2,
+            "two-cell gap between pills"
+        );
+        assert_eq!(rects[1].width, pill_width(confirm_label(&actions[1]), false));
+    }
+
+    #[test]
+    fn empty_variant_a_body_rows() {
+        let session = WriterSession::default();
+        let buf = paint_empty_to(&session, 120, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("📝"), "header mark");
+        assert!(text.contains("Writer"), "header");
+        assert!(text.contains("Markdown editor"), "subhead");
+        assert!(text.contains("Start"), "start block");
+        assert!(text.contains("*New document"), "new pill keeps its default mark");
+        assert!(text.contains("Ctrl+N"), "new key twin");
+        assert!(text.contains("Open…"), "open pill");
+        assert!(text.contains("Ctrl+O"), "open key twin");
+        assert!(text.contains("Recent"), "recent block");
+        assert!(text.contains("No Markdown files found"), "empty recent slot");
+        assert!(text.contains("Tip"), "tip line");
+        assert!(text.contains("agent can open a document"), "tip text");
+        assert!(text.contains("F6 focus"), "long hint row");
+        // Toolbar row 1 in the empty state too, with visible disableds.
+        assert!(text.contains("New"), "toolbar new");
+        assert!(text.contains("░Save░"), "toolbar save disabled, never color alone");
+        assert!(text.contains("░Preview░"), "preview disabled until E8");
+    }
+
+    #[test]
+    fn toolbar_shows_pressed_assistant_while_open() {
+        let mut session = WriterSession::default();
+        session.panel_visible = true;
+        let buf = paint_empty_to(&session, 120, 30);
+        assert!(buffer_text(&buf).contains("*Assistant"), "pressed marker");
+        let shut = paint_empty_to(&WriterSession::default(), 120, 30);
+        assert!(buffer_text(&shut).contains("Assistant"), "rest state");
+        assert!(!buffer_text(&shut).contains("*Assistant"), "no pressed mark");
+    }
+
+    #[test]
+    fn doc_title_row_shows_toolbar_and_filename() {
+        let mut session = doc_session("aaa bbb");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let row = row_text(&buf, layout.title.y, layout.title.x, layout.title.x + layout.title.width);
+        assert!(row.contains("New"), "toolbar in the title row: {row:?}");
+        assert!(row.contains("Open"), "toolbar open: {row:?}");
+        assert!(row.contains("░Preview░"), "preview disabled: {row:?}");
+        assert!(row.contains("d.md"), "file name in the title row: {row:?}");
+        assert!(row.find("d.md").unwrap() > row.find("New").unwrap(), "name trails the pills");
+        session.doc.as_mut().unwrap().dirty = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let row = row_text(&buf, layout.title.y, layout.title.x, layout.title.x + layout.title.width);
+        assert!(row.contains("●"), "dirty dot: {row:?}");
+    }
+
+    #[test]
+    fn recent_rows_show_selection_marker_and_ages() {
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::now();
+        let mut session = WriterSession::default();
+        session.recent_cwd = Some(std::path::PathBuf::from("/s"));
+        session.recent_cache = vec![
+            crate::writer::recent::RecentEntry {
+                rel: "a.md".to_string(),
+                mtime: now - Duration::from_secs(720),
+                opened_this_run: true,
+            },
+            crate::writer::recent::RecentEntry {
+                rel: "old/b.md".to_string(),
+                mtime: now - Duration::from_secs(3 * 24 * 3600),
+                opened_this_run: false,
+            },
+        ];
+        session.recent_sel = 1;
+        let buf = paint_empty_to(&session, 120, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("a.md"), "first row");
+        assert!(text.contains("12 min ago"), "relative age");
+        assert!(text.contains("3 days ago"), "older age");
+        assert!(text.find("a.md").unwrap() < text.find("old/b.md").unwrap(), "opened first");
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        // Selected row carries the ▸ marker; the other row does not.
+        let sel_row = row_text(&buf, layout.body.y + 11, layout.body.x, layout.body.x + 30);
+        assert!(sel_row.contains("▸"), "marker on the selected row: {sel_row:?}");
+        let first_row = row_text(&buf, layout.body.y + 10, layout.body.x, layout.body.x + 30);
+        assert!(!first_row.contains("▸"), "no marker elsewhere: {first_row:?}");
+    }
+
+    #[test]
+    fn prompt_block_replaces_start_with_suggestions_and_buttons() {
+        use std::time::SystemTime;
+        let mut session = WriterSession::default();
+        session.recent_cwd = Some(std::path::PathBuf::from("/s"));
+        session.open_prompt = Some(crate::app::writer::WriterOpenPrompt {
+            buffer: "notes/d".to_string(),
+            kind: crate::app::writer::PromptKind::New,
+        });
+        session.recent_cache = vec![
+            crate::writer::recent::RecentEntry {
+                rel: "notes/demo.md".to_string(),
+                mtime: SystemTime::now(),
+                opened_this_run: false,
+            },
+            crate::writer::recent::RecentEntry {
+                rel: "notes/design.md".to_string(),
+                mtime: SystemTime::now(),
+                opened_this_run: false,
+            },
+            crate::writer::recent::RecentEntry {
+                rel: "other.md".to_string(),
+                mtime: SystemTime::now(),
+                opened_this_run: false,
+            },
+        ];
+        let buf = paint_empty_to(&session, 120, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("New document — path:"), "prompt head");
+        assert!(text.contains("notes/d"), "typed prefix");
+        assert!(text.contains("notes/demo.md"), "first suggestion");
+        assert!(text.contains("notes/design.md"), "second suggestion");
+        assert!(!text.contains("Start"), "start block replaced");
+        assert!(text.contains("*Create"), "default create pill");
+        assert!(text.contains("Cancel"), "cancel pill");
+        assert!(text.contains("Tab completes"), "completion hint");
+    }
+
+    #[test]
+    fn confirm_paints_message_and_default_pills_in_the_slot() {
+        use crate::app::writer::{ConfirmAction, PendingConfirm};
+        let mut session = WriterSession::default();
+        session.pending_confirm = Some(PendingConfirm {
+            message: "b.md exists:".to_string(),
+            actions: vec![
+                ConfirmAction::Overwrite("/s/b.md".into()),
+                ConfirmAction::Cancel,
+            ],
+        });
+        let buf = paint_empty_to(&session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let row = row_text(
+            &buf,
+            layout.error.y,
+            layout.error.x,
+            layout.error.x + layout.error.width,
+        );
+        assert!(row.contains("b.md exists:"), "message: {row:?}");
+        assert!(row.contains("*Overwrite"), "default first action: {row:?}");
+        assert!(row.contains("Cancel"), "cancel: {row:?}");
+    }
+
+    #[test]
+    fn saveas_prompt_overlays_the_doc_editor() {
+        let mut session = doc_session("aaa bbb");
+        session.open_prompt = Some(crate::app::writer::WriterOpenPrompt {
+            buffer: "c.md".to_string(),
+            kind: crate::app::writer::PromptKind::SaveAs,
+        });
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Save as — path:"), "prompt head over the editor");
+        assert!(text.contains("c.md"), "typed target");
+        assert!(text.contains("aaa bbb"), "editor still paints below");
+    }
+
+    #[test]
+    fn action_row_holds_only_rephrase_beside_the_toolbar_save() {
+        let mut session = doc_session("aaa");
+        session.doc.as_mut().unwrap().dirty = true;
+        session.panel_visible = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let text = buffer_text(&buf);
+        assert!(text.contains("Rephrase"), "AI action stays");
+        // The toolbar carries the only Save pill now (dirty: enabled).
+        // Pin the action row cells: Rephrase paints there, Save does not.
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), true);
+        let action_row = row_text(&buf, layout.action.y, layout.action.x, layout.action.x + 30);
+        assert!(action_row.contains("Rephrase"), "action row: {action_row:?}");
+        assert!(!action_row.contains("Save"), "no bottom Save: {action_row:?}");
+        let hidden = paint_doc_to(&mut doc_session("aaa"), 120, 30);
+        assert!(!buffer_text(&hidden).contains("Rephrase"), "row hides with the panel");
     }
 
     #[test]

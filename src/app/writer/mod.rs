@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::writer::document::Document;
+use std::path::PathBuf;
 use crate::writer::proposal::Proposals;
 use crate::writer::request::WriterAction;
 
@@ -58,13 +59,47 @@ pub enum WriterFocus {
     Thread,
 }
 
-/// The empty-state path prompt: typed path plus which pill opened it.
+/// Which job the path prompt does: New and SaveAs create, Open opens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PromptKind {
+    New,
+    #[default]
+    Open,
+    SaveAs,
+}
+
+/// The path prompt: typed path plus its job. Replaces the Start
+/// block while open; the toolbar and hint row stay.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WriterOpenPrompt {
     pub buffer: String,
-    /// True from `(*New document)`, false from `(Open…)`; both submit
-    /// through `writer_open`, only the prompt title differs.
-    pub create: bool,
+    pub kind: PromptKind,
+}
+
+/// One actionable error-slot row: a message plus clickable pills.
+/// Also used for confirmations (overwrite, unsaved close).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingConfirm {
+    pub message: String,
+    pub actions: Vec<ConfirmAction>,
+}
+
+/// Error-slot pills: each fires its completion on click; Esc or
+/// Cancel clears the row. Paths are absolute session-cwd joins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfirmAction {
+    /// Save-as target exists: write it anyway.
+    Overwrite(PathBuf),
+    /// Unsaved close: save (conflicts abort the close), then close.
+    SaveAndClose,
+    /// Unsaved close: close without saving.
+    DiscardClose,
+    /// Drop the row, stay where you are.
+    Cancel,
+    /// New collided: open the existing file instead.
+    OpenInstead(PathBuf),
+    /// Open missed: create the file instead.
+    CreateInstead(PathBuf),
 }
 
 /// Per-session Writer state: the open document plus everything about it.
@@ -122,6 +157,20 @@ pub struct WriterSession {
     /// Hiding returns focus to the editor (the chat box lives in
     /// the panel, so keys must land somewhere visible).
     pub panel_visible: bool,
+    /// Files opened in Writer this run (absolute, most-recent-first,
+    /// capped): heads the recent list ahead of the directory scan.
+    pub opened: Vec<std::path::PathBuf>,
+    /// Cached recent rows plus the cwd they were scanned under.
+    /// Refreshes when the tab opens or the cwd changes, never per
+    /// frame; prompt opens and Save-as also refresh.
+    pub recent_cache: Vec<crate::writer::recent::RecentEntry>,
+    pub recent_cwd: Option<std::path::PathBuf>,
+    /// Keyboard selection into the cached recent rows.
+    pub recent_sel: usize,
+    /// Narrow-terminal toolbar "More" menu open.
+    pub more_open: bool,
+    /// Actionable error-slot row, if any (confirm or offered fix).
+    pub pending_confirm: Option<PendingConfirm>,
 }
 
 /// Most finished requests kept; oldest evicted. Open requests and
@@ -280,6 +329,7 @@ impl AppState {
             // The entry exists from here on: even the empty state
             // paints and takes keys through it.
             self.writers.entry(active).or_default();
+            self.writer_refresh_recent(active);
             self.overlay_view = Some((active, slot));
             self.dirty = true;
         }

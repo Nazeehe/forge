@@ -11,7 +11,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::editor::row_of;
-use super::layout::{action_pill_rects, pill_spans};
+use super::layout::pill_spans;
 use crate::app::writer::{WriterFocus, WriterSession};
 use crate::ui::theme::{style, Role};
 
@@ -262,21 +262,6 @@ fn line_start(text: &str, offset: usize) -> usize {
         }
     }
     start
-}
-
-/// Action row: `(Rephrase)` carries the emphasis, `(Save)` rests.
-pub(super) fn paint_actions(f: &mut Frame, area: Rect) {
-    let (rephrase, save) = action_pill_rects(area);
-    f.render_widget(
-        Paragraph::new(Line::from(pill_spans("Rephrase", true, false))),
-        rephrase,
-    );
-    if save.x < area.x.saturating_add(area.width) {
-        f.render_widget(
-            Paragraph::new(Line::from(pill_spans("Save", false, false))),
-            save,
-        );
-    }
 }
 
 /// One row of pills separated by two spaces.

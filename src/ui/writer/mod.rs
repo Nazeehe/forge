@@ -6,11 +6,19 @@
 //! surrounding content around.
 
 pub mod editor;
+pub mod empty;
 pub mod layout;
 pub mod thread;
+pub mod toolbar;
 #[cfg(test)]
 mod tests;
 
 pub use editor::paint;
-pub use layout::{action_pill_rects, chip_detach_rect, empty_pill_rects, panel_collapsed, pill_width, writer_layout, WriterLayout};
+pub use layout::{
+    action_pill_rect, chip_detach_rect, confirm_pill_rects, more_menu_item_rects, more_menu_rect,
+    panel_collapsed, pill_width, prompt_button_rects, prompt_sugg_rect, prompt_suggestions,
+    recent_window, start_new_rect, start_open_rect, toolbar_enabled, toolbar_narrow,
+    toolbar_pill_rects, writer_layout, ToolbarButton, WriterLayout, EMPTY_INDENT,
+    PROMPT_ORIGIN_OFF, RECENT_FIRST_ROW_OFF,
+};
 pub use thread::{panel_rows, panel_skip, PanelClick};

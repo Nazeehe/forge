@@ -365,11 +365,258 @@
         let (x, y) = find_text(&buf, "*New document");
         super::handle_writer_mouse(&mut state, click_at(x, y));
         let session = state.writers.get(&id).unwrap();
-        assert!(session.open_prompt.as_ref().is_some_and(|p| p.create));
+        assert!(session.open_prompt.as_ref().is_some_and(|p| p.kind == crate::app::writer::PromptKind::New));
+        // The prompt replaces Start while open; Esc backs out of it.
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Esc), now);
         let buf = paint_full(&mut state, id);
         let (x, y) = find_text(&buf, "Open…");
         super::handle_writer_mouse(&mut state, click_at(x, y));
-        assert!(state.writers.get(&id).unwrap().open_prompt.as_ref().is_some_and(|p| !p.create));
+        assert!(state.writers.get(&id).unwrap().open_prompt.as_ref().is_some_and(|p| p.kind == crate::app::writer::PromptKind::Open));
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn toolbar_assistant_toggles_the_panel_on_click() {
+        let (mut state, id, dir) = writer_agent();
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        assert!(!state.writers.get(&id).unwrap().panel_visible, "hidden default");
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Assistant");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert!(state.writers.get(&id).unwrap().panel_visible, "click toggles on");
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Assistant");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert!(!state.writers.get(&id).unwrap().panel_visible, "click toggles off");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn disabled_preview_never_fires() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Preview");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        let session = state.writers.get(&id).unwrap();
+        assert!(session.open_prompt.is_none(), "no prompt");
+        assert!(!session.more_open, "no menu");
+        assert!(!session.panel_visible, "panel untouched");
+        assert!(session.doc.is_some(), "doc untouched");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn toolbar_save_as_and_close_fire_in_doc_state() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        // Save-as opens its prompt; Esc backs out of it.
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Save as");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert!(state.writers.get(&id).unwrap().open_prompt.as_ref().is_some_and(
+            |p| p.kind == crate::app::writer::PromptKind::SaveAs
+        ));
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Esc), now);
+        assert!(state.writers.get(&id).unwrap().open_prompt.is_none(), "esc cancels");
+        // Close on a clean doc returns to the empty state at once.
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Close");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert!(state.writers.get(&id).unwrap().doc.is_none(), "clean closes");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recent_row_click_opens_that_file() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("alpha.md"), "A\n").unwrap();
+        std::fs::write(dir.join("beta.md"), "B\n").unwrap();
+        state.term_size = (30, 120);
+        // Entering the tab scans the folder into the recent cache.
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "beta.md");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        let session = state.writers.get(&id).unwrap();
+        assert_eq!(session.doc.as_ref().unwrap().path_rel, "beta.md");
+        assert_eq!(session.doc.as_ref().unwrap().text, "B\n");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recent_keys_navigate_and_enter_opens() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("alpha.md"), "A\n").unwrap();
+        std::fs::write(dir.join("beta.md"), "B\n").unwrap();
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        assert_eq!(state.writers.get(&id).unwrap().recent_sel, 1);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Up), now);
+        assert_eq!(state.writers.get(&id).unwrap().recent_sel, 0);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        // Same-nanosecond mtimes sort either way: read the row, then open it.
+        let target = state.writers.get(&id).unwrap().recent_cache[1].rel.clone();
+        let want = std::fs::read_to_string(dir.join(&target)).unwrap();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        let session = state.writers.get(&id).unwrap();
+        assert_eq!(session.doc.as_ref().unwrap().path_rel, target);
+        assert_eq!(session.doc.as_ref().unwrap().text, want, "enter opens the selection");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prompt_tab_completes_enter_submits_and_buttons_fire() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("alpha.md"), "A\n").unwrap();
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        // The Start pill opens the New prompt through the real path.
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "*New document");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        for c in "alp".chars() {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Char(c)), now);
+        }
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Tab), now);
+        assert_eq!(
+            state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().buffer,
+            "alpha.md",
+            "tab completes from the scan"
+        );
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        // New on an existing file offers Open instead; the confirm
+        // pill (default-marked, unlike the toolbar twin) fires it.
+        assert!(state.writers.get(&id).unwrap().pending_confirm.is_some());
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "*Open");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        let session = state.writers.get(&id).unwrap();
+        assert_eq!(session.doc.as_ref().unwrap().path_rel, "alpha.md");
+        assert_eq!(session.doc.as_ref().unwrap().text, "A\n");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn confirm_overwrite_fires_on_click() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("alpha.md"), "A\n").unwrap();
+        std::fs::write(dir.join("beta.md"), "stale\n").unwrap();
+        // The helper keeps existing bytes, so the doc holds "A\n".
+        open_doc(&mut state, id, "alpha.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Save as");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        for c in "beta.md".chars() {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Char(c)), now);
+        }
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        assert!(state.writers.get(&id).unwrap().pending_confirm.is_some(), "overwrite offered");
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Overwrite");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert_eq!(std::fs::read_to_string(dir.join("beta.md")).unwrap(), "A\n");
+        assert_eq!(
+            state.writers.get(&id).unwrap().doc.as_ref().unwrap().path_rel,
+            "beta.md"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn more_menu_fires_in_narrow_terminals() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 80);
+        state.open_writer_overlay();
+        // The short toolbar hides Save-as behind More.
+        let buf = paint_full(&mut state, id);
+        assert_eq!(find_all_text(&buf, "Save as").len(), 0, "no room for save-as");
+        let (x, y) = find_text(&buf, "More");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert!(state.writers.get(&id).unwrap().more_open, "menu opens");
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Save as");
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        let session = state.writers.get(&id).unwrap();
+        assert!(!session.more_open, "firing closes the menu");
+        assert!(session.open_prompt.as_ref().is_some_and(
+            |p| p.kind == crate::app::writer::PromptKind::SaveAs
+        ));
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_twins_work_from_the_doc_state() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('n')), now);
+        assert!(state.writers.get(&id).unwrap().open_prompt.as_ref().is_some_and(
+            |p| p.kind == crate::app::writer::PromptKind::New
+        ));
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Esc), now);
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('o')), now);
+        assert!(state.writers.get(&id).unwrap().open_prompt.as_ref().is_some_and(
+            |p| p.kind == crate::app::writer::PromptKind::Open
+        ));
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Esc), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Char('!')), now);
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('s')), now);
+        assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "!aaa bbb");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn esc_clears_confirms_and_closes_the_menu() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Char('!')), now);
+        state.writer_close_doc(id);
+        assert!(state.writers.get(&id).unwrap().pending_confirm.is_some());
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Esc), now);
+        assert!(state.writers.get(&id).unwrap().pending_confirm.is_none(), "esc clears");
+        assert!(state.writers.get(&id).unwrap().doc.is_some(), "nothing closed");
+        // Narrow menu dismisses the same way.
+        state.term_size = (30, 80);
+        state.writers.get_mut(&id).unwrap().more_open = true;
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Esc), now);
+        assert!(!state.writers.get(&id).unwrap().more_open, "menu closes");
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }

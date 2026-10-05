@@ -19,9 +19,11 @@ impl AppState {
         let missing_editor = session.editor.is_none();
         if session.doc.as_ref().is_some_and(|doc| doc.path_rel == path) {
             let rev = session.doc.as_ref().expect("checked above").revision;
+            let abs = session.doc.as_ref().expect("checked above").abs_path.clone();
             if missing_editor {
                 self.writer_open_editor(id);
             }
+            self.writer_note_opened(id, abs);
             return Ok(format!(
                 r#"{{"opened":true,"path":{},"revision":{rev}}}"#,
                 crate::ipc::mcp::escape_json(&path),
@@ -30,8 +32,15 @@ impl AppState {
         session.open_document_path(&cwd, &path)?;
         session.title = title;
         let rev = session.doc.as_ref().expect("opened above").revision;
+        let abs = session
+            .doc
+            .as_ref()
+            .expect("opened above")
+            .abs_path
+            .clone();
         self.dirty = true;
         self.writer_open_editor(id);
+        self.writer_note_opened(id, abs);
         Ok(format!(
             r#"{{"opened":true,"path":{},"revision":{rev}}}"#,
             crate::ipc::mcp::escape_json(&path),

@@ -283,16 +283,22 @@ impl AppState {
         }
         session.proposals.on_edit(&range);
     }
-    /// Open the typed-path prompt: `create` from `(*New document)`,
-    /// otherwise from `(Open…)`. Typing is bounded; Enter submits.
-    pub fn writer_prompt_open(&mut self, id: crate::session::SessionId, create: bool) {
-        // Entry API: the empty state has no writer entry yet, and the
-        // prompt is exactly how one comes to exist.
+    /// Open the typed-path prompt for New / Open / Save-as (E2b:
+    /// one prompt component, three kinds; submit routes on the kind).
+    /// Entry API: the empty state has no writer entry yet, and the
+    /// prompt is exactly how one comes to exist. Opening a prompt
+    /// clears any pending confirm: one actionable thing at a time.
+    pub fn writer_prompt_open(
+        &mut self,
+        id: crate::session::SessionId,
+        kind: crate::app::writer::PromptKind,
+    ) {
         let session = self.writers.entry(id).or_default();
         session.open_prompt = Some(WriterOpenPrompt {
             buffer: String::new(),
-            create,
+            kind,
         });
+        session.pending_confirm = None;
         session.error = None;
         self.dirty = true;
     }
@@ -335,43 +341,405 @@ impl AppState {
         self.dirty = true;
     }
 
-    /// Submit the prompt: same scope rules as the agent tool. Success
-    /// closes the prompt and builds the editor; failure keeps the
-    /// prompt open with the reason in the fixed error slot.
+    /// Submit the prompt: routes on the prompt kind. Success closes
+    /// the prompt and builds the editor; failure (and actionable
+    /// confirms) keep the prompt open with the reason in the fixed
+    /// error slot.
     pub fn writer_submit_open(&mut self, id: crate::session::SessionId) {
-        let path = match self.writers.get(&id).and_then(|s| s.open_prompt.as_ref()) {
-            Some(prompt) => prompt.buffer.clone(),
+        let (buffer, kind) = match self.writers.get(&id).and_then(|s| s.open_prompt.as_ref()) {
+            Some(prompt) => (prompt.buffer.clone(), prompt.kind),
             None => return,
         };
-        if path.trim().is_empty() {
+        match kind {
+            crate::app::writer::PromptKind::New => self.writer_submit_new(id, buffer.trim()),
+            crate::app::writer::PromptKind::Open => {
+                self.writer_submit_open_existing(id, buffer.trim());
+            }
+            crate::app::writer::PromptKind::SaveAs => {
+                self.writer_submit_save_as(id, buffer.trim());
+            }
+        }
+    }
+
+    /// New-document submit: an existing path offers to open it instead
+    /// of silently reusing the name; a missing path creates empty.
+    fn writer_submit_new(&mut self, id: crate::session::SessionId, path: &str) {
+        if path.is_empty() {
             self.writer_fail(id, "type a path first");
             return;
         }
-        let cwd = self
-            .manager
-            .get(id)
-            .map(|rec| rec.cwd.clone())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let opened = self
+        let cwd = super::requests::writer_cwd(self, id);
+        let abs = match crate::infra::paths::confine(&cwd, std::path::Path::new(path)) {
+            Ok(abs) => abs,
+            Err(e) => {
+                self.writer_fail(id, &e.to_string());
+                return;
+            }
+        };
+        if abs.is_file() {
+            self.writer_raise_confirm(
+                id,
+                format!("{path} exists:"),
+                vec![
+                    crate::app::writer::ConfirmAction::OpenInstead(abs),
+                    crate::app::writer::ConfirmAction::Cancel,
+                ],
+            );
+            return;
+        }
+        // A missing path creates empty through the same confined open
+        // the agent tool uses (Document::open maps missing → empty).
+        self.writer_open_rel(id, path);
+    }
+
+    /// Open-document submit: a missing path offers to create it.
+    fn writer_submit_open_existing(&mut self, id: crate::session::SessionId, path: &str) {
+        if path.is_empty() {
+            self.writer_fail(id, "type a path first");
+            return;
+        }
+        let cwd = super::requests::writer_cwd(self, id);
+        let abs = match crate::infra::paths::confine(&cwd, std::path::Path::new(path)) {
+            Ok(abs) => abs,
+            Err(e) => {
+                self.writer_fail(id, &e.to_string());
+                return;
+            }
+        };
+        if !abs.is_file() {
+            self.writer_raise_confirm(
+                id,
+                format!("no file {path}:"),
+                vec![
+                    crate::app::writer::ConfirmAction::CreateInstead(abs),
+                    crate::app::writer::ConfirmAction::Cancel,
+                ],
+            );
+            return;
+        }
+        self.writer_open_rel(id, path);
+    }
+
+    /// Save-as submit: needs an open doc, a Markdown extension (the
+    /// same rule the opener enforces), and a non-identity target. An
+    /// existing target offers Overwrite; a missing one saves at once.
+    fn writer_submit_save_as(&mut self, id: crate::session::SessionId, path: &str) {
+        let current = self
             .writers
-            .get_mut(&id)
-            .expect("checked above")
-            .open_document_path(&cwd, path.trim());
+            .get(&id)
+            .and_then(|s| s.doc.as_ref())
+            .map(|d| d.abs_path.clone());
+        let Some(current) = current else {
+            self.writer_fail(id, "no document open");
+            return;
+        };
+        if path.is_empty() {
+            self.writer_fail(id, "type a path first");
+            return;
+        }
+        if !crate::writer::document::is_markdown(path) {
+            self.writer_fail(id, &format!("{path}: only .md, .markdown or .txt"));
+            return;
+        }
+        let cwd = super::requests::writer_cwd(self, id);
+        let abs = match crate::infra::paths::confine(&cwd, std::path::Path::new(path)) {
+            Ok(abs) => abs,
+            Err(e) => {
+                self.writer_fail(id, &e.to_string());
+                return;
+            }
+        };
+        if abs == current {
+            self.writer_fail(id, &format!("already saved as {path}"));
+            return;
+        }
+        if abs.is_file() {
+            self.writer_raise_confirm(
+                id,
+                format!("{path} exists:"),
+                vec![
+                    crate::app::writer::ConfirmAction::Overwrite(abs),
+                    crate::app::writer::ConfirmAction::Cancel,
+                ],
+            );
+            return;
+        }
+        self.writer_save_as_to(id, path, abs);
+    }
+
+    /// Move the recent-list keyboard selection, clamped to the cache.
+    /// `pub(crate)`: the TUI input layer calls this directly.
+    pub(crate) fn writer_recent_move(&mut self, id: crate::session::SessionId, delta: i32) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        if session.recent_cache.is_empty() {
+            session.recent_sel = 0;
+        } else {
+            let len = session.recent_cache.len();
+            let next = (session.recent_sel as i32 + delta).clamp(0, len as i32 - 1);
+            session.recent_sel = next as usize;
+        }
+        self.dirty = true;
+    }
+
+    /// Open the keyboard-selected recent row, if any.
+    /// `pub(crate)`: the TUI input layer calls this directly.
+    pub(crate) fn writer_recent_open(&mut self, id: crate::session::SessionId) {
+        let sel = self.writers.get(&id).map(|s| s.recent_sel).unwrap_or(0);
+        self.writer_open_recent_at(id, sel);
+    }
+
+    /// Open one cached recent row by index; out-of-range opens nothing.
+    /// `pub(crate)`: mouse clicks land on rows, not the selection.
+    pub(crate) fn writer_open_recent_at(&mut self, id: crate::session::SessionId, index: usize) {
+        let rel = self
+            .writers
+            .get(&id)
+            .and_then(|s| s.recent_cache.get(index))
+            .map(|e| e.rel.clone());
+        let Some(rel) = rel else {
+            return;
+        };
+        if let Some(session) = self.writers.get_mut(&id) {
+            session.recent_sel = index;
+        }
+        self.writer_open_rel(id, &rel);
+    }
+
+    /// Dismiss the topmost transient: the More menu first, then the
+    /// pending confirm (a Cancel without firing). True when something
+    /// dismissed, so keys fall through to their normal target
+    /// otherwise. `pub(crate)`: the TUI input layer calls this directly.
+    pub(crate) fn writer_dismiss_top(&mut self, id: crate::session::SessionId) -> bool {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return false;
+        };
+        if session.more_open {
+            session.more_open = false;
+            self.dirty = true;
+            return true;
+        }
+        if session.pending_confirm.is_some() {
+            session.pending_confirm = None;
+            self.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    /// Fill the prompt buffer with one suggestion (clicking a row).
+    /// Bounded like typing; unknown sessions stay silent.
+    /// `pub(crate)`: the TUI input layer calls this directly.
+    pub(crate) fn writer_prompt_fill(&mut self, id: crate::session::SessionId, value: String) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(prompt) = session.open_prompt.as_mut() else {
+            return;
+        };
+        prompt.buffer = value.chars().take(super::super::MAX_PATH_CHARS).collect();
+        self.dirty = true;
+    }
+
+    /// Open `rel` (confined, Markdown-gated by Document::open): record
+    /// it as opened this run, rebuild the editor, close the prompt.
+    /// Same-path re-opens and dirty-switch refusals surface as errors.
+    /// `pub(crate)`: recent rows and confirms share it.
+    pub(crate) fn writer_open_rel(&mut self, id: crate::session::SessionId, rel: &str) {
+        let cwd = super::requests::writer_cwd(self, id);
+        let abs = match crate::infra::paths::confine(&cwd, std::path::Path::new(rel)) {
+            Ok(abs) => abs,
+            Err(e) => {
+                self.writer_fail(id, &e.to_string());
+                return;
+            }
+        };
+        let opened = match self.writers.get_mut(&id) {
+            Some(session) => session.open_document_path(&cwd, rel),
+            None => return,
+        };
         match opened {
             Ok(_) => {
-                let Some(session) = self.writers.get_mut(&id) else {
-                    return;
-                };
-                session.open_prompt = None;
-                session.error = None;
-                self.dirty = true;
+                if let Some(session) = self.writers.get_mut(&id) {
+                    session.open_prompt = None;
+                    session.pending_confirm = None;
+                    session.error = None;
+                }
+                self.writer_note_opened(id, abs);
                 self.writer_open_editor(id);
+                self.dirty = true;
             }
             Err(message) => self.writer_fail(id, &message),
         }
     }
 
-    /// Cycle keyboard focus Editor → Chat → Thread → Editor.
+    /// Raise an actionable confirm into the fixed error slot. The
+    /// prompt stays open underneath; Cancel returns to it.
+    fn writer_raise_confirm(
+        &mut self,
+        id: crate::session::SessionId,
+        message: String,
+        actions: Vec<crate::app::writer::ConfirmAction>,
+    ) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        session.pending_confirm = Some(crate::app::writer::PendingConfirm { message, actions });
+        self.dirty = true;
+    }
+
+    /// Fire one confirm action by index; out-of-range clicks are
+    /// ignored. The confirm clears first so every branch below lands
+    /// with errors (if any) in the fixed slot, never stacked behind it.
+    pub fn writer_fire_confirm(&mut self, id: crate::session::SessionId, index: usize) {
+        // Out-of-range picks (and firing with no confirm) are ignored
+        // with the row left up for a valid pick.
+        let action = match self.writers.get_mut(&id) {
+            Some(session) => match session.pending_confirm.take() {
+                Some(mut confirm) if index < confirm.actions.len() => {
+                    Some(confirm.actions.swap_remove(index))
+                }
+                kept => {
+                    session.pending_confirm = kept;
+                    None
+                }
+            },
+            None => None,
+        };
+        self.dirty = true;
+        let Some(action) = action else { return };
+        match action {
+            crate::app::writer::ConfirmAction::Cancel => {}
+            crate::app::writer::ConfirmAction::OpenInstead(abs)
+            | crate::app::writer::ConfirmAction::CreateInstead(abs) => {
+                let rel = self.writer_rel_for(id, &abs);
+                self.writer_open_rel(id, &rel);
+            }
+            crate::app::writer::ConfirmAction::Overwrite(abs) => {
+                let rel = self.writer_rel_for(id, &abs);
+                self.writer_save_as_to(id, &rel, abs);
+            }
+            crate::app::writer::ConfirmAction::SaveAndClose => {
+                self.writer_save(id);
+                let dirty = self
+                    .writers
+                    .get(&id)
+                    .and_then(|s| s.doc.as_ref())
+                    .is_some_and(|d| d.dirty);
+                if !dirty {
+                    self.writer_do_close(id);
+                }
+            }
+            crate::app::writer::ConfirmAction::DiscardClose => self.writer_do_close(id),
+        }
+    }
+
+    /// Session-relative display path for an absolute path; falls back
+    /// to the full path when it escapes the session folder.
+    fn writer_rel_for(&self, id: crate::session::SessionId, abs: &std::path::Path) -> String {
+        let cwd = super::requests::writer_cwd(self, id);
+        abs.strip_prefix(&cwd)
+            .map(|rel| rel.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
+    }
+
+    /// Tab completion over the prompt: first opened-this-run or recent
+    /// path extending the typed prefix. A second Tab is stable (the
+    /// filled value no longer extends), so completion never cycles.
+    pub fn writer_prompt_complete(&mut self, id: crate::session::SessionId) {
+        let prefix = match self.writers.get(&id).and_then(|s| s.open_prompt.as_ref()) {
+            Some(prompt) => prompt.buffer.clone(),
+            None => return,
+        };
+        let cwd = super::requests::writer_cwd(self, id);
+        let mut seen = std::collections::HashSet::new();
+        let mut hit: Option<String> = None;
+        let opened: Vec<String> = self
+            .writers
+            .get(&id)
+            .map(|s| {
+                s.opened
+                    .iter()
+                    .filter_map(|abs| {
+                        abs.strip_prefix(&cwd)
+                            .ok()
+                            .map(|rel| rel.to_string_lossy().into_owned())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let recent: Vec<String> = self
+            .writers
+            .get(&id)
+            .map(|s| s.recent_cache.iter().map(|e| e.rel.clone()).collect())
+            .unwrap_or_default();
+        for candidate in opened.into_iter().chain(recent) {
+            if !seen.insert(candidate.clone()) {
+                continue;
+            }
+            if candidate.starts_with(prefix.as_str()) && candidate.len() > prefix.len() {
+                hit = Some(candidate);
+                break;
+            }
+        }
+        if let (Some(hit), Some(session)) = (hit, self.writers.get_mut(&id)) {
+            if let Some(prompt) = session.open_prompt.as_mut() {
+                prompt.buffer = hit;
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Toolbar dispatch (E2b): every toolbar pill funnels through
+    /// these, so mouse clicks and shortcut keys share one path.
+    /// Toolbar `(*New document)`: the New-kind prompt.
+    pub fn writer_toolbar_new(&mut self, id: crate::session::SessionId) {
+        self.writer_prompt_open(id, crate::app::writer::PromptKind::New);
+    }
+
+    /// Toolbar `(Open…)`: the Open-kind prompt, with completion and
+    /// the create-instead confirm.
+    pub fn writer_toolbar_open(&mut self, id: crate::session::SessionId) {
+        self.writer_prompt_open(id, crate::app::writer::PromptKind::Open);
+    }
+
+    /// Toolbar `(Save)`: plain S2 save; no doc is a fixed-slot error.
+    pub fn writer_toolbar_save(&mut self, id: crate::session::SessionId) {
+        self.writer_save(id);
+    }
+
+    /// Toolbar `(Save as)`: needs an open doc, otherwise the prompt
+    /// would have nothing to write. The entry is created first so the
+    /// refusal lands in the fixed error slot instead of vanishing.
+    pub fn writer_toolbar_save_as(&mut self, id: crate::session::SessionId) {
+        let has_doc = self.writers.entry(id).or_default().doc.is_some();
+        if !has_doc {
+            self.writer_fail(id, "no document open");
+            return;
+        }
+        self.writer_prompt_open(id, crate::app::writer::PromptKind::SaveAs);
+    }
+
+    /// Toolbar `(Close)`: clean closes at once, dirty confirms.
+    pub fn writer_toolbar_close(&mut self, id: crate::session::SessionId) {
+        self.writer_close_doc(id);
+    }
+
+    /// Toolbar `(Assistant)` / `(Assistant*)`: the real E10 toggle.
+    pub fn writer_toolbar_assistant(&mut self, id: crate::session::SessionId) {
+        self.writer_toggle_assistant(id);
+    }
+
+    /// Toggle the narrow-mode More menu; firing a menu row closes it.
+    /// `pub(crate)`: the TUI input layer calls this directly.
+    pub(crate) fn writer_toggle_more(&mut self, id: crate::session::SessionId) {
+        if let Some(session) = self.writers.get_mut(&id) {
+            session.more_open = !session.more_open;
+            self.dirty = true;
+        }
+    }
+
     /// Toggle the assistant panel. The panel is hidden by default and
     /// the editor takes the full width then; hiding returns focus to
     /// the editor, since the chat box lives in the panel.
@@ -386,6 +754,7 @@ impl AppState {
         self.dirty = true;
     }
 
+    /// Cycle keyboard focus Editor → Chat → Thread → Editor.
     pub fn writer_cycle_focus(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;

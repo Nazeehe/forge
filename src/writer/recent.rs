@@ -27,6 +27,7 @@ const SKIP_DIRS: [&str; 4] = [".git", "target", "node_modules", "vendor"];
 
 /// One recent row: the path relative to the cwd plus its mtime.
 /// Extensions match lower-case only (`*.md`, `*.markdown`).
+#[derive(Clone, Debug)]
 pub struct RecentEntry {
     pub rel: String,
     pub mtime: SystemTime,

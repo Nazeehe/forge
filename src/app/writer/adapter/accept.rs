@@ -3,6 +3,7 @@
 //! step), plus Save through S2 with conflicts in the error slot.
 
 use super::{editor_selection_to_range, offset_to_index2, SharedClipboard};
+use crate::writer::{document::Document, proposal::Proposals};
 use crate::app::AppState;
 use edtui::{
     actions::{DeleteSelection, InsertChar, SwitchMode},
@@ -126,6 +127,105 @@ impl AppState {
                 session.error = Some(format!("save failed: {other}"));
             }
         }
+        self.dirty = true;
+    }
+
+    /// Save-as: write the live text to `rel` (confined, Markdown-only
+    /// by the caller) and switch the doc onto the new file. The text
+    /// is identical, so proposals, selection and the editor buffer all
+    /// stay valid; Recent updates through the opened list.
+    /// `pub(crate)`: the prompt submit and the Overwrite confirm share it.
+    pub(crate) fn writer_save_as_to(
+        &mut self,
+        id: crate::session::SessionId,
+        rel: &str,
+        abs: std::path::PathBuf,
+    ) {
+        let text = match self.writers.get(&id).and_then(|s| s.doc.as_ref()) {
+            Some(doc) => doc.text.clone(),
+            None => {
+                self.writer_fail(id, "no document open");
+                return;
+            }
+        };
+        let cwd = super::requests::writer_cwd(self, id);
+        let mut target = match Document::open(&cwd, rel) {
+            Ok(doc) => doc,
+            Err(e) => {
+                self.writer_fail(id, &e.to_string());
+                return;
+            }
+        };
+        target.text = text;
+        target.dirty = true;
+        match target.save() {
+            Ok(()) => {
+                if let Some(session) = self.writers.get_mut(&id) {
+                    session.doc = Some(target);
+                    session.open_prompt = None;
+                    session.pending_confirm = None;
+                    session.error = None;
+                }
+                self.writer_note_opened(id, abs);
+                self.dirty = true;
+            }
+            Err(crate::writer::WriterError::ConflictOnSave) => {
+                self.writer_fail(id, "save conflict: file changed on disk");
+            }
+            Err(other) => self.writer_fail(id, &format!("save failed: {other}")),
+        }
+    }
+
+    /// Close the document: a clean doc closes to the empty state at
+    /// once; a dirty doc raises the Save&close / Discard / Cancel
+    /// confirm in the fixed slot instead of closing.
+    pub fn writer_close_doc(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get(&id) else {
+            return;
+        };
+        let Some(doc) = session.doc.as_ref() else {
+            return;
+        };
+        if !doc.dirty {
+            self.writer_do_close(id);
+            return;
+        }
+        let rel = doc.path_rel.clone();
+        if let Some(session) = self.writers.get_mut(&id) {
+            session.pending_confirm = Some(crate::app::writer::PendingConfirm {
+                message: format!("Unsaved changes in {rel}:"),
+                actions: vec![
+                    crate::app::writer::ConfirmAction::SaveAndClose,
+                    crate::app::writer::ConfirmAction::DiscardClose,
+                    crate::app::writer::ConfirmAction::Cancel,
+                ],
+            });
+        }
+        self.dirty = true;
+    }
+
+    /// Drop the document and its editor, proposals, requests, thread
+    /// and draft: the empty state owns the screen again. The panel
+    /// toggle, the opened list and the recent cache survive, so the
+    /// list still offers what this run opened.
+    pub(super) fn writer_do_close(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        session.doc = None;
+        session.editor = None;
+        session.selection = None;
+        session.sel_anchor = None;
+        session.selected_proposal = None;
+        session.proposals = Proposals::default();
+        session.requests.clear();
+        session.thread.clear();
+        session.chat_input.clear();
+        session.nav_goal = None;
+        session.open_prompt = None;
+        session.pending_confirm = None;
+        session.error = None;
+        session.focus = crate::app::writer::WriterFocus::Editor;
         self.dirty = true;
     }
 }

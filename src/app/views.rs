@@ -77,6 +77,9 @@ impl AppState {
             // and keys/mouse find no session.
             if Some(index) == self.writer_slot(id) {
                 self.writers.entry(id).or_default();
+                // The scan runs when the tab opens (cached, never per
+                // frame), so the Recent list is fresh on entry.
+                self.writer_refresh_recent(id);
             }
             self.dirty |= changed;
             changed

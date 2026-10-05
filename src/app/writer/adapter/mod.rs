@@ -17,6 +17,9 @@ pub mod requests;
 /// Most outbound requests awaiting the settle flush; never drops.
 pub const MAX_WRITER_QUEUE: usize = 8;
 
+/// Most paths remembered as opened this run (E2b: recent list seed).
+pub(super) const MAX_OPENED_THIS_RUN: usize = 32;
+
 /// Forge-owned clipboard backing the editor: Accept saves and restores
 /// the user's copied text around the DeleteSelection+InsertChar replace,
 /// which EdTUI would otherwise clobber with the drained range.

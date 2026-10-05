@@ -2,5 +2,6 @@
 //! and human→agent requests.
 
 mod editing;
+mod lifecycle;
 mod requests;
 mod tools;

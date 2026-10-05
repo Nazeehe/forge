@@ -194,7 +194,7 @@ fn paste_lands_in_the_editor_not_the_pane() {
     );
     // Prompt paste fills the bounded buffer instead.
     state.writers.get_mut(&id).unwrap().doc = None;
-    state.writer_prompt_open(id, false);
+    state.writer_prompt_open(id, crate::app::writer::PromptKind::Open);
     state.writer_paste(id, "d.md");
     assert_eq!(
         state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().buffer,
@@ -225,7 +225,7 @@ fn prompt_submit_opens_and_failures_keep_the_prompt() {
     let (mut state, id, _run, dir) = writer_agent();
     std::fs::write(dir.join("d.md"), "hello").unwrap();
     // Empty submit refuses without opening.
-    state.writer_prompt_open(id, false);
+    state.writer_prompt_open(id, crate::app::writer::PromptKind::Open);
     state.writer_submit_open(id);
     let session = state.writers.get(&id).unwrap();
     assert!(session.open_prompt.is_some(), "prompt stays");
@@ -257,7 +257,7 @@ fn prompt_submit_opens_and_failures_keep_the_prompt() {
     // Backspace, cancel, then a good submit.
     state.writer_prompt_cancel(id);
     assert!(state.writers.get(&id).unwrap().open_prompt.is_none());
-    state.writer_prompt_open(id, false);
+    state.writer_prompt_open(id, crate::app::writer::PromptKind::Open);
     for c in "d.md".chars() {
         state.writer_prompt_char(id, c);
     }

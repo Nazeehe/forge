@@ -6,9 +6,12 @@ use crossterm::event;
 use crate::app::AppState;
 
 /// One key while the Writer overlay owns input. The typed-path prompt
-/// takes typing/Enter/Esc; without a document `n`/`o` open the prompt;
-/// otherwise Tab cycles Editor → Chat → Thread, `Ctrl+S` saves and
-/// `Alt+R` rephrases from any focus, and every other key routes by
+/// takes typing/Tab/Enter/Esc; Esc dismisses the More menu or a
+/// pending confirm anywhere; without a document `n`/`o` (and their
+/// Ctrl twins) open the prompt and ↑↓/Enter drive the recent list;
+/// with a document Ctrl+N/O/S ride above every focus so the toolbar
+/// always has a keyboard twin (Ctrl+N yields its Emacs next-line to
+/// the table twin), `Alt+R` rephrases, and every other key routes by
 /// focus: editor keys to the adapter, chat typing to the chat box,
 /// thread keys to the proposal selection.
 pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
@@ -25,10 +28,19 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
             (KeyCode::Enter, _) => state.writer_submit_open(id),
             (KeyCode::Esc, _) => state.writer_prompt_cancel(id),
             (KeyCode::Backspace, _) => state.writer_prompt_backspace(id),
+            (KeyCode::Tab, KeyModifiers::NONE) => state.writer_prompt_complete(id),
             (KeyCode::Char(c), KeyModifiers::NONE) => state.writer_prompt_char(id, c),
             _ => {}
         }
         return;
+    }
+    // Esc dismisses the topmost transient first; otherwise it falls
+    // through to its normal target (prompt cancel above, editor
+    // selection clearing below).
+    if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
+        if state.writer_dismiss_top(id) {
+            return;
+        }
     }
     let focus = state.writers.get(&id).map(|session| session.focus);
     let has_editor = state
@@ -37,20 +49,38 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
         .is_some_and(|session| session.editor.is_some());
     if !has_editor {
         match (key.code, key.modifiers) {
-            (KeyCode::Char('n'), KeyModifiers::NONE) => state.writer_prompt_open(id, true),
-            (KeyCode::Char('o'), KeyModifiers::NONE) => state.writer_prompt_open(id, false),
+            (KeyCode::Char('n'), KeyModifiers::NONE)
+            | (KeyCode::Char('n'), KeyModifiers::CONTROL) => state.writer_toolbar_new(id),
+            (KeyCode::Char('o'), KeyModifiers::NONE)
+            | (KeyCode::Char('o'), KeyModifiers::CONTROL) => state.writer_toolbar_open(id),
+            (KeyCode::Up, _) => state.writer_recent_move(id, -1),
+            (KeyCode::Down, _) => state.writer_recent_move(id, 1),
+            (KeyCode::Enter, _) => state.writer_recent_open(id),
             _ => {}
         }
         return;
     }
-    // Save rides above every focus so the pill always has a keyboard
-    // twin, even mid-sentence in the editor (Emacs isearch gives way
-    // inside the Writer tab). Rephrase rides on Alt+R, which is free
-    // in EdTUI's emacs map and outside the Forge prefix: Ctrl+R stays
-    // the editor's redo.
-    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
-        state.writer_save(id);
-        return;
+    // Twins ride above every focus so the toolbar pills always have a
+    // keyboard path, even mid-sentence in the editor (Emacs isearch
+    // and next-line give way inside the Writer tab). Rephrase rides on
+    // Alt+R, which is free in EdTUI's emacs map and outside the Forge
+    // prefix: Ctrl+R stays the editor's redo.
+    if key.modifiers == KeyModifiers::CONTROL {
+        match key.code {
+            KeyCode::Char('n') => {
+                state.writer_toolbar_new(id);
+                return;
+            }
+            KeyCode::Char('o') => {
+                state.writer_toolbar_open(id);
+                return;
+            }
+            KeyCode::Char('s') => {
+                state.writer_toolbar_save(id);
+                return;
+            }
+            _ => {}
+        }
     }
     if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('r') {
         state.writer_rephrase(id);

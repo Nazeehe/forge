@@ -1,91 +1,32 @@
-//! Writer document paint: empty state, the L2 document view with
-//! the EdTUI editor plus the proposal gutter, and the wrap math the
-//! gutter mapping shares with the adapter's vertical moves.
+//! Writer document paint: the L2 document view with the EdTUI
+//! editor plus the proposal gutter, the toolbar, and the Save-as
+//! overlay. The empty state lives in `empty`; shared slot painters in
+//! `toolbar` and `thread`.
 
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
-use super::layout::{empty_pill_rects, panel_collapsed, pill_spans, writer_layout};
-use super::thread::{
-    paint_actions, paint_chat, paint_error_slot, paint_notice, paint_panel, paint_status,
+use super::empty::{paint_empty, paint_prompt_block};
+use super::layout::{
+    more_menu_rect, panel_collapsed, pill_spans, prompt_suggestions, toolbar_narrow,
+    toolbar_pill_rects, writer_layout, ToolbarButton,
 };
+use super::thread::{
+    paint_chat, paint_error_slot, paint_notice, paint_panel, paint_status,
+};
+use super::toolbar::{paint_confirm_slot, paint_more_menu, paint_toolbar};
 use crate::app::writer::{WriterFocus, WriterSession};
 use crate::ui::theme::{style, Role};
 
-pub fn paint_empty(
-    f: &mut Frame,
-    area: Rect,
-    session: &WriterSession,
-) -> Option<ratatui::layout::Position> {
-    let layout = writer_layout(area, session.panel_visible);
+/// Rounded chrome frame shared by the empty and document states.
+pub(super) fn paint_frame(f: &mut Frame, area: Rect) {
     let frame = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(style(Role::BorderFocused));
     f.render_widget(frame, area);
-    f.render_widget(Paragraph::new(Line::from(vec![Span::styled(
-        "Writer",
-        style(Role::Text),
-    )])), layout.title);
-    // Pills center in the content width like dialog primary actions.
-    let (new_rect, open_rect) = empty_pill_rects(layout.body);
-    let new_pill = pill_spans("New document", session.open_prompt.is_none(), true);
-    let open_pill = pill_spans(
-        "Open…",
-        session
-            .open_prompt
-            .as_ref()
-            .is_some_and(|prompt| !prompt.create),
-        false,
-    );
-    if new_rect.height > 0 {
-        f.render_widget(Paragraph::new(Line::from(new_pill)), new_rect);
-        f.render_widget(Paragraph::new(Line::from(open_pill)), open_rect);
-    }
-    let mut row = layout.body.y.saturating_add(3);
-    let mut cursor = None;
-    if let Some(prompt) = session.open_prompt.as_ref() {
-        let head = if prompt.create {
-            "New document — path:"
-        } else {
-            "Open document — path:"
-        };
-        if row < layout.body.y.saturating_add(layout.body.height) {
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(head.to_string(), style(Role::Muted)),
-                    Span::styled(" ".to_string(), Style::default()),
-                    Span::styled(prompt.buffer.clone(), style(Role::Text)),
-                    Span::styled("▌".to_string(), style(Role::Focus)),
-                ])),
-                Rect::new(layout.body.x, row, layout.body.width, 1),
-            );
-            use ratatui::text::Line as TextLine;
-            let dx = TextLine::from(format!("{head} {}", prompt.buffer)).width() as u16;
-            cursor = Some(ratatui::layout::Position::new(
-                layout.body.x.saturating_add(dx.min(layout.body.width.saturating_sub(1))),
-                row,
-            ));
-        }
-        row = row.saturating_add(1);
-    }
-    if row < layout.body.y.saturating_add(layout.body.height) {
-        // Hints pick their long/short form from the measured width.
-        let hint = if layout.body.width >= 90 {
-            "n new · o open · Enter submits · Esc cancels · paths relative to the session dir"
-        } else {
-            "n new · o open · Enter submits · Esc cancels"
-        };
-        f.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(hint, style(Role::Muted))])),
-            Rect::new(layout.body.x, row, layout.body.width, 1),
-        );
-    }
-    paint_error_slot(f, layout.error, session.error.as_deref());
-    cursor
 }
 
 /// Dispatch empty versus document paint. Returns the terminal cursor
@@ -98,7 +39,7 @@ pub fn paint(
     term_cols: u16,
 ) -> Option<ratatui::layout::Position> {
     if session.doc.is_none() {
-        return paint_empty(f, area, session);
+        return paint_empty(f, area, session, term_cols);
     }
     paint_doc(f, area, session, activity, term_cols)
 }
@@ -115,24 +56,57 @@ fn paint_doc(
     use edtui::{EditorTheme, EditorView, Highlight};
 
     let layout = writer_layout(area, session.panel_visible);
-    let frame = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(style(Role::BorderFocused));
-    f.render_widget(frame, area);
-    let doc = session.doc.as_ref().expect("checked above");
-    let title = if doc.dirty {
-        format!("{} ●", doc.path_rel)
-    } else {
-        doc.path_rel.clone()
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(title, style(Role::Text))])),
-        layout.title,
-    );
-    let buffer = doc.text.clone();
-    let rev = doc.revision;
-    let dirty = doc.dirty;
+    paint_frame(f, area);
+    let buffer = session.doc.as_ref().expect("checked above").text.clone();
+    let rev = session.doc.as_ref().expect("checked above").revision;
+    let dirty = session.doc.as_ref().expect("checked above").dirty;
+    let path_rel = session
+        .doc
+        .as_ref()
+        .expect("checked above")
+        .path_rel
+        .clone();
+    // Toolbar row 1 with the file name trailing, like the empty state.
+    paint_toolbar(f, layout.title, session, term_cols, Some((&path_rel, dirty)));
+    let narrow = toolbar_narrow(term_cols);
+    let more = toolbar_pill_rects(layout.title, narrow, session)
+        .into_iter()
+        .find(|(_, b)| *b == ToolbarButton::More)
+        .map(|(r, _)| r)
+        .unwrap_or_default();
+    paint_more_menu(f, more, more_menu_rect(more), session);
+    // An open prompt overlays the top of the editor column (any kind:
+    // New/Open prompted from the toolbar land here too). The editor
+    // shrinks below it and reports the shrunk rows/cols, so paging
+    // and wrapping count what is actually on screen.
+    let mut prompt_cursor = None;
+    let mut edit_rect = layout.editor;
+    let mut gut_rect = layout.gutter;
+    if let Some(prompt) = session.open_prompt.clone() {
+        let sugg = prompt_suggestions(session, &prompt.buffer);
+        let shift = (2 + sugg.len() as u16 + 2).min(layout.editor.height);
+        let (_, pos) = paint_prompt_block(
+            f,
+            layout.editor.x,
+            layout.editor.width,
+            layout.body.y,
+            session,
+            &prompt,
+        );
+        prompt_cursor = pos;
+        edit_rect = Rect::new(
+            layout.editor.x,
+            layout.editor.y.saturating_add(shift),
+            layout.editor.width,
+            layout.editor.height.saturating_sub(shift),
+        );
+        gut_rect = Rect::new(
+            layout.gutter.x,
+            layout.gutter.y.saturating_add(shift),
+            layout.gutter.width,
+            layout.gutter.height.saturating_sub(shift),
+        );
+    }
     let editor = session.editor.as_mut().expect("editor built on open");
     // Fresh highlights every frame: stale ranges must never linger.
     editor.clear_highlights();
@@ -165,13 +139,14 @@ fn paint_doc(
         .hide_status_line();
     f.render_widget(
         EditorView::new(editor).wrap(true).theme(theme),
-        layout.editor,
+        edit_rect,
     );
     // Page keys move by the last painted editor height, vertical
     // moves wrap by its width; the adapter cannot see the viewport,
-    // so the paint layer reports both here.
-    session.editor_rows = layout.editor.height;
-    session.editor_cols = layout.editor.width;
+    // so the paint layer reports both here (shrunk while the prompt
+    // overlays the editor head).
+    session.editor_rows = edit_rect.height;
+    session.editor_cols = edit_rect.width;
     // Wrap-exact gutter mapping, anchored on the cursor: screen rows
     // of every doc row are counted from the cursor with the same
     // greedy wrap EdTUI's LineWrapper uses, so wrapped rows can never
@@ -183,8 +158,8 @@ fn paint_doc(
         .expect("rendered above")
         .cursor_screen_position()
     {
-        let width = layout.editor.width.max(1) as usize;
-        let rel = pos.y.saturating_sub(layout.editor.y) as isize;
+        let width = edit_rect.width.max(1) as usize;
+        let rel = pos.y.saturating_sub(edit_rect.y) as isize;
         let cursor_row = row_of(
             &buffer,
             crate::app::writer::adapter::editor_cursor_offset(
@@ -222,17 +197,17 @@ fn paint_doc(
             };
             for k in from..=to.min(last_chunk) {
                 let y =
-                    layout.editor.y as isize + rel + (prefix(row) as isize + k as isize - base);
-                if y >= layout.editor.y as isize
-                    && y < (layout.editor.y + layout.editor.height) as isize
-                    && layout.gutter.width > 0
+                    edit_rect.y as isize + rel + (prefix(row) as isize + k as isize - base);
+                if y >= edit_rect.y as isize
+                    && y < (edit_rect.y + edit_rect.height) as isize
+                    && gut_rect.width > 0
                 {
                     f.render_widget(
                         Paragraph::new(Line::from(vec![Span::styled(
                             "▌",
                             style(Role::Brand),
                         )])),
-                        Rect::new(layout.gutter.x, y as u16, 1, 1),
+                        Rect::new(gut_rect.x, y as u16, 1, 1),
                     );
                 }
             }
@@ -254,7 +229,7 @@ fn paint_doc(
         } else {
             paint_chat(f, layout.chat, session);
         }
-        paint_actions(f, layout.action);
+        paint_rephrase(f, layout.action);
     }
     paint_status(
         f,
@@ -265,8 +240,29 @@ fn paint_doc(
         dirty,
         activity,
     );
-    paint_error_slot(f, layout.error, session.error.as_deref());
+    // The prompt owns the cursor while it overlays the editor.
+    if prompt_cursor.is_some() {
+        cursor = prompt_cursor;
+    }
+    match session.pending_confirm.as_ref() {
+        Some(confirm) => paint_confirm_slot(f, layout.error, confirm),
+        None => paint_error_slot(f, layout.error, session.error.as_deref()),
+    }
     cursor
+}
+
+/// Action row, panel-visible only: `(Rephrase)` alone. Save moved to
+/// the toolbar (E2); the row vanishes with the panel, giving the
+/// editor its row back.
+fn paint_rephrase(f: &mut Frame, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let rephrase = super::layout::action_pill_rect(area);
+    f.render_widget(
+        Paragraph::new(Line::from(pill_spans("Rephrase", true, false))),
+        rephrase,
+    );
 }
 
 pub(super) fn row_of(text: &str, offset: usize) -> usize {

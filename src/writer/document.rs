@@ -144,8 +144,9 @@ impl Document {
     }
 }
 
-/// Accepted Markdown extensions (case-insensitive).
-fn is_markdown(rel: &str) -> bool {
+/// Accepted Markdown extensions (case-insensitive). Shared with the
+/// Save-as path check so Save-as only offers files the opener accepts.
+pub(crate) fn is_markdown(rel: &str) -> bool {
     let lower = rel.to_lowercase();
     lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".txt")
 }

@@ -117,40 +117,310 @@ pub fn pill_width(label: &str, default_mark: bool) -> u16 {
     (label.chars().count() + 2 + usize::from(default_mark)) as u16
 }
 
-/// Hit rects for the empty-state pills, centered in the body width.
-/// Paint and mouse dispatch share these, so clicks can never desync.
-/// Empty rects when the body has no room.
-pub fn empty_pill_rects(body: Rect) -> (Rect, Rect) {
-    let new_width = pill_width("New document", true);
-    let open_width = pill_width("Open…", false);
-    let gap: u16 = 2;
-    let row_width = new_width.saturating_add(gap).saturating_add(open_width);
-    let y = body.y.saturating_add(1);
-    if body.width < row_width || body.height < 2 {
-        return (Rect::default(), Rect::default());
+/// Hit rect for the action-row pill, left-aligned to the grid.
+/// Paint and mouse dispatch share it. The row holds `(Rephrase)`
+/// alone since E2 (Save moved to the toolbar).
+pub fn action_pill_rect(action: Rect) -> Rect {
+    Rect::new(action.x, action.y, pill_width("Rephrase", false).min(action.width), 1)
+}
+
+/// First recent row offset from the body top: separator, header pair,
+/// Start triple, blank, Recent head.
+pub const RECENT_FIRST_ROW_OFF: u16 = 10;
+
+/// First prompt-block row offset from the body top in the empty state
+/// (the prompt replaces Start at +5).
+pub const PROMPT_ORIGIN_OFF: u16 = 5;
+
+/// Hit rects for the empty-state Start pills, which paint inline in
+/// the Start rows. Paint and mouse dispatch share these.
+pub fn start_new_rect(x: u16, y: u16) -> Rect {
+    Rect::new(x, y, pill_width("New document", true), 1)
+}
+
+/// Ditto for the Open entry.
+pub fn start_open_rect(x: u16, y: u16) -> Rect {
+    Rect::new(x, y, pill_width("Open…", false), 1)
+}
+
+/// One always-visible toolbar button (E2): the same row in the
+/// empty and open states, text pills, never icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarButton {
+    New,
+    Open,
+    Save,
+    SaveAs,
+    Close,
+    Preview,
+    Assistant,
+    /// Narrow-mode overflow holding Save-as, Preview, Assistant.
+    More,
+}
+
+/// Visible toolbar buttons: the full row, or the short set plus the
+/// More overflow below [`WIDE_COLS`] terminal columns.
+pub fn toolbar_buttons(narrow: bool) -> Vec<ToolbarButton> {
+    use ToolbarButton as B;
+    if narrow {
+        vec![B::New, B::Open, B::Save, B::Close, B::More]
+    } else {
+        vec![
+            B::New,
+            B::Open,
+            B::Save,
+            B::SaveAs,
+            B::Close,
+            B::Preview,
+            B::Assistant,
+        ]
     }
-    let x = body.x.saturating_add(body.width.saturating_sub(row_width) / 2);
+}
+
+/// The toolbar collapses keyed off terminal columns, the same ≥100
+/// rule as the assistant panel.
+pub fn toolbar_narrow(term_cols: u16) -> bool {
+    term_cols < WIDE_COLS
+}
+
+/// Pill label per button. Save-as keeps its space (`Save as`);
+/// Assistant carries the pressed `*` mark while the panel shows.
+pub fn toolbar_label(button: ToolbarButton) -> &'static str {
+    use ToolbarButton as B;
+    match button {
+        B::New => "New",
+        B::Open => "Open",
+        B::Save => "Save",
+        B::SaveAs => "Save as",
+        B::Close => "Close",
+        B::Preview => "Preview",
+        B::Assistant => "Assistant",
+        B::More => "▾ More",
+    }
+}
+
+/// Whether a toolbar button fires now. Save needs a dirty doc,
+/// Save-as and Close need a doc, Preview is disabled until E8, and
+/// the rest (including the Assistant toggle) always fire. Disabled
+/// pills render dimmed with `░` markers — never color alone — and
+/// never fire.
+pub fn toolbar_enabled(
+    session: &crate::app::writer::WriterSession,
+    button: ToolbarButton,
+) -> bool {
+    use ToolbarButton as B;
+    match button {
+        B::New | B::Open | B::Assistant | B::More => true,
+        B::Save => session.doc.as_ref().is_some_and(|d| d.dirty),
+        B::SaveAs | B::Close => session.doc.is_some(),
+        B::Preview => false,
+    }
+}
+
+/// Hit rects for the toolbar pills, left-aligned in the row with
+/// 1-cell gaps and the `│` separator between Close and Preview.
+/// Paint and mouse dispatch share these. Pills past the row edge
+/// come back empty so stray clicks die.
+pub fn toolbar_pill_rects(
+    row: Rect,
+    narrow: bool,
+    session: &crate::app::writer::WriterSession,
+) -> Vec<(Rect, ToolbarButton)> {
+    let mut out = Vec::new();
+    let mut x = row.x;
+    let end = row.x.saturating_add(row.width);
+    let mut first = true;
+    for button in toolbar_buttons(narrow) {
+        if !first && button == ToolbarButton::Preview {
+            // ` │ ` between the file group and the view group.
+            x = x.saturating_add(2);
+        }
+        first = false;
+        let pressed = button == ToolbarButton::Assistant && session.panel_visible;
+        let label = toolbar_label(button);
+        let enabled = toolbar_enabled(session, button);
+        let width = if enabled {
+            pill_width(label, pressed)
+        } else {
+            pill_width_disabled(label)
+        };
+        if x.saturating_add(width) > end {
+            out.push((Rect::default(), button));
+            continue;
+        }
+        out.push((Rect::new(x, row.y, width, 1.min(row.height)), button));
+        x = x.saturating_add(width).saturating_add(1);
+    }
+    out
+}
+
+/// Cell width of a disabled pill: the caps plus `░`-wrapped label.
+pub fn pill_width_disabled(label: &str) -> u16 {
+    (label.chars().count() + 4) as u16
+}
+
+/// A disabled pill: muted caps with the label wrapped in `░` markers,
+/// so the state reads without color.
+pub fn pill_spans_disabled(label: &str) -> Vec<Span<'static>> {
+    let cap = pill_rest_cap();
+    vec![
+        Span::styled(pill_left().to_string(), Style::default().fg(cap)),
+        Span::styled(format!("░{label}░"), style(Role::Muted)),
+        Span::styled(pill_right().to_string(), Style::default().fg(cap)),
+    ]
+}
+
+/// Confirm/error-slot action label: short verbs, first action default.
+pub fn confirm_label(action: &crate::app::writer::ConfirmAction) -> &'static str {
+    use crate::app::writer::ConfirmAction as A;
+    match action {
+        A::Overwrite(_) => "Overwrite",
+        A::SaveAndClose => "Save & close",
+        A::DiscardClose => "Discard",
+        A::Cancel => "Cancel",
+        A::OpenInstead(_) => "Open",
+        A::CreateInstead(_) => "Create",
+    }
+}
+
+/// Hit rects for the confirm pills: two cells past the message, then
+/// two-cell gaps, first pill default-marked. Pills past the slot edge
+/// come back empty. Paint and mouse dispatch share these.
+pub fn confirm_pill_rects(
+    slot: Rect,
+    message: &str,
+    actions: &[crate::app::writer::ConfirmAction],
+) -> Vec<Rect> {
+    let mut out = Vec::new();
+    let mut x = slot
+        .x
+        .saturating_add(message.chars().count() as u16)
+        .saturating_add(2);
+    let end = slot.x.saturating_add(slot.width);
+    for (index, action) in actions.iter().enumerate() {
+        let width = pill_width(confirm_label(action), index == 0);
+        if x.saturating_add(width) > end {
+            out.push(Rect::default());
+            continue;
+        }
+        out.push(Rect::new(x, slot.y, width, 1.min(slot.height)));
+        x = x.saturating_add(width).saturating_add(2);
+    }
+    out
+}
+
+/// The More overflow menu: three pill rows under the More pill,
+/// wide enough for the longest row plus side padding.
+pub fn more_menu_rect(more: Rect) -> Rect {
+    if more.width == 0 {
+        return Rect::default();
+    }
+    Rect::new(more.x, more.y.saturating_add(1), 22, 3)
+}
+
+/// Hit rects for the three More-menu rows: Save-as, Preview,
+/// Assistant. Paint and mouse dispatch share these.
+pub fn more_menu_item_rects(menu: Rect) -> [(Rect, ToolbarButton); 3] {
+    use ToolbarButton as B;
+    let row = |i: u16, label: &str, mark: bool| {
+        Rect::new(
+            menu.x.saturating_add(1),
+            menu.y.saturating_add(i),
+            pill_width(label, mark).min(menu.width.saturating_sub(2)),
+            1,
+        )
+    };
+    [
+        (row(0, "Save as", false), B::SaveAs),
+        (row(1, "Preview", false), B::Preview),
+        (row(2, "Assistant", false), B::Assistant),
+    ]
+}
+
+/// Indent of the Variant A body column from its column edge.
+pub const EMPTY_INDENT: u16 = 2;
+
+/// Visible recent window: the first `room` rows, or the last `room`
+/// ending at the keyboard selection, so the selected row never hides
+/// below the fold. Returns (start, count).
+pub fn recent_window(total: usize, sel: usize, room: usize) -> (usize, usize) {
+    if total <= room {
+        return (0, total);
+    }
+    let end = (sel + 1).max(room).min(total);
+    (end - room, room)
+}
+
+/// Suggestions for the prompt: cached recent rels extending the typed
+/// prefix, opened-first (the cache heads opened), at most 4 in the
+/// fixed slot. The adapter's Tab completion walks the same order over
+/// opened plus the cache, so the first hit agrees outside a
+/// delete-under-us race.
+pub fn prompt_suggestions(
+    session: &crate::app::writer::WriterSession,
+    prefix: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for rel in session.recent_cache.iter().map(|e| e.rel.as_str()) {
+        if out.len() >= 4 {
+            break;
+        }
+        if rel.starts_with(prefix) && rel.len() > prefix.len() && !out.contains(&rel.to_string()) {
+            out.push(rel.to_string());
+        }
+    }
+    out
+}
+
+/// Submit pill label per prompt kind.
+pub fn prompt_submit_label(kind: &crate::app::writer::PromptKind) -> &'static str {
+    match kind {
+        crate::app::writer::PromptKind::New => "Create",
+        crate::app::writer::PromptKind::Open => "Open",
+        crate::app::writer::PromptKind::SaveAs => "Save",
+    }
+}
+
+/// Submit verb per prompt kind for the hint row.
+pub fn prompt_submit_verb(kind: &crate::app::writer::PromptKind) -> &'static str {
+    match kind {
+        crate::app::writer::PromptKind::New => "create",
+        crate::app::writer::PromptKind::Open => "open",
+        crate::app::writer::PromptKind::SaveAs => "save",
+    }
+}
+
+/// Hit rects for the prompt's submit + Cancel pills, left-aligned at
+/// the buttons row with a two-cell gap. Paint and mouse share these.
+pub fn prompt_button_rects(
+    x: u16,
+    y: u16,
+    width: u16,
+    kind: &crate::app::writer::PromptKind,
+) -> (Rect, Rect) {
+    let submit = pill_width(prompt_submit_label(kind), true);
+    let cancel = pill_width("Cancel", false);
     (
-        Rect::new(x, y, new_width, 1),
-        Rect::new(x.saturating_add(new_width).saturating_add(gap), y, open_width, 1),
+        Rect::new(x, y, submit.min(width), 1),
+        Rect::new(x.saturating_add(submit).saturating_add(2), y, cancel, 1),
     )
 }
 
-/// Hit rects for the action-row pills, left-aligned to the grid.
-/// Paint and mouse dispatch share these.
-pub fn action_pill_rects(action: Rect) -> (Rect, Rect) {
-    let rephrase = pill_width("Rephrase", false);
-    let save = pill_width("Save", false);
-    let gap: u16 = 2;
-    (
-        Rect::new(action.x, action.y, rephrase.min(action.width), 1),
-        Rect::new(
-            action.x.saturating_add(rephrase).saturating_add(gap),
-            action.y,
-            save,
-            1,
-        ),
-    )
+/// Hit rect of one prompt suggestion row: the full column width, so
+/// the row clicks like a list.
+pub fn prompt_sugg_rect(x: u16, origin_y: u16, width: u16, index: usize) -> Rect {
+    Rect::new(x, origin_y.saturating_add(2 + index as u16), width, 1)
+}
+
+/// Middle-ellipsis: overlong paths keep head and tail around `…`.
+pub fn ellipsize_middle(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max || max < 4 {
+        return text.to_string();
+    }
+    let tail = (max - 1) / 2;
+    let head = max - 1 - tail;
+    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
 }
 
 /// Hit rect of the chat chip's `(✕)` detach, if a selection is live.
