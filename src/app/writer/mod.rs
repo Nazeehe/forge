@@ -103,6 +103,10 @@ pub struct WriterSession {
     pub queue: std::collections::VecDeque<String>,
     /// Empty-state typed-path prompt, if open.
     pub open_prompt: Option<WriterOpenPrompt>,
+    /// Last painted editor height in rows (0 before the first paint).
+    /// PageUp/PageDown move by this; the adapter cannot see the
+    /// viewport, so the paint layer reports it here.
+    pub editor_rows: u16,
 }
 
 /// Most finished requests kept; oldest evicted. Open requests and

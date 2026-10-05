@@ -232,12 +232,14 @@ fn paint_doc(
     // Fresh highlights every frame: stale ranges must never linger.
     editor.clear_highlights();
     let mut mark_rows: Vec<usize> = Vec::new();
+    let mut mark_range: std::ops::Range<usize> = 0..0;
     if let Some(selected) = session.selected_proposal {
         if let Some(proposal) = session.proposals.get(selected) {
             if proposal.range.end > proposal.range.start {
                 let start = row_of(&buffer, proposal.range.start);
                 let end = row_of(&buffer, proposal.range.end.saturating_sub(1));
                 mark_rows = (start..=end).collect();
+                mark_range = proposal.range.clone();
                 editor.add_highlight(Highlight::new(
                     crate::app::writer::adapter::offset_to_index2(&buffer, proposal.range.start),
                     crate::app::writer::adapter::offset_to_index2(
@@ -260,9 +262,13 @@ fn paint_doc(
         EditorView::new(editor).wrap(true).theme(theme),
         layout.editor,
     );
-    // Cursor-anchored gutter mapping: the first visible doc row is the
-    // cursor row minus its screen row. Exact while no wrapped row sits
-    // above the cursor in the viewport; wrapped prose may shift marks.
+    // Page keys move by the last painted editor height; the adapter
+    // cannot see the viewport, so the paint layer reports it here.
+    session.editor_rows = layout.editor.height;
+    // Wrap-exact gutter mapping, anchored on the cursor: screen rows
+    // of every doc row are counted from the cursor with the same
+    // greedy wrap EdTUI's LineWrapper uses, so wrapped rows can never
+    // desync the marks. Every highlighted screen row gets a mark.
     let mut cursor = None;
     if let Some(pos) = session
         .editor
@@ -270,18 +276,48 @@ fn paint_doc(
         .expect("rendered above")
         .cursor_screen_position()
     {
-        let screen_row = pos.y.saturating_sub(layout.editor.y) as usize;
+        let width = layout.editor.width.max(1) as usize;
+        let rel = pos.y.saturating_sub(layout.editor.y) as isize;
         let cursor_row = row_of(
             &buffer,
             crate::app::writer::adapter::editor_cursor_offset(
                 session.editor.as_ref().expect("rendered above"),
             ),
         );
-        let first = cursor_row.saturating_sub(screen_row);
+        let doc_rows: Vec<&str> = buffer.split('\n').collect();
+        // Screen-row prefix of doc row r: wrapped rows above it.
+        let prefix = |r: usize| {
+            doc_rows
+                .iter()
+                .take(r)
+                .map(|line| wrapped_height(line, width) as isize)
+                .sum::<isize>()
+        };
+        let base = prefix(cursor_row);
+        // The range's first/last (row, col): partial rows only mark
+        // the wrapped chunks the range touches.
+        let (first_row, first_col) = range_mark_start(&buffer, &mark_range);
+        let (last_row, last_col) = range_mark_end(&buffer, &mark_range);
         for row in mark_rows {
-            if row >= first {
-                let y = layout.editor.y.saturating_add((row - first) as u16);
-                if y < layout.editor.y.saturating_add(layout.editor.height)
+            let height = wrapped_height(doc_rows[row], width);
+            let last_chunk = height.saturating_sub(1);
+            let (from, to) = if row == first_row && row == last_row {
+                (
+                    chunk_of(doc_rows[row], first_col, width),
+                    chunk_of(doc_rows[row], last_col, width),
+                )
+            } else if row == first_row {
+                (chunk_of(doc_rows[row], first_col, width), last_chunk)
+            } else if row == last_row {
+                (0, chunk_of(doc_rows[row], last_col, width))
+            } else {
+                (0, last_chunk)
+            };
+            for k in from..=to.min(last_chunk) {
+                let y =
+                    layout.editor.y as isize + rel + (prefix(row) as isize + k as isize - base);
+                if y >= layout.editor.y as isize
+                    && y < (layout.editor.y + layout.editor.height) as isize
                     && layout.gutter.width > 0
                 {
                     f.render_widget(
@@ -289,7 +325,7 @@ fn paint_doc(
                             "▌",
                             style(Role::Brand),
                         )])),
-                        Rect::new(layout.gutter.x, y, 1, 1),
+                        Rect::new(layout.gutter.x, y as u16, 1, 1),
                     );
                 }
             }
@@ -325,6 +361,88 @@ fn paint_doc(
 /// Doc row (0-based) holding a char offset.
 fn row_of(text: &str, offset: usize) -> usize {
     text.chars().take(offset.min(text.chars().count())).filter(|&c| c == '\n').count()
+}
+
+/// Column (in chars) of an offset within its doc row.
+fn col_of(text: &str, offset: usize) -> usize {
+    let offset = offset.min(text.chars().count());
+    let mut start = 0usize;
+    for (i, c) in text.chars().enumerate() {
+        if i >= offset {
+            break;
+        }
+        if c == '\n' {
+            start = i + 1;
+        }
+    }
+    offset - start
+}
+
+/// First (row, col) touched by a proposal range: the range start.
+fn range_mark_start(text: &str, range: &std::ops::Range<usize>) -> (usize, usize) {
+    (row_of(text, range.start), col_of(text, range.start))
+}
+
+/// Last (row, col) touched: the final char of a non-empty range.
+fn range_mark_end(text: &str, range: &std::ops::Range<usize>) -> (usize, usize) {
+    let end = range.end.saturating_sub(1);
+    (row_of(text, end), col_of(text, end))
+}
+
+/// EdTUI's tab stop: its view state default, which we never change.
+const WRAP_TAB_WIDTH: usize = 2;
+
+/// Cell width of one char under EdTUI's wrap, mirroring its
+/// `LineWrapper` greedy fill (`helper::char_width`).
+fn wrap_cell_width(ch: char) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    if ch == '\t' {
+        WRAP_TAB_WIDTH
+    } else {
+        ch.width().unwrap_or(0)
+    }
+}
+
+/// Screen rows one doc line occupies at `width` cells: the chunk
+/// count of EdTUI's `wrap_line` (empty lines still take one row).
+fn wrapped_height(line: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let mut rows = 0usize;
+    let mut used = 0usize;
+    let mut chars = 0usize;
+    for ch in line.chars() {
+        chars += 1;
+        let cw = wrap_cell_width(ch);
+        if used + cw > width {
+            rows += 1;
+            used = 0;
+        }
+        used += cw;
+    }
+    if chars > 0 {
+        rows += 1;
+    }
+    rows.max(1)
+}
+
+/// Which wrapped chunk holds the char at column `col`: the split
+/// count EdTUI's `wrap_line` would have emitted before it.
+fn chunk_of(line: &str, col: usize, width: usize) -> usize {
+    let width = width.max(1);
+    let mut chunk = 0usize;
+    let mut used = 0usize;
+    for (i, ch) in line.chars().enumerate() {
+        if i >= col {
+            break;
+        }
+        let cw = wrap_cell_width(ch);
+        if used + cw > width {
+            chunk += 1;
+            used = 0;
+        }
+        used += cw;
+    }
+    chunk
 }
 
 /// Fixed one-line narrow notice in place of the panel.

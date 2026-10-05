@@ -677,8 +677,8 @@ fn shift_arrows_select_without_reaching_edtui() {
     // Text-field counts: two presses select two chars, not three.
     // (EdTUI visual counts the anchor char; the adapter compensates.)
     assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..2));
-    // Shift+Ctrl+Right runs to the next word start (EdTUI word motion),
-    // taking the separating space: standard Ctrl+Shift+Right behavior.
+    // Shift+Ctrl+Right runs to the next word start (adapter word
+    // motion), taking the separating space: standard behavior.
     let word = crossterm::event::KeyModifiers::SHIFT | crossterm::event::KeyModifiers::CONTROL;
     let (mut state, id, run, dir) = writer_agent();
     std::fs::write(dir.join("e.md"), "aaa bbb").unwrap();

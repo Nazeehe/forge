@@ -10,8 +10,7 @@
 use super::*;
 use edtui::{
     actions::{
-        DeleteSelection, InsertChar, MoveDown, MoveUp, MoveWordBackward, MoveWordForward,
-        SwitchMode,
+        DeleteSelection, InsertChar, SwitchMode,
     },
     clipboard::ClipboardTrait,
     EditorEventHandler, EditorMode, EditorState, Index2, Lines,
@@ -33,6 +32,107 @@ impl ClipboardTrait for SharedClipboard {
 
     fn get_text(&mut self) -> String {
         self.0.borrow().clone()
+    }
+}
+
+/// One adapter-owned cursor move: the CUA set from the E-phase
+/// keymap table. Char moves cross `\n` by offset (EdTUI motions
+/// stop at line ends); word jumps go to word starts (EdTUI stops
+/// at word ends, vim-style); pages move by the last painted editor
+/// height; everything clamps to the document.
+#[derive(Clone, Copy)]
+enum NavMove {
+    CharLeft,
+    CharRight,
+    WordLeft,
+    WordRight,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+    DocStart,
+    DocEnd,
+    PageUp,
+    PageDown,
+}
+
+/// Word chars for word jumps: letters, digits, underscore.
+/// Everything else (spaces, newlines, punctuation) separates.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Start of the next word run at or after `cursor`, else the doc end.
+fn word_right(chars: &[char], cursor: usize) -> usize {
+    let total = chars.len();
+    let mut i = cursor.min(total);
+    while i < total && is_word_char(chars[i]) {
+        i += 1;
+    }
+    while i < total && !is_word_char(chars[i]) {
+        i += 1;
+    }
+    i
+}
+
+/// Start of the word run before `cursor` (or the run holding it),
+/// else 0.
+fn word_left(chars: &[char], cursor: usize) -> usize {
+    let mut i = cursor.min(chars.len());
+    while i > 0 && !is_word_char(chars[i - 1]) {
+        i -= 1;
+    }
+    while i > 0 && is_word_char(chars[i - 1]) {
+        i -= 1;
+    }
+    i
+}
+
+/// Target char offset for `motion` from `cursor` in `buffer`
+/// (`total` chars), moving `page` rows on page keys.
+fn nav_target(buffer: &str, total: usize, cursor: usize, page: usize, motion: NavMove) -> usize {
+    let mut starts = vec![0usize];
+    for (i, c) in buffer.chars().enumerate() {
+        if c == '\n' {
+            starts.push(i + 1);
+        }
+    }
+    let cursor = cursor.min(total);
+    let row = starts.partition_point(|&s| s <= cursor).saturating_sub(1);
+    let col = cursor - starts[row];
+    let line_len = |r: usize| {
+        let end = if r + 1 < starts.len() {
+            starts[r + 1] - 1
+        } else {
+            total
+        };
+        end - starts[r]
+    };
+    match motion {
+        NavMove::CharLeft => cursor.saturating_sub(1),
+        NavMove::CharRight => (cursor + 1).min(total),
+        NavMove::WordLeft => word_left(&buffer.chars().collect::<Vec<_>>(), cursor),
+        NavMove::WordRight => word_right(&buffer.chars().collect::<Vec<_>>(), cursor),
+        NavMove::Up => {
+            let r = row.saturating_sub(1);
+            starts[r] + col.min(line_len(r))
+        }
+        NavMove::Down => {
+            let r = (row + 1).min(starts.len() - 1);
+            starts[r] + col.min(line_len(r))
+        }
+        NavMove::LineStart => starts[row],
+        NavMove::LineEnd => starts[row] + line_len(row),
+        NavMove::DocStart => 0,
+        NavMove::DocEnd => total,
+        NavMove::PageUp => {
+            let r = row.saturating_sub(page);
+            starts[r] + col.min(line_len(r))
+        }
+        NavMove::PageDown => {
+            let r = (row + page).min(starts.len() - 1);
+            starts[r] + col.min(line_len(r))
+        }
     }
 }
 
@@ -58,54 +158,86 @@ impl AppState {
         self.dirty = true;
     }
 
-    /// Feed one terminal key to the editor and sync back. Shift+arrows
-    /// (and Shift+Ctrl+arrows by word) are adapter-owned selection and
-    /// never reach EdTUI; everything else is forwarded as-is.
+    /// Feed one terminal key to the editor and sync back. Movement is
+    /// adapter-owned on top of char offsets, because EdTUI's char
+    /// motions stop at line ends and can never cross `\n`, its word
+    /// jumps stop at word ends (vim-style, not CUA starts), its page
+    /// keys move only the viewport, and several CUA keys have no
+    /// emacs-map binding at all. Everything else is forwarded as-is.
     pub fn writer_feed_key(&mut self, id: crate::session::SessionId, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
+        // Esc always returns the editor to the known-good state: no
+        // selection, Insert mode. EdTUI would park in vim Normal
+        // (its emacs map, mouse Down while Visual, all strand there)
+        // with nothing ever returning, so the adapter owns this.
+        if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::empty() {
+            if let Some(session) = self.writers.get_mut(&id) {
+                if let Some(editor) = session.editor.as_mut() {
+                    editor.selection = None;
+                    editor.mode = EditorMode::Insert;
+                }
+                session.sel_anchor = None;
+            }
+            self.writer_sync_editor(id);
+            self.dirty = true;
+            return;
+        }
         let shift = KeyModifiers::SHIFT;
         let shift_ctrl = KeyModifiers::SHIFT | KeyModifiers::CONTROL;
-        let shifted = if key.modifiers == shift {
+        // Adapter-owned moves: every move key plain (collapse) or
+        // with Shift (select), plus word jumps and doc bounds on
+        // Ctrl. Nothing navigation-like reaches EdTUI motions.
+        let nav = if key.modifiers == KeyModifiers::empty() || key.modifiers == shift {
             match key.code {
-                KeyCode::Left => Some((false, false)),
-                KeyCode::Right => Some((true, false)),
-                KeyCode::Up => None,
-                KeyCode::Down => None,
+                KeyCode::Left => Some(NavMove::CharLeft),
+                KeyCode::Right => Some(NavMove::CharRight),
+                KeyCode::Up => Some(NavMove::Up),
+                KeyCode::Down => Some(NavMove::Down),
+                KeyCode::Home => Some(NavMove::LineStart),
+                KeyCode::End => Some(NavMove::LineEnd),
+                KeyCode::PageUp => Some(NavMove::PageUp),
+                KeyCode::PageDown => Some(NavMove::PageDown),
                 _ => None,
             }
-        } else if key.modifiers == shift_ctrl {
+        } else if key.modifiers == KeyModifiers::CONTROL
+            || key.modifiers == shift_ctrl
+        {
             match key.code {
-                KeyCode::Left => Some((false, true)),
-                KeyCode::Right => Some((true, true)),
+                KeyCode::Left => Some(NavMove::WordLeft),
+                KeyCode::Right => Some(NavMove::WordRight),
+                KeyCode::Home => Some(NavMove::DocStart),
+                KeyCode::End => Some(NavMove::DocEnd),
                 _ => None,
             }
         } else {
             None
         };
-        // Vertical Shift selection shares the same anchor logic.
-        let vertical = key.modifiers == shift
-            && matches!(key.code, KeyCode::Up | KeyCode::Down);
-        if shifted.is_none() && !vertical {
+        if nav.is_none() {
             let Some(session) = self.writers.get_mut(&id) else {
                 return;
             };
             let Some(editor) = session.editor.as_mut() else {
                 return;
             };
-            // Any other key ends the keyboard-selection gesture; a
-            // plain arrow also collapses the selection first, the way
-            // every text field does.
+            // Any other key ends the keyboard-selection gesture. A
+            // live selection with a text-producing key replaces it
+            // first (CUA): EdTUI's emacs map has no Visual-char
+            // behavior we can rely on, so the adapter deletes, then
+            // forwards the key for the normal insert. (Two undo
+            // steps for now; E6 groups them.)
             session.sel_anchor = None;
-            if key.modifiers == KeyModifiers::empty()
+            if editor.selection.is_some()
                 && matches!(
-                    key.code,
-                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+                    (key.code, key.modifiers),
+                    (KeyCode::Char(_), KeyModifiers::NONE)
+                        | (KeyCode::Char(_), KeyModifiers::SHIFT)
+                        | (KeyCode::Backspace, KeyModifiers::NONE)
+                        | (KeyCode::Delete, KeyModifiers::NONE)
+                        | (KeyCode::Enter, KeyModifiers::NONE)
                 )
             {
-                editor.selection = None;
-                if editor.mode == EditorMode::Visual {
-                    editor.mode = EditorMode::Insert;
-                }
+                editor.execute(DeleteSelection);
+                editor.mode = EditorMode::Insert;
             }
             let mut handler = EditorEventHandler::emacs_mode();
             handler.on_event(crossterm::event::Event::Key(key), editor);
@@ -113,6 +245,7 @@ impl AppState {
             let Some(session) = self.writers.get_mut(&id) else {
                 return;
             };
+            let page = session.editor_rows.max(1) as usize;
             let Some(editor) = session.editor.as_mut() else {
                 return;
             };
@@ -120,6 +253,7 @@ impl AppState {
             // when one starts, or the end opposite the cursor when
             // extending a mouse-made selection.
             let cursor_off = index2_to_offset(&editor.lines, editor.cursor);
+            let selecting = key.modifiers == shift || key.modifiers == shift_ctrl;
             let anchor = match session.sel_anchor {
                 Some(anchor) => anchor,
                 None => match editor.selection.as_ref() {
@@ -135,59 +269,49 @@ impl AppState {
                     None => cursor_off,
                 },
             };
-            session.sel_anchor = Some(anchor);
-            if editor.mode != EditorMode::Visual {
-                editor.execute(SwitchMode(EditorMode::Visual));
-            }
-            if vertical {
-                if key.code == KeyCode::Up {
-                    editor.execute(MoveUp(1));
-                } else {
-                    editor.execute(MoveDown(1));
-                }
-            } else if let Some((forward, word)) = shifted {
-                match (forward, word) {
-                    // Char motions move by char offset, not by EdTUI
-                    // motion: MoveForward/MoveBackward stop at line
-                    // ends and can never cross `\n`. Word and vertical
-                    // motions already cross lines on their own.
-                    (true, false) | (false, false) => {
-                        let buffer = editor.lines.to_string();
-                        let total = buffer.chars().count();
-                        let off = index2_to_offset(&editor.lines, editor.cursor);
-                        let next = if forward {
-                            off.saturating_add(1).min(total)
-                        } else {
-                            off.saturating_sub(1)
-                        };
-                        editor.cursor = offset_to_index2(&buffer, next);
-                    }
-                    (true, true) => editor.execute(MoveWordForward(1)),
-                    (false, true) => editor.execute(MoveWordBackward(1)),
+            if selecting {
+                session.sel_anchor = Some(anchor);
+                if editor.mode != EditorMode::Visual {
+                    editor.execute(SwitchMode(EditorMode::Visual));
                 }
             }
-            // Text-field semantics: N presses select N chars. EdTUI
-            // visual counts the anchor char too, so the far end moves
-            // back one char; meeting the anchor collapses to a cursor.
-            let buffer = editor.lines.to_string();
-            let total = buffer.chars().count();
-            let anchor = anchor.min(total);
-            let cursor = index2_to_offset(&editor.lines, editor.cursor).min(total);
-            if cursor == anchor {
-                // Back at the start: no selection, not a zero-width
-                // value (which now reads as one char). Leave Visual
-                // too, so the next Shift gesture re-enters it and
-                // gets a fresh Selection instead of moving a None.
+            if let Some(motion) = nav {
+                let buffer = editor.lines.to_string();
+                let total = buffer.chars().count();
+                let target = nav_target(&buffer, total, cursor_off, page, motion);
+                editor.cursor = offset_to_index2(&buffer, target);
+            }
+            if !selecting {
+                // Plain moves collapse, the way every text field
+                // does, and land back in Insert: navigation must
+                // never strand the editor in a modal state.
                 editor.selection = None;
                 editor.mode = EditorMode::Insert;
-            } else if let Some(sel) = editor.selection.as_mut() {
-                let (low, high) = if cursor > anchor {
-                    (anchor, cursor - 1)
-                } else {
-                    (cursor, anchor - 1)
-                };
-                sel.start = offset_to_index2(&buffer, low);
-                sel.end = offset_to_index2(&buffer, high);
+                session.sel_anchor = None;
+            } else {
+                // Text-field semantics: N presses select N chars. EdTUI
+                // visual counts the anchor char too, so the far end moves
+                // back one char; meeting the anchor collapses to a cursor.
+                let buffer = editor.lines.to_string();
+                let total = buffer.chars().count();
+                let anchor = anchor.min(total);
+                let cursor = index2_to_offset(&editor.lines, editor.cursor).min(total);
+                if cursor == anchor {
+                    // Back at the start: no selection, not a zero-width
+                    // value (which now reads as one char). Leave Visual
+                    // too, so the next Shift gesture re-enters it and
+                    // gets a fresh Selection instead of moving a None.
+                    editor.selection = None;
+                    editor.mode = EditorMode::Insert;
+                } else if let Some(sel) = editor.selection.as_mut() {
+                    let (low, high) = if cursor > anchor {
+                        (anchor, cursor - 1)
+                    } else {
+                        (cursor, anchor - 1)
+                    };
+                    sel.start = offset_to_index2(&buffer, low);
+                    sel.end = offset_to_index2(&buffer, high);
+                }
             }
         }
         self.writer_sync_editor(id);
@@ -206,6 +330,21 @@ impl AppState {
         };
         let handler = EditorEventHandler::emacs_mode();
         handler.on_mouse_event(mouse, editor);
+        // Clicks and clean releases land back in Insert: EdTUI parks
+        // Down in vim Normal while a Visual selection is live, and
+        // nothing would ever return after that. Drags keep EdTUI's
+        // Visual and its growing selection untouched.
+        match mouse.kind {
+            crossterm::event::MouseEventKind::Down(_) => {
+                editor.mode = EditorMode::Insert;
+            }
+            crossterm::event::MouseEventKind::Up(_) => {
+                if editor.selection.is_none() {
+                    editor.mode = EditorMode::Insert;
+                }
+            }
+            _ => {}
+        }
         session.sel_anchor = None;
         self.writer_sync_editor(id);
         self.dirty = true;

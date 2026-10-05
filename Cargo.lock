@@ -650,6 +650,7 @@ dependencies = [
  "tui-markdown",
  "tui-realm-stdlib",
  "tuirealm",
+ "unicode-width 0.2.2",
  "ureq",
  "vt100",
 ]
