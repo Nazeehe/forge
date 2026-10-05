@@ -25,6 +25,9 @@ pub const MAX_SELECTION_CHARS: usize = 8_000;
 /// Longest proposal body, in chars (spec §6).
 pub const MAX_PROPOSAL_CHARS: usize = 32_000;
 
+/// Most document text returned by one read, in chars (spec §6).
+pub const MAX_READ_CHARS: usize = 64_000;
+
 /// Most pending proposals per document; the next is refused (spec §4.4).
 pub const MAX_PENDING_PROPOSALS: usize = 16;
 

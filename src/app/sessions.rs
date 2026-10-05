@@ -525,6 +525,7 @@ impl AppState {
         self.last_human_input.remove(&id);
         self.last_hook_activity.remove(&id);
         self.attention_flags.remove(&id);
+        self.writers.remove(&id);
         self.overlay_view = None;
         self.dirty = true;
         true

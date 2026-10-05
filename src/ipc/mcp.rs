@@ -392,7 +392,10 @@ fn instructions(srv: &ServerCtx) -> String {
         for delayed self-injection, start_session to spawn local agent sessions. \
         Keep set_session_status current as your phase changes and clear it when \
         it stops describing reality. Use request_attention only when you are \
-        blocked waiting on the operator, never to report completion.";
+        blocked waiting on the operator, never to report completion. Writer tools \
+        (writer_open, writer_read, writer_propose, writer_answer) exist for the \
+        session's document: while a Writer document is open, change it only \
+        through writer_propose, never your own file tools.";
     if srv.instructions_extra.is_empty() {
         base.to_string()
     } else {
@@ -528,6 +531,26 @@ fn tool_defs() -> Vec<ToolDef> {
             name: "walkthrough_update",
             description: "Update one step of the open tour: step_index is 1-based like the displayed counter; absent fields keep their values.",
             schema: r#"{"type":"object","properties":{"step_index":{"type":"integer"},"start_line":{"type":"integer"},"end_line":{"type":"integer"},"explanation":{"type":"string"}},"required":["step_index"]}"#,
+        },
+        ToolDef {
+            name: "writer_open",
+            description: "Open or create a Markdown file (.md/.markdown/.txt) in this session's folder for the Writer editor; refuses when a different unsaved document is open and never discards unsaved work. Pass title to label it.",
+            schema: r#"{"type":"object","properties":{"path":{"type":"string"},"title":{"type":"string"}},"required":["path"]}"#,
+        },
+        ToolDef {
+            name: "writer_read",
+            description: "Read the session's open Writer document: path, revision, total lines, current selection (char range plus line:col), pending request ids, and the requested 1-based line range (default all, capped with a truncation note).",
+            schema: r#"{"type":"object","properties":{"start_line":{"type":"integer"},"end_line":{"type":"integer"}}}"#,
+        },
+        ToolDef {
+            name: "writer_propose",
+            description: "Suggest an edit to the open Writer document as a reviewable proposal: full replacement text plus either request_id (uses exactly that request's range) or start_line/end_line (insert: end_line = start_line - 1; append: start_line = total lines + 1). The human accepts or rejects; bad ranges, oversize text, and over-cap proposals are refused.",
+            schema: r#"{"type":"object","properties":{"text":{"type":"string"},"request_id":{"type":"integer"},"start_line":{"type":"integer"},"end_line":{"type":"integer"},"note":{"type":"string"}},"required":["text"]}"#,
+        },
+        ToolDef {
+            name: "writer_answer",
+            description: "Answer a Writer request with Markdown for the Assistant thread. Errors when the request id is unknown, cancelled, or already answered.",
+            schema: r#"{"type":"object","properties":{"request_id":{"type":"integer"},"answer":{"type":"string"}},"required":["request_id","answer"]}"#,
         },
         #[cfg(feature = "visual")]
         ToolDef {
@@ -815,6 +838,19 @@ mod tests {
         assert!(text.contains("same as pane lines"), "{text}");
     }
 
+    #[test]
+    fn instructions_carry_the_writer_propose_only_rule() {
+        let res = handle_line(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("initialize answers");
+        assert!(res.contains("writer_propose"), "writer tools named: {res}");
+        assert!(res.contains("never your own file tools"), "propose-only rule: {res}");
+    }
+
     fn call_ctx() -> CallCtx {
         CallCtx {
             endpoint: None,
@@ -872,6 +908,10 @@ mod tests {
             "request_attention",
             "walkthrough_add_step",
             "walkthrough_update",
+            "writer_open",
+            "writer_read",
+            "writer_propose",
+            "writer_answer",
             #[cfg(feature = "visual")]
             "visual_show",
         ] {

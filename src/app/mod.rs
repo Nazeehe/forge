@@ -17,6 +17,7 @@ pub mod views;
 pub mod tools;
 pub mod visual;
 pub mod walkthrough;
+pub mod writer;
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -195,6 +196,9 @@ pub struct AppState {
     /// walkthrough_* tools; the overlay opens on start and the human
     /// steps through with j/k, asking with Enter.
     pub walkthroughs: std::collections::HashMap<crate::session::SessionId, crate::walkthrough::Walkthrough>,
+    /// Live Writer documents by session. Entered agent-side through the
+    /// writer_* tools; dropped with the session. The S4 tab renders them.
+    pub writers: std::collections::HashMap<crate::session::SessionId, crate::app::writer::WriterSession>,
     /// Grid mode (`Ctrl-b w`): the main area tiles every session in
     /// framed cells instead of showing only the focused one.
     pub grid_mode: bool,
@@ -439,6 +443,7 @@ impl AppState {
             hold_logged: std::collections::HashMap::new(),
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
+            writers: std::collections::HashMap::new(),
             grid_mode: false,
             board_open: false,
             tetris_open: false,
@@ -568,7 +573,10 @@ impl AppState {
                             Some(verdict) => verdict,
                             None => match self.board_tool(&req.run_id, &req.tool, &req.args) {
                                 Some(verdict) => verdict,
-                                None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                                None => match self.writer_tool(&req.run_id, &req.tool, &req.args) {
+                                    Some(verdict) => verdict,
+                                    None => self.broker.call(&self.manager, &req.run_id, &req.tool, &req.args, now),
+                                },
                             },
                         },
                     },
