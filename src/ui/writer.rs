@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::writer::{WriterFocus, WriterSession};
-use crate::ui::theme::{button_chrome, pill_left, pill_right, style, Role};
+use crate::ui::theme::{button_chrome, pill_left, pill_rest_cap, pill_right, style, Role};
 
 /// Narrow-terminal cutoff: below this width the assistant panel shows
 /// a fixed widen notice instead of the thread.
@@ -91,12 +91,11 @@ pub fn panel_collapsed(term_cols: u16) -> bool {
 /// One pill button: themed caps with an accent fill when emphasized.
 /// `default_mark` draws the `*` the wireframe pins on `(*New…)`.
 fn pill_spans(label: &str, emphasized: bool, default_mark: bool) -> Vec<Span<'static>> {
-    use ratatui::style::Color;
     let (fill, left, right) = button_chrome(
         emphasized,
         style(Role::TabActive),
         style(Role::TabInactive),
-        Color::DarkGray,
+        pill_rest_cap(),
     );
     vec![
         Span::styled(pill_left().to_string(), Style::default().fg(left)),
@@ -911,6 +910,22 @@ mod tests {
         // Rounded border corners, never blank panels.
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(119, 0)].symbol(), "╮");
+    }
+
+    #[test]
+    fn rest_pill_caps_use_the_semantic_rest_cap() {
+        // No new inline colours: rest caps come from the shared theme
+        // helper, mirroring the topbar/dialog pills.
+        let buf = paint_empty_to(&WriterSession::default(), 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30));
+        let (_, open_rect) = empty_pill_rects(layout.body);
+        assert!(open_rect.height > 0, "open pill paints");
+        let left_cap = buf[(open_rect.x, open_rect.y)].fg;
+        let right_cap =
+            buf[(open_rect.x + open_rect.width - 1, open_rect.y)].fg;
+        let rest = crate::ui::theme::pill_rest_cap();
+        assert_eq!(left_cap, rest, "left cap");
+        assert_eq!(right_cap, rest, "right cap");
     }
 
     #[test]

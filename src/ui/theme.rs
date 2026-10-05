@@ -139,6 +139,12 @@ pub fn highlight_mode() -> ButtonHighlight {
 /// button carries the emphasis (selected, default, open), `rest`/
 /// `rest_cap` otherwise. Under `Left` highlight an emphasized button
 /// keeps its rest fill and only the left bookend lights up.
+/// Rest cap colour for pill buttons: the dim gray every pill site
+/// passes to [`button_chrome`] when the button carries no emphasis.
+pub fn pill_rest_cap() -> Color {
+    Color::DarkGray
+}
+
 pub fn button_chrome(
     emphasized: bool,
     accent: Style,

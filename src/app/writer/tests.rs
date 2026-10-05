@@ -628,10 +628,12 @@ fn selection_conversion_boundaries() {
     // Empty document: no selection, no range.
     let empty = EditorState::new(Lines::from(""));
     assert_eq!(editor_selection_to_range(&empty), None);
-    // Zero-width visual selection is a cursor, not a range.
+    // An inclusive point selection is one char: EdTUI addresses both
+    // ends inclusively, so start == end still covers that char. A
+    // true cursor is `selection = None`, never a zero-width value.
     let mut plain = EditorState::new(Lines::from("hello"));
     plain.execute(SwitchMode(EditorMode::Visual));
-    assert_eq!(editor_selection_to_range(&plain), None);
+    assert_eq!(editor_selection_to_range(&plain), Some(0..1));
     // ASCII range: inclusive end becomes exclusive.
     let mut ascii = EditorState::new(Lines::from("hello"));
     ascii.execute(SwitchMode(EditorMode::Visual));
@@ -753,6 +755,137 @@ fn accept_replaces_exactly_with_one_undo_and_clipboard_intact() {
     let editor = state.writers.get_mut(&id).unwrap().editor.as_mut().unwrap();
     editor.undo();
     assert_eq!(editor.lines.to_string(), "hello world, hello");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn accept_multiline_proposal_then_typing_keeps_doc_exact() {
+    let (mut state, id, _run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "l1\nl2\nl3").unwrap();
+    let doc = crate::writer::document::Document::open(&dir, "d.md").unwrap();
+    let session = state.writers.entry(id).or_default();
+    session.doc = Some(doc.clone());
+    state.writer_open_editor(id);
+    let pid = state
+        .writers
+        .get_mut(&id)
+        .unwrap()
+        .proposals
+        .propose(&doc, None, 0..5, "X\nY".to_string(), None)
+        .unwrap();
+    state.writer_accept(id, pid).unwrap();
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.doc.as_ref().unwrap().text, "X\nY\nl3");
+    assert_eq!(
+        session.editor.as_ref().unwrap().lines.to_string(),
+        "X\nY\nl3",
+        "buffer matches the document right after accept"
+    );
+    // The next keystroke must diff a correct buffer, not corrupt.
+    feed(&mut state, id, crossterm::event::KeyCode::Char('!'));
+    assert_eq!(
+        state.writers.get(&id).unwrap().doc.as_ref().unwrap().text,
+        "X\nY!\nl3"
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn accept_proposal_changing_line_count() {
+    let (mut state, id, _run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "l1\nl2\nl3").unwrap();
+    let doc = crate::writer::document::Document::open(&dir, "d.md").unwrap();
+    let session = state.writers.entry(id).or_default();
+    session.doc = Some(doc.clone());
+    state.writer_open_editor(id);
+    let pid = state
+        .writers
+        .get_mut(&id)
+        .unwrap()
+        .proposals
+        .propose(&doc, None, 0..2, "longer\nlines\nhere".to_string(), None)
+        .unwrap();
+    state.writer_accept(id, pid).unwrap();
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(
+        session.doc.as_ref().unwrap().text,
+        "longer\nlines\nhere\nl2\nl3"
+    );
+    assert_eq!(
+        session.editor.as_ref().unwrap().lines.to_string(),
+        "longer\nlines\nhere\nl2\nl3",
+        "buffer matches"
+    );
+    feed(&mut state, id, crossterm::event::KeyCode::Char('?'));
+    assert_eq!(
+        state.writers.get(&id).unwrap().doc.as_ref().unwrap().text,
+        "longer\nlines\nhere?\nl2\nl3"
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shift_right_once_selects_one_char() {
+    let (mut state, id, _run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+    let doc = crate::writer::document::Document::open(&dir, "d.md").unwrap();
+    let session = state.writers.entry(id).or_default();
+    session.doc = Some(doc);
+    state.writer_open_editor(id);
+    shift_select(&mut state, id, 1);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..1));
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shift_selection_crosses_line_boundaries() {
+    let (mut state, id, _run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "ab\ncd").unwrap();
+    let doc = crate::writer::document::Document::open(&dir, "d.md").unwrap();
+    let session = state.writers.entry(id).or_default();
+    session.doc = Some(doc);
+    state.writer_open_editor(id);
+    // Forward across the newline: three presses take "ab\n".
+    shift_select(&mut state, id, 3);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..3));
+    // Back across it from a fresh gesture: plain arrows collapse and
+    // clear the anchor, then three Shift+Left take it all back.
+    feed(&mut state, id, crossterm::event::KeyCode::Right);
+    feed(&mut state, id, crossterm::event::KeyCode::Left);
+    assert_eq!(state.writers.get(&id).unwrap().selection, None);
+    let shift = crossterm::event::KeyModifiers::SHIFT;
+    for _ in 0..3 {
+        state.writer_feed_key(
+            id,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Left, shift),
+        );
+    }
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..3));
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rephrase_leaves_the_chat_draft_alone() {
+    let (mut state, id, _run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb ccc").unwrap();
+    let doc = crate::writer::document::Document::open(&dir, "d.md").unwrap();
+    let session = state.writers.entry(id).or_default();
+    session.doc = Some(doc);
+    state.writer_open_editor(id);
+    shift_select(&mut state, id, 3);
+    state.writers.get_mut(&id).unwrap().chat_input = "abc".to_string();
+    state.writer_rephrase(id);
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.chat_input, "abc", "draft survives Rephrase");
+    assert!(
+        session.queue.back().expect("queued").contains("<instruction></instruction>"),
+        "no instruction sent"
+    );
     assert!(state.manager.remove(id));
     std::fs::remove_dir_all(&dir).ok();
 }

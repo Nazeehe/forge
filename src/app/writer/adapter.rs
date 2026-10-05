@@ -10,8 +10,8 @@
 use super::*;
 use edtui::{
     actions::{
-        DeleteSelection, InsertChar, MoveBackward, MoveDown, MoveForward, MoveUp, MoveWordBackward,
-        MoveWordForward, SwitchMode,
+        DeleteSelection, InsertChar, MoveDown, MoveUp, MoveWordBackward, MoveWordForward,
+        SwitchMode,
     },
     clipboard::ClipboardTrait,
     EditorEventHandler, EditorMode, EditorState, Index2, Lines,
@@ -147,8 +147,21 @@ impl AppState {
                 }
             } else if let Some((forward, word)) = shifted {
                 match (forward, word) {
-                    (true, false) => editor.execute(MoveForward(1)),
-                    (false, false) => editor.execute(MoveBackward(1)),
+                    // Char motions move by char offset, not by EdTUI
+                    // motion: MoveForward/MoveBackward stop at line
+                    // ends and can never cross `\n`. Word and vertical
+                    // motions already cross lines on their own.
+                    (true, false) | (false, false) => {
+                        let buffer = editor.lines.to_string();
+                        let total = buffer.chars().count();
+                        let off = index2_to_offset(&editor.lines, editor.cursor);
+                        let next = if forward {
+                            off.saturating_add(1).min(total)
+                        } else {
+                            off.saturating_sub(1)
+                        };
+                        editor.cursor = offset_to_index2(&buffer, next);
+                    }
                     (true, true) => editor.execute(MoveWordForward(1)),
                     (false, true) => editor.execute(MoveWordBackward(1)),
                 }
@@ -160,19 +173,18 @@ impl AppState {
             let total = buffer.chars().count();
             let anchor = anchor.min(total);
             let cursor = index2_to_offset(&editor.lines, editor.cursor).min(total);
-            if let Some(sel) = editor.selection.as_mut() {
-                if cursor == anchor {
-                    sel.start = editor.cursor;
-                    sel.end = editor.cursor;
+            if cursor == anchor {
+                // Back at the start: no selection, not a zero-width
+                // value (which now reads as one char).
+                editor.selection = None;
+            } else if let Some(sel) = editor.selection.as_mut() {
+                let (low, high) = if cursor > anchor {
+                    (anchor, cursor - 1)
                 } else {
-                    let (low, high) = if cursor > anchor {
-                        (anchor, cursor - 1)
-                    } else {
-                        (cursor, anchor - 1)
-                    };
-                    sel.start = offset_to_index2(&buffer, low);
-                    sel.end = offset_to_index2(&buffer, high);
-                }
+                    (cursor, anchor - 1)
+                };
+                sel.start = offset_to_index2(&buffer, low);
+                sel.end = offset_to_index2(&buffer, high);
             }
         }
         self.writer_sync_editor(id);
@@ -251,18 +263,39 @@ impl AppState {
             .proposals
             .accept(doc, proposal_id)
             .map_err(|e| e.to_string())?;
-        if let Some(editor) = session.editor.as_mut() {
-            if editor.lines.to_string() == pre_text {
+        if session.editor.is_some() {
+            let buffer_matches = session
+                .editor
+                .as_ref()
+                .expect("checked above")
+                .lines
+                .to_string()
+                == pre_text;
+            if buffer_matches {
+                let editor = session.editor.as_mut().expect("checked above");
                 let clip = session.clip.clone();
                 editor_apply_accept(editor, &clip, range.clone(), &text);
             } else {
                 let fresh = session.doc.as_ref().expect("checked above").text.clone();
                 let editor = session.editor.as_mut().expect("checked above");
-                editor.lines = Lines::from(fresh.as_str());
-                let total = fresh.chars().count();
-                editor.cursor = offset_to_index2(&fresh, range.start.min(total));
-                editor.selection = None;
-                editor.mode = EditorMode::Insert;
+                editor_rebuild(editor, &fresh, range.start);
+            }
+            // Belt and braces: the buffer must equal the doc after any
+            // replace. A diverged buffer is rebuilt from the doc, never
+            // diffed back into it by the next sync. The cursor lands at
+            // the end of the inserted text either way, so typing
+            // continues where the accept left off.
+            let authoritative = session.doc.as_ref().expect("checked above").text.clone();
+            let matches = session
+                .editor
+                .as_ref()
+                .expect("checked above")
+                .lines
+                .to_string()
+                == authoritative;
+            if !matches {
+                let editor = session.editor.as_mut().expect("checked above");
+                editor_rebuild(editor, &authoritative, range.start + text.chars().count());
             }
             session.selection = editor_selection_to_range(session.editor.as_ref().expect("checked above"));
         }
@@ -297,15 +330,11 @@ impl AppState {
     }
 
     /// Rephrase the live selection, or the paragraph under the cursor.
-    /// The chat box rides along as the optional instruction when set.
+    /// Sends no instruction and leaves the chat draft untouched: a
+    /// half-typed message must never ride along and be lost.
     /// `pub(crate)`: the TUI input layer calls this directly.
     pub(crate) fn writer_rephrase(&mut self, id: crate::session::SessionId) {
-        let instruction = self
-            .writers
-            .get(&id)
-            .map(|session| session.chat_input.clone())
-            .unwrap_or_default();
-        self.writer_send_request(id, WriterAction::Rephrase, instruction);
+        self.writer_send_request(id, WriterAction::Rephrase, String::new());
     }
 
     /// Chat over the live selection, or the whole document when there
@@ -396,8 +425,10 @@ impl AppState {
             return;
         };
         session.queue.push_back(markup);
-        session.chat_input.clear();
-        session.chat_cursor = 0;
+        if action == WriterAction::Chat {
+            session.chat_input.clear();
+            session.chat_cursor = 0;
+        }
         session.error = None;
         self.dirty = true;
     }
@@ -786,6 +817,17 @@ impl AppState {
     }
 }
 
+/// Rebuild the editor buffer from the document text: cursor near the
+/// accept, no selection, Insert mode. Used for drift and as the
+/// never-diverge backstop after a replace.
+fn editor_rebuild(editor: &mut EditorState, text: &str, cursor_off: usize) {
+    editor.lines = Lines::from(text);
+    let total = text.chars().count();
+    editor.cursor = offset_to_index2(text, cursor_off.min(total));
+    editor.selection = None;
+    editor.mode = EditorMode::Insert;
+}
+
 /// Replace an accepted range inside the editor buffer: DeleteSelection
 /// plus one InsertChar per replacement char is exactly one undo step
 /// (only DeleteSelection captures). The Forge-owned clipboard is saved
@@ -809,9 +851,15 @@ fn editor_apply_accept(
             editor.execute(InsertChar(c));
         }
     } else {
+        // The selection is set directly from the char offsets:
+        // EdTUI motions stop at line ends and can never span `\n`.
+        // (EdTUI's extract still eats a line-final break, so ranges
+        // ending at a line end rebuild below; the doc stays exact.)
+        editor.cursor = offset_to_index2(&buffer, range.start);
         editor.execute(SwitchMode(EditorMode::Visual));
-        for _ in range.start..range.end {
-            editor.execute(MoveForward(1));
+        if let Some(sel) = editor.selection.as_mut() {
+            sel.start = offset_to_index2(&buffer, range.start);
+            sel.end = offset_to_index2(&buffer, range.end.saturating_sub(1).max(range.start));
         }
         editor.execute(DeleteSelection);
         for c in text.chars() {
@@ -824,16 +872,17 @@ fn editor_apply_accept(
 
 /// The inclusive→exclusive conversion, in one place: EdTUI selections
 /// address both ends inclusively, while the domain counts the end
-/// exclusive. Zero-width selections are cursors, not ranges.
+/// exclusive — so start == end still covers exactly one char. A true
+/// cursor is `selection = None`, never a zero-width value.
 pub fn editor_selection_to_range(editor: &EditorState) -> Option<std::ops::Range<usize>> {
     let selection = editor.selection.as_ref()?;
     let lines = &editor.lines;
     let start = index2_to_offset(lines, selection.start());
     let end = index2_to_offset(lines, selection.end());
-    if start >= end {
+    let total = lines.to_string().chars().count();
+    if start > end || start >= total {
         return None;
     }
-    let total = lines.to_string().chars().count();
     Some(start..(end + 1).min(total))
 }
 

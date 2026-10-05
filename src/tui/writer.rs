@@ -13,7 +13,7 @@ use crate::app::AppState;
 /// One key while the Writer overlay owns input. The typed-path prompt
 /// takes typing/Enter/Esc; without a document `n`/`o` open the prompt;
 /// otherwise Tab cycles Editor → Chat → Thread, `Ctrl+S` saves and
-/// `Ctrl+R` rephrases from any focus, and every other key routes by
+/// `Alt+R` rephrases from any focus, and every other key routes by
 /// focus: editor keys to the adapter, chat typing to the chat box,
 /// thread keys to the proposal selection.
 pub(super) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
@@ -48,21 +48,18 @@ pub(super) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
         }
         return;
     }
-    // Save and Rephrase ride above every focus so the pills always
-    // have a keyboard twin, even mid-sentence in the editor. (Emacs
-    // reverse-search and isearch give way inside the Writer tab.)
-    if key.modifiers == KeyModifiers::CONTROL {
-        match key.code {
-            KeyCode::Char('s') => {
-                state.writer_save(id);
-                return;
-            }
-            KeyCode::Char('r') => {
-                state.writer_rephrase(id);
-                return;
-            }
-            _ => {}
-        }
+    // Save rides above every focus so the pill always has a keyboard
+    // twin, even mid-sentence in the editor (Emacs isearch gives way
+    // inside the Writer tab). Rephrase rides on Alt+R, which is free
+    // in EdTUI's emacs map and outside the Forge prefix: Ctrl+R stays
+    // the editor's redo.
+    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') {
+        state.writer_save(id);
+        return;
+    }
+    if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('r') {
+        state.writer_rephrase(id);
+        return;
     }
     if key.code == KeyCode::Tab {
         state.writer_cycle_focus(id);
@@ -530,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_saves_and_ctrl_r_rephrases() {
+    fn ctrl_s_saves_and_alt_r_rephrases() {
         let (mut state, id, dir) = writer_agent();
         open_doc(&mut state, id, "d.md");
         state.open_writer_overlay();
@@ -540,10 +537,66 @@ mod tests {
         handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('s')), now);
         assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "!aaa bbb");
         assert_eq!(state.writers.get(&id).unwrap().error, None);
-        // Ctrl+R rephrases the paragraph under the cursor.
-        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('r')), now);
+        // Alt+R rephrases the paragraph under the cursor (Ctrl+R is
+        // the editor's redo and stays untouched).
+        let alt_r = event::KeyEvent::new(event::KeyCode::Char('r'), event::KeyModifiers::ALT);
+        handle_key_at(&mut state, &mut router, alt_r, now);
         let session = state.writers.get(&id).unwrap();
         assert!(session.queue.back().expect("queued").contains("action=rephrase"));
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_r_redoes_and_alt_r_rephrases() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Char('!')), now);
+        // Ctrl+U undoes, Ctrl+R redoes: the editor keeps its redo.
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('u')), now);
+        assert_eq!(
+            state.writers.get(&id).unwrap().doc.as_ref().unwrap().text,
+            "aaa bbb"
+        );
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('r')), now);
+        assert_eq!(
+            state.writers.get(&id).unwrap().doc.as_ref().unwrap().text,
+            "!aaa bbb",
+            "Ctrl+R still redoes"
+        );
+        // Alt+R rephrases instead.
+        let alt_r = event::KeyEvent::new(event::KeyCode::Char('r'), event::KeyModifiers::ALT);
+        handle_key_at(&mut state, &mut router, alt_r, now);
+        let session = state.writers.get(&id).unwrap();
+        assert!(session.queue.back().expect("queued").contains("action=rephrase"));
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_char_mouse_selection_is_kept() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        // Paint once so EdTUI learns its screen area.
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "bbb");
+        // Down and drag on the same cell: one char stays selected.
+        super::handle_writer_mouse(&mut state, click_at(x, y));
+        super::handle_writer_mouse(
+            &mut state,
+            event::MouseEvent {
+                kind: event::MouseEventKind::Drag(event::MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.writers.get(&id).unwrap().selection, Some(4..5));
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }
