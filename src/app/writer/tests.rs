@@ -870,6 +870,52 @@ fn shift_selection_crosses_line_boundaries() {
 }
 
 #[test]
+fn shift_selection_reextends_after_collapse() {
+    let (mut state, id, _run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+    let doc = crate::writer::document::Document::open(&dir, "d.md").unwrap();
+    let session = state.writers.entry(id).or_default();
+    session.doc = Some(doc);
+    state.writer_open_editor(id);
+    shift_select(&mut state, id, 1);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..1));
+    shift_left(&mut state, id, 1);
+    assert_eq!(state.writers.get(&id).unwrap().selection, None);
+    shift_select(&mut state, id, 1);
+    assert_eq!(
+        state.writers.get(&id).unwrap().selection,
+        Some(0..1),
+        "re-extend after collapse"
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn shift_left_past_anchor_after_collapse_selects_before() {
+    let (mut state, id, _run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+    let doc = crate::writer::document::Document::open(&dir, "d.md").unwrap();
+    let session = state.writers.entry(id).or_default();
+    session.doc = Some(doc);
+    state.writer_open_editor(id);
+    feed(&mut state, id, crossterm::event::KeyCode::Right);
+    feed(&mut state, id, crossterm::event::KeyCode::Right);
+    shift_select(&mut state, id, 2);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(2..4));
+    shift_left(&mut state, id, 2);
+    assert_eq!(state.writers.get(&id).unwrap().selection, None);
+    shift_left(&mut state, id, 1);
+    assert_eq!(
+        state.writers.get(&id).unwrap().selection,
+        Some(1..2),
+        "the char before the anchor"
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn rephrase_leaves_the_chat_draft_alone() {
     let (mut state, id, _run, dir) = writer_agent();
     std::fs::write(dir.join("d.md"), "aaa bbb ccc").unwrap();
@@ -964,6 +1010,16 @@ fn shift_select(state: &mut AppState, id: crate::session::SessionId, count: usiz
         state.writer_feed_key(
             id,
             crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Right, shift),
+        );
+    }
+}
+
+fn shift_left(state: &mut AppState, id: crate::session::SessionId, count: usize) {
+    let shift = crossterm::event::KeyModifiers::SHIFT;
+    for _ in 0..count {
+        state.writer_feed_key(
+            id,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Left, shift),
         );
     }
 }

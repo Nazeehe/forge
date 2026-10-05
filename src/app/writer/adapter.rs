@@ -175,8 +175,11 @@ impl AppState {
             let cursor = index2_to_offset(&editor.lines, editor.cursor).min(total);
             if cursor == anchor {
                 // Back at the start: no selection, not a zero-width
-                // value (which now reads as one char).
+                // value (which now reads as one char). Leave Visual
+                // too, so the next Shift gesture re-enters it and
+                // gets a fresh Selection instead of moving a None.
                 editor.selection = None;
+                editor.mode = EditorMode::Insert;
             } else if let Some(sel) = editor.selection.as_mut() {
                 let (low, high) = if cursor > anchor {
                     (anchor, cursor - 1)
