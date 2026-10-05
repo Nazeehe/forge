@@ -15,6 +15,8 @@ pub mod adapter;
 pub mod tools;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(super) mod test_support;
 
 /// A human → agent request. Proposals and answers arrive independently,
 /// in either order; only a cancelled request refuses both.
