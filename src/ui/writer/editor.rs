@@ -133,9 +133,16 @@ fn paint_doc(
             }
         }
     }
+    // Every EdTUI style maps to a semantic role: the defaults hide
+    // hard-coded RGB (white-on-black cursor, yellow selection, gray
+    // line numbers) that no theme remap could reach.
     let theme = EditorTheme::default()
         .base(style(Role::Text))
+        .cursor_style(
+            style(Role::Text).add_modifier(ratatui::style::Modifier::REVERSED),
+        )
         .selection_style(style(Role::Focus))
+        .line_numbers_style(style(Role::Muted))
         .hide_status_line();
     f.render_widget(
         EditorView::new(editor).wrap(true).theme(theme),

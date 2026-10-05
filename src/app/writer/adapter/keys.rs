@@ -713,7 +713,11 @@ impl AppState {
             .get(&id)
             .map(|s| s.recent_cache.iter().map(|e| e.rel.clone()).collect())
             .unwrap_or_default();
-        for candidate in opened.into_iter().chain(recent) {
+        // Live filesystem last: files the cache has not seen yet (open
+        // races it), through the jail. The suggestion row previews only
+        // the cache hits above; Tab additionally consults the disk.
+        let live = crate::writer::recent::complete(&cwd, &prefix);
+        for candidate in opened.into_iter().chain(recent).chain(live) {
             if !seen.insert(candidate.clone()) {
                 continue;
             }
@@ -793,11 +797,18 @@ impl AppState {
         self.dirty = true;
     }
 
-    /// Cycle keyboard focus Editor → Chat → Thread → Editor.
+    /// Cycle keyboard focus Editor → Chat → Thread → Editor. Chat
+    /// and Thread live in the assistant panel, so while it is hidden
+    /// focus stays in the editor instead of moving somewhere invisible.
     pub fn writer_cycle_focus(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;
         };
+        if !session.panel_visible {
+            session.focus = WriterFocus::Editor;
+            self.dirty = true;
+            return;
+        }
         session.focus = match session.focus {
             WriterFocus::Editor => WriterFocus::Chat,
             WriterFocus::Chat => WriterFocus::Thread,

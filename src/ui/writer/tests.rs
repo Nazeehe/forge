@@ -234,6 +234,28 @@
     }
 
     #[test]
+    fn editor_theme_uses_semantic_roles_only() {
+        use ratatui::style::Color;
+        let mut session = doc_session("aaa bbb");
+        session.panel_visible = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), true);
+        let mut rgb_cells = Vec::new();
+        for y in layout.editor.y..layout.editor.y.saturating_add(layout.editor.height) {
+            for x in layout.editor.x..layout.editor.x.saturating_add(layout.editor.width) {
+                let cell = &buf[(x, y)];
+                if matches!(cell.fg, Color::Rgb(..)) || matches!(cell.bg, Color::Rgb(..)) {
+                    rgb_cells.push((x, y, cell.symbol().to_string()));
+                }
+            }
+        }
+        assert!(
+            rgb_cells.is_empty(),
+            "EdTUI cursor/line-numbers must map to semantic roles, got RGB at {rgb_cells:?}"
+        );
+    }
+
+    #[test]
     fn rest_pill_caps_use_the_semantic_rest_cap() {
         // No new inline colours: rest caps come from the shared theme
         // helper, mirroring the topbar/dialog pills.

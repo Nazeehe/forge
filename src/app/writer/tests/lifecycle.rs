@@ -147,6 +147,47 @@ fn prompt_tab_completes_from_opened_then_recent_and_stays_stable() {
 }
 
 #[test]
+fn prompt_tab_completes_live_filesystem_beyond_the_cache() {
+    let (mut state, id, _run, dir) = writer_agent();
+    state.writer_toolbar_open(id);
+    // Created after the prompt opened: only a live filesystem read
+    // can find these (late.txt is .txt, which the md-only scan skips;
+    // sub/deep.md postdates the cache refresh).
+    std::fs::write(dir.join("late.txt"), "t\n").unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub").join("deep.md"), "d\n").unwrap();
+    type_path(&mut state, id, "lat");
+    state.writer_prompt_complete(id);
+    assert_eq!(prompt_buffer(&state, id), "late.txt", "live .txt hit");
+    state.writer_prompt_cancel(id);
+    state.writer_toolbar_open(id);
+    type_path(&mut state, id, "su");
+    state.writer_prompt_complete(id);
+    assert_eq!(prompt_buffer(&state, id), "sub/", "dir with trailing slash");
+    type_path(&mut state, id, "d");
+    state.writer_prompt_complete(id);
+    assert_eq!(prompt_buffer(&state, id), "sub/deep.md", "completes inside subdir");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prompt_tab_never_completes_outside_the_jail() {
+    let (mut state, id, _run, dir) = writer_agent();
+    state.writer_toolbar_open(id);
+    type_path(&mut state, id, "../");
+    state.writer_prompt_complete(id);
+    assert_eq!(prompt_buffer(&state, id), "../", "parent escape completes nothing");
+    state.writer_prompt_cancel(id);
+    state.writer_toolbar_open(id);
+    type_path(&mut state, id, "/tmp/");
+    state.writer_prompt_complete(id);
+    assert_eq!(prompt_buffer(&state, id), "/tmp/", "absolute path completes nothing");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn save_as_writes_new_file_switches_path_and_updates_recent() {
     let (mut state, id, run, dir) = writer_agent();
     std::fs::write(dir.join("a.md"), "hello\n").unwrap();

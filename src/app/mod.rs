@@ -661,7 +661,14 @@ impl AppState {
             }
             AppEvent::Resize(rows, cols) => {
                 self.term_size = (rows, cols);
-                if cols < 100 { self.overlay_view = None; }
+                // Narrow keeps the Writer overlay: its panel degrades
+                // to a fixed "widen" notice, so the document stays
+                // usable. Every other overlay still evicts below 100
+                // columns, as before.
+                let keep_writer = self.overlay_view.is_some_and(|(view_id, index)| {
+                    Some(index) == self.writer_slot(view_id)
+                });
+                if cols < 100 && !keep_writer { self.overlay_view = None; }
                 self.dirty = true;
             }
             AppEvent::HookRequest(req) => {

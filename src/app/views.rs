@@ -34,7 +34,10 @@ impl AppState {
                 active: i == rec.active_tab,
             })
             .collect();
-        if rec.tabs.len() > 1 && self.term_size.1 >= 100 {
+        // Overlay tabs stay reachable at any width (narrow only drops
+        // their icons below): the Writer tab in particular must remain
+        // selectable when the terminal shrinks under 100 columns.
+        if rec.tabs.len() > 1 {
             for (index, label) in OVERLAY_TABS.iter().enumerate() {
                 tabs.push(crate::ui::topbar::TopTab {
                     label: (*label).to_string(),
@@ -623,7 +626,9 @@ mod tests {
         assert!(state.select_top_tab(3));
         state.apply(AppEvent::Resize(24, 80));
         assert!(!state.overlay_active());
-        assert_eq!(state.topbar().tabs.len(), 3);
+        // Overlay tabs stay in the strip when narrow (A3): the view
+        // evicts but its tab stays reachable.
+        assert_eq!(state.topbar().tabs.len(), 6);
         assert!(state.manager.remove(id));
     }
 

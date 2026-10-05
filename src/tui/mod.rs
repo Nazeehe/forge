@@ -54,6 +54,86 @@ fn paint_due(last_paint: Instant, now: Instant, input_this_tick: bool) -> bool {
     input_this_tick || now.duration_since(last_paint) >= Duration::from_millis(BACKGROUND_FRAME_MS)
 }
 
+/// One full frame: chrome, the which-key HUD, the Writer overlay, every
+/// modal, then the tour. Extracted from the event loop so tests can pin
+/// the order on a real backend. Returns the Writer editor cursor, if any.
+pub(crate) fn paint_frame(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    state: &mut AppState,
+    views: &[ui::PaneView],
+    chrome: &ui::Chrome,
+) -> Option<ratatui::layout::Position> {
+    ui::render(f, area, views, chrome);
+    let mut writer_cursor = None;
+    // The which-key HUD floats above the chrome but below
+    // every modal: it only ever opens off the prefix path,
+    // which modals bypass, so both can never want input.
+    if state.whichkey.visible() {
+        let hud = crate::ui::whichkey::whichkey_area(area);
+        crate::ui::whichkey::render_whichkey(f, area, hud);
+    }
+    // The Writer overlay paints its live editor above the chrome but
+    // below every modal: a direct widget render, since PaneView spans
+    // cannot host an editor. Modals below still win when both are open.
+    if let Some(id) = state.writer_overlay_active() {
+        let activity = state
+            .manager
+            .get(id)
+            .map(|rec| rec.activity)
+            .unwrap_or(crate::session::Activity::Idle);
+        if let Some(session) = state.writers.get_mut(&id) {
+            let (_, term_cols) = state.term_size;
+            writer_cursor = crate::ui::writer::paint(
+                f,
+                crate::walkthrough::walk_area(area),
+                session,
+                activity,
+                term_cols,
+            );
+        }
+    }
+    if let Some(dialog) = state.create_dialog.as_mut() {
+        dialog.view(f, crate::ui::dialogs::create::create_area(area));
+    }
+    if state.group_dialog.is_some() {
+        let ctx = state.group_ctx();
+        let garea = crate::ui::dialogs::groups::group_area(area);
+        if let Some(dialog) = state.group_dialog.as_ref() {
+            dialog.view(f, garea, &ctx);
+        }
+    }
+    if let Some(dialog) = state.telegram_dialog.as_mut() {
+        dialog.view(f, crate::ui::dialogs::telegram::telegram_area(area));
+    }
+    if let Some(dialog) = state.card_edit.as_mut() {
+        dialog.view(f, crate::ui::dialogs::card_edit::card_edit_area(area));
+    }
+    if let Some(dialog) = state.theme_dialog.as_ref() {
+        dialog.view(f, crate::ui::dialogs::theme::theme_area(area));
+    }
+    if let Some(dialog) = state.confirm.as_ref() {
+        dialog.view(f, crate::ui::dialogs::quit::confirm_area(area));
+    }
+    if state.quit_saving {
+        crate::ui::dialogs::quit::view_saving(f, crate::ui::dialogs::quit::saving_area(area));
+    }
+    if let Some(picker) = state.restore_picker.as_ref() {
+        picker.view(f, crate::session::checkpoint::RestorePicker::picker_area(area));
+    }
+    // First run sits above every other modal (below the tour):
+    // it owns input while present, so it paints on top.
+    if let Some(dialog) = state.oobe_dialog.as_ref() {
+        dialog.view(f, crate::ui::dialogs::oobe::oobe_area(area));
+    }
+    // The tour takes over the main area above every dialog:
+    // it is opaque and owns input while open.
+    if let Some(tour) = state.walkthrough_overlay() {
+        tour.view(f, crate::walkthrough::walk_area(area));
+    }
+    writer_cursor
+}
+
 /// Grace window on quit: SIGTERM'd agents share this long to save state
 /// before the state drop SIGKILLs stragglers.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -520,73 +600,7 @@ fn loop_until_quit(
             let mut writer_cursor = None;
             terminal.draw(|f| {
                 let area = f.area();
-                ui::render(f, area, &views, &chrome);
-                // The which-key HUD floats above the chrome but below
-                // every modal: it only ever opens off the prefix path,
-                // which modals bypass, so both can never want input.
-                if state.whichkey.visible() {
-                    let hud = crate::ui::whichkey::whichkey_area(area);
-                    crate::ui::whichkey::render_whichkey(f, area, hud);
-                }
-                if let Some(dialog) = state.create_dialog.as_mut() {
-                    dialog.view(f, crate::ui::dialogs::create::create_area(area));
-                }
-                if state.group_dialog.is_some() {
-                    let ctx = state.group_ctx();
-                    let garea = crate::ui::dialogs::groups::group_area(area);
-                    if let Some(dialog) = state.group_dialog.as_ref() {
-                        dialog.view(f, garea, &ctx);
-                    }
-                }
-                if let Some(dialog) = state.telegram_dialog.as_mut() {
-                    dialog.view(f, crate::ui::dialogs::telegram::telegram_area(area));
-                }
-                if let Some(dialog) = state.card_edit.as_mut() {
-                    dialog.view(f, crate::ui::dialogs::card_edit::card_edit_area(area));
-                }
-                if let Some(dialog) = state.theme_dialog.as_ref() {
-                    dialog.view(f, crate::ui::dialogs::theme::theme_area(area));
-                }
-                if let Some(dialog) = state.confirm.as_ref() {
-                    dialog.view(f, crate::ui::dialogs::quit::confirm_area(area));
-                }
-                if state.quit_saving {
-                    crate::ui::dialogs::quit::view_saving(f, crate::ui::dialogs::quit::saving_area(area));
-                }
-                if let Some(picker) = state.restore_picker.as_ref() {
-                    picker.view(f, crate::session::checkpoint::RestorePicker::picker_area(area));
-                }
-                // First run sits above every other modal (below the tour):
-                // it owns input while present, so it paints on top.
-                if let Some(dialog) = state.oobe_dialog.as_ref() {
-                    dialog.view(f, crate::ui::dialogs::oobe::oobe_area(area));
-                }
-                // The Writer overlay paints its live editor above the
-                // chrome but below every modal: a direct widget render,
-                // since PaneView spans cannot host an editor. The tour
-                // arm below still wins when both are open.
-                if let Some(id) = state.writer_overlay_active() {
-                    let activity = state
-                        .manager
-                        .get(id)
-                        .map(|rec| rec.activity)
-                        .unwrap_or(crate::session::Activity::Idle);
-                    if let Some(session) = state.writers.get_mut(&id) {
-                        let (_, term_cols) = state.term_size;
-                        writer_cursor = crate::ui::writer::paint(
-                            f,
-                            crate::walkthrough::walk_area(area),
-                            session,
-                            activity,
-                            term_cols,
-                        );
-                    }
-                }
-                // The tour takes over the main area above every dialog:
-                // it is opaque and owns input while open.
-                if let Some(tour) = state.walkthrough_overlay() {
-                    tour.view(f, crate::walkthrough::walk_area(area));
-                }
+                writer_cursor = paint_frame(f, area, state, &views, &chrome);
             })?;
             #[cfg(feature = "visual")]
             sync_visual_terminal(state, &mut *terminal)?;

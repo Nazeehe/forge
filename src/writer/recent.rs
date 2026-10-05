@@ -134,6 +134,66 @@ fn walk(cwd: &Path, budget: usize) -> Vec<(String, SystemTime)> {
     out
 }
 
+/// Filesystem completions for the path prompt's Tab: entries under
+/// `cwd` starting with `prefix`, directories with a trailing slash.
+/// Only the parent level of the typed prefix is listed (one
+/// `read_dir`, at most 200 entries), resolved through the path jail,
+/// so `..` and absolute prefixes complete nothing. Listed files must
+/// be openable documents
+/// ([`is_markdown`](super::document::is_markdown)); symlinks, hidden
+/// directories and the skipped build dirs never complete. Sorted, so
+/// the first hit is stable.
+pub fn complete(cwd: &Path, prefix: &str) -> Vec<String> {
+    const MAX_COMPLETE_ENTRIES: usize = 200;
+    let (dir_part, file_part) = match prefix.rsplit_once('/') {
+        Some((dir, file)) => (dir, file),
+        None => ("", prefix),
+    };
+    let base = if dir_part.is_empty() {
+        cwd.to_path_buf()
+    } else {
+        match crate::infra::paths::confine(cwd, Path::new(dir_part)) {
+            Ok(confined) => confined,
+            Err(_) => return Vec::new(),
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten().take(MAX_COMPLETE_ENTRIES) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(file_part) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let rel = if dir_part.is_empty() {
+            name.clone()
+        } else {
+            format!("{dir_part}/{name}")
+        };
+        if rel.len() <= prefix.len() {
+            continue;
+        }
+        if meta.is_dir() {
+            let n: &str = &name;
+            if n.starts_with('.') || SKIP_DIRS.contains(&n) {
+                continue;
+            }
+            out.push(format!("{rel}/"));
+        } else if meta.is_file() && super::document::is_markdown(&name) {
+            out.push(rel);
+        }
+    }
+    out.sort();
+    out
+}
+
 /// "12 min ago", "yesterday", "3 days ago": relative age of `mtime`
 /// against `now`. Future mtimes (clock skew) read as just now.
 pub fn relative_age(mtime: SystemTime, now: SystemTime) -> String {

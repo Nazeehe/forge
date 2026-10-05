@@ -70,6 +70,8 @@
         let (mut state, id, dir) = writer_agent();
         open_doc(&mut state, id, "d.md");
         state.open_writer_overlay();
+        // F6 below must reach Chat: the panel owns it (A1).
+        state.writer_toggle_assistant(id);
         let mut router = InputRouter::new();
         let now = std::time::Instant::now();
         // Tab in the editor indents (two spaces) instead of cycling.
@@ -113,6 +115,9 @@
         let (mut state, id, dir) = writer_agent();
         open_doc(&mut state, id, "d.md");
         state.open_writer_overlay();
+        // The chat box lives in the panel: F6 only reaches it while
+        // the panel is visible (A1).
+        state.writer_toggle_assistant(id);
         let mut router = InputRouter::new();
         let now = std::time::Instant::now();
         // F6 reaches the chat box now that Tab never cycles.
@@ -155,6 +160,9 @@
             .propose(&doc, None, 4..7, "BBB".to_string(), None)
             .unwrap();
         state.open_writer_overlay();
+        // Chat and thread live in the panel: F6 only reaches them
+        // while it is visible (A1).
+        state.writer_toggle_assistant(id);
         let mut router = InputRouter::new();
         let now = std::time::Instant::now();
         // F6 twice reaches the thread now that Tab never cycles.

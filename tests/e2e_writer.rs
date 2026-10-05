@@ -1,0 +1,332 @@
+//! Writer E2E smoke: the real `forge` binary in a portable-pty with
+//! an isolated temp HOME, driven by keys plus SGR mouse bytes, with
+//! assertions on the vt100-parsed screen. Every later E task adds its
+//! scenario here.
+//!
+//! The fake agent is `bash -c "exec sleep 300"` through a scratch
+//! agents.json (resume.without_id non-empty per the registry
+//! schema); `exec cat` would also work, but sleep survives stray
+//! stdin closes while the harness owns the pty.
+
+use std::io::{Read, Write};
+use std::time::{Duration, Instant};
+
+const COLS: u16 = 120;
+const ROWS: u16 = 30;
+const STEP_TIMEOUT: Duration = Duration::from_secs(15);
+
+struct Harness {
+    home: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
+    parser: vt100::Parser,
+    _child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+/// Boot forge with an isolated HOME (scratch agents.json, seeded
+/// files) and dismiss anything the first frame shows.
+fn boot(files: &[(&str, &str)]) -> Harness {
+    let tag = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0));
+    let home = std::env::temp_dir().join(format!("forge-e2e-home-{}-{}", tag.0, tag.1));
+    let cwd = std::env::temp_dir().join(format!("forge-e2e-cwd-{}-{}", tag.0, tag.1));
+    std::fs::create_dir_all(home.join(".forge")).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(
+        home.join(".forge/agents.json"),
+        r#"{
+  "version": 1,
+  "agents": [
+    {
+      "name": "fake",
+      "binary": "bash",
+      "env_override": "FORGE_E2E_BASH",
+      "model_flag": "--model",
+      "default_model": "",
+      "extra_args": ["-c", "exec sleep 300"],
+      "resume": {
+        "subcommand": null,
+        "with_id": { "flag": "--resume" },
+        "without_id": ["--new"]
+      },
+      "supports_hooks": false,
+      "session_attribution": "cwd_window"
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+    for (name, text) in files {
+        std::fs::write(cwd.join(name), text).unwrap();
+    }
+    let pty = portable_pty::native_pty_system();
+    let pair = pty
+        .openpty(portable_pty::PtySize {
+            rows: ROWS,
+            cols: COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut cmd = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_forge"));
+    cmd.cwd(&cwd);
+    cmd.env("HOME", &home);
+    cmd.env("TERM", "xterm-256color");
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let writer = pair.master.take_writer().unwrap();
+    let master = pair.master;
+    // Blocking pty reads would wedge STEP_TIMEOUT while the child
+    // idles, so a reader thread forwards bytes; the main thread only
+    // ever recv_timeouts, and a dead child fails the wait instead of
+    // hanging it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("e2e-reader".to_string())
+        .spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        if tx.send(Some(buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    _ => {
+                        let _ = tx.send(None);
+                        break;
+                    }
+                }
+            }
+        })
+        .unwrap();
+    let mut harness = Harness {
+        home,
+        cwd,
+        master,
+        writer,
+        rx,
+        parser: vt100::Parser::new(ROWS, COLS, 0),
+        _child: child,
+    };
+    // Whatever the first frame shows (setup dialog or not), Esc backs
+    // out of it; then the idle screen must settle. The fake agent's
+    // name only appears inside the create dialog, asserted there.
+    harness.send("\x1b");
+    harness.wait_for("Nosessionsyet", "idle screen");
+    harness
+}
+
+impl Harness {
+    fn send(&mut self, bytes: &str) {
+        self.writer.write_all(bytes.as_bytes()).unwrap();
+        self.writer.flush().unwrap();
+    }
+
+    /// Drain output until `needle` appears on screen or time out.
+    /// Returns the screen text at success for follow-up assertions.
+    /// Both sides squash whitespace: the parser drops some blank
+    /// cells, so needles never contain spaces.
+    fn wait_for(&mut self, needle: &str, what: &str) -> String {
+        // Needles are step-specific: each names text only its own
+        // transition can produce, so a match is never stale. Steps
+        // asserting current state (no transition) use settle instead.
+        let end = Instant::now() + STEP_TIMEOUT;
+        loop {
+            let text = screen_text(&self.parser);
+            let squashed: String =
+                text.chars().filter(|c| !c.is_whitespace()).collect();
+            if squashed.contains(needle) {
+                return text;
+            }
+            if Instant::now() >= end {
+                panic!("timed out waiting for {what} ({needle:?}):\n{text}");
+            }
+            match self.rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Some(bytes)) => self.parser.process(&bytes),
+                Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!(
+                        "child output ended while waiting for {what} ({needle:?}):\n{}",
+                        screen_text(&self.parser)
+                    );
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Drain up to a beat of output, then read the screen as-is. For
+    /// assertions where the screen may legitimately not change.
+    fn settle(&mut self) -> String {
+        let end = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < end {
+            match self.rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Some(bytes)) => self.parser.process(&bytes),
+                Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        screen_text(&self.parser)
+    }
+
+    /// Legacy X10 click (press + release) at 0-based cells: Forge
+    /// enables plain mouse capture, not SGR.
+    fn click(&mut self, x: u16, y: u16) {
+        let press = [0x1b, b'[', b'M', 32, (x + 1) as u8 + 32, (y + 1) as u8 + 32];
+        let release = [0x1b, b'[', b'M', 35, (x + 1) as u8 + 32, (y + 1) as u8 + 32];
+        self.writer.write_all(&press).unwrap();
+        self.writer.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        self.writer.write_all(&release).unwrap();
+        self.writer.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    /// First cell of `needle` on screen, if visible. Cell-based:
+    /// wide glyphs make char counts lie about columns.
+    fn find(&mut self, needle: &str) -> Option<(u16, u16)> {
+        let screen = self.parser.screen();
+        let (rows, cols) = (screen.size().0, screen.size().1);
+        for y in 0..rows {
+            let cells: Vec<String> = (0..cols)
+                .map(|x| {
+                    screen.cell(y, x).map(|c| c.contents()).unwrap_or_default().to_string()
+                })
+                .collect();
+            for x in 0..cols {
+                if cells[x as usize..].concat().starts_with(needle) {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    fn resize(&mut self, rows: u16, cols: u16) {
+        self.master
+            .resize(portable_pty::PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        self.parser = vt100::Parser::new(rows, cols, 0);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = self._child.kill();
+        std::fs::remove_dir_all(&self.home).ok();
+        std::fs::remove_dir_all(&self.cwd).ok();
+    }
+}
+
+fn screen_text(parser: &vt100::Parser) -> String {
+    let screen = parser.screen();
+    let mut out = String::new();
+    for y in 0..screen.size().0 {
+        for x in 0..screen.size().1 {
+            if let Some(cell) = screen.cell(y, x) {
+                out.push_str(&cell.contents());
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Create one session through the real create dialog (defaults) and
+/// wait until it runs.
+fn create_session(h: &mut Harness) {
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("c");
+    let text = h.wait_for("Create", "create dialog");
+    assert!(text.contains("fake"), "scratch registry lists the fake agent");
+    std::thread::sleep(Duration::from_millis(300));
+    h.send("\r");
+    h.wait_for("running", "session running");
+}
+
+#[test]
+fn writer_opens_types_and_keeps_modal_intact() {
+    let mut h = boot(&[("seeded.md", "seed\n")]);
+    create_session(&mut h);
+    // Ctrl-b d opens Writer through the prefix path.
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    // Open the seeded file through the real prompt.
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("seeded.md\r");
+    // The prompt echoes the name too: wait for the doc-view status.
+    let text = h.wait_for("rev0", "doc open");
+    assert!(text.contains("seeded.md"), "title names the file");
+    // Arrows and typing land in the document. The cursor opens at
+    // the doc head: Right moves into the word, End jumps after it.
+    h.send("\x1b[C");
+    h.send("\x1b[F");
+    h.send("!");
+    let text = h.wait_for("seed!", "typed bang");
+    assert!(text.contains("seed!"), "typing lands after the arrow moves");
+    // Tab keeps focus in the editor: the next char lands in the doc.
+    // (The hidden panel never paints, so visible text is doc text.)
+    h.send("\t");
+    h.send("X");
+    let text = h.wait_for("seed!X", "tab kept focus");
+    assert!(text.contains("seed!X"), "tab does not lose focus");
+    // The quit modal paints last over the live editor.
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("q");
+    let text = h.wait_for("Areyousureyouwanttoquit?", "quit modal");
+    assert!(
+        text.chars().filter(|c| !c.is_whitespace()).collect::<String>().contains("Areyousureyouwanttoquit?"),
+        "modal text intact"
+    );
+    h.send("\x1b");
+    // Dismissal shows no new text: settle, then the modal is gone and
+    // the doc is back.
+    let text = h.settle();
+    assert!(
+        !text.chars().filter(|c| !c.is_whitespace()).collect::<String>().contains("Areyousureyouwanttoquit?"),
+        "modal dismissed"
+    );
+    assert!(text.contains("seed!X"), "back in writer after dismiss");
+}
+
+#[test]
+fn writer_topbar_click_and_narrow_resize_keep_writer() {
+    let mut h = boot(&[]);
+    create_session(&mut h);
+    // Open Writer by clicking its topbar tab through real SGR bytes.
+    h.wait_for("Writer", "writer tab in the strip");
+    let (x, y) = h.find("Writer").expect("writer tab cell");
+    h.click(x, y);
+    h.wait_for("Markdowneditor", "writer via topbar click");
+    // Narrow resize keeps the Writer view (never evicted) with a
+    // reachable tab and the collapsed toolbar.
+    h.resize(30, 90);
+    let text = h.wait_for("Writer", "writer survives at 90 cols");
+    assert!(
+        text.contains("Markdowneditor") || text.contains("New"),
+        "writer still open narrow"
+    );
+    let (x, y) = h.find("Writer").expect("writer tab cell when narrow");
+    h.click(x, y);
+    // Re-selecting the open tab may repaint nothing: settle, then read.
+    let text = h.settle();
+    assert!(
+        text.contains("Markdowneditor") || text.contains("New"),
+        "narrow tab click keeps writer"
+    );
+}
