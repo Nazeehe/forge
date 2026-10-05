@@ -34,11 +34,10 @@ pub(super) fn paint_toolbar(
         }
         let label = toolbar_label(*button);
         let spans = if toolbar_enabled(session, *button) {
-            let pressed = matches!(button, ToolbarButton::Assistant) && session.panel_visible;
-            let fresh = matches!(button, ToolbarButton::New)
-                && session.doc.is_none()
-                && session.open_prompt.is_none();
-            pill_spans(label, pressed || fresh, pressed || fresh)
+            // One shared marker source with the hit rects: a marked
+            // pill never outpaints its rect.
+            let mark = super::layout::toolbar_mark(session, *button);
+            pill_spans(label, mark.is_some(), mark)
         } else {
             pill_spans_disabled(label)
         };
@@ -105,18 +104,48 @@ pub(super) fn paint_more_menu(
     if !session.more_open || more.width == 0 || menu.width == 0 {
         return;
     }
-    for (rect, button) in more_menu_item_rects(menu) {
+    for (rect, button) in more_menu_item_rects(menu, session) {
         if rect.width == 0 {
             continue;
         }
         let label = toolbar_label(button);
         let spans = if toolbar_enabled(session, button) {
-            let pressed = button == ToolbarButton::Assistant && session.panel_visible;
-            pill_spans(label, pressed, pressed)
+            let mark = super::layout::toolbar_mark(session, button);
+            pill_spans(label, mark.is_some(), mark)
         } else {
             pill_spans_disabled(label)
         };
         f.render_widget(Paragraph::new(Line::from(spans)), rect);
+    }
+}
+
+/// Separator rule under the toolbar, across one column. Shared by
+/// the empty and document states so both heads match.
+pub(super) fn paint_separator(f: &mut Frame, col: Rect, y: u16) {
+    if col.width == 0 {
+        return;
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "─".repeat(col.width as usize),
+            style(Role::Muted),
+        )])),
+        Rect::new(col.x, y, col.width, 1),
+    );
+}
+
+/// Divider column between the editor and a visible panel, full body
+/// height. The column is `panel.x - 1`; paint and mouse share the
+/// layout, and the column is never a hit area.
+pub(super) fn paint_divider(f: &mut Frame, panel_x: u16, body_y: u16, body_h: u16) {
+    for y in body_y..body_y.saturating_add(body_h) {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "│".to_string(),
+                style(Role::Muted),
+            )])),
+            Rect::new(panel_x.saturating_sub(1), y, 1, 1),
+        );
     }
 }
 
@@ -137,7 +166,11 @@ pub(super) fn paint_confirm_slot(
             continue;
         }
         spans.push(Span::styled("  ".to_string(), ratatui::style::Style::default()));
-        spans.extend(pill_spans(confirm_label(action), index == 0, index == 0));
+        spans.extend(pill_spans(
+            confirm_label(action),
+            index == 0,
+            (index == 0).then_some('*'),
+        ));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), slot);
 }

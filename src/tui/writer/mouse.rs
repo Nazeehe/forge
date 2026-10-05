@@ -172,7 +172,7 @@ fn menu_item_at(
         .find(|(_, b)| *b == ToolbarButton::More)
         .map(|(r, _)| r)?;
     let menu = crate::ui::writer::more_menu_rect(more);
-    crate::ui::writer::more_menu_item_rects(menu)
+    crate::ui::writer::more_menu_item_rects(menu, session)
         .into_iter()
         .find(|(rect, _)| hits(*rect, x, y))
         .map(|(_, button)| button)

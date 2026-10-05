@@ -68,6 +68,10 @@ fn paint_doc(
         .clone();
     // Toolbar row 1 with the file name trailing, like the empty state.
     paint_toolbar(f, layout.title, session, term_cols, Some((&path_rel, dirty)));
+    // The document head matches the empty state: a rule under the
+    // toolbar plus one row of top padding, then the editor.
+    super::toolbar::paint_separator(f, layout.editor, layout.body.y);
+    // Narrow-mode menu floats over the separator and body head.
     let narrow = toolbar_narrow(term_cols);
     let more = toolbar_pill_rects(layout.title, narrow, session)
         .into_iter()
@@ -75,21 +79,32 @@ fn paint_doc(
         .map(|(r, _)| r)
         .unwrap_or_default();
     paint_more_menu(f, more, more_menu_rect(more), session);
-    // An open prompt overlays the top of the editor column (any kind:
+    // The prompt overlays the editor head below the rule (any kind:
     // New/Open prompted from the toolbar land here too). The editor
     // shrinks below it and reports the shrunk rows/cols, so paging
     // and wrapping count what is actually on screen.
+    let head_y = layout.body.y.saturating_add(2);
     let mut prompt_cursor = None;
-    let mut edit_rect = layout.editor;
-    let mut gut_rect = layout.gutter;
+    let mut edit_rect = Rect::new(
+        layout.editor.x,
+        head_y,
+        layout.editor.width,
+        layout.editor.height.saturating_sub(2),
+    );
+    let mut gut_rect = Rect::new(
+        layout.gutter.x,
+        head_y,
+        layout.gutter.width,
+        layout.gutter.height.saturating_sub(2),
+    );
     if let Some(prompt) = session.open_prompt.clone() {
         let sugg = prompt_suggestions(session, &prompt.buffer);
-        let shift = (2 + sugg.len() as u16 + 2).min(layout.editor.height);
+        let shift = (2 + sugg.len() as u16 + 2).min(edit_rect.height);
         let (_, pos) = paint_prompt_block(
             f,
             layout.editor.x,
             layout.editor.width,
-            layout.body.y,
+            head_y,
             session,
             &prompt,
         );
@@ -226,6 +241,7 @@ fn paint_doc(
     // The panel, chat box, and action row exist only while the
     // assistant is visible; the status row and error slot stay.
     if session.panel_visible {
+        super::toolbar::paint_divider(f, layout.panel.x, layout.body.y, layout.body.height);
         if panel_collapsed(term_cols) {
             paint_notice(f, layout.panel);
         } else {
@@ -267,7 +283,7 @@ fn paint_rephrase(f: &mut Frame, area: Rect) {
     }
     let rephrase = super::layout::action_pill_rect(area);
     f.render_widget(
-        Paragraph::new(Line::from(pill_spans("Rephrase", true, false))),
+        Paragraph::new(Line::from(pill_spans("Rephrase", true, None))),
         rephrase,
     );
 }

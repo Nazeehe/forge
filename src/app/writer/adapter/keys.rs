@@ -274,7 +274,16 @@ impl AppState {
             return;
         };
         let handler = super::cua::cua_handler();
-        handler.on_mouse_event(mouse, editor);
+        // One wheel notch scrolls three lines: EdTUI moves a single
+        // line per event, matching the PTY panes and the tour.
+        let scrolls = match mouse.kind {
+            crossterm::event::MouseEventKind::ScrollUp
+            | crossterm::event::MouseEventKind::ScrollDown => 3,
+            _ => 1,
+        };
+        for _ in 0..scrolls {
+            handler.on_mouse_event(mouse, editor);
+        }
         // Clicks and clean releases land back in Insert: EdTUI parks
         // Down in vim Normal while a Visual selection is live, and
         // nothing would ever return after that. Drags keep EdTUI's

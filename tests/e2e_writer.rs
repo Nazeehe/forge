@@ -186,6 +186,24 @@ impl Harness {
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    /// Owned cell grid plus width: for geometry assertions the
+    /// joined text cannot serve (wide glyphs shift char counts).
+    fn grid(&mut self) -> (u16, Vec<Vec<String>>) {
+        let screen = self.parser.screen();
+        let (rows, cols) = (screen.size().0, screen.size().1);
+        let mut out = Vec::new();
+        for y in 0..rows {
+            let mut row = Vec::new();
+            for x in 0..cols {
+                row.push(
+                    screen.cell(y, x).map(|c| c.contents()).unwrap_or_default().to_string(),
+                );
+            }
+            out.push(row);
+        }
+        (cols, out)
+    }
+
     /// First cell of `needle` on screen, if visible. Cell-based:
     /// wide glyphs make char counts lie about columns.
     fn find(&mut self, needle: &str) -> Option<(u16, u16)> {
@@ -329,4 +347,60 @@ fn writer_topbar_click_and_narrow_resize_keep_writer() {
         text.contains("Markdowneditor") || text.contains("New"),
         "narrow tab click keeps writer"
     );
+}
+
+/// The polish items you can see: Alt+A shows the Assistant panel with
+/// its pressed check marker, a divider column splits editor and panel,
+/// and the status row sits pinned above the error slot.
+#[test]
+fn writer_panel_shows_divider_and_pinned_status() {
+    let mut h = boot(&[("seeded.md", "seed\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("seeded.md\r");
+    h.wait_for("rev0", "doc open");
+    // Alt+A shows the Assistant panel; the toolbar toggle carries the
+    // pressed check (never the default star). Lowercase a: the binding
+    // is Char('a'), and uppercase would read as Shift, not Alt.
+    h.send("\x1ba");
+    h.wait_for("\u{2713}Assistant", "panel pressed marker");
+    let (_cols, grid) = h.grid();
+    // Locate the Writer frame from its toolbar row: the pressed toggle
+    // only paints there, two rows below the frame top.
+    let title_y = grid
+        .iter()
+        .position(|row| row.concat().contains("\u{2713}Assistant"))
+        .expect("toolbar row");
+    let top = title_y - 2;
+    let x0 = grid[top].iter().position(|c| c == "╭").expect("frame left") as u16;
+    let x1 = grid[top].iter().rposition(|c| c == "╮").expect("frame right") as u16;
+    let width = x1 - x0 + 1;
+    let bottom = grid
+        .iter()
+        .skip(top)
+        .position(|row| {
+            row.iter().skip(x0 as usize).take(2).any(|c| c == "╰")
+        })
+        .map(|i| top + i)
+        .expect("frame bottom");
+    // Divider column mirrors the layout math: 3 cells of chrome, then
+    // 65% editor, then the divider.
+    let inner = width - 6;
+    let div_x = x0 + 3 + inner * 65 / 100;
+    for y in (top + 5)..(top + 10) {
+        assert_eq!(
+            grid[y].get(div_x as usize).map(String::as_str),
+            Some("│"),
+            "divider column at ({div_x}, {y})"
+        );
+    }
+    // Status sits pinned three rows above the frame bottom
+    // (pad, error slot, then status).
+    let status_row: String = grid[bottom - 3].concat();
+    assert!(status_row.contains("rev"), "pinned status row: {status_row:?}");
 }

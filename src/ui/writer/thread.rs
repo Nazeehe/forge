@@ -271,7 +271,7 @@ fn pill_line(buttons: &[(&str, bool, bool)]) -> Line<'static> {
         if index > 0 {
             spans.push(Span::styled("  ".to_string(), Style::default()));
         }
-        spans.extend(pill_spans(label, *emphasized, *default_mark));
+        spans.extend(pill_spans(label, *emphasized, (*default_mark).then_some('*')));
     }
     Line::from(spans)
 }

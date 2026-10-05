@@ -117,16 +117,17 @@
         assert!(text.contains("Reject"), "reject pill");
         assert!(text.contains("> P"), "selected marker");
         // Single-line doc: the gutter mark sits on the editor's first
-        // row, and the highlight fills exactly the target cells.
-        assert_eq!(buf[(3, 3)].symbol(), "▌", "gutter mark");
+        // row below the toolbar rule (A6 head), and the highlight
+        // fills exactly the target cells.
+        assert_eq!(buf[(3, 5)].symbol(), "▌", "gutter mark");
         for x in [8, 9, 10] {
             assert_eq!(
-                buf[(x, 3)].style().bg,
+                buf[(x, 5)].style().bg,
                 Some(Color::Yellow),
                 "highlight cell {x}"
             );
         }
-        assert_ne!(buf[(4, 3)].style().bg, Some(Color::Yellow), "outside range");
+        assert_ne!(buf[(4, 5)].style().bg, Some(Color::Yellow), "outside range");
     }
 
     #[test]
@@ -197,10 +198,16 @@
         // Editor takes 65% of the 114-wide content.
         assert_eq!(layout.editor.width, 114 * 65 / 100 - 1);
         assert_eq!(layout.gutter.width, 1);
+        // One divider column sits between editor and panel.
+        assert_eq!(
+            layout.panel.x,
+            layout.editor.x + layout.editor.width + 1,
+            "divider column"
+        );
         assert_eq!(
             layout.panel.width,
-            114 - 114 * 65 / 100,
-            "panel takes the rest"
+            114 - 114 * 65 / 100 - 1,
+            "panel takes the rest minus the divider"
         );
         // Fixed slots stack at the bottom: chat 3, status/action/error 1.
         assert_eq!(layout.chat.height, 3);
@@ -231,6 +238,123 @@
         // Rounded border corners, never blank panels.
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(119, 0)].symbol(), "╮");
+    }
+
+    #[test]
+    fn bottom_stack_pins_status_with_no_reserved_rows() {
+        let hidden = writer_layout(Rect::new(0, 0, 120, 30), false);
+        assert_eq!(hidden.error.y, 27, "error slot owns the last row");
+        assert_eq!(hidden.status.y, 26, "status pinned to the bottom");
+        assert_eq!(hidden.action.height, 0, "no action row when hidden");
+        assert_eq!(
+            hidden.body.y.saturating_add(hidden.body.height),
+            hidden.status.y,
+            "no reserved rows: the body meets the status"
+        );
+        let shown = writer_layout(Rect::new(0, 0, 120, 30), true);
+        assert_eq!(shown.error.y, 27);
+        assert_eq!(shown.status.y, 26, "status pinned in both geometries");
+        assert_eq!(shown.action.height, 1);
+        assert_eq!(
+            shown.body.y.saturating_add(shown.body.height),
+            shown.chat.y,
+            "no gap row above the chat"
+        );
+        assert_eq!(shown.chat.y.saturating_add(shown.chat.height), shown.action.y);
+        assert_eq!(shown.action.y.saturating_add(1), shown.status.y);
+        assert_eq!(shown.status.y.saturating_add(1), shown.error.y);
+    }
+
+    #[test]
+    fn recent_rows_align_the_age_column() {
+        use std::time::SystemTime;
+        let mut session = WriterSession::default();
+        session.recent_cache = ["a.md", "a-much-longer-file-name.md"]
+            .iter()
+            .map(|rel| crate::writer::recent::RecentEntry {
+                rel: rel.to_string(),
+                mtime: SystemTime::now(),
+                opened_this_run: false,
+            })
+            .collect();
+        let buf = paint_empty_to(&session, 120, 30);
+        let mut cols = Vec::new();
+        for y in 0..30 {
+            let cells: Vec<String> =
+                (0..120).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            if cells.concat().contains("edited") {
+                // First cell whose remaining row starts "edited".
+                cols.push(
+                    (0..120)
+                        .find(|x| cells[*x as usize..].concat().starts_with("edited"))
+                        .unwrap_or(usize::MAX),
+                );
+            }
+        }
+        assert_eq!(cols.len(), 2, "both recent rows show ages");
+        assert_eq!(cols[0], cols[1], "ages start in one column: {cols:?}");
+    }
+
+    #[test]
+    fn panel_visible_paints_editor_panel_divider() {
+        let mut session = doc_session("aaa");
+        session.panel_visible = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), true);
+        assert_eq!(
+            layout.panel.x,
+            layout.editor.x.saturating_add(layout.editor.width).saturating_add(1),
+            "one divider column between editor and panel"
+        );
+        for y in layout.body.y..layout.body.y.saturating_add(layout.body.height) {
+            assert_eq!(
+                buf[(layout.panel.x.saturating_sub(1), y)].symbol(),
+                "│",
+                "divider row {y}"
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_pressed_uses_check_never_default_star() {
+        let mut session = doc_session("x");
+        session.panel_visible = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("✓Assistant"),
+            "pressed toggle carries ✓: {text}"
+        );
+        assert!(
+            !text.contains("*Assistant"),
+            "`*` stays the default-action marker: {text}"
+        );
+    }
+
+    #[test]
+    fn doc_view_has_toolbar_rule_and_top_padding_like_empty() {
+        let mut session = doc_session("aaa bbb");
+        session.panel_visible = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), true);
+        let rule: String = (layout.editor.x
+            ..layout.editor.x.saturating_add(layout.editor.width))
+            .map(|x| buf[(x, layout.body.y)].symbol())
+            .collect();
+        assert!(
+            rule.chars().all(|c| c == '─'),
+            "rule under the toolbar: {rule:?}"
+        );
+        let pad: String = (layout.editor.x
+            ..layout.editor.x.saturating_add(layout.editor.width))
+            .map(|x| buf[(x, layout.body.y + 1)].symbol())
+            .collect();
+        assert!(pad.trim().is_empty(), "one padding row: {pad:?}");
+        let first: String = (layout.editor.x
+            ..layout.editor.x.saturating_add(12))
+            .map(|x| buf[(x, layout.body.y + 2)].symbol())
+            .collect();
+        assert!(first.contains("aaa"), "editor head below the padding: {first:?}");
     }
 
     #[test]
@@ -400,10 +524,12 @@
         let mut session = WriterSession::default();
         session.panel_visible = true;
         let buf = paint_empty_to(&session, 120, 30);
-        assert!(buffer_text(&buf).contains("*Assistant"), "pressed marker");
+        // Pressed carries ✓, never the default-action `*` (A7).
+        assert!(buffer_text(&buf).contains("✓Assistant"), "pressed marker");
+        assert!(!buffer_text(&buf).contains("*Assistant"), "no default star");
         let shut = paint_empty_to(&WriterSession::default(), 120, 30);
         assert!(buffer_text(&shut).contains("Assistant"), "rest state");
-        assert!(!buffer_text(&shut).contains("*Assistant"), "no pressed mark");
+        assert!(!buffer_text(&shut).contains("✓Assistant"), "no pressed mark");
     }
 
     #[test]
@@ -539,9 +665,14 @@
         let full = paint_empty_to(&session, 120, 30);
         let row = row_text(&full, tip_y, layout.body.x, layout.body.x + 40);
         assert!(row.contains("Tip"), "fixed slot when full: {row:?}");
-        // And the last recent row sits exactly one row above it.
-        let above = row_text(&full, tip_y - 1, layout.body.x, layout.body.x + 40);
-        assert!(above.contains("f7.md"), "eight rows fit above: {above:?}");
+        // All eight rows paint above the Tip, wherever the body ends.
+        let mut found = false;
+        for y in layout.body.y..tip_y {
+            if row_text(&full, y, layout.body.x, layout.body.x + 40).contains("f7.md") {
+                found = true;
+            }
+        }
+        assert!(found, "eight rows fit above the Tip");
     }
 
     #[test]

@@ -39,22 +39,34 @@ pub fn writer_layout(area: Rect, panel_visible: bool) -> WriterLayout {
     let inner_w = area.width.saturating_sub(6);
     let inner_h = area.height.saturating_sub(4);
     let title = Rect::new(inner_x, inner_y, inner_w, 1);
-    let chat = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(6)), inner_w, 3);
-    let status = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(3)), inner_w, 1);
-    // A hidden panel takes its action row down with it: the editor
-    // gains exactly that row.
+    // Bottom-anchored stack, no gaps: the error slot owns the last
+    // row, the status sits pinned directly above it, the action row
+    // above the status only while the panel is visible. The chat box
+    // is panel chrome too: hidden, it keeps no rows and the body runs
+    // down to the status.
+    let error = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(1)), inner_w, 1);
+    let status = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(2)), inner_w, 1);
     let action_h = u16::from(panel_visible);
     let action = Rect::new(
         inner_x,
-        inner_y.saturating_add(inner_h.saturating_sub(2)),
+        inner_y.saturating_add(inner_h.saturating_sub(3)),
         inner_w,
         action_h,
     );
-    let error = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(1)), inner_w, 1);
+    let chat_h = if panel_visible { CHAT_ROWS } else { 0 };
+    let chat = Rect::new(
+        inner_x,
+        inner_y.saturating_add(inner_h.saturating_sub(6)),
+        inner_w,
+        chat_h,
+    );
     let body_y = inner_y.saturating_add(1);
-    let body_h = inner_h
-        .saturating_sub(8)
-        .saturating_add(1 - action_h);
+    let body_bottom = if panel_visible {
+        chat.y
+    } else {
+        status.y
+    };
+    let body_h = body_bottom.saturating_sub(body_y);
     let body = Rect::new(inner_x, body_y, inner_w, body_h);
     let editor_w = if panel_visible {
         inner_w * 65 / 100
@@ -68,12 +80,18 @@ pub fn writer_layout(area: Rect, panel_visible: bool) -> WriterLayout {
         editor_w.saturating_sub(1),
         body_h,
     );
-    let panel = Rect::new(
-        inner_x.saturating_add(editor_w),
-        body_y,
-        inner_w.saturating_sub(editor_w),
-        body_h,
-    );
+    // A visible panel leaves one divider column between itself and
+    // the editor; hidden, the editor takes the full width and the
+    // panel rect stays empty.
+    let (panel_x, panel_w) = if panel_visible {
+        (
+            inner_x.saturating_add(editor_w).saturating_add(1),
+            inner_w.saturating_sub(editor_w).saturating_sub(1),
+        )
+    } else {
+        (inner_x.saturating_add(editor_w), inner_w.saturating_sub(editor_w))
+    };
+    let panel = Rect::new(panel_x, body_y, panel_w, body_h);
     WriterLayout {
         title,
         body,
@@ -95,7 +113,9 @@ pub fn panel_collapsed(term_cols: u16) -> bool {
 }
 
 /// One pill button: themed caps with an accent fill when emphasized.
-pub(super) fn pill_spans(label: &str, emphasized: bool, default_mark: bool) -> Vec<Span<'static>> {
+/// The marker is explicit: `*` means default action, `✓` means a
+/// pressed toggle. The two never share a glyph.
+pub(super) fn pill_spans(label: &str, emphasized: bool, mark: Option<char>) -> Vec<Span<'static>> {
     let (fill, left, right) = button_chrome(
         emphasized,
         style(Role::TabActive),
@@ -105,7 +125,7 @@ pub(super) fn pill_spans(label: &str, emphasized: bool, default_mark: bool) -> V
     vec![
         Span::styled(pill_left().to_string(), Style::default().fg(left)),
         Span::styled(
-            format!("{}{label}", if default_mark { "*" } else { "" }),
+            format!("{}{label}", mark.map(|m| m.to_string()).unwrap_or_default()),
             fill,
         ),
         Span::styled(pill_right().to_string(), Style::default().fg(right)),
@@ -199,6 +219,26 @@ pub fn toolbar_label(button: ToolbarButton) -> &'static str {
     }
 }
 
+/// Marker for one toolbar pill: `✓` while the Assistant toggle is
+/// pressed, `*` on a fresh New (no doc, no prompt). Paint and hit
+/// rects share this, so a marked pill never outpaints its rect and a
+/// later pill never drifts.
+pub fn toolbar_mark(
+    session: &crate::app::writer::WriterSession,
+    button: ToolbarButton,
+) -> Option<char> {
+    if button == ToolbarButton::Assistant && session.panel_visible {
+        Some('✓')
+    } else if matches!(button, ToolbarButton::New)
+        && session.doc.is_none()
+        && session.open_prompt.is_none()
+    {
+        Some('*')
+    } else {
+        None
+    }
+}
+
 /// Whether a toolbar button fires now. Save needs a dirty doc,
 /// Save-as and Close need a doc, Preview is disabled until E8, and
 /// the rest (including the Assistant toggle) always fire. Disabled
@@ -236,11 +276,11 @@ pub fn toolbar_pill_rects(
             x = x.saturating_add(2);
         }
         first = false;
-        let pressed = button == ToolbarButton::Assistant && session.panel_visible;
+        let mark = toolbar_mark(session, button);
         let label = toolbar_label(button);
         let enabled = toolbar_enabled(session, button);
         let width = if enabled {
-            pill_width(label, pressed)
+            pill_width(label, mark.is_some())
         } else {
             pill_width_disabled(label)
         };
@@ -320,7 +360,10 @@ pub fn more_menu_rect(more: Rect) -> Rect {
 
 /// Hit rects for the three More-menu rows: Save-as, Preview,
 /// Assistant. Paint and mouse dispatch share these.
-pub fn more_menu_item_rects(menu: Rect) -> [(Rect, ToolbarButton); 3] {
+pub fn more_menu_item_rects(
+    menu: Rect,
+    session: &crate::app::writer::WriterSession,
+) -> [(Rect, ToolbarButton); 3] {
     use ToolbarButton as B;
     let row = |i: u16, label: &str, mark: bool| {
         Rect::new(
@@ -333,7 +376,10 @@ pub fn more_menu_item_rects(menu: Rect) -> [(Rect, ToolbarButton); 3] {
     [
         (row(0, "Save as", false), B::SaveAs),
         (row(1, "Preview", false), B::Preview),
-        (row(2, "Assistant", false), B::Assistant),
+        (
+            row(2, "Assistant", toolbar_mark(session, B::Assistant).is_some()),
+            B::Assistant,
+        ),
     ]
 }
 
@@ -353,9 +399,10 @@ pub fn recent_window(total: usize, sel: usize, room: usize) -> (usize, usize) {
 
 /// Suggestions for the prompt: cached recent rels extending the typed
 /// prefix, opened-first (the cache heads opened), at most 4 in the
-/// fixed slot. The adapter's Tab completion walks the same order over
-/// opened plus the cache, so the first hit agrees outside a
-/// delete-under-us race.
+/// fixed slot. The adapter's Tab completion walks opened, then the
+/// cache, then the live filesystem, so a cache first hit agrees with
+/// the row; a disk-only hit completes with no row preview (paint never
+/// reads the disk).
 pub fn prompt_suggestions(
     session: &crate::app::writer::WriterSession,
     prefix: &str,

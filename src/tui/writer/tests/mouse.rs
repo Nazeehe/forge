@@ -323,6 +323,113 @@
     }
 
     #[test]
+    fn close_pill_fires_from_every_painted_cell_including_caps() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let content =
+            crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, 120, 30));
+        let layout = crate::ui::writer::writer_layout(content, false);
+        let (rect, _) = crate::ui::writer::toolbar_pill_rects(layout.title, false, state.writers.get(&id).unwrap())
+            .into_iter()
+            .find(|(_, b)| *b == crate::ui::writer::ToolbarButton::Close)
+            .expect("close rect");
+        assert!(rect.width > 0, "close paints");
+        for x in rect.x..rect.x.saturating_add(rect.width) {
+            assert!(
+                state.writers.get(&id).unwrap().doc.is_some(),
+                "doc open before click at {x}"
+            );
+            super::super::handle_writer_mouse(&mut state, click_at(x, rect.y));
+            assert!(
+                state.writers.get(&id).unwrap().doc.is_none(),
+                "clean Close fires from painted cell {x}"
+            );
+            open_doc(&mut state, id, "d.md");
+        }
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn toolbar_pill_rects_cover_the_painted_caps_in_every_state() {
+        let left = crate::ui::theme::pill_left();
+        let right = crate::ui::theme::pill_right();
+        for (doc, panel, cols) in
+            [(false, false, 120), (false, true, 120), (true, false, 120), (true, true, 120), (true, false, 80)]
+        {
+            let (mut state, id, dir) = writer_agent();
+            if doc {
+                open_doc(&mut state, id, "d.md");
+            }
+            state.term_size = (30, cols);
+            state.open_writer_overlay();
+            if panel {
+                state.writer_toggle_assistant(id);
+            }
+            let buf = paint_full(&mut state, id);
+            let content = crate::walkthrough::walk_area(ratatui::layout::Rect::new(
+                0, 0, cols, 30,
+            ));
+            let layout = crate::ui::writer::writer_layout(content, panel);
+            let narrow = crate::ui::writer::toolbar_narrow(cols);
+            for (rect, button) in
+                crate::ui::writer::toolbar_pill_rects(layout.title, narrow, state.writers.get(&id).unwrap())
+            {
+                if rect.width == 0 {
+                    continue;
+                }
+                let first = buf[(rect.x, rect.y)].symbol().chars().next();
+                let last = buf[(rect.x + rect.width - 1, rect.y)]
+                    .symbol()
+                    .chars()
+                    .next();
+                assert_eq!(first, Some(left), "{button:?} left cap at rect start (doc={doc} panel={panel} {cols})");
+                assert_eq!(last, Some(right), "{button:?} right cap at rect end (doc={doc} panel={panel} {cols})");
+            }
+            assert!(state.manager.remove(id));
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn wheel_moves_three_lines_per_notch() {
+        let (mut state, id, dir) = writer_agent();
+        let text: String = (0..60).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.join("long.md"), &text).unwrap();
+        open_doc(&mut state, id, "long.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "line 0");
+        super::super::handle_writer_mouse(
+            &mut state,
+            event::MouseEvent {
+                kind: event::MouseEventKind::ScrollDown,
+                column: x,
+                row: y,
+                modifiers: event::KeyModifiers::NONE,
+            },
+        );
+        let after = paint_full(&mut state, id);
+        let editor = editor_area(&state, id);
+        // Content starts below the toolbar rule and its padding row.
+        let head = editor.y.saturating_add(2);
+        let first: String = (editor.x..editor.x + 14)
+            .map(|cx| after[(cx, head)].symbol())
+            .collect();
+        let trimmed = first.trim_start().to_string();
+        assert!(
+            trimmed.starts_with("line 3")
+                && !trimmed[6..].starts_with(|c: char| c.is_ascii_digit()),
+            "one notch is three lines: {first:?}"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn detach_chip_click_clears_the_selection() {
         let (mut state, id, dir) = writer_agent();
         open_doc(&mut state, id, "d.md");

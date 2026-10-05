@@ -37,14 +37,6 @@ pub fn paint_empty(
     let layout = writer_layout(area, session.panel_visible);
     super::editor::paint_frame(f, area);
     paint_toolbar(f, layout.title, session, term_cols, None);
-    // Narrow-mode menu floats over the separator and body head.
-    let narrow = toolbar_narrow(term_cols);
-    let more = toolbar_pill_rects(layout.title, narrow, session)
-        .into_iter()
-        .find(|(_, b)| *b == ToolbarButton::More)
-        .map(|(r, _)| r)
-        .unwrap_or_default();
-    paint_more_menu(f, more, more_menu_rect(more), session);
     // Body column: the editor column while the panel shows, else the
     // full body. Everything below indents to one column.
     let col = if session.panel_visible {
@@ -57,7 +49,15 @@ pub fn paint_empty(
     if width == 0 {
         return None;
     }
-    paint_separator(f, col, layout.body.y);
+    super::toolbar::paint_separator(f, col, layout.body.y);
+    // Narrow-mode menu floats over the separator and body head.
+    let narrow = toolbar_narrow(term_cols);
+    let more = toolbar_pill_rects(layout.title, narrow, session)
+        .into_iter()
+        .find(|(_, b)| *b == ToolbarButton::More)
+        .map(|(r, _)| r)
+        .unwrap_or_default();
+    paint_more_menu(f, more, more_menu_rect(more), session);
     paint_header(f, x0, width, layout.body.y.saturating_add(2), session);
     let mut cursor = None;
     let block_y = layout.body.y.saturating_add(PROMPT_ORIGIN_OFF);
@@ -76,6 +76,7 @@ pub fn paint_empty(
     paint_tip(f, x0, width, layout.body.y.saturating_add(layout.body.height).saturating_sub(1));
     paint_empty_hints(f, layout.status);
     if session.panel_visible {
+        super::toolbar::paint_divider(f, layout.panel.x, layout.body.y, layout.body.height);
         paint_panel(f, layout.panel, session, "");
     }
     match session.pending_confirm.as_ref() {
@@ -83,20 +84,6 @@ pub fn paint_empty(
         None => paint_error_slot(f, layout.error, session.error.as_deref()),
     }
     cursor
-}
-
-/// Separator rule under the toolbar, across the body column.
-fn paint_separator(f: &mut Frame, col: Rect, y: u16) {
-    if col.width == 0 {
-        return;
-    }
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "─".repeat(col.width as usize),
-            style(Role::Muted),
-        )])),
-        Rect::new(col.x, y, col.width, 1),
-    );
 }
 
 /// Header: `📝 Writer`, one-line subhead with the session cwd
@@ -140,7 +127,7 @@ fn paint_start(f: &mut Frame, x: u16, width: u16, y: u16) -> u16 {
             start_open_rect(x, row_y)
         };
         f.render_widget(
-            Paragraph::new(Line::from(pill_spans(label, *mark, *mark))),
+            Paragraph::new(Line::from(pill_spans(label, *mark, (*mark).then_some('*')))),
             pill,
         );
         let rest = vec![
@@ -190,7 +177,10 @@ fn paint_recent(
         let selected = start + i == session.recent_sel;
         let mark = if selected { "▸ " } else { "  " };
         let age = crate::writer::recent::relative_age(entry.mtime, now);
-        let line = format!("{mark}{}  edited {age}", ellipsize_middle(&entry.rel, 40));
+        // The rel field pads to a fixed width so every age starts in
+        // one column, whatever the name lengths.
+        let rel = ellipsize_middle(&entry.rel, 40);
+        let line = format!("{mark}{rel:<40}  edited {age}");
         f.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 line,
@@ -292,12 +282,16 @@ pub(super) fn paint_prompt_block(
     let buttons_y = y.saturating_add(2 + suggestions.len() as u16);
     let (submit_rect, cancel_rect) = prompt_button_rects(x, buttons_y, width, &prompt.kind);
     f.render_widget(
-        Paragraph::new(Line::from(pill_spans(prompt_submit_label(&prompt.kind), true, true))),
+        Paragraph::new(Line::from(pill_spans(
+            prompt_submit_label(&prompt.kind),
+            true,
+            Some('*'),
+        ))),
         submit_rect,
     );
     if cancel_rect.x < x.saturating_add(width) {
         f.render_widget(
-            Paragraph::new(Line::from(pill_spans("Cancel", false, false))),
+            Paragraph::new(Line::from(pill_spans("Cancel", false, None))),
             cancel_rect,
         );
     }

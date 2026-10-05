@@ -97,9 +97,12 @@
         open_doc(&mut state, id, "long.md");
         state.term_size = (30, 120);
         state.open_writer_overlay();
-        // Paint once so the editor learns its screen area.
+        // Paint once so the editor learns its screen area. Page keys
+        // move by the painted height (below the toolbar rule), which
+        // the paint reports back.
         paint_full(&mut state, id);
-        let page = editor_area(&state, id).height as usize;
+        let page = state.writers.get(&id).unwrap().editor_rows as usize;
+        assert!(page > 0, "paint reports a visible height");
         let mut router = InputRouter::new();
         let now = std::time::Instant::now();
         handle_key_at(&mut state, &mut router, key(event::KeyCode::PageDown), now);
