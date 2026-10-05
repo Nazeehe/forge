@@ -29,7 +29,11 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
     {
         return;
     }
-    let layout = crate::ui::writer::writer_layout(content);
+    let panel_visible = state
+        .writers
+        .get(&id)
+        .is_some_and(|session| session.panel_visible);
+    let layout = crate::ui::writer::writer_layout(content, panel_visible);
     let has_doc = state
         .writers
         .get(&id)

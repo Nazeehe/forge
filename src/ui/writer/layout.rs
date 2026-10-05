@@ -30,7 +30,7 @@ pub struct WriterLayout {
     pub error: Rect,
 }
 
-pub fn writer_layout(area: Rect) -> WriterLayout {
+pub fn writer_layout(area: Rect, panel_visible: bool) -> WriterLayout {
     // One cell of border all around, then 2 cells of side padding
     // and 1 row of top padding inside it; 1 row of bottom padding so
     // content never touches the chrome.
@@ -41,12 +41,26 @@ pub fn writer_layout(area: Rect) -> WriterLayout {
     let title = Rect::new(inner_x, inner_y, inner_w, 1);
     let chat = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(6)), inner_w, 3);
     let status = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(3)), inner_w, 1);
-    let action = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(2)), inner_w, 1);
+    // A hidden panel takes its action row down with it: the editor
+    // gains exactly that row.
+    let action_h = u16::from(panel_visible);
+    let action = Rect::new(
+        inner_x,
+        inner_y.saturating_add(inner_h.saturating_sub(2)),
+        inner_w,
+        action_h,
+    );
     let error = Rect::new(inner_x, inner_y.saturating_add(inner_h.saturating_sub(1)), inner_w, 1);
     let body_y = inner_y.saturating_add(1);
-    let body_h = inner_h.saturating_sub(8);
+    let body_h = inner_h
+        .saturating_sub(8)
+        .saturating_add(1 - action_h);
     let body = Rect::new(inner_x, body_y, inner_w, body_h);
-    let editor_w = inner_w * 65 / 100;
+    let editor_w = if panel_visible {
+        inner_w * 65 / 100
+    } else {
+        inner_w
+    };
     let gutter = Rect::new(inner_x, body_y, 1.min(editor_w), body_h);
     let editor = Rect::new(
         inner_x.saturating_add(1),

@@ -372,6 +372,20 @@ impl AppState {
     }
 
     /// Cycle keyboard focus Editor → Chat → Thread → Editor.
+    /// Toggle the assistant panel. The panel is hidden by default and
+    /// the editor takes the full width then; hiding returns focus to
+    /// the editor, since the chat box lives in the panel.
+    pub fn writer_toggle_assistant(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        session.panel_visible = !session.panel_visible;
+        if !session.panel_visible && session.focus != WriterFocus::Editor {
+            session.focus = WriterFocus::Editor;
+        }
+        self.dirty = true;
+    }
+
     pub fn writer_cycle_focus(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;

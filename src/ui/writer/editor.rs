@@ -20,7 +20,7 @@ pub fn paint_empty(
     area: Rect,
     session: &WriterSession,
 ) -> Option<ratatui::layout::Position> {
-    let layout = writer_layout(area);
+    let layout = writer_layout(area, session.panel_visible);
     let frame = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -114,7 +114,7 @@ fn paint_doc(
 ) -> Option<ratatui::layout::Position> {
     use edtui::{EditorTheme, EditorView, Highlight};
 
-    let layout = writer_layout(area);
+    let layout = writer_layout(area, session.panel_visible);
     let frame = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -241,15 +241,20 @@ fn paint_doc(
             cursor = Some(pos);
         }
     }
-    if panel_collapsed(term_cols) {
-        paint_notice(f, layout.panel);
-    } else {
-        paint_panel(f, layout.panel, session, &buffer);
-    }
-    if session.focus == WriterFocus::Chat {
-        cursor = paint_chat(f, layout.chat, session).or(cursor);
-    } else {
-        paint_chat(f, layout.chat, session);
+    // The panel, chat box, and action row exist only while the
+    // assistant is visible; the status row and error slot stay.
+    if session.panel_visible {
+        if panel_collapsed(term_cols) {
+            paint_notice(f, layout.panel);
+        } else {
+            paint_panel(f, layout.panel, session, &buffer);
+        }
+        if session.focus == WriterFocus::Chat {
+            cursor = paint_chat(f, layout.chat, session).or(cursor);
+        } else {
+            paint_chat(f, layout.chat, session);
+        }
+        paint_actions(f, layout.action);
     }
     paint_status(
         f,
@@ -260,7 +265,6 @@ fn paint_doc(
         dirty,
         activity,
     );
-    paint_actions(f, layout.action);
     paint_error_slot(f, layout.error, session.error.as_deref());
     cursor
 }

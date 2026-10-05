@@ -3,15 +3,37 @@
 use super::*;
 use crate::app::test_support::*;
 
-pub(super) fn writer_agent() -> (AppState, crate::session::SessionId, String, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!(
-        "forge-writer-tool-{}-{}",
+/// Process-wide scratch-dir sequence: parallel tests can spawn in
+/// the same nanosecond, and time-only names then share one dir (and
+/// one `d.md`), flaking exact-bytes assertions. The counter makes
+/// every dir unique by construction.
+static WRITER_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[test]
+fn tmp_dirs_stay_unique_under_bursts() {
+    // Pin for the burst-collision guard: 500 rapid names must all
+    // differ. (Time-only names collide when parallel test spawns
+    // share one nanosecond; the counter closes it by construction.)
+    let mut dirs = std::collections::HashSet::new();
+    for _ in 0..500 {
+        assert!(dirs.insert(writer_tmp_dir()), "scratch dir repeated");
+    }
+}
+
+pub(super) fn writer_tmp_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "forge-writer-tool-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0),
-    ));
+        WRITER_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ))
+}
+
+pub(super) fn writer_agent() -> (AppState, crate::session::SessionId, String, std::path::PathBuf) {
+    let dir = writer_tmp_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = AppState::new();
     let id = state

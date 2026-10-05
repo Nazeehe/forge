@@ -25,15 +25,33 @@
         }
     }
 
-    fn writer_agent() -> (AppState, crate::session::SessionId, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "forge-tui-writer-{}-{}",
+    static TUI_WRITER_TMP_SEQ: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    fn tui_writer_tmp_dir() -> std::path::PathBuf {
+        // Same burst-collision guard as app::writer::test_support:
+        // time-only names can repeat across parallel spawns.
+        std::env::temp_dir().join(format!(
+            "forge-tui-writer-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0),
-        ));
+            TUI_WRITER_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ))
+    }
+
+    #[test]
+    fn tui_tmp_dirs_stay_unique_under_bursts() {
+        let mut dirs = std::collections::HashSet::new();
+        for _ in 0..500 {
+            assert!(dirs.insert(tui_writer_tmp_dir()), "scratch dir repeated");
+        }
+    }
+
+    fn writer_agent() -> (AppState, crate::session::SessionId, std::path::PathBuf) {
+        let dir = tui_writer_tmp_dir();
         std::fs::create_dir_all(&dir).unwrap();
         let mut state = AppState::new();
         let id = state
@@ -377,6 +395,8 @@
         open_doc(&mut state, id, "d.md");
         state.term_size = (30, 120);
         state.open_writer_overlay();
+        // Panel-era UI needs the assistant shown (hidden default).
+        state.writer_toggle_assistant(id);
         // Save pill writes the typed text.
         let mut router = InputRouter::new();
         let now = std::time::Instant::now();
@@ -412,6 +432,7 @@
             .unwrap();
         state.term_size = (30, 120);
         state.open_writer_overlay();
+        state.writer_toggle_assistant(id);
         // Click the diff row: selects the proposal.
         let buf = paint_full(&mut state, id);
         let (x, y) = find_text(&buf, "- aaa");
@@ -481,8 +502,7 @@
             );
         }
         let after = paint_full(&mut state, id);
-        let area = crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, 120, 30));
-        let editor = crate::ui::writer::writer_layout(area).editor;
+        let editor = editor_area(&state, id);
         let first: String = (editor.x..editor.x + 8)
             .map(|cx| after[(cx, editor.y)].symbol())
             .collect();
@@ -497,6 +517,7 @@
         open_doc(&mut state, id, "d.md");
         state.term_size = (30, 120);
         state.open_writer_overlay();
+        state.writer_toggle_assistant(id);
         shift_select(&mut state, id, 3);
         assert!(state.writers.get(&id).unwrap().selection.is_some());
         let buf = paint_full(&mut state, id);
@@ -522,10 +543,11 @@
         event::KeyEvent::new(code, event::KeyModifiers::CONTROL)
     }
 
-    fn editor_area(state: &AppState) -> ratatui::layout::Rect {
+    fn editor_area(state: &AppState, id: crate::session::SessionId) -> ratatui::layout::Rect {
         let (rows, cols) = state.term_size;
         let area = crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, cols, rows));
-        crate::ui::writer::writer_layout(area).editor
+        let visible = state.writers.get(&id).is_some_and(|s| s.panel_visible);
+        crate::ui::writer::writer_layout(area, visible).editor
     }
 
     #[test]
@@ -623,7 +645,7 @@
         state.open_writer_overlay();
         // Paint once so the editor learns its screen area.
         paint_full(&mut state, id);
-        let page = editor_area(&state).height as usize;
+        let page = editor_area(&state, id).height as usize;
         let mut router = InputRouter::new();
         let now = std::time::Instant::now();
         handle_key_at(&mut state, &mut router, key(event::KeyCode::PageDown), now);
@@ -686,7 +708,7 @@
         let now = std::time::Instant::now();
         handle_key_at(&mut state, &mut router, ctrl_key(event::KeyCode::End), now);
         let buf = paint_full(&mut state, id);
-        let editor = editor_area(&state);
+        let editor = editor_area(&state, id);
         let tail: String = (editor.x..editor.x + 8)
             .map(|cx| buf[(cx, editor.y + editor.height - 1)].symbol())
             .collect();
@@ -720,7 +742,8 @@
         handle_key_at(&mut state, &mut router, ctrl_key(event::KeyCode::End), now);
         let buf = paint_full(&mut state, id);
         let area = crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, 120, 30));
-        let layout = crate::ui::writer::writer_layout(area);
+        let visible = state.writers.get(&id).is_some_and(|s| s.panel_visible);
+        let layout = crate::ui::writer::writer_layout(area, visible);
         let marks: Vec<u16> = (layout.editor.y..layout.editor.y + layout.editor.height)
             .filter(|y| buf[(layout.gutter.x, *y)].symbol() == "▌")
             .collect();
@@ -759,7 +782,7 @@
             pos
         };
         let cursor = cursor.expect("cursor paints");
-        let editor = editor_area(&state);
+        let editor = editor_area(&state, id);
         assert!(
             cursor.x >= editor.x
                 && cursor.x < editor.x + editor.width
@@ -877,7 +900,7 @@
         open_doc(&mut state, id, "d.md");
         state.term_size = (30, 120);
         state.open_writer_overlay();
-        let w = editor_area(&state).width as usize;
+        let w = editor_area(&state, id).width as usize;
         assert!(w > 10, "sane editor width: {w}");
         let text = format!("{}\nzzz", "y".repeat(2 * w + 5));
         std::fs::write(dir.join("wrap.md"), &text).unwrap();
@@ -919,6 +942,99 @@
         assert_eq!(cursor_offset(&state, id), 30);
         down(&mut state);
         assert_eq!(cursor_offset(&state, id), 51, "col 9, not the old 10");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn panel_text(buf: &ratatui::buffer::Buffer, layout: crate::ui::writer::WriterLayout) -> String {
+        let mut s = String::new();
+        for y in layout.panel.y..layout.panel.y + layout.panel.height {
+            for x in layout.panel.x..layout.panel.x + layout.panel.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    #[test]
+    fn assistant_hidden_by_default_with_full_width_editor() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        assert!(!state.writers.get(&id).unwrap().panel_visible, "hidden default");
+        let buf = paint_full(&mut state, id);
+        let area = crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, 120, 30));
+        let hidden = crate::ui::writer::writer_layout(area, false);
+        let shown = crate::ui::writer::writer_layout(area, true);
+        assert_eq!(hidden.panel.width, 0, "no panel rect");
+        assert!(
+            hidden.editor.width > shown.editor.width,
+            "editor takes the panel width"
+        );
+        assert!(
+            !panel_text(&buf, shown).contains("thread"),
+            "no panel content painted: {buf:?}"
+        );
+        let row: String = (0..120).map(|x| buf[(x, hidden.action.y)].symbol()).collect();
+        assert!(!row.contains("Rephrase"), "no action row: {row:?}");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn assistant_toggle_shows_panel_and_action_row() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        state.writer_toggle_assistant(id);
+        assert!(state.writers.get(&id).unwrap().panel_visible);
+        let buf = paint_full(&mut state, id);
+        let area = crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, 120, 30));
+        let shown = crate::ui::writer::writer_layout(area, true);
+        assert!(shown.panel.width > 0);
+        let row: String = (0..120).map(|x| buf[(x, shown.action.y)].symbol()).collect();
+        assert!(row.contains("Rephrase"), "action row back: {row:?}");
+        state.writer_toggle_assistant(id);
+        assert!(!state.writers.get(&id).unwrap().panel_visible);
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hiding_assistant_returns_focus_to_editor() {
+        use crate::app::writer::WriterFocus;
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        state.writer_toggle_assistant(id);
+        state.writers.get_mut(&id).unwrap().focus = WriterFocus::Chat;
+        state.writer_toggle_assistant(id);
+        assert_eq!(state.writers.get(&id).unwrap().focus, WriterFocus::Editor);
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn topbar_click_select_paints_the_empty_state() {
+        // The blank-tab bug: entries were only created by Ctrl-b d,
+        // so any other selection path painted nothing. Topbar clicks
+        // funnel through select_top_tab (tui/mouse.rs), and the real
+        // draw closure (tui/mod.rs) paints only with an entry.
+        let (mut state, id, dir) = writer_agent();
+        state.term_size = (30, 120);
+        let slot = state.writer_slot(id).unwrap();
+        assert!(state.select_top_tab(slot));
+        assert!(
+            state.writers.contains_key(&id),
+            "entry exists however the tab is selected"
+        );
+        assert!(state.writer_keys_active());
+        let buf = paint_full(&mut state, id);
+        find_text(&buf, "*New document");
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }

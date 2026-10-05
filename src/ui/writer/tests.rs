@@ -59,6 +59,8 @@
     #[test]
     fn doc_paints_title_editor_status_and_actions() {
         let mut session = doc_session("aaa bbb");
+        // Panel-era UI needs the assistant shown (hidden default).
+        session.panel_visible = true;
         let buf = paint_doc_to(&mut session, 120, 30);
         let text = buffer_text(&buf);
         assert!(text.contains("d.md"), "title row: {text}");
@@ -93,6 +95,8 @@
     fn selected_proposal_paints_diff_gutter_and_highlight() {
         use ratatui::style::Color;
         let mut session = doc_session("aaa bbb ccc");
+        // Panel-era UI needs the assistant shown (hidden default).
+        session.panel_visible = true;
         let pid = session
             .proposals
             .propose(
@@ -128,6 +132,8 @@
     #[test]
     fn stale_entry_shows_note_without_pills() {
         let mut session = doc_session("aaa bbb");
+        // Panel-era UI needs the assistant shown (hidden default).
+        session.panel_visible = true;
         let pid = session
             .proposals
             .propose(session.doc.as_ref().unwrap(), None, 0..3, "AAA".to_string(), None)
@@ -145,6 +151,8 @@
     #[test]
     fn answer_renders_markdown_in_the_thread() {
         let mut session = doc_session("aaa");
+        // Panel-era UI needs the assistant shown (hidden default).
+        session.panel_visible = true;
         session.thread.push(crate::app::writer::WriterThreadEntry {
             request_id: 1,
             answer: "# Why\n\nbecause reasons".to_string(),
@@ -159,8 +167,10 @@
     #[test]
     fn narrow_panel_shows_the_widen_notice() {
         let mut session = doc_session("aaa bbb");
+        // Panel-era UI needs the assistant shown (hidden default).
+        session.panel_visible = true;
         let buf = paint_doc_to(&mut session, 80, 24);
-        let layout = writer_layout(Rect::new(0, 0, 80, 24));
+        let layout = writer_layout(Rect::new(0, 0, 80, 24), true);
         assert!(panel_collapsed(80));
         let row = row_text(&buf, layout.panel.y, layout.panel.x, layout.panel.x + 22);
         assert!(row.contains("widen to ≥100 columns"), "notice: {row:?}");
@@ -170,6 +180,8 @@
     #[test]
     fn chat_chip_shows_the_live_selection() {
         let mut session = doc_session("aaa bbb");
+        // Panel-era UI needs the assistant shown (hidden default).
+        session.panel_visible = true;
         session.selection = Some(2..5);
         let buf = paint_doc_to(&mut session, 120, 30);
         assert!(buffer_text(&buf).contains("[2–5] (✕)"), "chip with detach");
@@ -178,7 +190,7 @@
     #[test]
     fn layout_keeps_the_65_35_split_and_fixed_slots() {
         let area = Rect::new(0, 0, 120, 30);
-        let layout = writer_layout(area);
+        let layout = writer_layout(area, true);
         // Border 1 + side pad 2 on the left.
         assert_eq!((layout.title.x, layout.title.y), (3, 2));
         assert_eq!(layout.title.width, 114);
@@ -226,7 +238,7 @@
         // No new inline colours: rest caps come from the shared theme
         // helper, mirroring the topbar/dialog pills.
         let buf = paint_empty_to(&WriterSession::default(), 120, 30);
-        let layout = writer_layout(Rect::new(0, 0, 120, 30));
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), true);
         let (_, open_rect) = empty_pill_rects(layout.body);
         assert!(open_rect.height > 0, "open pill paints");
         let left_cap = buf[(open_rect.x, open_rect.y)].fg;
@@ -259,7 +271,7 @@
         let mut session = WriterSession::default();
         session.error = Some("no live agent tab".to_string());
         let buf = paint_empty_to(&session, 120, 30);
-        let layout = writer_layout(Rect::new(0, 0, 120, 30));
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), true);
         let row = row_text(&buf, layout.error.y, layout.error.x, layout.error.x + 20);
         assert!(row.contains("no live agent tab"), "slot row: {row:?}");
         // Same row empty without an error: geometry never moves.

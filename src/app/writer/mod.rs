@@ -117,6 +117,11 @@ pub struct WriterSession {
     /// them, reset by any horizontal move, edit or click. `None`
     /// means "take the current column".
     pub nav_goal: Option<usize>,
+    /// Assistant panel visible. Hidden by default: the editor takes
+    /// the full width and the action row disappears with the panel.
+    /// Hiding returns focus to the editor (the chat box lives in
+    /// the panel, so keys must land somewhere visible).
+    pub panel_visible: bool,
 }
 
 /// Most finished requests kept; oldest evicted. Open requests and
@@ -245,7 +250,7 @@ impl WriterSession {
 impl AppState {
     /// Absolute topbar index of the Writer overlay slot for one
     /// session, or `None` for an unknown session.
-    pub(super) fn writer_slot(&self, id: crate::session::SessionId) -> Option<usize> {
+    pub(crate) fn writer_slot(&self, id: crate::session::SessionId) -> Option<usize> {
         let rec = self.manager.get(id)?;
         OVERLAY_TABS
             .iter()

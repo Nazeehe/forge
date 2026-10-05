@@ -10,6 +10,7 @@
 
 pub mod document;
 pub mod proposal;
+pub mod recent;
 pub mod request;
 
 use std::collections::hash_map::DefaultHasher;

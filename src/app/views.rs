@@ -72,6 +72,12 @@ impl AppState {
             let next = Some((id, index));
             let changed = self.overlay_view != next;
             self.overlay_view = next;
+            // The Writer entry exists however the tab gets selected:
+            // without it the draw closure paints nothing (blank tab)
+            // and keys/mouse find no session.
+            if Some(index) == self.writer_slot(id) {
+                self.writers.entry(id).or_default();
+            }
             self.dirty |= changed;
             changed
         }
