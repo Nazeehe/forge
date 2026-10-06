@@ -163,16 +163,13 @@ fn select_all_empty_doc_selects_nothing() {
 }
 
 #[test]
-fn indent_takes_two_undos_until_e6_groups() {
+fn indent_is_one_undo_step_after_e6() {
     let (mut state, id, run, dir) = writer_agent();
     open_text(&mut state, id, &run, &dir, "d.md", "aaa");
     feed(&mut state, id, crossterm::event::KeyCode::Tab);
     assert_eq!(doc_text(&state, id), "  aaa");
-    // Each inserted space captures its own undo step today; E6
-    // coalesces typing (and indent) into word/pause groups.
+    // E6 groups the whole indent into one undo step.
     let (code, mods) = ctrl(crossterm::event::KeyCode::Char('z'));
-    feed_mod(&mut state, id, code, mods);
-    assert_eq!(doc_text(&state, id), " aaa");
     feed_mod(&mut state, id, code, mods);
     assert_eq!(doc_text(&state, id), "aaa");
     assert!(state.manager.remove(id));

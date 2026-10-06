@@ -566,6 +566,58 @@ fn writer_preview_toggle_renders_and_keeps_the_cursor() {
 }
 
 #[test]
+fn writer_typing_groups_words_for_undo() {
+    let mut h = boot(&[("grp.md", "")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("grp.md\r");
+    h.wait_for("rev0", "doc open");
+    h.send("alpha beta");
+    h.wait_for("alphabeta", "typed sentence");
+    // One Ctrl+Z removes the last word group, not one char.
+    h.send("\x1a");
+    std::thread::sleep(Duration::from_millis(300));
+    h.settle();
+    let (_, y) = h.find("alpha").expect("kept word on screen");
+    let row = row_cells(&h.parser, y);
+    assert!(row.contains("alpha"), "first word survives: {row:?}");
+    assert!(!row.contains("beta"), "last word undone as one: {row:?}");
+}
+
+#[test]
+fn writer_list_continuation_then_exit() {
+    let mut h = boot(&[("list.md", "")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("list.md\r");
+    h.wait_for("rev0", "doc open");
+    h.send("- item\r");
+    h.wait_for("-item", "continued marker");
+    h.send("more\r");
+    h.wait_for("more", "second item");
+    // Enter on the empty third item exits the list.
+    h.send("\r");
+    std::thread::sleep(Duration::from_millis(300));
+    let text = h.settle();
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squashed.contains("-item"), "first item kept: {text:?}");
+    assert!(squashed.contains("-more"), "second item kept: {text:?}");
+    // "- item\n- more" is 4 words / 13 chars; a surviving third
+    // marker would read 5w 16c.
+    assert!(squashed.contains("4w13c"), "exit removed the marker: {text:?}");
+}
+
+#[test]
 fn writer_prompt_home_fixes_first_char() {
     let mut h = boot(&[("needed.md", "need\n")]);
     create_session(&mut h);

@@ -781,6 +781,222 @@
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn type_text(state: &mut crate::app::AppState, router: &mut InputRouter, text: &str) {
+        let now = std::time::Instant::now();
+        for c in text.chars() {
+            handle_key_at(state, router, key(event::KeyCode::Char(c)), now);
+        }
+    }
+
+    #[test]
+    fn typing_a_word_is_one_undo_step() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        type_text(&mut state, &mut router, "hello");
+        assert_eq!(doc_text(&state, id), "helloaaa bbb");
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "aaa bbb", "one undo takes the word");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn word_boundary_breaks_the_group() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        type_text(&mut state, &mut router, "hi you");
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "hi aaa bbb", "undo takes the last word");
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "hiaaa bbb", "then the space");
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "aaa bbb", "then the first word");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pause_breaks_the_group() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        type_text(&mut state, &mut router, "hi");
+        // Two seconds pass before the next char.
+        let session = state.writers.get_mut(&id).unwrap();
+        let back = session.type_group.as_mut().expect("open group");
+        back.at = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        type_text(&mut state, &mut router, "x");
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "hiaaa bbb", "undo takes post-pause char");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cursor_jump_breaks_the_group() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        type_text(&mut state, &mut router, "hi");
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Left), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Char('x')), now);
+        assert_eq!(doc_text(&state, id), "hxiaaa bbb");
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "hiaaa bbb", "undo takes only the jumped char");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn typing_over_a_selection_is_one_step() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        for _ in 0..3 {
+            handle_key_at(&mut state, &mut router, shift(event::KeyCode::Left), now);
+        }
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Char('X')), now);
+        assert_eq!(doc_text(&state, id), "aaa X");
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "aaa bbb", "one undo restores the range");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn indent_of_a_selection_is_one_step() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "one\ntwo\n").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('a')), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Tab), now);
+        assert_eq!(doc_text(&state, id), "  one\n  two\n");
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "one\ntwo\n", "one undo outdents both");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn outdent_of_a_selection_is_one_step() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "  one\n  two\n").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('a')), now);
+        handle_key_at(
+            &mut state,
+            &mut router,
+            event::KeyEvent::new(event::KeyCode::Tab, event::KeyModifiers::SHIFT),
+            now,
+        );
+        assert_eq!(doc_text(&state, id), "one\ntwo\n");
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "  one\n  two\n", "one undo re-indents both");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enter_continues_a_bullet() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "- item").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        assert_eq!(doc_text(&state, id), "- item\n- ", "marker continues");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enter_on_an_empty_item_exits_the_list() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "- item\n- ").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        // EdTUI's DeleteSelection takes the line's newline with the
+        // marker, so the exited line is gone, not left blank.
+        assert_eq!(doc_text(&state, id), "- item", "marker removed");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn enter_continues_numbered_and_task_items() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "  2. two\n  - [x] done").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "  2. two\n  3. \n  - [x] done",
+            "number increments, indent kept"
+        );
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "  2. two\n  3. \n  - [x] done\n  - [ ] ",
+            "task box resets unchecked"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tab_nests_a_list_item_and_shift_tab_unnests() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "- a\n- b\n").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Tab), now);
+        assert_eq!(doc_text(&state, id), "- a\n  - b\n", "tab nests");
+        handle_key_at(
+            &mut state,
+            &mut router,
+            event::KeyEvent::new(event::KeyCode::Tab, event::KeyModifiers::SHIFT),
+            now,
+        );
+        assert_eq!(doc_text(&state, id), "- a\n- b\n", "shift+tab unnests");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn prefix_escapes_while_editing() {
         let (mut state, id, dir) = writer_agent();

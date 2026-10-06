@@ -28,6 +28,18 @@ pub(super) const MAX_OPENED_THIS_RUN: usize = 32;
 #[derive(Clone, Default)]
 pub struct SharedClipboard(pub std::rc::Rc<std::cell::RefCell<String>>);
 
+/// Open typing undo group (E6): chars typed at `end` within the
+/// pause window extend one undo step instead of capturing per char.
+/// Any other key, a cursor jump, a class break, or a selection
+/// closes it; the next plain char opens a fresh one.
+#[derive(Clone, Copy, Debug)]
+pub struct TypeGroup {
+    /// Char offset just past the group's last char.
+    pub end: usize,
+    /// When the last group char landed.
+    pub at: std::time::Instant,
+}
+
 impl ClipboardTrait for SharedClipboard {
     fn set_text(&mut self, text: String) {
         *self.0.borrow_mut() = text;

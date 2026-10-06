@@ -137,7 +137,9 @@ impl AppState {
     /// (list markers survive: spaces go before them), or — with no
     /// selection on a line this leaves alone — nothing extra beyond
     /// the spaces. Plain indent inserts [`INDENT_WIDTH`] spaces at the
-    /// cursor. Each space is its own undo step until E6 groups them.
+    /// cursor. The whole indent is one undo step: the first space
+    /// goes through the register (opening the step's capture) and
+    /// the rest apply as raw `InsertChar`s, which never capture.
     /// `pub(crate)`: Tab arrives through the TUI input layer.
     pub(crate) fn writer_indent(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
@@ -153,12 +155,11 @@ impl AppState {
             return;
         }
         // Indent bottom-up so earlier inserts never shift later rows.
-        // The cursor tracks its own row's insert. Spaces go through
-        // the handler (not raw executes) so each captures its undo
-        // step: raw `InsertChar` never captures.
+        // The cursor tracks its own row's insert.
         let cursor_row = row_of_offset(&buffer, index2_to_offset(&editor.lines, editor.cursor));
         let mut cursor_off = index2_to_offset(&editor.lines, editor.cursor);
         let mut handler = cua_handler();
+        let mut first = true;
         for row in rows.iter().rev() {
             // Rows only ever gain a prefix, so row indices stay put
             // while offsets move: re-derive the live buffer per row.
@@ -168,13 +169,18 @@ impl AppState {
             editor.mode = EditorMode::Insert;
             editor.selection = None;
             for _ in 0..INDENT_WIDTH {
-                handler.on_event(
-                    crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
-                        crossterm::event::KeyCode::Char(' '),
-                        crossterm::event::KeyModifiers::NONE,
-                    )),
-                    editor,
-                );
+                if first {
+                    first = false;
+                    handler.on_event(
+                        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                            crossterm::event::KeyCode::Char(' '),
+                            crossterm::event::KeyModifiers::NONE,
+                        )),
+                        editor,
+                    );
+                } else {
+                    editor.execute(edtui::actions::InsertChar(' '));
+                }
             }
             if *row == cursor_row {
                 cursor_off += INDENT_WIDTH;
@@ -193,7 +199,10 @@ impl AppState {
     /// Shift+Tab: strip up to [`INDENT_WIDTH`] leading spaces per
     /// touched line (selection or current line). Lines without indent
     /// are untouched; a fully plain target edits nothing and bumps no
-    /// revision. One `DeleteSelection` per stripped line.
+    /// revision. The whole outdent is one undo step: the first
+    /// stripped row goes through `DeleteSelection` (opening the
+    /// step's capture) and the rest strip chars directly, which
+    /// never captures.
     /// `pub(crate)`: Shift+Tab arrives through the TUI input layer.
     pub(crate) fn writer_outdent(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
@@ -205,7 +214,7 @@ impl AppState {
         let buffer = editor.lines.to_string();
         let range = editor_selection_range(editor, &buffer);
         let rows = touched_rows(&buffer, range, index2_to_offset(&editor.lines, editor.cursor));
-        // Strip bottom-up; at most one capture per line.
+        // Strip bottom-up; only the first stripped row captures.
         let mut stripped_any = false;
         for row in rows.iter().rev() {
             let text = editor.lines.to_string();
@@ -215,13 +224,19 @@ impl AppState {
             if strip == 0 {
                 continue;
             }
-            editor.cursor = offset_to_index2(&text, line_start);
-            editor.execute(SwitchMode(EditorMode::Visual));
-            if let Some(sel) = editor.selection.as_mut() {
-                sel.start = offset_to_index2(&text, line_start);
-                sel.end = offset_to_index2(&text, line_start + strip - 1);
+            if !stripped_any {
+                editor.cursor = offset_to_index2(&text, line_start);
+                editor.execute(SwitchMode(EditorMode::Visual));
+                if let Some(sel) = editor.selection.as_mut() {
+                    sel.start = offset_to_index2(&text, line_start);
+                    sel.end = offset_to_index2(&text, line_start + strip - 1);
+                }
+                editor.execute(DeleteSelection);
+            } else {
+                for _ in 0..strip {
+                    editor.lines.remove(edtui::Index2::new(*row, 0));
+                }
             }
-            editor.execute(DeleteSelection);
             stripped_any = true;
         }
         if !stripped_any {

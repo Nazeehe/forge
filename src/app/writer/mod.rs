@@ -130,6 +130,8 @@ pub struct WriterSession {
     /// slow gap, or a move to another cell restarts at one.
     pub last_press: Option<(u16, u16, std::time::Instant)>,
     pub press_count: u8,
+    /// Open typing undo group; see [`TypeGroup`](adapter::TypeGroup).
+    pub type_group: Option<adapter::TypeGroup>,
     /// Read-only rendered view (E8): the editor keeps its cursor
     /// and scroll underneath, so toggling back resumes exactly.
     pub preview: bool,

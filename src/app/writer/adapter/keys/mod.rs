@@ -168,31 +168,59 @@ impl AppState {
             None
         };
         if nav.is_none() {
-            let Some(session) = self.writers.get_mut(&id) else {
-                return;
-            };
-            let Some(editor) = session.editor.as_mut() else {
-                return;
-            };
-            // Any other key ends the keyboard-selection gesture. A
-            // live selection with a text-producing key replaces it
-            // first (CUA): the register has no Visual-char behavior,
-            // so the adapter deletes, then forwards the key for the
-            // normal insert. (Two undo steps for now; E6 groups them.)
-            session.sel_anchor = None;
-            session.nav_goal = None;
-            if editor.selection.is_some()
-                && matches!(
-                    (key.code, key.modifiers),
-                    (KeyCode::Char(_), KeyModifiers::NONE)
-                        | (KeyCode::Char(_), KeyModifiers::SHIFT)
-                        | (KeyCode::Backspace, KeyModifiers::NONE)
-                        | (KeyCode::Delete, KeyModifiers::NONE)
-                        | (KeyCode::Enter, KeyModifiers::NONE)
-                )
+            // Typing groups (E6) live or die here: the open group is
+            // taken; only a continuing plain char restores it below.
+            // Every other key starts over.
+            let group;
+            let had_selection;
             {
-                editor.execute(DeleteSelection);
-                editor.mode = EditorMode::Insert;
+                let Some(session) = self.writers.get_mut(&id) else {
+                    return;
+                };
+                let Some(editor) = session.editor.as_mut() else {
+                    return;
+                };
+                group = session.type_group.take();
+                // Any other key ends the keyboard-selection gesture. A
+                // live selection with a text-producing key replaces it
+                // first (CUA): the register has no Visual-char
+                // behavior, so the adapter deletes, then inserts below.
+                session.sel_anchor = None;
+                session.nav_goal = None;
+                had_selection = editor.selection.is_some();
+                if had_selection
+                    && matches!(
+                        (key.code, key.modifiers),
+                        (KeyCode::Char(_), KeyModifiers::NONE)
+                            | (KeyCode::Char(_), KeyModifiers::SHIFT)
+                            | (KeyCode::Backspace, KeyModifiers::NONE)
+                            | (KeyCode::Delete, KeyModifiers::NONE)
+                            | (KeyCode::Enter, KeyModifiers::NONE)
+                    )
+                {
+                    editor.execute(DeleteSelection);
+                    editor.mode = EditorMode::Insert;
+                }
+            }
+            // Enter on a list item continues or exits it; with a
+            // selection, or off-list, the register keeps its break.
+            if matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Enter, KeyModifiers::NONE)
+            ) && !had_selection
+                && self.writer_list_enter(id)
+            {
+                return;
+            }
+            // Plain chars group into one undo step per word run;
+            // everything else keeps its own capture.
+            if let KeyCode::Char(c) = key.code {
+                if key.modifiers == KeyModifiers::NONE
+                    || key.modifiers == KeyModifiers::SHIFT
+                {
+                    self.writer_type_char(id, c, group, had_selection);
+                    return;
+                }
             }
             // Only convertible codes reach the register: EdTUI's
             // crossterm conversion panics on the rest (F-keys, media,
@@ -208,6 +236,12 @@ impl AppState {
                 self.dirty = true;
                 return;
             }
+            let Some(session) = self.writers.get_mut(&id) else {
+                return;
+            };
+            let Some(editor) = session.editor.as_mut() else {
+                return;
+            };
             let mut handler = super::cua::cua_handler();
             handler.on_event(crossterm::event::Event::Key(key), editor);
         } else {
@@ -378,4 +412,225 @@ impl AppState {
         session.note_fence_edit(edit_line);
         session.proposals.on_edit(&range);
     }
+
+    /// Type one plain char with undo grouping (E6): a char that
+    /// continues the open group (same run, cursor at its end, no
+    /// selection, inside the pause window) applies through a raw
+    /// `InsertChar`, which never captures — one undo step per word
+    /// run. Anything else goes through the register, opening its
+    /// own step. A replace already captured its delete
+    /// (`had_selection`), so its char always applies raw: delete
+    /// plus insert stay one step.
+    /// `pub(crate)`: the feed path owns the group handoff.
+    pub(crate) fn writer_type_char(
+        &mut self,
+        id: crate::session::SessionId,
+        c: char,
+        group: Option<super::TypeGroup>,
+        had_selection: bool,
+    ) {
+        let now = std::time::Instant::now();
+        let continues = match group {
+            Some(open) => {
+                let Some(session) = self.writers.get(&id) else {
+                    return;
+                };
+                let Some(editor) = session.editor.as_ref() else {
+                    return;
+                };
+                let buffer = editor.lines.to_string();
+                let cursor_off = index2_to_offset(&editor.lines, editor.cursor);
+                !had_selection
+                    && cursor_off == open.end
+                    && now.duration_since(open.at) < GROUP_PAUSE
+                    && super::nav::is_word_char(c)
+                    && open.end > 0
+                    && buffer
+                        .chars()
+                        .nth(open.end - 1)
+                        .is_some_and(super::nav::is_word_char)
+            }
+            None => false,
+        };
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(editor) = session.editor.as_mut() else {
+            return;
+        };
+        if continues || had_selection {
+            editor.execute(edtui::actions::InsertChar(c));
+        } else {
+            let mut handler = super::cua::cua_handler();
+            handler.on_event(
+                crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(c),
+                    crossterm::event::KeyModifiers::NONE,
+                )),
+                editor,
+            );
+        }
+        editor.mode = EditorMode::Insert;
+        let end = index2_to_offset(&editor.lines, editor.cursor);
+        session.type_group = Some(super::TypeGroup { end, at: now });
+        session.selection = editor_selection_to_range(editor);
+        self.writer_sync_editor(id);
+        self.dirty = true;
+    }
+
+    /// Enter on a list item (E6): continue the marker on a new line,
+    /// or exit the list when the item is empty. Returns true when it
+    /// handled the key. Continuation keeps plain-Enter undo behavior
+    /// (the register's break captures nothing); exiting deletes the
+    /// marker through `DeleteSelection`, which is one step.
+    /// `pub(crate)`: the feed path calls this before the register.
+    pub(crate) fn writer_list_enter(&mut self, id: crate::session::SessionId) -> bool {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return false;
+        };
+        let Some(editor) = session.editor.as_mut() else {
+            return false;
+        };
+        let buffer = editor.lines.to_string();
+        let cursor_off = index2_to_offset(&editor.lines, editor.cursor);
+        let row = row_of_offset(&buffer, cursor_off);
+        let Some(line) = buffer.split('\n').nth(row) else {
+            return false;
+        };
+        let Some(item) = parse_list_item(line) else {
+            return false;
+        };
+
+        let line_start = cursor_off - col_of_offset(&buffer, cursor_off);
+        if item.empty {
+            // Exit: the marker goes through one capturing delete.
+            // The drain would clobber the Forge clip, so it is
+            // saved and restored around the delete.
+            use edtui::clipboard::ClipboardTrait;
+            let saved_clip = session.clip.0.borrow().clone();
+            let marker_end = line_start + item.marker_len();
+            editor.cursor = offset_to_index2(&buffer, line_start);
+            editor.execute(SwitchMode(EditorMode::Visual));
+            if let Some(sel) = editor.selection.as_mut() {
+                sel.start = offset_to_index2(&buffer, line_start);
+                sel.end = offset_to_index2(&buffer, marker_end.saturating_sub(1));
+            }
+            editor.execute(DeleteSelection);
+            session.clip.set_text(saved_clip);
+            editor.mode = EditorMode::Insert;
+        } else {
+            // Continue: split the line and stamp the next marker.
+            // Following numbered items keep their numbers (E6 skips
+            // renumbering); task boxes reset to `[ ]`.
+            let col = col_of_offset(&buffer, cursor_off);
+            let left: String = line.chars().take(col).collect();
+            let right: String = line.chars().skip(col).collect();
+            let head: String = buffer
+                .split('\n')
+                .take(row)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let tail: String = buffer
+                .split('\n')
+                .skip(row + 1)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut merged = String::new();
+            if row > 0 {
+                merged.push_str(&head);
+                merged.push('\n');
+            }
+            merged.push_str(&left);
+            merged.push('\n');
+            merged.push_str(&item.next_marker());
+            merged.push_str(&right);
+            if !tail.is_empty() {
+                merged.push('\n');
+                merged.push_str(&tail);
+            }
+            let new_cursor = line_start + left.chars().count() + 1 + item.next_marker().chars().count();
+            editor.lines = Lines::from(merged.as_str());
+            editor.cursor = offset_to_index2(&merged, new_cursor);
+            editor.mode = EditorMode::Insert;
+            editor.selection = None;
+        }
+        session.sel_anchor = None;
+        session.nav_goal = None;
+        session.selection = editor_selection_to_range(editor);
+        self.writer_sync_editor(id);
+        self.dirty = true;
+        true
+    }
+}
+
+/// Pause that closes a typing group: ~1 s without a char.
+const GROUP_PAUSE: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// A parsed list item: indent width, full marker text (trailing
+/// space included), and whether anything follows the marker.
+struct ListItem {
+    indent: String,
+    marker: String,
+    empty: bool,
+}
+
+impl ListItem {
+    /// Marker for the next item: same indent and bullet, numbers
+    /// increment, task boxes reset to unchecked.
+    fn next_marker(&self) -> String {
+        format!("{}{}", self.indent, self.marker)
+    }
+
+    fn marker_len(&self) -> usize {
+        self.indent.chars().count() + self.marker.chars().count()
+    }
+}
+
+/// Parse `- `/`* `/`+ `/`1. `/`1) ` plus an optional task box,
+/// up to any indent. Returns `None` off-list.
+fn parse_list_item(line: &str) -> Option<ListItem> {
+    let indent_len = line.chars().take_while(|c| *c == ' ').count();
+    let rest = &line[indent_len..];
+    let (bullet, after_bullet) = if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
+        (rest[..2].to_string(), &rest[2..])
+    } else {
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        let delim = rest[digits..].chars().next()?;
+        if delim != '.' && delim != ')' {
+            return None;
+        }
+        let after_delim = &rest[digits + 1..];
+        if !after_delim.starts_with(' ') {
+            return None;
+        }
+        let num: u64 = rest[..digits].parse().ok()?;
+        (format!("{}{} ", num + 1, delim), &rest[digits + 2..])
+    };
+    let (task, content) = if after_bullet.starts_with("[ ] ")
+        || after_bullet.starts_with("[x] ")
+        || after_bullet.starts_with("[X] ")
+    {
+        ("[ ] ".to_string(), &after_bullet[4..])
+    } else {
+        (String::new(), after_bullet)
+    };
+    Some(ListItem {
+        indent: line[..indent_len].to_string(),
+        marker: format!("{bullet}{task}"),
+        empty: content.trim().is_empty(),
+    })
+}
+
+/// Doc row of a char offset.
+fn row_of_offset(text: &str, offset: usize) -> usize {
+    text.chars().take(offset).filter(|c| *c == '\n').count()
+}
+
+/// Column of a char offset within its row.
+fn col_of_offset(text: &str, offset: usize) -> usize {
+    let taken: String = text.chars().take(offset).collect();
+    taken.rsplit('\n').next().map_or(0, |s| s.chars().count())
 }
