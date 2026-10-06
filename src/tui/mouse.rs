@@ -618,9 +618,9 @@ mod tests {
             )
             .unwrap();
         // Top strip is row 0: "[Codex]" then "[Terminal]" from column 10.
-        // Overlay tabs stay listed when narrow (A3).
+        // Narrow keeps PTY tabs plus Writer only (R1).
         let bar = state.topbar();
-        assert_eq!(bar.tabs.len(), 6);
+        assert_eq!(bar.tabs.len(), 4);
         assert!(bar.tabs[0].active);
         forward_mouse(
             &mut state,

@@ -69,11 +69,15 @@ pub enum PromptKind {
 }
 
 /// The path prompt: typed path plus its job. Replaces the Start
-/// block while open; the toolbar and hint row stay.
+/// block while open; the toolbar and hint row stay. `cursor` is a
+/// char index into `buffer`; `select_all` marks the whole buffer for
+/// type-to-replace.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WriterOpenPrompt {
     pub buffer: String,
     pub kind: PromptKind,
+    pub cursor: usize,
+    pub select_all: bool,
 }
 
 /// One actionable error-slot row: a message plus clickable pills.
@@ -132,6 +136,8 @@ pub struct WriterSession {
     /// Chat box input (chars) plus cursor as a char index into it.
     pub chat_input: String,
     pub chat_cursor: usize,
+    /// Whole chat input marked for type-to-replace (Ctrl+A).
+    pub chat_select_all: bool,
     /// Proposal selected by clicking its thread entry, if any.
     pub selected_proposal: Option<u64>,
     /// Fixed error slot text; `None` renders the slot empty.

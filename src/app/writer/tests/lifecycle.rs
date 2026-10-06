@@ -26,6 +26,17 @@ fn prompt_buffer(state: &crate::app::AppState, id: crate::session::SessionId) ->
         .unwrap_or_default()
 }
 
+fn prompt_cursor(state: &crate::app::AppState, id: crate::session::SessionId) -> usize {
+    state
+        .writers
+        .get(&id)
+        .unwrap()
+        .open_prompt
+        .as_ref()
+        .map(|p| p.cursor)
+        .unwrap_or(usize::MAX)
+}
+
 #[test]
 fn new_submit_missing_creates_empty_and_records_opened() {
     let (mut state, id, _run, dir) = writer_agent();
@@ -142,6 +153,50 @@ fn prompt_tab_completes_from_opened_then_recent_and_stays_stable() {
     assert_eq!(prompt_buffer(&state, id), "beta.md", "recent scan fills in");
     state.writer_prompt_complete(id);
     assert_eq!(prompt_buffer(&state, id), "beta.md", "second Tab is stable");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prompt_edits_at_the_cursor() {
+    let (mut state, id, _run, dir) = writer_agent();
+    state.writer_toolbar_open(id);
+    type_path(&mut state, id, "ac");
+    state.writer_prompt_move(id, -1);
+    state.writer_prompt_char(id, 'b');
+    assert_eq!(prompt_buffer(&state, id), "abc", "insert at cursor");
+    state.writer_prompt_delete(id);
+    assert_eq!(prompt_buffer(&state, id), "ab", "delete under cursor");
+    state.writer_prompt_home(id);
+    state.writer_prompt_backspace(id);
+    assert_eq!(prompt_buffer(&state, id), "ab", "backspace at head");
+    state.writer_prompt_end(id);
+    state.writer_prompt_move(id, -4_000_000);
+    assert_eq!(prompt_cursor(&state, id), 0, "clamped to head");
+    state.writer_prompt_move(id, 4_000_000);
+    assert_eq!(prompt_cursor(&state, id), 2, "clamped to end");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn prompt_word_jumps_and_select_all_replaces() {
+    let (mut state, id, _run, dir) = writer_agent();
+    state.writer_toolbar_open(id);
+    type_path(&mut state, id, "aa bb");
+    state.writer_prompt_home(id);
+    state.writer_prompt_word(id, 1);
+    assert_eq!(prompt_cursor(&state, id), 2, "first word end");
+    state.writer_prompt_word(id, 1);
+    assert_eq!(prompt_cursor(&state, id), 5, "second word end");
+    state.writer_prompt_word(id, -1);
+    assert_eq!(prompt_cursor(&state, id), 3, "second word start");
+    state.writer_prompt_select_all(id);
+    state.writer_prompt_char(id, 'z');
+    assert_eq!(prompt_buffer(&state, id), "z", "select-all types to replace");
+    state.writer_prompt_select_all(id);
+    state.writer_prompt_move(id, -1);
+    assert_eq!(prompt_buffer(&state, id), "z", "a move drops the selection");
     assert!(state.manager.remove(id));
     std::fs::remove_dir_all(&dir).ok();
 }

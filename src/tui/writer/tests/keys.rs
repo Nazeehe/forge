@@ -111,6 +111,57 @@
     }
 
     #[test]
+    fn prompt_keys_edit_at_the_cursor() {
+        use crossterm::event::KeyCode;
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        state.writer_toolbar_open(id);
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        for c in "ac".chars() {
+            handle_key_at(&mut state, &mut router, key(KeyCode::Char(c)), now);
+        }
+        handle_key_at(&mut state, &mut router, key(KeyCode::Left), now);
+        handle_key_at(&mut state, &mut router, key(KeyCode::Char('b')), now);
+        let buffer = state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().buffer.clone();
+        assert_eq!(buffer, "abc", "keys reach the prompt cursor");
+        handle_key_at(&mut state, &mut router, key(KeyCode::Delete), now);
+        let buffer = state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().buffer.clone();
+        assert_eq!(buffer, "ab", "delete under the cursor");
+        handle_key_at(&mut state, &mut router, key(KeyCode::Home), now);
+        handle_key_at(&mut state, &mut router, ctrl(KeyCode::Char('a')), now);
+        handle_key_at(&mut state, &mut router, key(KeyCode::Char('z')), now);
+        let prompt = state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().clone();
+        assert_eq!(prompt.buffer, "z", "ctrl+a types to replace through keys");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn chat_keys_home_end_and_ctrl_a() {
+        use crossterm::event::KeyCode;
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        state.writer_toggle_assistant(id);
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::F(6)), now);
+        for c in "hi".chars() {
+            handle_key_at(&mut state, &mut router, key(KeyCode::Char(c)), now);
+        }
+        handle_key_at(&mut state, &mut router, key(KeyCode::Home), now);
+        assert_eq!(state.writers.get(&id).unwrap().chat_cursor, 0);
+        handle_key_at(&mut state, &mut router, key(KeyCode::End), now);
+        assert_eq!(state.writers.get(&id).unwrap().chat_cursor, 2);
+        handle_key_at(&mut state, &mut router, ctrl(KeyCode::Char('a')), now);
+        assert!(state.writers.get(&id).unwrap().chat_select_all);
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn chat_box_edits_and_enter_sends() {
         let (mut state, id, dir) = writer_agent();
         open_doc(&mut state, id, "d.md");

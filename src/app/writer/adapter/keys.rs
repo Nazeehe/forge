@@ -345,14 +345,17 @@ impl AppState {
         session.open_prompt = Some(WriterOpenPrompt {
             buffer: String::new(),
             kind,
+            cursor: 0,
+            select_all: false,
         });
         session.pending_confirm = None;
         session.error = None;
         self.dirty = true;
     }
 
-    /// Type one char into the prompt, bounded at [`MAX_PATH_CHARS`].
-    /// Control chars never enter a path.
+    /// Type one char into the prompt at the cursor, bounded at
+    /// [`MAX_PATH_CHARS`]. Control chars never enter a path. A
+    /// select-all replaces the whole buffer (type-to-replace).
     pub fn writer_prompt_char(&mut self, id: crate::session::SessionId, c: char) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;
@@ -360,15 +363,31 @@ impl AppState {
         let Some(prompt) = session.open_prompt.as_mut() else {
             return;
         };
-        if c.is_control() || prompt.buffer.chars().count() >= MAX_PATH_CHARS {
+        if c.is_control() {
             return;
         }
-        prompt.buffer.push(c);
+        if prompt.select_all {
+            prompt.buffer.clear();
+            prompt.cursor = 0;
+            prompt.select_all = false;
+        }
+        if prompt.buffer.chars().count() >= MAX_PATH_CHARS {
+            return;
+        }
+        let at = prompt.cursor.min(prompt.buffer.chars().count());
+        let byte = prompt
+            .buffer
+            .char_indices()
+            .nth(at)
+            .map(|(index, _)| index)
+            .unwrap_or(prompt.buffer.len());
+        prompt.buffer.insert(byte, c);
+        prompt.cursor = at + 1;
         self.dirty = true;
     }
 
-    /// Backspace one char out of the prompt; an empty prompt stays open
-    /// (Esc cancels it).
+    /// Backspace one char before the prompt cursor; an empty prompt
+    /// stays open (Esc cancels it). A select-all clears the buffer.
     pub fn writer_prompt_backspace(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;
@@ -376,7 +395,125 @@ impl AppState {
         let Some(prompt) = session.open_prompt.as_mut() else {
             return;
         };
-        prompt.buffer.pop();
+        if prompt.select_all {
+            prompt.buffer.clear();
+            prompt.cursor = 0;
+            prompt.select_all = false;
+            self.dirty = true;
+            return;
+        }
+        if prompt.cursor == 0 {
+            return;
+        }
+        let mut chars: Vec<char> = prompt.buffer.chars().collect();
+        if prompt.cursor <= chars.len() {
+            chars.remove(prompt.cursor - 1);
+            prompt.buffer = chars.into_iter().collect();
+            prompt.cursor -= 1;
+            self.dirty = true;
+        }
+    }
+
+    /// Delete one char under the prompt cursor. A select-all clears.
+    pub fn writer_prompt_delete(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(prompt) = session.open_prompt.as_mut() else {
+            return;
+        };
+        if prompt.select_all {
+            prompt.buffer.clear();
+            prompt.cursor = 0;
+            prompt.select_all = false;
+            self.dirty = true;
+            return;
+        }
+        let mut chars: Vec<char> = prompt.buffer.chars().collect();
+        if prompt.cursor < chars.len() {
+            chars.remove(prompt.cursor);
+            prompt.buffer = chars.into_iter().collect();
+            self.dirty = true;
+        }
+    }
+
+    /// Move the prompt cursor one char, clamped. Drops a select-all.
+    pub fn writer_prompt_move(&mut self, id: crate::session::SessionId, dir: i32) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(prompt) = session.open_prompt.as_mut() else {
+            return;
+        };
+        let len = prompt.buffer.chars().count();
+        prompt.cursor = (prompt.cursor as i32 + dir).clamp(0, len as i32) as usize;
+        prompt.select_all = false;
+        self.dirty = true;
+    }
+
+    /// Prompt cursor to the head of the buffer. Drops a select-all.
+    pub fn writer_prompt_home(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(prompt) = session.open_prompt.as_mut() else {
+            return;
+        };
+        prompt.cursor = 0;
+        prompt.select_all = false;
+        self.dirty = true;
+    }
+
+    /// Prompt cursor to the end of the buffer. Drops a select-all.
+    pub fn writer_prompt_end(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(prompt) = session.open_prompt.as_mut() else {
+            return;
+        };
+        prompt.cursor = prompt.buffer.chars().count();
+        prompt.select_all = false;
+        self.dirty = true;
+    }
+
+    /// Prompt cursor one word in `dir` (-1/1). Word chars are
+    /// alphanumeric plus underscore; anything else is a separator.
+    pub fn writer_prompt_word(&mut self, id: crate::session::SessionId, dir: i32) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(prompt) = session.open_prompt.as_mut() else {
+            return;
+        };
+        prompt.cursor = word_edge(&prompt.buffer, prompt.cursor, dir);
+        prompt.select_all = false;
+        self.dirty = true;
+    }
+
+    /// Mark the whole prompt buffer for type-to-replace.
+    pub fn writer_prompt_select_all(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(prompt) = session.open_prompt.as_mut() else {
+            return;
+        };
+        prompt.select_all = !prompt.buffer.is_empty();
+        self.dirty = true;
+    }
+
+    /// Place the prompt cursor at a char index (mouse click-to-place).
+    /// Clamped; drops a select-all.
+    pub fn writer_prompt_place(&mut self, id: crate::session::SessionId, at: usize) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(prompt) = session.open_prompt.as_mut() else {
+            return;
+        };
+        prompt.cursor = at.min(prompt.buffer.chars().count());
+        prompt.select_all = false;
         self.dirty = true;
     }
 
@@ -587,6 +724,8 @@ impl AppState {
             return;
         };
         prompt.buffer = value.chars().take(super::super::MAX_PATH_CHARS).collect();
+        prompt.cursor = prompt.buffer.chars().count();
+        prompt.select_all = false;
         self.dirty = true;
     }
 
@@ -738,6 +877,8 @@ impl AppState {
         if let (Some(hit), Some(session)) = (hit, self.writers.get_mut(&id)) {
             if let Some(prompt) = session.open_prompt.as_mut() {
                 prompt.buffer = hit;
+                prompt.cursor = prompt.buffer.chars().count();
+                prompt.select_all = false;
                 self.dirty = true;
             }
         }
@@ -835,6 +976,11 @@ impl AppState {
         if c.is_control() {
             return;
         }
+        if session.chat_select_all {
+            session.chat_input.clear();
+            session.chat_cursor = 0;
+            session.chat_select_all = false;
+        }
         let len = session.chat_input.chars().count();
         if len < crate::writer::MAX_INPUT_CHARS {
             let at = session.chat_cursor.min(len);
@@ -851,11 +997,18 @@ impl AppState {
         }
     }
 
-    /// Backspace one char before the chat cursor.
+    /// Backspace one char before the chat cursor. A select-all clears.
     pub fn writer_chat_backspace(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;
         };
+        if session.chat_select_all {
+            session.chat_input.clear();
+            session.chat_cursor = 0;
+            session.chat_select_all = false;
+            self.dirty = true;
+            return;
+        }
         if session.chat_cursor == 0 {
             return;
         }
@@ -868,13 +1021,85 @@ impl AppState {
         }
     }
 
-    /// Move the chat cursor one char, clamped to the input.
+    /// Move the chat cursor one char, clamped to the input. Drops a
+    /// select-all.
     pub fn writer_chat_move(&mut self, id: crate::session::SessionId, dir: i32) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;
         };
         let len = session.chat_input.chars().count();
         session.chat_cursor = (session.chat_cursor as i32 + dir).clamp(0, len as i32) as usize;
+        session.chat_select_all = false;
+        self.dirty = true;
+    }
+
+    /// Chat cursor to the head of the input. Drops a select-all.
+    pub fn writer_chat_home(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        session.chat_cursor = 0;
+        session.chat_select_all = false;
+        self.dirty = true;
+    }
+
+    /// Chat cursor to the end of the input. Drops a select-all.
+    pub fn writer_chat_end(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        session.chat_cursor = session.chat_input.chars().count();
+        session.chat_select_all = false;
+        self.dirty = true;
+    }
+
+    /// Chat cursor one word in `dir` (-1/1). Drops a select-all.
+    pub fn writer_chat_word(&mut self, id: crate::session::SessionId, dir: i32) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        session.chat_cursor = word_edge(&session.chat_input.clone(), session.chat_cursor, dir);
+        session.chat_select_all = false;
+        self.dirty = true;
+    }
+
+    /// Delete one char under the chat cursor. A select-all clears.
+    pub fn writer_chat_delete(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        if session.chat_select_all {
+            session.chat_input.clear();
+            session.chat_cursor = 0;
+            session.chat_select_all = false;
+            self.dirty = true;
+            return;
+        }
+        let mut chars: Vec<char> = session.chat_input.chars().collect();
+        if session.chat_cursor < chars.len() {
+            chars.remove(session.chat_cursor);
+            session.chat_input = chars.into_iter().collect();
+            self.dirty = true;
+        }
+    }
+
+    /// Mark the whole chat input for type-to-replace.
+    pub fn writer_chat_select_all(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        session.chat_select_all = !session.chat_input.is_empty();
+        self.dirty = true;
+    }
+
+    /// Place the chat cursor at a char index (mouse click-to-place).
+    /// Clamped; drops a select-all.
+    pub fn writer_chat_place(&mut self, id: crate::session::SessionId, at: usize) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        session.chat_cursor = at.min(session.chat_input.chars().count());
+        session.chat_select_all = false;
         self.dirty = true;
     }
 
@@ -982,4 +1207,31 @@ impl AppState {
         session.sel_anchor = None;
         self.dirty = true;
     }
+}
+
+/// Word edge in `dir` (-1 left, +1 right) from a char `cursor`.
+/// Word chars are alphanumeric plus underscore; separators bound
+/// words. Clamped to the text.
+fn word_edge(text: &str, cursor: usize, dir: i32) -> usize {
+    fn word_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut at = cursor.min(chars.len());
+    if dir < 0 {
+        while at > 0 && !word_char(chars[at - 1]) {
+            at -= 1;
+        }
+        while at > 0 && word_char(chars[at - 1]) {
+            at -= 1;
+        }
+    } else {
+        while at < chars.len() && !word_char(chars[at]) {
+            at += 1;
+        }
+        while at < chars.len() && word_char(chars[at]) {
+            at += 1;
+        }
+    }
+    at
 }

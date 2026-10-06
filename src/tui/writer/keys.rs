@@ -28,7 +28,15 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
             (KeyCode::Enter, _) => state.writer_submit_open(id),
             (KeyCode::Esc, _) => state.writer_prompt_cancel(id),
             (KeyCode::Backspace, _) => state.writer_prompt_backspace(id),
+            (KeyCode::Delete, _) => state.writer_prompt_delete(id),
             (KeyCode::Tab, KeyModifiers::NONE) => state.writer_prompt_complete(id),
+            (KeyCode::Left, KeyModifiers::NONE) => state.writer_prompt_move(id, -1),
+            (KeyCode::Right, KeyModifiers::NONE) => state.writer_prompt_move(id, 1),
+            (KeyCode::Home, _) => state.writer_prompt_home(id),
+            (KeyCode::End, _) => state.writer_prompt_end(id),
+            (KeyCode::Left, KeyModifiers::CONTROL) => state.writer_prompt_word(id, -1),
+            (KeyCode::Right, KeyModifiers::CONTROL) => state.writer_prompt_word(id, 1),
+            (KeyCode::Char('a'), KeyModifiers::CONTROL) => state.writer_prompt_select_all(id),
             (KeyCode::Char(c), KeyModifiers::NONE) => state.writer_prompt_char(id, c),
             _ => {}
         }
@@ -127,8 +135,14 @@ fn handle_chat_key(state: &mut AppState, id: crate::session::SessionId, key: eve
             }
         }
         (KeyCode::Backspace, _) => state.writer_chat_backspace(id),
-        (KeyCode::Left, _) => state.writer_chat_move(id, -1),
-        (KeyCode::Right, _) => state.writer_chat_move(id, 1),
+        (KeyCode::Delete, _) => state.writer_chat_delete(id),
+        (KeyCode::Left, KeyModifiers::NONE) => state.writer_chat_move(id, -1),
+        (KeyCode::Right, KeyModifiers::NONE) => state.writer_chat_move(id, 1),
+        (KeyCode::Home, _) => state.writer_chat_home(id),
+        (KeyCode::End, _) => state.writer_chat_end(id),
+        (KeyCode::Left, KeyModifiers::CONTROL) => state.writer_chat_word(id, -1),
+        (KeyCode::Right, KeyModifiers::CONTROL) => state.writer_chat_word(id, 1),
+        (KeyCode::Char('a'), KeyModifiers::CONTROL) => state.writer_chat_select_all(id),
         (KeyCode::Char(c), KeyModifiers::NONE) => state.writer_chat_char(id, c),
         _ => {}
     }

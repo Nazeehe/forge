@@ -152,6 +152,30 @@ fn chat_sends_with_and_without_selection() {
 }
 
 #[test]
+fn chat_box_matches_prompt_editing_basics() {
+    let (mut state, id, _run, dir) = writer_agent();
+    state.writers.entry(id).or_default();
+    for c in "hello world".chars() {
+        state.writer_chat_char(id, c);
+    }
+    state.writer_chat_home(id);
+    assert_eq!(state.writers.get(&id).unwrap().chat_cursor, 0);
+    state.writer_chat_end(id);
+    assert_eq!(state.writers.get(&id).unwrap().chat_cursor, 11);
+    state.writer_chat_word(id, -1);
+    assert_eq!(state.writers.get(&id).unwrap().chat_cursor, 6, "word start");
+    state.writer_chat_delete(id);
+    assert_eq!(state.writers.get(&id).unwrap().chat_input, "hello orld");
+    state.writer_chat_select_all(id);
+    state.writer_chat_char(id, '!');
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(session.chat_input, "!", "select-all replaces");
+    assert!(!session.chat_select_all, "typing consumes it");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn chat_box_input_is_bounded_with_a_movable_cursor() {
     let (mut state, id, _run, dir) = writer_agent();
     state.writers.entry(id).or_default();

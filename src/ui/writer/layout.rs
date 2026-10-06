@@ -91,7 +91,15 @@ pub fn writer_layout(area: Rect, panel_visible: bool) -> WriterLayout {
     } else {
         (inner_x.saturating_add(editor_w), inner_w.saturating_sub(editor_w))
     };
-    let panel = Rect::new(panel_x, body_y, panel_w, body_h);
+    // Panel content starts below the toolbar rule, like the editor
+    // head (rule + one padding row); paint, skip math and click
+    // mapping all derive from this rect, so they stay agreed.
+    let panel = Rect::new(
+        panel_x,
+        body_y.saturating_add(2),
+        panel_w,
+        body_h.saturating_sub(2),
+    );
     WriterLayout {
         title,
         body,
@@ -385,6 +393,11 @@ pub fn more_menu_item_rects(
 
 /// Indent of the Variant A body column from its column edge.
 pub const EMPTY_INDENT: u16 = 2;
+
+/// Prompt-block offset in the document view: the A6 head (toolbar
+/// rule + one padding row). The doc paint and the mouse dispatch
+/// share it, so suggestion/button/input rows always agree.
+pub const DOC_PROMPT_OFF: u16 = 2;
 
 /// Visible recent window: the first `room` rows, or the last `room`
 /// ending at the keyboard selection, so the selected row never hides

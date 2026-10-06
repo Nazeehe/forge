@@ -253,16 +253,35 @@ pub(super) fn paint_prompt_block(
         Paragraph::new(Line::from(vec![Span::styled(head.to_string(), style(Role::Muted))])),
         Rect::new(x, y, width, 1),
     );
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
+    // The input cursor rides at the prompt cursor (clamped); a
+    // select-all renders the whole buffer reversed for
+    // type-to-replace.
+    let len = prompt.buffer.chars().count();
+    let at = prompt.cursor.min(len);
+    let before: String = prompt.buffer.chars().take(at).collect();
+    let after: String = prompt.buffer.chars().skip(at).collect();
+    let input_spans = if prompt.select_all {
+        vec![
             Span::styled("> ".to_string(), style(Role::Brand)),
-            Span::styled(prompt.buffer.clone(), style(Role::Text)),
+            Span::styled(
+                prompt.buffer.clone(),
+                style(Role::Text).add_modifier(ratatui::style::Modifier::REVERSED),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled("> ".to_string(), style(Role::Brand)),
+            Span::styled(before.clone(), style(Role::Text)),
             Span::styled("▌".to_string(), style(Role::Focus)),
-        ])),
+            Span::styled(after, style(Role::Text)),
+        ]
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(input_spans)),
         Rect::new(x, y.saturating_add(1), width, 1),
     );
     use ratatui::text::Line as TextLine;
-    let dx = TextLine::from(format!("> {}", prompt.buffer)).width() as u16;
+    let dx = TextLine::from(format!("> {before}")).width() as u16;
     let cursor = Some(ratatui::layout::Position::new(
         x.saturating_add(dx.min(width.saturating_sub(1))),
         y.saturating_add(1),

@@ -349,6 +349,28 @@ fn writer_topbar_click_and_narrow_resize_keep_writer() {
     );
 }
 
+/// Prompt line editing over the wire: type a path with a wrong first
+/// char, Home, fix it, Enter opens the right file.
+#[test]
+fn writer_prompt_home_fixes_first_char() {
+    let mut h = boot(&[("needed.md", "need\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("eeded.md");
+    std::thread::sleep(Duration::from_millis(300));
+    h.send("\x1b[H");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("n");
+    h.send("\r");
+    let text = h.wait_for("rev0", "fixed path opens");
+    assert!(text.contains("needed.md"), "home-fixed path opens the file");
+}
+
 /// The polish items you can see: Alt+A shows the Assistant panel with
 /// its pressed check marker, a divider column splits editor and panel,
 /// and the status row sits pinned above the error slot.

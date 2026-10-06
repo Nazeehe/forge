@@ -430,6 +430,98 @@
     }
 
     #[test]
+    fn prompt_input_click_places_the_cursor() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        state.writer_toolbar_open(id);
+        for c in "abcd".chars() {
+            state.writer_prompt_char(id, c);
+        }
+        let buf = paint_full(&mut state, id);
+        let content =
+            crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, 120, 30));
+        let layout = crate::ui::writer::writer_layout(content, false);
+        // Input row sits one below the prompt origin; the target cell
+        // is the second buffer char read back off the real paint.
+        let y = layout.body.y.saturating_add(crate::ui::writer::DOC_PROMPT_OFF + 1);
+        let row: String = (0..120).map(|x| buf[(x, y)].symbol()).collect();
+        let prompt_col = row.find("> abcd").unwrap_or_else(|| panic!("painted prompt input: {row:?}"));
+        // Byte index is not a cell: count chars (the box border is
+        // multibyte) so the target is a painted cell, not hand math.
+        let x = (row[..prompt_col].chars().count() + "> ".len() + 1) as u16;
+        assert_eq!(buf[(x, y)].symbol(), "b", "target cell holds the painted char (col {prompt_col} row {row:?})");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        let cursor = state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().cursor;
+        assert_eq!(cursor, 1, "click lands on the second char");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn chat_input_click_places_the_cursor() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        state.writer_toggle_assistant(id);
+        for c in "wxyz".chars() {
+            state.writer_chat_char(id, c);
+        }
+        let buf = paint_full(&mut state, id);
+        let content =
+            crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, 120, 30));
+        let layout = crate::ui::writer::writer_layout(content, true);
+        let y = layout.chat.y.saturating_add(1);
+        let row: String = (0..120).map(|x| buf[(x, y)].symbol()).collect();
+        let prompt_col = row.find("> wxyz").expect("painted chat input");
+        let x = (row[..prompt_col].chars().count() + "> ".len() + 3) as u16;
+        assert_eq!(buf[(x, y)].symbol(), "z", "target cell holds the painted char");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert_eq!(
+            state.writers.get(&id).unwrap().chat_cursor,
+            3,
+            "click lands past three chars"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn doc_prompt_suggestion_click_fills_from_painted_row() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        state.writer_toolbar_open(id);
+        for c in "d".chars() {
+            state.writer_prompt_char(id, c);
+        }
+        let buf = paint_full(&mut state, id);
+        let body_y = {
+            let content = crate::walkthrough::walk_area(ratatui::layout::Rect::new(0, 0, 120, 30));
+            crate::ui::writer::writer_layout(content, false).body.y
+        };
+        // The suggestion paints below the head (rule + padding); the
+        // title row also names d.md, so only rows past it count.
+        let mut hit = None;
+        for y in body_y..30 {
+            let row: String = (0..120).map(|x| buf[(x, y)].symbol()).collect();
+            if row.contains("d.md") {
+                hit = Some((row.find("d.md").unwrap() as u16, y));
+                break;
+            }
+        }
+        let (x, y) = hit.expect("painted suggestion row");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        let buffer = state.writers.get(&id).unwrap().open_prompt.as_ref().unwrap().buffer.clone();
+        assert_eq!(buffer, "d.md", "click fills from the painted row");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn detach_chip_click_clears_the_selection() {
         let (mut state, id, dir) = writer_agent();
         open_doc(&mut state, id, "d.md");

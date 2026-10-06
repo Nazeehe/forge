@@ -246,6 +246,17 @@
         assert_eq!(hidden.error.y, 27, "error slot owns the last row");
         assert_eq!(hidden.status.y, 26, "status pinned to the bottom");
         assert_eq!(hidden.action.height, 0, "no action row when hidden");
+        // Looked at the rows under the status: row 27 is the fixed
+        // error slot (blank when there is no error, so toggling it
+        // never shoves the layout) and row 28 is the deliberate box
+        // bottom padding mirroring the top chrome. Neither is
+        // reserved space to remove.
+        let buf = paint_empty_to(&WriterSession::default(), 120, 30);
+        let row28: String = (1..119).map(|x| buf[(x, 28)].symbol()).collect();
+        assert!(
+            row28.trim().is_empty(),
+            "row 28 interior stays blank box padding: {row28:?}"
+        );
         assert_eq!(
             hidden.body.y.saturating_add(hidden.body.height),
             hidden.status.y,
@@ -293,6 +304,36 @@
         }
         assert_eq!(cols.len(), 2, "both recent rows show ages");
         assert_eq!(cols[0], cols[1], "ages start in one column: {cols:?}");
+    }
+
+    #[test]
+    fn panel_content_starts_below_the_toolbar_rule() {
+        let session = WriterSession {
+            panel_visible: true,
+            ..WriterSession::default()
+        };
+        let buf = paint_empty_to(&session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), true);
+        assert_eq!(layout.panel.y, layout.body.y.saturating_add(2));
+        assert_eq!(
+            layout.panel.y.saturating_add(layout.panel.height),
+            layout.body.y.saturating_add(layout.body.height),
+            "panel still ends at the body bottom"
+        );
+        for y in layout.body.y..layout.panel.y {
+            let row: String = (layout.panel.x..layout.panel.x.saturating_add(layout.panel.width))
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            assert!(row.trim().is_empty(), "no panel content on the rule rows: {row:?}");
+        }
+        let first: String = (layout.panel.x
+            ..layout.panel.x.saturating_add(layout.panel.width))
+            .map(|x| buf[(x, layout.panel.y)].symbol())
+            .collect();
+        assert!(
+            first.contains("proposals and answers land here"),
+            "panel head below the rule: {first:?}"
+        );
     }
 
     #[test]
@@ -404,6 +445,8 @@
         session.open_prompt = Some(crate::app::writer::WriterOpenPrompt {
             buffer: "zz9".to_string(),
             kind: crate::app::writer::PromptKind::Open,
+            cursor: 3,
+            select_all: false,
         });
         let buf = paint_empty_to(&session, 120, 30);
         let text: String = buf
@@ -590,6 +633,8 @@
         session.open_prompt = Some(crate::app::writer::WriterOpenPrompt {
             buffer: "notes/d".to_string(),
             kind: crate::app::writer::PromptKind::New,
+            cursor: 7,
+            select_all: false,
         });
         session.recent_cache = vec![
             crate::writer::recent::RecentEntry {
@@ -682,6 +727,8 @@
         session.open_prompt = Some(crate::app::writer::WriterOpenPrompt {
             buffer: String::new(),
             kind: crate::app::writer::PromptKind::New,
+            cursor: 0,
+            select_all: false,
         });
         let buf = paint_empty_to(&session, 120, 30);
         assert!(
@@ -704,6 +751,8 @@
         session.open_prompt = Some(crate::app::writer::WriterOpenPrompt {
             buffer: "c.md".to_string(),
             kind: crate::app::writer::PromptKind::SaveAs,
+            cursor: 4,
+            select_all: false,
         });
         let buf = paint_doc_to(&mut session, 120, 30);
         let text = buffer_text(&buf);

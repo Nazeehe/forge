@@ -83,7 +83,7 @@ fn paint_doc(
     // New/Open prompted from the toolbar land here too). The editor
     // shrinks below it and reports the shrunk rows/cols, so paging
     // and wrapping count what is actually on screen.
-    let head_y = layout.body.y.saturating_add(2);
+    let head_y = layout.body.y.saturating_add(super::layout::DOC_PROMPT_OFF);
     let mut prompt_cursor = None;
     let mut edit_rect = Rect::new(
         layout.editor.x,

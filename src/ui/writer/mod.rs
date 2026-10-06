@@ -19,6 +19,6 @@ pub use layout::{
     panel_collapsed, pill_width, prompt_button_rects, prompt_sugg_rect, prompt_suggestions,
     recent_window, start_new_rect, start_open_rect, toolbar_enabled, toolbar_narrow,
     toolbar_pill_rects, writer_layout, ToolbarButton, WriterLayout, EMPTY_INDENT,
-    PROMPT_ORIGIN_OFF, RECENT_FIRST_ROW_OFF,
+    PROMPT_ORIGIN_OFF, RECENT_FIRST_ROW_OFF, DOC_PROMPT_OFF,
 };
 pub use thread::{panel_rows, panel_skip, PanelClick};

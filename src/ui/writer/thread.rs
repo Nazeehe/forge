@@ -186,10 +186,17 @@ pub(super) fn paint_chat(
         .chars()
         .take((area.width as usize).saturating_sub(2))
         .collect();
+    // A select-all renders the whole input reversed for
+    // type-to-replace.
+    let input_style = if session.chat_select_all {
+        style(Role::Text).add_modifier(ratatui::style::Modifier::REVERSED)
+    } else {
+        style(Role::Text)
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("> ".to_string(), style(Role::Brand)),
-            Span::styled(input.clone(), style(Role::Text)),
+            Span::styled(input.clone(), input_style),
         ])),
         Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
     );

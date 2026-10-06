@@ -37,11 +37,13 @@ impl AppState {
         // Overlay tabs stay reachable at any width (narrow only drops
         // their icons below): the Writer tab in particular must remain
         // selectable when the terminal shrinks under 100 columns.
+        // Below 100 columns Visual and Walkthrough drop first, since
+        // only Writer has a narrow layout; Writer itself always stays.
         if rec.tabs.len() > 1 {
-            for (index, label) in OVERLAY_TABS.iter().enumerate() {
+            for (slot, label) in self.overlay_slots(id) {
                 tabs.push(crate::ui::topbar::TopTab {
-                    label: (*label).to_string(),
-                    active: self.overlay_view == Some((id, index + rec.tabs.len())),
+                    label: label.to_string(),
+                    active: self.overlay_view == Some((id, slot)),
                 });
             }
             if self.overlay_view.is_some_and(|(view_id, _)| view_id == id) {
@@ -60,6 +62,26 @@ impl AppState {
         crate::ui::topbar::TopBar { tabs }
     }
 
+    /// Overlay tabs with their session slots in strip order. Below
+    /// 100 columns Visual and Walkthrough drop (only Writer has a
+    /// narrow layout); both the strip and the selection path share
+    /// this, so a shown position always maps back to its real slot.
+    fn overlay_slots(&self, id: crate::session::SessionId) -> Vec<(usize, &'static str)> {
+        let Some(rec) = self.manager.get(id) else {
+            return Vec::new();
+        };
+        if rec.tabs.len() <= 1 {
+            return Vec::new();
+        }
+        let narrow = self.term_size.1 < 100;
+        OVERLAY_TABS
+            .iter()
+            .enumerate()
+            .filter(|(_, label)| !narrow || ***label == *"Writer")
+            .map(|(index, label)| (rec.tabs.len() + index, *label))
+            .collect()
+    }
+
     /// Select a PTY tab or one of the read-only view slots shown in the
     /// agent's top bar. Extra views never create a PTY or accept typing.
     pub fn select_top_tab(&mut self, index: usize) -> bool {
@@ -72,13 +94,21 @@ impl AppState {
             self.dirty |= was_overlay || changed;
             was_overlay || changed
         } else {
-            let next = Some((id, index));
+            // Shown positions past the PTY tabs map back through the
+            // same filtered list the strip paints.
+            let slots = self.overlay_slots(id);
+            let shown = index.saturating_sub(rec.tabs.len());
+            let Some((slot, _)) = slots.get(shown) else {
+                return false;
+            };
+            let slot = *slot;
+            let next = Some((id, slot));
             let changed = self.overlay_view != next;
             self.overlay_view = next;
             // The Writer entry exists however the tab gets selected:
             // without it the draw closure paints nothing (blank tab)
             // and keys/mouse find no session.
-            if Some(index) == self.writer_slot(id) {
+            if Some(slot) == self.writer_slot(id) {
                 self.writers.entry(id).or_default();
                 // The scan runs when the tab opens (cached, never per
                 // frame), so the Recent list is fresh on entry.
@@ -626,9 +656,24 @@ mod tests {
         assert!(state.select_top_tab(3));
         state.apply(AppEvent::Resize(24, 80));
         assert!(!state.overlay_active());
-        // Overlay tabs stay in the strip when narrow (A3): the view
-        // evicts but its tab stays reachable.
-        assert_eq!(state.topbar().tabs.len(), 6);
+        // Only Writer survives in the narrow strip (R1): the evicted
+        // view's tab is gone, Writer's stays reachable.
+        assert_eq!(state.topbar().tabs.len(), 4);
+        assert!(state.manager.remove(id));
+    }
+
+    #[test]
+    fn narrow_topbar_keeps_writer_and_drops_visual_walkthrough() {
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(30, 90));
+        let id = state.manager.spawn_agent(
+            "agent", &std::env::temp_dir(), "exec cat",
+            crate::infra::ids::RunId::generate(), "codex",
+        ).unwrap();
+        let labels: Vec<String> = state.topbar().tabs.iter().map(|tab| tab.label.clone()).collect();
+        assert!(labels.iter().any(|l| l.contains("Writer")), "writer survives: {labels:?}");
+        assert!(!labels.iter().any(|l| l.contains("Visual")), "visual drops first: {labels:?}");
+        assert!(!labels.iter().any(|l| l.contains("Walkthrough")), "walkthrough drops first: {labels:?}");
         assert!(state.manager.remove(id));
     }
 

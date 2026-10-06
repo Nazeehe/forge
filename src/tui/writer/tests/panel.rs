@@ -174,14 +174,84 @@
         open_doc(&mut state, id, "d.md");
         state.term_size = (30, 80);
         let tabs = state.topbar().tabs;
-        assert!(
-            tabs.iter().any(|t| t.label.contains("Writer")),
-            "Writer tab reachable below 100 cols: {:?}",
-            tabs.iter().map(|t| &t.label).collect::<Vec<_>>()
-        );
-        let slot = state.writer_slot(id).unwrap();
-        assert!(state.select_top_tab(slot), "keyboard/mouse index still selects Writer");
+        // The shown position maps back to the real Writer slot (R1:
+        // Visual/Walkthrough drop when narrow, so shown != slot).
+        let shown = tabs
+            .iter()
+            .position(|t| t.label.contains("Writer"))
+            .expect("writer tab reachable below 100 cols");
+        assert!(state.select_top_tab(shown), "shown index selects Writer");
         assert_eq!(state.writer_overlay_active(), Some(id));
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn narrow_strip_paints_writer_tab_clickable() {
+        use crate::tui::mouse::forward_mouse;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 90);
+        state.pill_tabs = true;
+        let views = state.views();
+        let chrome = crate::ui::Chrome {
+            tabs: Vec::new(),
+            topbar: state.topbar(),
+            detail: None,
+            sessions: Vec::new(),
+            active: None,
+            fleet_cursor: None,
+            fleet_scroll: 0,
+            other_timers: 0,
+            pending: 0,
+            mode: "off",
+            telegram: "off",
+            telegram_badge: None,
+            board_open: false,
+            board: None,
+            tetris_open: false,
+            tetris: None,
+            grid: false,
+            pills: true,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(90, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                crate::tui::paint_frame(f, f.area(), &mut state, &views, &chrome);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // The Writer label is really painted (not just listed), then
+        // clicked through the real dispatch. Cell-based: the emoji
+        // icons make byte offsets lie.
+        let mut hit = None;
+        for y in 0..30 {
+            let cells: Vec<String> =
+                (0..90).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            if let Some(x) = (0..90)
+                .find(|x| cells[*x as usize..].concat().starts_with("Writer"))
+            {
+                hit = Some((x, y));
+                break;
+            }
+        }
+        let (x, y) = hit.expect("writer tab painted at 90 cols");
+        forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            state.writer_overlay_active(),
+            Some(id),
+            "painted narrow tab opens Writer"
+        );
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -75,12 +75,21 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
                 return;
             }
             // An open prompt overlays the editor head: suggestions
-            // fill, buttons submit/cancel.
+            // fill, buttons submit/cancel. The origin shares
+            // DOC_PROMPT_OFF with the paint, never body.y.
             if state
                 .writers
                 .get(&id)
                 .is_some_and(|s| s.open_prompt.is_some())
-                && prompt_click(state, id, layout.editor.x, layout.body.y, layout.editor.width, mev.column, mev.row)
+                && prompt_click(
+                    state,
+                    id,
+                    layout.editor.x,
+                    layout.body.y.saturating_add(crate::ui::writer::DOC_PROMPT_OFF),
+                    layout.editor.width,
+                    mev.column,
+                    mev.row,
+                )
             {
                 return;
             }
@@ -95,6 +104,21 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
             );
             if chip.is_some_and(|rect| hits(rect, mev.column, mev.row)) {
                 state.writer_clear_selection(id);
+                return;
+            }
+            // Click-to-place in the chat input row (past the "> "
+            // prefix). The chat box only paints while the panel shows.
+            if state.writers.get(&id).is_some_and(|s| s.panel_visible)
+                && mev.row == layout.chat.y.saturating_add(1)
+                && mev.column >= layout.chat.x.saturating_add(2)
+            {
+                let input = state
+                    .writers
+                    .get(&id)
+                    .map(|s| s.chat_input.clone())
+                    .unwrap_or_default();
+                let at = cell_to_char(&input, mev.column.saturating_sub(layout.chat.x.saturating_add(2)));
+                state.writer_chat_place(id, at);
                 return;
             }
             if let Some(click) = panel_click_at(state, id, &layout, mev.column, mev.row) {
@@ -285,6 +309,13 @@ fn prompt_click(
         Some(prompt) => (prompt.buffer.clone(), prompt.kind),
         None => return false,
     };
+    // Click-to-place in the input row (origin + 1, past the "> "
+    // prefix): the cursor follows the clicked char.
+    if cy == origin_y.saturating_add(1) && cx >= x.saturating_add(2) {
+        let at = cell_to_char(&buffer, cx.saturating_sub(x.saturating_add(2)));
+        state.writer_prompt_place(id, at);
+        return true;
+    }
     let suggestions = state
         .writers
         .get(&id)
@@ -307,6 +338,20 @@ fn prompt_click(
         return true;
     }
     false
+}
+
+/// Char index under a click `dx` cells into a one-line input.
+/// Wide glyphs count their cells, so CJK clicks land right.
+fn cell_to_char(text: &str, dx: u16) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let mut cells = 0u16;
+    for (index, c) in text.chars().enumerate() {
+        cells += c.width().unwrap_or(0) as u16;
+        if cells > dx {
+            return index;
+        }
+    }
+    text.chars().count()
 }
 
 fn hits(area: ratatui::layout::Rect, x: u16, y: u16) -> bool {
