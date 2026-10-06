@@ -313,6 +313,181 @@
     }
 
     #[test]
+    fn shift_end_wrap_keeps_the_blank_line() {
+        // M8-fix operator repro: Ctrl+Home, Shift+End, @@, Enter on
+        // "First para line.\n\nNext text here.\n" must keep the blank
+        // line: Shift+End selects to end-of-line, never the break.
+        let (mut state, id, dir, mut router, now) = setup();
+        std::fs::write(dir.join("q.md"), "First para line.\n\nNext text here.\n").unwrap();
+        open_doc(&mut state, id, "q.md");
+        let ctrl = event::KeyModifiers::CONTROL;
+        let shift = event::KeyModifiers::SHIFT;
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::Home, ctrl),
+            now,
+        );
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::End, shift),
+            now,
+        );
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(0..16),
+            "Shift+End stops before the break"
+        );
+        handle_key_at(&mut state, &mut router, at(), now);
+        handle_key_at(&mut state, &mut router, at(), now);
+        handle_key_at(&mut state, &mut router, enter(), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "@@verb prompt@@First para line.@@\n\nNext text here.\n",
+            "blank line survives the gesture"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    /// M8-fix: the same Shift+End selection through Alt+M.
+    #[test]
+    fn shift_end_alt_m_keeps_the_blank_line() {
+        let (mut state, id, dir, mut router, now) = setup();
+        std::fs::write(dir.join("q.md"), "First para line.\n\nNext text here.\n").unwrap();
+        open_doc(&mut state, id, "q.md");
+        let ctrl = event::KeyModifiers::CONTROL;
+        let shift = event::KeyModifiers::SHIFT;
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::Home, ctrl),
+            now,
+        );
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::End, shift),
+            now,
+        );
+        handle_key_at(&mut state, &mut router, alt_m(), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "@@verb prompt@@First para line.@@\n\nNext text here.\n",
+            "Alt+M keeps the blank line too"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    /// M8-fix: plain typing over the same selection is the real
+    /// selection bug beyond markers — the newline must survive it.
+    #[test]
+    fn shift_end_typeover_keeps_the_blank_line() {
+        let (mut state, id, dir, mut router, now) = setup();
+        std::fs::write(dir.join("q.md"), "First para line.\n\nNext text here.\n").unwrap();
+        open_doc(&mut state, id, "q.md");
+        let ctrl = event::KeyModifiers::CONTROL;
+        let shift = event::KeyModifiers::SHIFT;
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::Home, ctrl),
+            now,
+        );
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::End, shift),
+            now,
+        );
+        handle_key_at(&mut state, &mut router, chr('x'), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "x\n\nNext text here.\n",
+            "type-over keeps the blank line"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    /// M8-fix: the other direction — End, then Shift+Home.
+    #[test]
+    fn shift_home_wrap_keeps_the_blank_line() {
+        let (mut state, id, dir, mut router, now) = setup();
+        std::fs::write(dir.join("q.md"), "First para line.\n\nNext text here.\n").unwrap();
+        open_doc(&mut state, id, "q.md");
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::Home, event::KeyModifiers::SHIFT),
+            now,
+        );
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(0..16),
+            "Shift+Home stops at the line start"
+        );
+        handle_key_at(&mut state, &mut router, alt_m(), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "@@verb prompt@@First para line.@@\n\nNext text here.\n",
+            "blank line survives from the other end"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    /// M8-fix: a whole-document selection wraps losslessly — the
+    /// wrapped text plus markers is exactly the original plus the
+    /// inserted marker chars.
+    #[test]
+    fn ctrl_shift_end_wrap_keeps_every_break() {
+        let (mut state, id, dir, mut router, now) = setup();
+        std::fs::write(dir.join("q.md"), "First para line.\n\nNext text here.\n").unwrap();
+        open_doc(&mut state, id, "q.md");
+        let shift_ctrl = event::KeyModifiers::SHIFT | event::KeyModifiers::CONTROL;
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::End, shift_ctrl),
+            now,
+        );
+        let total = doc_text(&state, id).chars().count();
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(0..total),
+            "whole document selected"
+        );
+        handle_key_at(&mut state, &mut router, alt_m(), now);
+        let text = doc_text(&state, id);
+        assert_eq!(
+            text,
+            "@@verb prompt@@First para line.\n\nNext text here.@@\n",
+            "every break survives (the final newline moves outside)"
+        );
+        assert_eq!(
+            text.chars().count(),
+            total + "@@verb prompt@@@@".chars().count(),
+            "only marker chars added"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    /// M8-fix: Esc restores a newline selection byte-exact.
+    #[test]
+    fn esc_restores_newline_selection_exactly() {
+        let (mut state, id, dir, mut router, now) = setup();
+        std::fs::write(dir.join("q.md"), "First para line.\n\nNext text here.\n").unwrap();
+        open_doc(&mut state, id, "q.md");
+        let shift = event::KeyModifiers::SHIFT;
+        handle_key_at(
+            &mut state, &mut router,
+            event::KeyEvent::new(event::KeyCode::Down, shift),
+            now,
+        );
+        handle_key_at(&mut state, &mut router, at(), now);
+        handle_key_at(&mut state, &mut router, at(), now);
+        handle_key_at(&mut state, &mut router, esc(), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "First para line.\n\nNext text here.\n",
+            "restore is byte-exact"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    #[test]
     fn paragraph_newline_stays_outside_the_markers() {
         // The operator's M8 selection: a whole paragraph grabbed
         // with Shift+Down, trailing `\n` included. The closer must

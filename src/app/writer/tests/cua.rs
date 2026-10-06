@@ -178,6 +178,29 @@ fn indent_is_one_undo_step_after_e6() {
 }
 
 #[test]
+fn cut_whole_line_keeps_the_break() {
+    // M8-fix: cutting a full row must not eat its line break (same
+    // EdTUI whole-row extract as the wrap path).
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "First para line.\n\nNext text here.\n");
+    feed_mod(&mut state, id, crossterm::event::KeyCode::End, crossterm::event::KeyModifiers::SHIFT);
+    assert_eq!(
+        state.writers.get(&id).unwrap().selection,
+        Some(0..16),
+        "whole first row selected"
+    );
+    let (code, mods) = (crossterm::event::KeyCode::Char('x'), crossterm::event::KeyModifiers::CONTROL);
+    feed_mod(&mut state, id, code, mods);
+    assert_eq!(
+        doc_text(&state, id),
+        "\n\nNext text here.\n",
+        "cut keeps the break"
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn clipboard_cut_is_one_undo_step() {
     let (mut state, id, run, dir) = writer_agent();
     open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb");

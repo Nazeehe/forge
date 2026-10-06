@@ -564,6 +564,9 @@ impl AppState {
         for c in replacement.chars() {
             editor.execute(InsertChar(c));
         }
+        // M8-fix: a match covering its whole row would otherwise
+        // lose the row's break to the whole-row extract.
+        super::super::editor_verify_replace(editor, &buffer, range.clone(), &replacement);
         editor.mode = EditorMode::Insert;
         *session.clip.0.borrow_mut() = saved;
         session.sel_anchor = None;
@@ -632,6 +635,15 @@ impl AppState {
         for c in replacement.chars() {
             editor.execute(InsertChar(c));
         }
+        // M8-fix: repair before the string splices below, which
+        // address pre-delete offsets (all before this match, so
+        // they stay valid through the repair).
+        super::super::editor_verify_replace(
+            editor,
+            &buffer,
+            matches[last].clone(),
+            &replacement,
+        );
         *session.clip.0.borrow_mut() = saved;
         let live = editor.lines.to_string();
         let mut chars: Vec<char> = live.chars().collect();

@@ -3,6 +3,7 @@
 //! the input.
 
 use crate::app::writer::WriterFocus;
+use crate::app::writer::adapter::editor_selection_to_range;
 use crate::app::AppState;
 use edtui::{
     actions::{DeleteSelection, InsertChar},
@@ -212,6 +213,16 @@ impl AppState {
         // A bracketed paste types literally at the cursor (one undo
         // step per char, like typing), never vim-`p` after it. A live
         // selection is replaced first, still as one undo step.
+        // M8-fix: the paste text skips `\r`, so the guard expects
+        // the pasted form.
+        let deleted = self.writers.get(&id).and_then(|session| {
+            session.editor.as_ref().map(|editor| {
+                (
+                    editor.lines.to_string(),
+                    editor_selection_to_range(editor),
+                )
+            })
+        });
         {
             let Some(session) = self.writers.get_mut(&id) else {
                 return;
@@ -230,6 +241,14 @@ impl AppState {
                 editor.execute(InsertChar(c));
             }
             session.nav_goal = None;
+        }
+        if let Some((before, Some(range))) = deleted {
+            let pasted: String = text.chars().filter(|&c| c != '\r').collect();
+            if let Some(session) = self.writers.get_mut(&id) {
+                if let Some(editor) = session.editor.as_mut() {
+                    super::super::editor_verify_replace(editor, &before, range, &pasted);
+                }
+            }
         }
         self.writer_sync_editor(id);
         self.dirty = true;

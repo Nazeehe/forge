@@ -16,7 +16,8 @@ mod toolbar;
 pub mod wrap;
 
 use super::{
-    changed_range, editor_selection_to_range, index2_to_offset, offset_to_index2,
+    changed_range, editor_selection_to_range, editor_verify_replace, index2_to_offset,
+    offset_to_index2,
 };
 use super::nav::{nav_target, vertical_target, NavMove};
 use crate::app::AppState;
@@ -249,6 +250,7 @@ fn process_lock_allows(key: &crossterm::event::KeyEvent) -> bool {
             // Every other key starts over.
             let group;
             let had_selection;
+            let deleted: Option<(String, Option<std::ops::Range<usize>>)>;
             {
                 let Some(session) = self.writers.get_mut(&id) else {
                     return;
@@ -264,7 +266,10 @@ fn process_lock_allows(key: &crossterm::event::KeyEvent) -> bool {
                 session.sel_anchor = None;
                 session.nav_goal = None;
                 had_selection = editor.selection.is_some();
-                if had_selection
+                // M8-fix: capture the pre-delete buffer for the
+                // whole-row guard below (only when the delete below
+                // actually runs).
+                let killing = had_selection
                     && matches!(
                         (key.code, key.modifiers),
                         (KeyCode::Char(_), KeyModifiers::NONE)
@@ -272,10 +277,28 @@ fn process_lock_allows(key: &crossterm::event::KeyEvent) -> bool {
                             | (KeyCode::Backspace, KeyModifiers::NONE)
                             | (KeyCode::Delete, KeyModifiers::NONE)
                             | (KeyCode::Enter, KeyModifiers::NONE)
-                    )
-                {
+                    );
+                deleted = if killing {
+                    Some((
+                        editor.lines.to_string(),
+                        editor_selection_to_range(editor),
+                    ))
+                } else {
+                    None
+                };
+                if killing {
                     editor.execute(DeleteSelection);
                     editor.mode = EditorMode::Insert;
+                }
+            }
+            // M8-fix: the delete above eats a structural break when
+            // the selection covers full rows; repair before the key
+            // itself dispatches (its own insert/split is quirk-free).
+            if let Some((before, Some(range))) = deleted {
+                if let Some(session) = self.writers.get_mut(&id) {
+                    if let Some(editor) = session.editor.as_mut() {
+                        editor_verify_replace(editor, &before, range, "");
+                    }
                 }
             }
             // Enter on a list item continues or exits it; with a
@@ -606,6 +629,9 @@ fn process_lock_allows(key: &crossterm::event::KeyEvent) -> bool {
                 sel.end = offset_to_index2(&buffer, marker_end.saturating_sub(1));
             }
             editor.execute(DeleteSelection);
+            // M8-fix: the marker can cover its whole row, whose
+            // break the whole-row extract would eat with it.
+            editor_verify_replace(editor, &buffer, line_start..marker_end, "");
             session.clip.set_text(saved_clip);
             editor.mode = EditorMode::Insert;
         } else {

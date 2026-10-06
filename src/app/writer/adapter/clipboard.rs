@@ -91,6 +91,16 @@ impl AppState {
             return;
         }
         self.writer_clip_copy(id);
+        // M8-fix: capture the pre-delete buffer for the whole-row
+        // guard below.
+        let before = self.writers.get(&id).and_then(|session| {
+            session.editor.as_ref().map(|editor| {
+                (
+                    editor.lines.to_string(),
+                    editor_selection_to_range(editor),
+                )
+            })
+        });
         if let Some(session) = self.writers.get_mut(&id) {
             if let Some(editor) = session.editor.as_mut() {
                 editor.execute(DeleteSelection);
@@ -98,6 +108,13 @@ impl AppState {
             }
             session.sel_anchor = None;
             session.nav_goal = None;
+        }
+        if let Some((before, Some(range))) = before {
+            if let Some(session) = self.writers.get_mut(&id) {
+                if let Some(editor) = session.editor.as_mut() {
+                    super::editor_verify_replace(editor, &before, range, "");
+                }
+            }
         }
         self.writer_sync_editor(id);
         self.dirty = true;
@@ -118,6 +135,16 @@ impl AppState {
         if clip.is_empty() {
             return;
         }
+        // M8-fix: EdTUI's paste-over deletes through the same
+        // whole-row extract, so guard it like a cut+insert.
+        let before = self.writers.get(&id).and_then(|session| {
+            session.editor.as_ref().map(|editor| {
+                (
+                    editor.lines.to_string(),
+                    editor_selection_to_range(editor),
+                )
+            })
+        });
         if let Some(session) = self.writers.get_mut(&id) {
             if let Some(editor) = session.editor.as_mut() {
                 if editor.selection.is_some() {
@@ -129,6 +156,13 @@ impl AppState {
             }
             session.sel_anchor = None;
             session.nav_goal = None;
+        }
+        if let Some((before, Some(range))) = before {
+            if let Some(session) = self.writers.get_mut(&id) {
+                if let Some(editor) = session.editor.as_mut() {
+                    super::editor_verify_replace(editor, &before, range, &clip);
+                }
+            }
         }
         self.writer_sync_editor(id);
         self.dirty = true;

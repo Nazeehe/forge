@@ -19,6 +19,45 @@ pub mod requests;
 /// Most outbound requests awaiting the settle flush; never drops.
 pub const MAX_WRITER_QUEUE: usize = 8;
 
+/// Char-precise replace guard (M8-fix): EdTUI's whole-row extract
+/// eats the structural line break when a selection covers full
+/// rows (start at column 0, end at the row's last char), so after
+/// the caller's DeleteSelection (+ inserts) confirm the buffer
+/// still holds exactly `before[..start] + replacement +
+/// before[end..]` (char offsets) and rebuild those lines directly
+/// on mismatch. Every editor DeleteSelection with an arbitrary
+/// selection funnels through here; call sites pass the pre-delete
+/// buffer, the session (exclusive char) range, and the inserted
+/// text (`""` for pure deletes like cut).
+pub fn editor_verify_replace(
+    editor: &mut EditorState,
+    before: &str,
+    range: std::ops::Range<usize>,
+    replacement: &str,
+) {
+    let chars: Vec<char> = before.chars().collect();
+    let total = chars.len();
+    let start = range.start.min(total);
+    let end = range.end.min(total).max(start);
+    let mut expected = String::with_capacity(before.len() + replacement.len());
+    expected.extend(chars[..start].iter());
+    expected.push_str(replacement);
+    expected.extend(chars[end..].iter());
+    editor_verify_text(editor, &expected);
+}
+
+/// The text-level guard behind [`editor_verify_replace`]: rebuild
+/// the lines directly when they differ from `expected`. The
+/// rebuild never captures, so the DeleteSelection capture keeps
+/// the op one undo step — and redo stays exact, because undo
+/// pushes the current (repaired) state. Only rebuilds on
+/// mismatch, so the common path costs one O(n) compare.
+pub fn editor_verify_text(editor: &mut EditorState, expected: &str) {
+    if editor.lines.to_string() != expected {
+        editor.lines = Lines::from(expected);
+    }
+}
+
 /// Most paths remembered as opened this run (E2b: recent list seed).
 pub(super) const MAX_OPENED_THIS_RUN: usize = 32;
 

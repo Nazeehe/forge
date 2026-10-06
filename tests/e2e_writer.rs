@@ -704,9 +704,10 @@ fn writer_list_continuation_then_exit() {
     let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(squashed.contains("-item"), "first item kept: {text:?}");
     assert!(squashed.contains("-more"), "second item kept: {text:?}");
-    // "- item\n- more" is 4 words / 13 chars; a surviving third
-    // marker would read 5w 16c.
-    assert!(squashed.contains("4w13c"), "exit removed the marker: {text:?}");
+    // M8-fix: "- item\n- more\n" is 4 words / 14 chars — exiting
+    // leaves the line blank (a surviving third marker would read
+    // 5w 17c, the old break-eating exit read 4w 13c).
+    assert!(squashed.contains("4w14c"), "exit removed the marker: {text:?}");
 }
 
 #[test]
@@ -1026,6 +1027,38 @@ fn writer_process_restores_a_trimmed_separator() {
     let text = h.settle();
     let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(!squashed.contains("Agentchangedtext"), "no banner: {squashed:?}");
+}
+
+/// M8-fix: the operator's exact repro — Ctrl+Home, Shift+End,
+/// @@, Enter, Ctrl+S on "First para line.\n\nNext text here.\n".
+/// The saved file keeps the blank line.
+#[test]
+fn writer_shift_end_wrap_keeps_the_blank_line() {
+    let mut h = boot(&[("op.md", "First para line.\n\nNext text here.\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("op.md\r");
+    h.wait_for("rev0", "doc open");
+    h.send("\x1b[1;5H");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("\x1b[1;2F");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("@@\r");
+    h.wait_for("@@verbprompt@@First", "wrapped paragraph");
+    h.send("\x13");
+    std::thread::sleep(Duration::from_millis(500));
+    h.settle();
+    let bytes = std::fs::read(h.cwd.join("op.md")).expect("saved file");
+    assert_eq!(
+        String::from_utf8_lossy(&bytes),
+        "@@verb prompt@@First para line.@@\n\nNext text here.\n",
+        "the saved file keeps the blank line"
+    );
 }
 
 /// M4: the marker protocol round-trips through the real editor. The

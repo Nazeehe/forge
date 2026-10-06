@@ -156,6 +156,11 @@ impl AppState {
         for c in wrapped.chars() {
             editor.execute(InsertChar(c));
         }
+        // M8-fix: a full-row selection would otherwise lose its
+        // structural break to EdTUI's whole-row extract.
+        crate::app::writer::adapter::editor_verify_replace(
+            editor, &buffer, range.clone(), &wrapped,
+        );
         editor.mode = EditorMode::Insert;
         *session.clip.0.borrow_mut() = saved;
         // The placeholder stays selected for type-over; the cursor
@@ -351,6 +356,45 @@ impl AppState {
         for c in original.1.chars() {
             editor.execute(InsertChar(c));
         }
+        // M8-fix: same whole-row guard as the wrap above. The
+        // expectation inverts the wrap exactly: the wrap moved the
+        // original's edge whitespace outside the markers, so the
+        // post-span text already holds the trail — it is skipped,
+        // not duplicated (degenerate all-whitespace wraps, which
+        // move nothing, skip nothing).
+        let chars: Vec<char> = original.1.chars().collect();
+        let mut lead = 0;
+        while lead < chars.len() && chars[lead].is_whitespace() {
+            lead += 1;
+        }
+        let mut trail = 0;
+        while trail < chars.len() - lead && chars[chars.len() - 1 - trail].is_whitespace() {
+            trail += 1;
+        }
+        let (lead, trail) = if lead + trail >= chars.len() {
+            (0, 0)
+        } else {
+            (lead, trail)
+        };
+        let buf_chars: Vec<char> = buffer.chars().collect();
+        // Skip the moved trail past the span, but only over
+        // whitespace that is actually there: the user may have
+        // edited behind the closer since wrapping, and the guard
+        // must never eat their text.
+        let mut rest = span.end.min(buf_chars.len());
+        let mut skipped = 0;
+        while skipped < trail
+            && rest < buf_chars.len()
+            && buf_chars[rest].is_whitespace()
+        {
+            rest += 1;
+            skipped += 1;
+        }
+        let mut expected = String::with_capacity(buffer.len());
+        expected.extend(buf_chars[..span.start.min(buf_chars.len())].iter());
+        expected.extend(chars[lead..].iter());
+        expected.extend(buf_chars[rest..].iter());
+        crate::app::writer::adapter::editor_verify_text(editor, &expected);
         editor.mode = EditorMode::Insert;
         *session.clip.0.borrow_mut() = saved;
         let after = editor.lines.to_string();

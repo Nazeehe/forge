@@ -937,9 +937,27 @@
         handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
         handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
         handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
-        // EdTUI's DeleteSelection takes the line's newline with the
-        // marker, so the exited line is gone, not left blank.
-        assert_eq!(doc_text(&state, id), "- item", "marker removed");
+        // M8-fix: exiting keeps the line (now blank), not just the
+        // marker — the break belongs to the document, not the item.
+        assert_eq!(doc_text(&state, id), "- item\n", "marker removed");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exiting_the_last_list_item_keeps_the_breaks_around_it() {
+        // M8-fix: the marker delete covers the whole row, which must
+        // not eat the line's break.
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "head\n- \n tail\n").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        assert_eq!(doc_text(&state, id), "head\n\n tail\n", "exit keeps breaks");
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }

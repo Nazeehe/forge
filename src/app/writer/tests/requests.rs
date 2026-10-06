@@ -229,6 +229,37 @@ fn paste_lands_in_the_editor_not_the_pane() {
 }
 
 #[test]
+fn paste_over_a_whole_line_keeps_the_break() {
+    // M8-fix: bracketed paste over a full-row selection replaces
+    // exactly the row (same whole-row extract as the wrap path).
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "First para line.\n\nNext text here.\n").unwrap();
+    assert!(open_doc(&mut state, &run, "d.md").contains(r#""ok":true"#));
+    open_editor(&mut state, id);
+    // Select the whole first row the real way (Shift+End).
+    state.writer_feed_key(
+        id,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::End,
+            crossterm::event::KeyModifiers::SHIFT,
+        ),
+    );
+    assert_eq!(
+        state.writers.get(&id).unwrap().selection,
+        Some(0..16),
+        "whole first row selected"
+    );
+    state.writer_paste(id, "XY");
+    assert_eq!(
+        state.writers.get(&id).unwrap().doc.as_ref().unwrap().text,
+        "XY\n\nNext text here.\n",
+        "paste keeps the break"
+    );
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn detach_chip_clears_the_editor_selection() {
     let (mut state, id, run, dir) = writer_agent();
     std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
