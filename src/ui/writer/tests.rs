@@ -1016,3 +1016,184 @@
         let row = slot(&paint_doc_to(&mut session, 120, 30));
         assert!(row.contains("Changed on disk"), "confirm wins: {row:?}");
     }
+
+    /// Cell debut of every marker part: muted `@@` runs, the verb in
+    /// the accent role, the prompt italic, the target on the marker
+    /// background. Columns come off the painted row, never by hand.
+    #[test]
+    fn marker_wrap_parts_paint_with_roles() {
+        let mut session = doc_session("@@fix typo@@this is teh@@\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let row = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("this is teh"))
+            .expect("marker row");
+        let col_of = |needle: &str| {
+            (0..120)
+                .find(|x| row_text(&buf, row, *x, 120).starts_with(needle))
+                .expect("part cell")
+        };
+        let opener = col_of("@@fix");
+        let typo = col_of("typo");
+        assert_eq!(typo, opener + 6, "one marker, contiguous cells");
+        // The first opener cell carries the cursor; assert past it.
+        assert_eq!(
+            buf[(opener + 1, row)].fg,
+            ratatui::style::Color::DarkGray,
+            "opener muted"
+        );
+        assert_eq!(
+            buf[(opener + 2, row)].fg,
+            ratatui::style::Color::Yellow,
+            "verb accent"
+        );
+        let prompt = buf[(typo, row)].clone();
+        assert_eq!(prompt.fg, ratatui::style::Color::White, "prompt text");
+        assert!(
+            prompt.modifier.contains(ratatui::style::Modifier::ITALIC),
+            "prompt italic"
+        );
+        let target = col_of("this is teh");
+        assert_eq!(
+            buf[(target, row)].bg,
+            ratatui::style::Color::DarkGray,
+            "target background"
+        );
+        let close = col_of("teh") + 3;
+        assert_eq!(
+            buf[(close, row)].fg,
+            ratatui::style::Color::DarkGray,
+            "target close muted"
+        );
+    }
+
+    #[test]
+    fn question_verbs_paint_in_the_distinct_role() {
+        let mut session = doc_session("@@ask capital@@Paris@@\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let row = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("capital"))
+            .expect("marker row");
+        let verb = (0..120)
+            .find(|x| row_text(&buf, row, *x, 120).starts_with("ask"))
+            .expect("verb cell");
+        assert_eq!(
+            buf[(verb, row)].fg,
+            ratatui::style::Color::Cyan,
+            "ask reads as a question"
+        );
+        let mut session = doc_session("@@rewrite?@@x@@\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let row = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("rewrite"))
+            .expect("marker row");
+        let verb = (0..120)
+            .find(|x| row_text(&buf, row, *x, 120).starts_with("rewrite"))
+            .expect("verb cell");
+        assert_eq!(
+            buf[(verb, row)].fg,
+            ratatui::style::Color::Cyan,
+            "? verb reads as a question"
+        );
+    }
+
+    #[test]
+    fn standalone_marker_paints_without_a_target() {
+        let mut session = doc_session("@@note hi @@end\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        assert!(
+            buffer_text(&buf).contains("@@note hi @@end"),
+            "marker stays literal"
+        );
+        let row = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("note hi"))
+            .expect("marker row");
+        let verb = (0..120)
+            .find(|x| row_text(&buf, row, *x, 120).starts_with("note"))
+            .expect("verb cell");
+        assert_eq!(
+            buf[(verb, row)].fg,
+            ratatui::style::Color::Yellow,
+            "verb accent"
+        );
+        let end = (0..120)
+            .find(|x| row_text(&buf, row, *x, 120).starts_with("end"))
+            .expect("end cell");
+        assert_eq!(
+            buf[(end, row)].fg,
+            ratatui::style::Color::DarkGray,
+            "closer muted"
+        );
+    }
+
+    #[test]
+    fn error_span_paints_danger_with_a_gutter_x() {
+        let mut session = doc_session("@@fix@@@@target@@\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let row = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("target"))
+            .expect("error row");
+        let fix = (0..120)
+            .find(|x| row_text(&buf, row, *x, 120).starts_with("fix"))
+            .expect("error cell");
+        assert_eq!(
+            buf[(fix, row)].fg,
+            ratatui::style::Color::Red,
+            "error span in the error role"
+        );
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let text_y = layout.editor.y.saturating_add(super::layout::DOC_PROMPT_OFF);
+        assert_eq!(
+            buf[(layout.gutter.x, text_y)].symbol(),
+            "✕",
+            "gutter marks the error row"
+        );
+    }
+
+    #[test]
+    fn cursor_on_error_shows_the_reason_in_the_error_slot() {
+        let mut session = doc_session("@@fix@@@@target@@\n");
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let slot = |buf: &ratatui::buffer::Buffer| {
+            row_text(&buf, layout.error.y, layout.error.x, layout.error.x + 60)
+        };
+        // The cursor opens at (0, 0): inside the nesting span.
+        let row = slot(&paint_doc_to(&mut session, 120, 30));
+        assert!(row.contains("doubled"), "reason on cursor: {row:?}");
+        // Plain text: the slot stays empty.
+        session.editor.as_mut().unwrap().cursor = edtui::Index2::new(0, 12);
+        let row = slot(&paint_doc_to(&mut session, 120, 30));
+        assert!(row.trim().is_empty(), "no reason off the error: {row:?}");
+        // A real error still outranks the marker reason.
+        session.editor.as_mut().unwrap().cursor = edtui::Index2::new(0, 0);
+        session.error = Some("boom".to_string());
+        let row = slot(&paint_doc_to(&mut session, 120, 30));
+        assert!(row.contains("boom") && !row.contains("doubled"), "error wins: {row:?}");
+    }
+
+    #[test]
+    fn status_counts_markers_and_errors() {
+        let mut session = doc_session("@@fix a@@b@@ and @@c@@d@@\ntext @@ more\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let status = (0..30)
+            .map(|y| row_text(&buf, y, 0, 120))
+            .find(|row| row.contains("rev 0"))
+            .expect("status row");
+        assert!(status.contains("2 markers"), "marker count: {status:?}");
+        assert!(status.contains("1 error"), "error count: {status:?}");
+        let mut session = doc_session("@@fix a@@b@@\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let status = (0..30)
+            .map(|y| row_text(&buf, y, 0, 120))
+            .find(|row| row.contains("rev 0"))
+            .expect("status row");
+        assert!(status.contains("1 marker"), "singular: {status:?}");
+        assert!(!status.contains("markers"), "no plural for one: {status:?}");
+        let mut session = doc_session("plain\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let status = (0..30)
+            .map(|y| row_text(&buf, y, 0, 120))
+            .find(|row| row.contains("rev 0"))
+            .expect("status row");
+        assert!(!status.contains("marker"), "no markers, no count: {status:?}");
+        assert!(!status.contains("error"), "no errors, no count: {status:?}");
+    }

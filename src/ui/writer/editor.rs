@@ -125,6 +125,9 @@ fn paint_doc(
     // Find matches refresh from the doc revision before any
     // highlight reads them; the borrow ends before the editor's.
     crate::app::writer::adapter::keys::find::refresh_find_matches(session);
+    // Marker cache follows the revision too: one O(n) parse per
+    // edit, never per frame on a static buffer.
+    crate::app::writer::markers::refresh_markers(session, &buffer, rev);
     let editor = session.editor.as_mut().expect("editor built on open");
     // Fresh highlights every frame: stale ranges must never linger.
     editor.clear_highlights();
@@ -170,6 +173,12 @@ fn paint_doc(
                 mark,
             ));
         }
+    }
+    // Marker part styles sit between find and markdown: proposal
+    // and find win ties, markers sit on top of the E4 scanner (the
+    // first-added highlight wins each cell).
+    for mark in crate::app::writer::markers::marker_highlights(&buffer, &session.markers) {
+        editor.add_highlight(mark);
     }
     // Markdown highlights for the visible window plus one row of
     // lookahead: fence parity comes from the session cache (valid
@@ -308,6 +317,29 @@ fn paint_doc(
                 }
             }
         }
+        // Marker errors mark every wrapped chunk of their rows with
+        // `✕`: painted after the `▌` marks, so an error row reads as
+        // an error even under a proposal selection. The glyph (never
+        // color alone) carries the meaning, like `▌` does.
+        for row in crate::app::writer::markers::error_rows(&buffer, &session.markers) {
+            let height = wrapped_height(doc_rows[row], width);
+            for k in 0..=height.saturating_sub(1) {
+                let y =
+                    edit_rect.y as isize + rel + (prefix(row) as isize + k as isize - base);
+                if y >= edit_rect.y as isize
+                    && y < (edit_rect.y + edit_rect.height) as isize
+                    && gut_rect.width > 0
+                {
+                    f.render_widget(
+                        Paragraph::new(Line::from(vec![Span::styled(
+                            "✕",
+                            style(Role::Danger),
+                        )])),
+                        Rect::new(gut_rect.x, y as u16, 1, 1),
+                    );
+                }
+            }
+        }
         if session.focus == WriterFocus::Editor {
             cursor = Some(pos);
         }
@@ -342,8 +374,17 @@ fn paint_doc(
     if prompt_cursor.is_some() {
         cursor = prompt_cursor;
     }
+    // The marker error under the cursor names itself in the
+    // fixed slot: actionable confirms, the find bar, and real
+    // errors all outrank it.
+    let marker_reason = session.editor.as_ref().and_then(|editor| {
+        let off = crate::app::writer::adapter::editor_cursor_offset(editor);
+        crate::app::writer::markers::error_at(&session.markers, off)
+            .map(|e| crate::app::writer::markers::error_reason(e.kind).to_string())
+    });
     // Fixed-slot priority, defined: an actionable confirm wins,
-    // then the find bar, then errors, then watch notices.
+    // then the find bar, then errors, then marker reasons, then
+    // watch notices.
     match session.pending_confirm.as_ref() {
         Some(confirm) => paint_confirm_slot(f, layout.error, confirm),
         None if session.find.is_some() => {
@@ -356,7 +397,12 @@ fn paint_doc(
         }
         None => match session.error.as_deref() {
             Some(_) => paint_error_slot(f, layout.error, session.error.as_deref()),
-            None => super::thread::paint_banner_slot(f, layout.error, session.banner.as_deref()),
+            None => match marker_reason.as_deref() {
+                Some(_) => paint_error_slot(f, layout.error, marker_reason.as_deref()),
+                None => {
+                    super::thread::paint_banner_slot(f, layout.error, session.banner.as_deref())
+                }
+            },
         },
     }
     cursor

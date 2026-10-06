@@ -48,6 +48,9 @@ pub enum Role {
     /// Markdown link text (underlined cyan); brackets and URLs
     /// stay Muted so the destination never shouts.
     MdLink,
+    /// Writer marker target span: a subtle background that keeps the
+    /// foreground the markdown scanner gave the text.
+    MarkerTarget,
 }
 
 /// Absolute-color overrides from the OS theme. Hue roles are absent on
@@ -713,6 +716,7 @@ fn builtin_style(role: Role) -> Style {
         Role::MdLink => Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::UNDERLINED),
+        Role::MarkerTarget => Style::default().bg(Color::DarkGray),
     }
 }
 

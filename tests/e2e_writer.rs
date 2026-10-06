@@ -485,6 +485,33 @@ fn writer_highlights_heading_and_fence() {
 }
 
 #[test]
+fn writer_marker_styles_counts_and_error_reason() {
+    let mut h = boot(&[("mark.md", "@@fix typo@@this is teh@@\ntext @@ more\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("mark.md\r");
+    let text = h.wait_for("rev0", "doc open");
+    assert!(text.contains("mark.md"), "title names the file");
+    // The verb cell carries a styled fg; plain prose would not.
+    let (_, y) = h.find("typo").expect("prompt on screen");
+    h.settle();
+    let styled = row_signature(&h.parser, y)
+        .into_iter()
+        .any(|(_, fg, _, _, _)| fg != "Default");
+    assert!(styled, "marker row is highlighted");
+    // Status counts the wrap marker and the stray closer.
+    let text = h.settle();
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squashed.contains("1marker"), "status counts markers");
+    assert!(squashed.contains("1error"), "status counts errors");
+}
+
+#[test]
 fn writer_double_click_selects_word_and_typing_replaces() {
     let mut h = boot(&[("dbl.md", "foo bar\n")]);
     create_session(&mut h);

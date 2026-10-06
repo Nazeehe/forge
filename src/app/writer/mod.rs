@@ -14,6 +14,7 @@ use crate::writer::request::WriterAction;
 
 pub mod adapter;
 pub mod markdown;
+pub mod markers;
 pub mod tools;
 pub mod watch;
 #[cfg(test)]
@@ -257,6 +258,12 @@ pub struct WriterSession {
     /// Files opened in Writer this run (absolute, most-recent-first,
     /// capped): heads the recent list ahead of the directory scan.
     pub opened: Vec<std::path::PathBuf>,
+    /// Parsed markers for the open document, refreshed when the
+    /// revision moves (never per frame): drives marker highlights,
+    /// the error gutter, status counts, and the cursor error reason.
+    pub markers: crate::writer::markers::ParseOutput,
+    /// Revision `markers` was parsed at; `None` forces a re-parse.
+    pub marker_rev: Option<u64>,
     /// Cached recent rows plus the cwd they were scanned under.
     /// Refreshes when the tab opens or the cwd changes, never per
     /// frame; prompt opens and Save-as also refresh.

@@ -265,6 +265,22 @@ pub(super) fn paint_status(
     if let Some(note) = session.save_note.as_ref() {
         text.push_str(&format!(" · {note}"));
     }
+    let marker_count = session.markers.markers.len();
+    if marker_count > 0 {
+        text.push_str(&format!(
+            " · {} marker{}",
+            marker_count,
+            if marker_count == 1 { "" } else { "s" }
+        ));
+    }
+    let error_count = session.markers.errors.len();
+    if error_count > 0 {
+        text.push_str(&format!(
+            " · {} error{}",
+            error_count,
+            if error_count == 1 { "" } else { "s" }
+        ));
+    }
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(text, style(Role::Muted))])),
         area,
