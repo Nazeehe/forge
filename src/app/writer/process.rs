@@ -85,6 +85,98 @@ impl AppState {
         }
     }
 
+    /// Pre-flight edge normalization (M8 layer 2): a marker whose
+    /// target begins or ends with whitespace (only hand-typed
+    /// markers; the wrap path never produces these) has that edge
+    /// whitespace moved outside the delimiters in the live buffer.
+    /// The agent then never sees edge whitespace in a target:
+    /// rewriters trim it, and that loss would hide inside the
+    /// wildcard span where the finish walk cannot see it. Pure
+    /// whitespace moves: total length and every downstream offset
+    /// stay put. Lines assign directly (never capture) ahead of the
+    /// one-undo boundary in the start path, so the normalized text
+    /// IS the pre-run snapshot. Returns the markers normalized.
+    /// `pub(crate)`: the start path and tests share it.
+    pub(crate) fn writer_normalize_marker_edges(
+        &mut self,
+        id: crate::session::SessionId,
+    ) -> usize {
+        let text = match self.writers.get(&id).and_then(|s| s.doc.as_ref()) {
+            Some(doc) => doc.text.clone(),
+            None => return 0,
+        };
+        let parsed = crate::writer::markers::parse_markers(&text);
+        let chars: Vec<char> = text.chars().collect();
+        let slice = |range: std::ops::Range<usize>| -> String {
+            chars.get(range).unwrap_or(&[]).iter().collect()
+        };
+        let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        for m in &parsed.markers {
+            let Some(t) = m.target.as_ref() else {
+                continue;
+            };
+            let mut core_start = t.start;
+            while core_start < t.end && chars.get(core_start).is_some_and(|c| c.is_whitespace()) {
+                core_start += 1;
+            }
+            let mut core_end = t.end;
+            while core_end > core_start && chars.get(core_end.saturating_sub(1)).is_some_and(|c| c.is_whitespace()) {
+                core_end -= 1;
+            }
+            if core_start == t.start && core_end == t.end {
+                continue;
+            }
+            if core_start >= core_end {
+                continue;
+            }
+            let new_text = format!(
+                "{}{}{}{}{}",
+                slice(t.start..core_start),
+                slice(m.whole.start..t.start),
+                slice(core_start..core_end),
+                slice(t.end..m.whole.end),
+                slice(core_end..t.end),
+            );
+            edits.push((m.whole.clone(), new_text));
+        }
+        if edits.is_empty() {
+            return 0;
+        }
+        let normalized = edits.len();
+        let Some(session) = self.writers.get_mut(&id) else {
+            return 0;
+        };
+        if let Some(doc) = session.doc.as_mut() {
+            for (range, new_text) in &edits {
+                // Ranges address the pre-edit text and every edit
+                // preserves length, so none of them can fail.
+                let _ = doc.apply_edit(range.clone(), new_text);
+            }
+        }
+        // Like the watch reload: rebuild the buffer in place (never
+        // captures, never clears the banner), clamp the cursor (same
+        // length: still in range), drop the selection, and stale
+        // proposals overlapping a moved span.
+        if let Some(text) = session.doc.as_ref().map(|doc| doc.text.clone()) {
+            if let Some(editor) = session.editor.as_mut() {
+                let total = text.chars().count();
+                editor.lines = edtui::Lines::from(text.as_str());
+                let buffer = editor.lines.to_string();
+                let off = crate::app::writer::adapter::editor_cursor_offset(editor);
+                editor.cursor = crate::app::writer::adapter::offset_to_index2(
+                    &buffer,
+                    off.min(total),
+                );
+            }
+        }
+        for (range, _) in &edits {
+            session.proposals.on_edit(range);
+        }
+        session.reset_fence_cache();
+        session.selection = None;
+        normalized
+    }
+
     /// Pre-flight and start: parse, filter to the selection,
     /// save-or-abort, snapshot, capture the one-undo boundary, start
     /// the run, and lock. Returns the run id.
@@ -132,6 +224,10 @@ impl AppState {
         // The wrap gesture cannot survive the run (its text can): the
         // placeholder is plain marker text the agent reads.
         self.abandon_wrap(id);
+        // Hand-typed targets can carry edge whitespace the wrap path
+        // never produces; normalize it out before the save below, so
+        // the file, the snapshot, and the excerpts stay edge-clean.
+        self.writer_normalize_marker_edges(id);
         if eligible == 0 {
             let message = if excluded.is_empty() {
                 "No markers to process".to_string()
@@ -458,6 +554,131 @@ pub(crate) fn process_run_intact(
             prev_lit = true;
         }
         true
+    }
+
+    /// Separator restoration (M8 layer 4): a done marker whose
+    /// replacement dropped separator line breaks gets them back.
+    /// For every non-verbatim (done, or silent) wildcard, the next
+    /// non-empty anchor — the following gap, or a verbatim span's
+    /// text past it — bounds the replacement's extent in the final
+    /// text; when the extent's trailing whitespace holds fewer line
+    /// breaks than the pre-run gap's leading whitespace, the
+    /// deficit is re-inserted where the anchor starts. Additions
+    /// are never removed (junction insertions are undetectable by
+    /// design, and removal could destroy agent-intended text), and
+    /// anything unlocatable is left for the violation walk. Pure
+    /// `\n` insertions, never touching non-whitespace.
+    /// Associated without `self`, so tests drive it directly.
+    pub(crate) fn restore_lost_separators(
+        pre: &str,
+        spans: &[std::ops::Range<usize>],
+        verbatim: &[bool],
+        final_text: &str,
+    ) -> String {
+        fn breaks(text: &str) -> usize {
+            text.chars().filter(|&c| c == '\n').count()
+        }
+        fn leading_ws(text: &str) -> &str {
+            let end = text
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            &text[..end]
+        }
+        fn trailing_ws(text: &str) -> &str {
+            let start = text
+                .char_indices()
+                .rev()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            &text[start..]
+        }
+        let pre_chars: Vec<char> = pre.chars().collect();
+        let span_text = |range: &std::ops::Range<usize>| -> String {
+            pre_chars.get(range.clone()).unwrap_or(&[]).iter().collect()
+        };
+        let gaps = Self::process_outside_segments(pre, spans);
+        // A gap opens with the separator (the damaged part) and
+        // closes with substance (the intact part): anchors strip the
+        // leading whitespace so the search lands past the damage.
+        // All-whitespace gaps anchor nothing; a run of adjacent done
+        // markers can lump extents (only the last separator reads),
+        // so those fall back to the violation banner.
+        let substance = |gap: &str| leading_ws(gap).len()..gap.len();
+        // Anchors after wildcard i, in order: the next gap, then
+        // each verbatim span's text and gap in turn. The first
+        // non-empty one bounds the extent.
+        let mut fixes: Vec<(usize, usize)> = Vec::new();
+        let mut cursor = 0;
+        // The head gap pins the start, like the walk's head rule.
+        if !gaps[0].is_empty() {
+            match final_text.find(&gaps[0]) {
+                Some(0) => cursor = gaps[0].len(),
+                _ => return final_text.to_string(),
+            }
+        }
+        for i in 0..spans.len() {
+            if verbatim.get(i) == Some(&true) {
+                // Verbatim spans stay literal: consume their text.
+                let lit = span_text(&spans[i]);
+                match final_text[cursor..].find(&lit) {
+                    Some(at) => cursor += at + lit.len(),
+                    None => return final_text.to_string(),
+                }
+                continue;
+            }
+            // First non-empty anchor in order: the next gap's
+            // substance, then each verbatim span's text and gap
+            // substance in turn.
+            let mut anchor: Option<String> = None;
+            let rest = &gaps[i + 1][substance(&gaps[i + 1])];
+            if !rest.is_empty() {
+                anchor = Some(rest.to_string());
+            } else {
+                for j in (i + 1)..spans.len() {
+                    if verbatim.get(j) == Some(&true) {
+                        anchor = Some(span_text(&spans[j]));
+                        break;
+                    }
+                    let rest = &gaps[j + 1][substance(&gaps[j + 1])];
+                    if !rest.is_empty() {
+                        anchor = Some(rest.to_string());
+                        break;
+                    }
+                }
+            }
+            let (extent_end, found) = match anchor.as_ref() {
+                Some(anchor) => match final_text[cursor..].find(anchor) {
+                    Some(at) => (cursor + at, true),
+                    None => return final_text.to_string(),
+                },
+                // Anchorless only reads precisely on the last span
+                // (everything before it consumed); lumped trailing
+                // wildcards stay the walk's business.
+                None if i + 1 == spans.len() => (final_text.len(), false),
+                None => continue,
+            };
+            let have = breaks(trailing_ws(&final_text[cursor..extent_end]));
+            let want = breaks(leading_ws(&gaps[i + 1]));
+            if want > have {
+                fixes.push((extent_end, want - have));
+            }
+            if found {
+                cursor = extent_end + anchor.map(|a| a.len()).unwrap_or(0);
+            } else {
+                cursor = extent_end;
+            }
+        }
+        if fixes.is_empty() {
+            return final_text.to_string();
+        }
+        let mut out = final_text.to_string();
+        for (pos, count) in fixes.iter().rev() {
+            out.insert_str(*pos, &"\n".repeat(*count));
+        }
+        out
     }
 
     /// Split `text` at the marker `spans` (sorted, disjoint) into the

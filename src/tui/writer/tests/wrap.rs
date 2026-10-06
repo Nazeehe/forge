@@ -313,6 +313,34 @@
     }
 
     #[test]
+    fn paragraph_newline_stays_outside_the_markers() {
+        // The operator's M8 selection: a whole paragraph grabbed
+        // with Shift+Down, trailing `\n` included. The closer must
+        // not swallow the line break.
+        let (mut state, id, dir, mut router, now) = setup();
+        std::fs::write(dir.join("p.md"), "para\n\nmore text\n").unwrap();
+        open_doc(&mut state, id, "p.md");
+        handle_key_at(
+            &mut state,
+            &mut router,
+            event::KeyEvent::new(event::KeyCode::Down, event::KeyModifiers::SHIFT),
+            now,
+        );
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(0..5),
+            "paragraph plus its newline"
+        );
+        handle_key_at(&mut state, &mut router, alt_m(), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "@@verb prompt@@para@@\n\nmore text\n",
+            "newline outside the closer"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    #[test]
     fn alt_m_without_selection_is_a_no_op() {
         let (mut state, id, dir, mut router, now) = setup();
         handle_key_at(&mut state, &mut router, alt_m(), now);

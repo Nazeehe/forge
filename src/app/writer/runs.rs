@@ -410,6 +410,64 @@ impl AppState {
         run_id: u64,
         summary: String,
     ) {
+        // M8 layer 4 runs before anything below reads the final
+        // text: a done marker whose replacement ate separator line
+        // breaks gets them back. The walk stays the arbiter — adopt
+        // only when the raw text fails it and the repaired text
+        // passes — so a mislocated anchor can never corrupt the doc.
+        // No borrows live yet, so the follow-up save is legal.
+        let restored = (|| {
+            let session = self.writers.get(&id)?;
+            let lock = session.process.as_ref().filter(|l| l.run_id == run_id)?;
+            let run = session.runs.iter().find(|r| r.id == run_id)?;
+            let mut verbatim = vec![false; lock.spans.len()];
+            for marker in &run.markers {
+                if matches!(
+                    marker.status,
+                    RunMarkerStatus::Skipped | RunMarkerStatus::Failed
+                ) && marker.marker.index < verbatim.len()
+                {
+                    verbatim[marker.marker.index] = true;
+                }
+            }
+            let final_text = session.doc.as_ref().map(|d| d.text.clone())?;
+            let fixed = Self::restore_lost_separators(
+                &lock.pre_text,
+                &lock.spans,
+                &verbatim,
+                &final_text,
+            );
+            (fixed != final_text
+                && !Self::process_run_intact(&lock.pre_text, &lock.spans, &verbatim, &final_text)
+                && Self::process_run_intact(&lock.pre_text, &lock.spans, &verbatim, &fixed))
+            .then(|| fixed)
+        })();
+        if let Some(fixed) = restored.as_ref() {
+            if let Some(session) = self.writers.get_mut(&id) {
+                if let Some(doc) = session.doc.as_mut() {
+                    let total = doc.text.chars().count();
+                    let _ = doc.apply_edit(0..total, &fixed);
+                }
+                // Insertions shift everything after them: stale the
+                // pending set like any agent write does, and rebuild
+                // the buffer without capturing (inside the one-undo
+                // step, like the reload assigns).
+                session.proposals.on_edit(&(0..fixed.chars().count()));
+                if let Some(editor) = session.editor.as_mut() {
+                    let off =
+                        crate::app::writer::adapter::editor_cursor_offset(editor);
+                    editor.lines = edtui::Lines::from(fixed.as_str());
+                    let buffer = editor.lines.to_string();
+                    editor.cursor =
+                        crate::app::writer::adapter::offset_to_index2(
+                            &buffer,
+                            off.min(buffer.chars().count()),
+                        );
+                }
+                session.reset_fence_cache();
+            }
+            self.dirty = true;
+        }
         let Some(session) = self.writers.get_mut(&id) else {
             return;
         };
@@ -513,6 +571,24 @@ impl AppState {
                     crate::app::writer::ConfirmAction::Keep,
                 ],
             });
+        }
+        // The restore above adopted into doc and buffer while locked
+        // (writer_save refuses under the lock); now unlocked, the
+        // file follows through doc.save directly, leaving the banner
+        // slot to the violation confirm above.
+        if restored.is_some() {
+            if let Some(doc) = session.doc.as_mut() {
+                match doc.save() {
+                    Ok(()) => {
+                        session.save_note = Some("saved".to_string());
+                    }
+                    Err(other) => {
+                        session.save_note = Some("not saved".to_string());
+                        session.error =
+                            Some(format!("restore save failed: {other}"));
+                    }
+                }
+            }
         }
         self.dirty = true;
     }

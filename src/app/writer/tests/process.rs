@@ -325,6 +325,73 @@ fn run_intact_walk_pins_substance_not_junctions() {
         pre, &spans, &[false, false],
         "alpha CHANGED @@fix typo@@this is teh@@\n\nANSWER\n",
     ));
+    // A trimmed separator after a done marker fails: the gap
+    // needle no longer matches (M8: the finish restore repairs
+    // this shape before the walk ever sees it).
+    assert!(!intact(
+        pre, &spans, &[false, false],
+        "alpha FIXED\nANSWER\n",
+    ));
+}
+
+#[test]
+fn restore_leaves_clean_and_foreign_damage_alone() {
+    use crate::writer::markers::parse_markers;
+    let restore = crate::app::AppState::restore_lost_separators;
+    let pre = DOC;
+    let spans: Vec<std::ops::Range<usize>> =
+        parse_markers(pre).markers.iter().map(|m| m.whole.clone()).collect();
+    // Clean replacements come back byte-identical (no churn that
+    // could fight the walk or the save).
+    assert_eq!(
+        restore(pre, &spans, &[false, false], "alpha FIXED\n\nANSWER\n"),
+        "alpha FIXED\n\nANSWER\n",
+    );
+    // Additions are never removed: junction insertions stay the
+    // walk's (undetectable-by-design) business, not the restore's.
+    assert_eq!(
+        restore(pre, &spans, &[false, false], "alpha FIXED\n\n\nANSWER\n"),
+        "alpha FIXED\n\n\nANSWER\n",
+    );
+    // Substance damage outside any separator is not a separator
+    // repair: returned unchanged for the violation banner.
+    assert_eq!(
+        restore(pre, &spans, &[false, false], "alpha FIXED\n\nCHANGED\n"),
+        "alpha FIXED\n\nCHANGED\n",
+    );
+}
+
+#[test]
+fn done_report_with_trimmed_separator_restores_the_break() {
+    let (mut state, id, run, dir) = custom_doc("@@fix it@@para@@\n\nmore text\n");
+    let mut now = std::time::Instant::now();
+    let rid = state.writer_process_start(id, None, now).expect("starts");
+    // Sloppy agent: the rewrite drops a separator newline.
+    agent_write_and_report(
+        &mut state, id, &run, &dir, rid, "NEW PARA\nmore text\n",
+        &format!(r#"{{"run":{rid},"index":0,"status":"done"}}"#), &mut now,
+    );
+    comms_reply(
+        &mut state, &run, "writer_run_done",
+        &format!(r#"{{"run":{rid},"summary":"s"}}"#),
+    );
+    // The finish restore puts the break back: no banner, and the
+    // doc, buffer, and file all agree.
+    assert_eq!(
+        doc_text(&state, id),
+        "NEW PARA\n\nmore text\n",
+        "separator restored"
+    );
+    assert_eq!(
+        file_text(&dir),
+        "NEW PARA\n\nmore text\n",
+        "the file follows"
+    );
+    assert!(
+        state.writers.get(&id).unwrap().pending_confirm.is_none(),
+        "no violation banner for a repaired run"
+    );
+    finish(&mut state, id, &dir);
 }
 
 #[test]
@@ -578,6 +645,83 @@ fn answer_auto_opens_the_panel() {
         state.writers.get(&id).unwrap().panel_visible,
         "answer opens the panel"
     );
+    finish(&mut state, id, &dir);
+}
+
+fn custom_doc(
+    text: &str,
+) -> (
+    crate::app::AppState,
+    crate::session::SessionId,
+    String,
+    std::path::PathBuf,
+) {
+    let (mut state, id, run, dir) = writer_agent();
+    std::fs::write(dir.join("n.md"), text).unwrap();
+    assert!(open_doc(&mut state, &run, "n.md").contains(r#""ok":true"#));
+    (state, id, run, dir)
+}
+
+#[test]
+fn preflight_moves_target_edge_whitespace_outside_the_markers() {
+    let (mut state, id, _run, dir) = custom_doc("@@fix it@@para\n@@\nmore text\n");
+    let rid = start(&mut state, id);
+    // The edge newline moved past the closer: the agent never sees
+    // edge whitespace in a target.
+    assert_eq!(
+        doc_text(&state, id),
+        "@@fix it@@para@@\n\nmore text\n",
+        "trailing edge moves out"
+    );
+    assert_eq!(
+        file_text(&dir),
+        "@@fix it@@para@@\n\nmore text\n",
+        "the save writes the normalized bytes the agent reads"
+    );
+    let session = state.writers.get(&id).unwrap();
+    assert_eq!(
+        session.process.as_ref().expect("locked").pre_text,
+        "@@fix it@@para@@\n\nmore text\n",
+        "the snapshot is the normalized text"
+    );
+    let run = session.runs.iter().find(|r| r.id == rid).expect("run");
+    assert_eq!(
+        run.markers[0].marker.target.as_deref(),
+        Some("para"),
+        "excerpt clean"
+    );
+    // One undo step lands on the normalized pre-run, not the
+    // hand-typed original: normalization assigns without capturing.
+    let session = state.writers.get_mut(&id).unwrap();
+    let editor = session.editor.as_mut().expect("editor live");
+    editor.execute(edtui::actions::Undo);
+    assert_eq!(
+        editor.lines.to_string(),
+        "@@fix it@@para@@\n\nmore text\n",
+        "undo lands on the snapshot"
+    );
+    finish(&mut state, id, &dir);
+}
+
+#[test]
+fn preflight_moves_leading_edge_whitespace_before_the_opener() {
+    let (mut state, id, _run, dir) = custom_doc("@@fix it@@\npara@@\n");
+    start(&mut state, id);
+    assert_eq!(
+        doc_text(&state, id),
+        "\n@@fix it@@para@@\n",
+        "leading edge moves out"
+    );
+    assert_eq!(file_text(&dir), "\n@@fix it@@para@@\n");
+    finish(&mut state, id, &dir);
+}
+
+#[test]
+fn preflight_leaves_clean_markers_byte_identical() {
+    let (mut state, id, _run, dir) = custom_doc(DOC);
+    start(&mut state, id);
+    assert_eq!(doc_text(&state, id), DOC, "no churn on clean docs");
+    assert_eq!(file_text(&dir), DOC);
     finish(&mut state, id, &dir);
 }
 

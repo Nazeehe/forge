@@ -963,6 +963,71 @@ fn writer_process_shows_hourglass_on_the_next_frame() {
     assert!(gx < 4, "hourglass lives in the left margin: {row:?}");
 }
 
+/// M8: the operator's eaten line break. Select a paragraph with
+/// Shift+Down, wrap it with Alt+M, process it, and have a sloppy
+/// agent (an external file write: the fake never reports) drop a
+/// separator newline. Force-finishing the run restores the break:
+/// the blank line survives with no violation banner.
+#[test]
+fn writer_process_restores_a_trimmed_separator() {
+    let mut h = boot(&[("para.md", "para\n\nmore text\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("para.md\r");
+    h.wait_for("rev0", "doc open");
+    // Shift+Down selects "para\n"; Alt+M wraps with the newline
+    // outside the closer; typing replaces the placeholder.
+    h.send("\x1b[1;2B");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("\x1bm");
+    h.send("fix it");
+    h.send("\r");
+    let text = h.wait_for("@@fixit@@para@@", "wrapped paragraph");
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squashed.contains("@@fixit@@para@@"), "wrap shape: {squashed:?}");
+    // Process through the real mouse path, then rewrite the file
+    // from outside like a trimming agent would.
+    let (x, y) = h.find("Process").expect("process pill");
+    h.press(x, y);
+    h.wait_for("⏳", "hourglass margin");
+    std::fs::write(h.cwd.join("para.md"), "NEW PARA\nmore text\n").unwrap();
+    h.wait_for("NEWPARA", "agent rewrite reloaded");
+    // The silent fake never reports: Esc asks it to wind down, Esc
+    // again force-finishes, and the finish restore puts the break
+    // back before the violation walk runs.
+    h.send("\x1b");
+    h.wait_for("Stoprequested", "stop request");
+    h.send("\x1b");
+    h.wait_for("Run:0done", "force stop");
+    let (gx, y) = h.find("NEW PARA").expect("rewritten row");
+    assert!(row_cells(&h.parser, y).contains("NEW PARA"), "rewrite kept");
+    // Same text cells one row down: the separator came back.
+    // (The row spans the whole terminal, sidebar included, so only
+    // the rewrite's cell columns read — cell-indexed, since wide
+    // glyphs elsewhere break char indexing.)
+    let cells = |yy: u16| -> Vec<String> {
+        let screen = h.parser.screen();
+        (0..screen.size().1)
+            .map(|x| screen.cell(yy, x).map(|c| c.contents()).unwrap_or_default().to_string())
+            .collect()
+    };
+    // The rewrite's own cell columns, one row down: blank.
+    let row = cells(y + 1);
+    let end = (gx as usize + "NEW PARA".len()).min(row.len());
+    let blank: String = row[gx as usize..end].concat();
+    assert!(blank.trim().is_empty(), "blank line restored: {blank:?}");
+    let tail: String = cells(y + 2)[gx as usize..].concat();
+    assert!(tail.starts_with("more text"), "tail follows the break: {tail:?}");
+    let text = h.settle();
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(!squashed.contains("Agentchangedtext"), "no banner: {squashed:?}");
+}
+
 /// M4: the marker protocol round-trips through the real editor. The
 /// agent reads the saved file bytes, so a wrap marker and a
 /// `@@end`-closed standalone must survive open → save byte-exact,
