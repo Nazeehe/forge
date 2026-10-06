@@ -13,6 +13,7 @@ mod chat;
 pub mod find;
 mod prompt;
 mod toolbar;
+pub mod wrap;
 
 use super::{
     changed_range, editor_selection_to_range, index2_to_offset, offset_to_index2,
@@ -81,6 +82,12 @@ impl AppState {
                 (KeyCode::Esc, KeyModifiers::NONE) => self.writer_toggle_preview(id),
                 _ => {}
             }
+            return;
+        }
+        // The §5.1 wrap gesture steers its keys before anything
+        // else: arming, finishing, and restoring consume the key,
+        // everything else flows into the normal path below.
+        if self.writer_wrap_key(id, key) {
             return;
         }
         // Esc always returns the editor to the known-good state: no
@@ -391,6 +398,15 @@ impl AppState {
         }
         session.sel_anchor = None;
         session.nav_goal = None;
+        // Button presses abandon the wrap gesture (the text stays);
+        // wheel scrolls keep it, the parse re-derives the marker.
+        use crossterm::event::MouseEventKind as Kind;
+        if matches!(
+            mouse.kind,
+            Kind::Down(_) | Kind::Up(_) | Kind::Drag(_)
+        ) {
+            self.abandon_wrap(id);
+        }
         self.writer_sync_editor(id);
         self.dirty = true;
     }

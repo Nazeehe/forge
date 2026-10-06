@@ -1158,7 +1158,7 @@
         };
         // The cursor opens at (0, 0): inside the nesting span.
         let row = slot(&paint_doc_to(&mut session, 120, 30));
-        assert!(row.contains("doubled"), "reason on cursor: {row:?}");
+        assert!(row.contains("inside a marker"), "reason on cursor: {row:?}");
         // Plain text: the slot stays empty.
         session.editor.as_mut().unwrap().cursor = edtui::Index2::new(0, 12);
         let row = slot(&paint_doc_to(&mut session, 120, 30));

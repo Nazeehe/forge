@@ -6,3 +6,4 @@ mod find;
 mod keys;
 mod mouse;
 mod panel;
+mod wrap;

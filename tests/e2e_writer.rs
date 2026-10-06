@@ -512,6 +512,32 @@ fn writer_marker_styles_counts_and_error_reason() {
 }
 
 #[test]
+fn writer_at_wrap_select_type_enter_exact() {
+    let mut h = boot(&[("wrap.md", "aaa bbb\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("wrap.md\r");
+    h.wait_for("rev0", "doc open");
+    // Double-click selects the word through the real mouse path.
+    let (x, y) = h.find("bbb").expect("word on screen");
+    h.press(x, y);
+    h.press(x, y);
+    // `@@` wraps it with the placeholder, typing replaces the
+    // placeholder, Enter finishes after the closing `@@`.
+    h.send("@@fix it\r");
+    let text = h.wait_for("@@fixit@@bbb@@", "wrapped text");
+    assert!(
+        text.contains("@@fix it@@bbb@@"),
+        "exact wrap text: {text:?}"
+    );
+}
+
+#[test]
 fn writer_double_click_selects_word_and_typing_replaces() {
     let mut h = boot(&[("dbl.md", "foo bar\n")]);
     create_session(&mut h);

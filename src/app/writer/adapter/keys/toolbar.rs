@@ -68,6 +68,8 @@ impl AppState {
             session.preview_scroll = 0;
             session.error = None;
         }
+        // The wrap gesture cannot survive a view change (its text can).
+        self.abandon_wrap(id);
         self.dirty = true;
     }
 
@@ -165,6 +167,8 @@ impl AppState {
             WriterFocus::Chat => WriterFocus::Thread,
             WriterFocus::Thread => WriterFocus::Editor,
         };
+        // Leaving the editor ends the wrap gesture (its text stays).
+        self.abandon_wrap(id);
         self.dirty = true;
     }
 }

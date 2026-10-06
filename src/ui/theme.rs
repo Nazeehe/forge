@@ -274,6 +274,10 @@ pub fn role_from_name(name: &str) -> Option<Role> {
         "border_modal" => Some(Role::BorderModal),
         "key_hint" => Some(Role::KeyHint),
         "key_desc" => Some(Role::KeyDesc),
+        "md_heading" => Some(Role::MdHeading),
+        "md_code" => Some(Role::MdCode),
+        "md_link" => Some(Role::MdLink),
+        "marker_target" => Some(Role::MarkerTarget),
         _ => None,
     }
 }
@@ -939,6 +943,25 @@ mod tests {
         assert_eq!(style(Role::Text).fg, Some(Color::Black));
         assert_eq!(modal_fill().bg, Some(Color::White));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn role_from_name_covers_markdown_and_marker_roles() {
+        assert_eq!(role_from_name("md_heading"), Some(Role::MdHeading));
+        assert_eq!(role_from_name("md_code"), Some(Role::MdCode));
+        assert_eq!(role_from_name("md_link"), Some(Role::MdLink));
+        assert_eq!(role_from_name("marker_target"), Some(Role::MarkerTarget));
+        assert_eq!(role_from_name("marker-target"), Some(Role::MarkerTarget));
+    }
+
+    #[test]
+    fn external_theme_override_of_marker_target_takes_effect() {
+        let theme = parse_external_theme(
+            r##"{"name": "t", "colors": {"marker_target": {"bg": "red"}}}"##,
+        )
+        .expect("marker_target parses");
+        let _guard = hold_external_theme(theme);
+        assert_eq!(style(Role::MarkerTarget).bg, Some(Color::Red));
     }
 
     #[test]

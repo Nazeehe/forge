@@ -209,6 +209,10 @@ pub struct WriterSession {
     /// mouse, or a buffer rebuild. Lets one gesture cross back over
     /// its start without losing where it began.
     pub sel_anchor: Option<usize>,
+    /// `@@` auto-wrap gesture (§5.1): armed over a selection, or
+    /// wrapping with the placeholder live. Cleared by Esc, finish,
+    /// navigation, focus moves, preview, and the mouse.
+    pub wrap: Option<adapter::keys::wrap::WrapState>,
     pub next_request_id: u64,
     /// Optional label from `writer_open`; titles the Writer tab.
     pub title: Option<String>,

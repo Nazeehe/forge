@@ -27,11 +27,13 @@ pub fn refresh_markers(session: &mut WriterSession, text: &str, rev: u64) -> boo
 /// slot when the cursor sits on the span.
 pub fn error_reason(kind: ErrorKind) -> &'static str {
     match kind {
-        ErrorKind::Unterminated => "unterminated marker: missing closing @@",
-        ErrorKind::EmptyHeader => "empty marker header",
-        ErrorKind::Nesting => "doubled @@ inside marker",
-        ErrorKind::StrayCloser => "stray @@ with no marker",
-        ErrorKind::EmptyTarget => "wrap has no text to apply to",
+        ErrorKind::Unterminated => "marker not closed: add @@ after the text (or @@end)",
+        ErrorKind::EmptyHeader => "marker has no instruction: type a prompt after @@",
+        ErrorKind::Nesting => "@@ inside a marker: escape it as \\@@ or close the first marker",
+        ErrorKind::StrayCloser => "stray @@: escape as \\@@ if it's literal text",
+        ErrorKind::EmptyTarget => {
+            "wrap has no text: select text first or use @@end for a standalone marker"
+        }
     }
 }
 
@@ -147,20 +149,23 @@ mod tests {
     fn reasons_name_every_error_kind() {
         assert_eq!(
             error_reason(ErrorKind::Unterminated),
-            "unterminated marker: missing closing @@"
+            "marker not closed: add @@ after the text (or @@end)"
         );
-        assert_eq!(error_reason(ErrorKind::EmptyHeader), "empty marker header");
+        assert_eq!(
+            error_reason(ErrorKind::EmptyHeader),
+            "marker has no instruction: type a prompt after @@"
+        );
         assert_eq!(
             error_reason(ErrorKind::Nesting),
-            "doubled @@ inside marker"
+            "@@ inside a marker: escape it as \\@@ or close the first marker"
         );
         assert_eq!(
             error_reason(ErrorKind::StrayCloser),
-            "stray @@ with no marker"
+            "stray @@: escape as \\@@ if it's literal text"
         );
         assert_eq!(
             error_reason(ErrorKind::EmptyTarget),
-            "wrap has no text to apply to"
+            "wrap has no text: select text first or use @@end for a standalone marker"
         );
     }
 

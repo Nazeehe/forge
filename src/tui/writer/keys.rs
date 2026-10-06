@@ -121,6 +121,13 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
         state.writer_rephrase(id);
         return;
     }
+    // Wrap rides the same Alt family: Alt+M wraps the live editor
+    // selection in `@@` markers at once (the `@@` gesture without
+    // typing `@@`). With no selection it is a silent no-op.
+    if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('m') {
+        state.writer_wrap_selection(id);
+        return;
+    }
     // The Assistant toggle rides beside Rephrase: Alt+A is free in
     // the CUA register and outside the Forge prefix.
     if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('a') {
