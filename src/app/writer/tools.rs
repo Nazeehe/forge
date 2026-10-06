@@ -250,12 +250,18 @@ impl AppState {
         }
     }
 
-    /// Store a Markdown answer for a request in the thread.
+    /// Store a Markdown answer in the thread: either for a request
+    /// (`request_id`) or for a run's question marker (`run` +
+    /// `index`, which also closes that marker as done).
     pub(super) fn writer_answer(&mut self, id: crate::session::SessionId, args: &str) -> Result<String, String> {
-        let rid = Self::tool_u32(args, "request_id")
-            .ok_or_else(|| "writer_answer needs request_id".to_string())? as u64;
         let answer = Self::tool_arg(args, "answer")
             .ok_or_else(|| "writer_answer needs an answer".to_string())?;
+        if crate::ipc::mcp::top_raw(args, "run").is_some() {
+            return self.writer_answer_run(id, args, answer);
+        }
+        let rid = Self::tool_u32(args, "request_id")
+            .ok_or_else(|| "writer_answer needs request_id or run, index".to_string())?
+            as u64;
         let session = self
             .writers
             .get_mut(&id)

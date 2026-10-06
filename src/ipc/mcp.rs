@@ -551,12 +551,12 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "writer_answer",
-            description: "Answer a Writer request with Markdown for the Assistant thread. Errors when the request id is unknown, cancelled, or already answered.",
-            schema: r#"{"type":"object","properties":{"request_id":{"type":"integer"},"answer":{"type":"string"}},"required":["request_id","answer"]}"#,
+            description: "Answer a Writer request (request_id) or a run question marker (run plus index, which also closes that marker as done) with Markdown for the Assistant thread. Errors when the id is unknown, cancelled, finished, or already answered.",
+            schema: r#"{"type":"object","properties":{"request_id":{"type":"integer"},"answer":{"type":"string"},"run":{"type":"integer"},"index":{"type":"integer"}},"required":["answer"]}"#,
         },
         ToolDef {
             name: "writer_run_report",
-            description: "Report one process-run marker as started, done, or blocked, with an optional note. Refuses unknown runs, finished runs, and bad marker indexes.",
+            description: "Report one process-run marker as started, done, skipped, or failed, with an optional note. Refuses unknown runs, finished runs, and bad marker indexes.",
             schema: r#"{"type":"object","properties":{"run":{"type":"integer"},"index":{"type":"integer"},"status":{"type":"string"},"note":{"type":"string"}},"required":["run","index","status"]}"#,
         },
         ToolDef {

@@ -207,6 +207,85 @@
         finish(&mut state, id, &dir);
     }
 
+    /// Question markers answer through the run flow (`run` + `index`
+    /// instead of `request_id`): the answer posts to the thread and
+    /// closes that marker as done, in one step.
+    #[test]
+    fn answer_by_run_and_index_posts_and_closes_the_marker() {
+        let (mut state, id, run, dir) = seeded();
+        let now = std::time::Instant::now();
+        let rid = state.writer_start_run(id, now).expect("run starts");
+        let reply = comms_reply(
+            &mut state,
+            &run,
+            "writer_answer",
+            &format!(r#"{{"run":{rid},"index":1,"answer":"Paris is the capital"}}"#),
+        );
+        assert!(reply.contains(r#""answered":true"#), "reply: {reply}");
+        let session = state.writers.get(&id).unwrap();
+        let marker = &session.runs.iter().find(|r| r.id == rid).expect("run kept").markers[1];
+        assert_eq!(
+            marker.status,
+            crate::app::writer::runs::RunMarkerStatus::Done,
+            "answer closes the marker"
+        );
+        assert_eq!(marker.note.as_deref(), Some("Paris is the capital"));
+        let note = session.thread.last().expect("answer posts");
+        assert_eq!(note.run, Some(rid), "note rides the run");
+        assert!(note.answer.contains("Paris is the capital"), "note: {}", note.answer);
+        finish(&mut state, id, &dir);
+    }
+
+    #[test]
+    fn answer_by_run_refuses_unknown_finished_and_missing_fields() {
+        let (mut state, id, run, dir) = seeded();
+        let now = std::time::Instant::now();
+        let rid = state.writer_start_run(id, now).expect("run starts");
+        let unknown = comms_reply(
+            &mut state,
+            &run,
+            "writer_answer",
+            r#"{"run":99,"index":0,"answer":"x"}"#,
+        );
+        assert!(unknown.contains("unknown run 99"), "unknown: {unknown}");
+        let bad_index = comms_reply(
+            &mut state,
+            &run,
+            "writer_answer",
+            &format!(r#"{{"run":{rid},"index":7,"answer":"x"}}"#),
+        );
+        assert!(bad_index.contains("unknown marker index 7"), "index: {bad_index}");
+        let no_answer = comms_reply(
+            &mut state,
+            &run,
+            "writer_answer",
+            &format!(r#"{{"run":{rid},"index":0}}"#),
+        );
+        assert!(no_answer.contains("needs an answer"), "answer: {no_answer}");
+        let no_id = comms_reply(
+            &mut state,
+            &run,
+            "writer_answer",
+            r#"{"answer":"x"}"#,
+        );
+        assert!(no_id.contains("needs request_id or run"), "id: {no_id}");
+        // A finished run takes no answers.
+        comms_reply(
+            &mut state,
+            &run,
+            "writer_run_done",
+            &format!(r#"{{"run":{rid},"summary":"s"}}"#),
+        );
+        let late = comms_reply(
+            &mut state,
+            &run,
+            "writer_answer",
+            &format!(r#"{{"run":{rid},"index":0,"answer":"x"}}"#),
+        );
+        assert!(late.contains("already finished"), "late: {late}");
+        finish(&mut state, id, &dir);
+    }
+
     #[test]
     fn timeout_finishes_a_silent_run_but_not_a_reporting_one() {
         let (mut state, id, run, dir) = seeded();
@@ -228,7 +307,7 @@
             &mut state,
             &run,
             "writer_run_report",
-            &format!(r#"{{"run":{talking},"index":1,"status":"blocked","note":"needs context"}}"#),
+            &format!(r#"{{"run":{talking},"index":1,"status":"failed","note":"needs context"}}"#),
         );
         state.settle_writer_runs(t1 + std::time::Duration::from_secs(600));
         assert!(

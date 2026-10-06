@@ -13,18 +13,23 @@ use crate::writer::markers::parse_markers;
 use crate::writer::process::{ProcessMarker, WriterProcess};
 use crate::writer::{MAX_RUNS_PER_DOC, RUN_TIMEOUT};
 
-/// Per-marker agent progress inside a run.
+/// Per-marker agent progress inside a run. The wire vocabulary is
+/// `started` (optional: lights the M5 progress gutter), `done`,
+/// `skipped`, and `failed` — the same set the run rules text names,
+/// so the two cannot drift (see `tool_status_set_matches_the_rules_text`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RunMarkerStatus {
     /// Listed, agent silent so far.
     #[default]
     Pending,
-    /// Agent started this marker.
+    /// Agent started this marker (optional progress signal).
     Started,
-    /// Agent finished this marker.
+    /// Agent handled this marker.
     Done,
-    /// Agent is blocked on this marker (see note).
-    Blocked,
+    /// Agent left this marker untouched (reason in note).
+    Skipped,
+    /// Agent tried and failed (reason in note); marker untouched.
+    Failed,
 }
 
 impl RunMarkerStatus {
@@ -34,7 +39,8 @@ impl RunMarkerStatus {
             RunMarkerStatus::Pending => "pending",
             RunMarkerStatus::Started => "started",
             RunMarkerStatus::Done => "done",
-            RunMarkerStatus::Blocked => "blocked",
+            RunMarkerStatus::Skipped => "skipped",
+            RunMarkerStatus::Failed => "failed",
         }
     }
 
@@ -43,7 +49,8 @@ impl RunMarkerStatus {
         match text {
             "started" => Some(RunMarkerStatus::Started),
             "done" => Some(RunMarkerStatus::Done),
-            "blocked" => Some(RunMarkerStatus::Blocked),
+            "skipped" => Some(RunMarkerStatus::Skipped),
+            "failed" => Some(RunMarkerStatus::Failed),
             _ => None,
         }
     }
@@ -162,7 +169,7 @@ impl AppState {
         Ok(rid)
     }
 
-    /// Report one run marker as started, done, or blocked.
+    /// Report one run marker as started, done, skipped, or failed.
     pub(super) fn writer_run_report(
         &mut self,
         id: crate::session::SessionId,
@@ -177,7 +184,9 @@ impl AppState {
         let status = Self::tool_arg(args, "status")
             .ok_or_else(|| "writer_run_report needs run, index, and status".to_string())?;
         let status = RunMarkerStatus::parse(&status)
-            .ok_or_else(|| format!("bad status '{status}': started, done, or blocked"))?;
+            .ok_or_else(|| {
+                format!("bad status '{status}': started, done, skipped, or failed")
+            })?;
         let note = Self::tool_arg(args, "note");
         let session = self
             .writers
@@ -234,8 +243,54 @@ impl AppState {
         Ok(format!(r#"{{"done":true,"run":{rid}}}"#))
     }
 
+    /// Answer a run's question marker: post the answer to the thread
+    /// and close that marker as done, in one step. Unknown and
+    /// finished runs, and bad marker indexes, are refused.
+    /// `pub(super)`: the answer tool shares it with the run tools.
+    pub(super) fn writer_answer_run(
+        &mut self,
+        id: crate::session::SessionId,
+        args: &str,
+        answer: String,
+    ) -> Result<String, String> {
+        let rid = Self::tool_run_id(args, "writer_answer")?;
+        let index = match crate::ipc::mcp::top_raw(args, "index") {
+            Some(_) => Self::tool_u32(args, "index")
+                .ok_or_else(|| "index must be a non-negative integer".to_string())?,
+            None => return Err("writer_answer needs run, index, and answer".to_string()),
+        };
+        let session = self
+            .writers
+            .get_mut(&id)
+            .ok_or_else(|| "no Writer document open for this session".to_string())?;
+        let run = session
+            .runs
+            .iter_mut()
+            .find(|r| r.id == rid)
+            .ok_or_else(|| format!("unknown run {rid}"))?;
+        if matches!(run.state, WriterRunState::Finished { .. }) {
+            return Err(format!("run {rid} already finished"));
+        }
+        let marker = run
+            .markers
+            .iter_mut()
+            .find(|m| m.marker.index as u32 == index)
+            .ok_or_else(|| format!("unknown marker index {index} for run {rid}"))?;
+        marker.status = RunMarkerStatus::Done;
+        marker.note = Some(answer.clone());
+        run.reported = true;
+        session.push_thread_note(crate::app::writer::WriterThreadEntry {
+            request_id: 0,
+            answer,
+            run: Some(rid),
+        });
+        self.dirty = true;
+        Ok(format!(r#"{{"answered":true,"run":{rid},"index":{index}}}"#))
+    }
+
     /// A `run` tool arg: present, numeric, and positive.
-    fn tool_run_id(args: &str, tool: &str) -> Result<u64, String> {
+    /// `pub(super)`: the answer tool shares it with the run tools.
+    pub(super) fn tool_run_id(args: &str, tool: &str) -> Result<u64, String> {
         match crate::ipc::mcp::top_raw(args, "run") {
             Some(_) => Self::tool_u32(args, "run")
                 .filter(|n| *n > 0)

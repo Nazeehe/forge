@@ -152,7 +152,9 @@ impl WriterProcess {
 }
 
 /// Self-contained run rules: everything the agent needs, no PRD.
-const PROCESS_RULES: &str = "Edit the named file directly with your file tools, one marker at a time in index order. Never add or remove @@ markers. Report each marker as started, done, or blocked (writer_run_report with run, index, status, and an optional note) and close the run with writer_run_done (run plus a one-line summary) when every marker is done.";
+/// Processing a marker REPLACES it: the marker text leaves the file
+/// and its result takes its place.
+const PROCESS_RULES: &str = "Process the markers below in index order, one at a time, editing <file> directly with your file tools. WRAP (@@verb prompt@@target@@): replace the WHOLE marker (from the opening @@ through the closing @@ or @@end) with the target rewritten per the prompt. STANDALONE (@@verb prompt @@end): replace the WHOLE marker with the content the prompt asks for, written at that position. QUESTION (verb ask or ending in ?): do not rewrite; replace the marker with its target text unchanged (standalone: remove it), and send the answer with writer_answer(run, index, answer). After EACH marker, write the file before starting the next (the user watches it change live). Change nothing outside marker spans; all other text must stay byte-identical. Line numbers are pre-run positions; earlier edits shift them, so re-locate each marker by its text. Report started before editing (it lights the progress gutter), then each marker with writer_run_report(run, index, status, note) where status is done | skipped | failed (failed/skipped: leave that marker untouched, give the reason in note). When all markers are handled, call writer_run_done(run, summary) even if some failed.";
 
 /// First [`TARGET_EXCERPT_CHARS`] chars plus the truncation marker
 /// when cut (it names `writer_read` for the rest).
@@ -277,6 +279,56 @@ mod tests {
         );
         assert_eq!(header.chars().filter(|&c| c == '"').count(), 2);
         let _ = proc;
+    }
+
+    /// The agent obeys the rules text, so it must state every
+    /// effect: what each shape writes, write-after-each, the
+    /// byte-identical surround, stale line numbers, failure
+    /// handling, and the status close-out.
+    #[test]
+    fn rules_state_each_shape_effect_and_the_run_discipline() {
+        let body = built().markup();
+        for needle in [
+            "replace the WHOLE marker",
+            "rewritten per the prompt",
+            "written at that position",
+            "QUESTION",
+            "writer_answer(run, index, answer)",
+            "write the file before starting the next",
+            "byte-identical",
+            "re-locate each marker by its text",
+            "done | skipped | failed",
+            "writer_run_done(run, summary)",
+        ] {
+            assert!(body.contains(needle), "rules miss {needle}: {body}");
+        }
+        assert!(
+            !body.contains("Never add or remove"),
+            "inverted marker rule survives: {body}"
+        );
+    }
+
+    /// The tool and the rules text share one status vocabulary: every
+    /// wire status the tool accepts is named in the rules, so the two
+    /// cannot drift apart.
+    #[test]
+    fn tool_status_set_matches_the_rules_text() {
+        use crate::app::writer::runs::RunMarkerStatus;
+        let body = built().markup();
+        for status in ["started", "done", "skipped", "failed"] {
+            assert!(
+                RunMarkerStatus::parse(status).is_some(),
+                "tool rejects '{status}'"
+            );
+            assert!(
+                body.contains(status),
+                "rules never name '{status}': {body}"
+            );
+        }
+        assert!(
+            RunMarkerStatus::parse("blocked").is_none(),
+            "the old 'blocked' status must go"
+        );
     }
 
     #[test]
