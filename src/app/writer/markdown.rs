@@ -13,21 +13,87 @@ use ratatui::style::Modifier;
 
 use crate::ui::theme::{Role, style};
 
-/// Highlights for doc rows `[first_row, first_row + row_count)`.
-/// Fence state scans from the document head (one linear pass, no
-/// allocation beyond the output), so a window mid-document still
-/// knows it is inside a fence; scanning stops at the window end.
-#[must_use]
-pub fn highlight_markdown(text: &str, first_row: usize, row_count: usize) -> Vec<Highlight> {
-    let last_row = first_row.saturating_add(row_count);
-    let mut out = Vec::new();
-    let mut fence: Option<(char, usize)> = None;
-    for (row, line) in text.split('\n').enumerate() {
-        if row >= last_row {
+/// Cached fence parity: `starts[i]` is the fence open at the
+/// start of doc line `i` (char and run length, `None` outside).
+/// The full tuple is stored because only a same-char run at least
+/// as long closes; a bare bool would mistoggle nested fences.
+/// Valid for `rev`; entries at and after the first edited line
+/// are dropped on revision change, the prefix is reused, and
+/// coverage extends forward on demand.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct FenceCache {
+    pub rev: u64,
+    pub starts: Vec<Option<(u8, usize)>>,
+}
+
+/// Cover line starts through `through` (exclusive): on a revision
+/// change the cache truncates to `dirty_from` (or zero without a
+/// hint) and rescans forward from there. One linear walk, byte
+/// scans only on uncovered lines.
+pub fn fence_cover(
+    text: &str,
+    cache: &mut FenceCache,
+    rev: u64,
+    dirty_from: Option<usize>,
+    through: usize,
+) {
+    if cache.rev != rev {
+        cache.starts.truncate(dirty_from.unwrap_or(0));
+        cache.rev = rev;
+    }
+    let mut state = match cache.starts.last() {
+        None => None,
+        Some(&at_last) => {
+            // State after the last covered line: re-step its own
+            // delimiter, the only line that could have changed it.
+            let last = cache.starts.len() - 1;
+            step_fence(at_last, text.split('\n').nth(last).unwrap_or(""))
+        }
+    };
+    for (row, line) in text.split('\n').enumerate().skip(cache.starts.len()) {
+        if row >= through {
             break;
         }
+        cache.starts.push(state);
+        state = step_fence(state, line);
+    }
+}
+
+/// Step fence state past one line with the same open/close rules
+/// the highlighter uses: a same-char run at least as long closes,
+/// anything else passes through.
+fn step_fence(fence: Option<(u8, usize)>, line: &str) -> Option<(u8, usize)> {
+    match (fence_delim(line), fence) {
+        (Some((kind, len)), Some((open_kind, open_len))) if kind == open_kind && len >= open_len => {
+            None
+        }
+        (Some((kind, len)), None) => Some((kind, len)),
+        (_, state) => state,
+    }
+}
+
+/// Highlights for doc rows `[first_row, first_row + row_count)`
+/// with a known fence state at the window head (from
+/// [`fence_cover`]). Stops at the window end: a paint costs only
+/// the visible lines.
+#[must_use]
+pub fn highlight_window(
+    text: &str,
+    first_row: usize,
+    row_count: usize,
+    fence_at_first: Option<(u8, usize)>,
+) -> Vec<Highlight> {
+    let last_row = first_row.saturating_add(row_count);
+    let mut out = Vec::new();
+    let mut fence = fence_at_first;
+    for (row, line) in text
+        .split('\n')
+        .enumerate()
+        .skip(first_row)
+        .take(last_row.saturating_sub(first_row))
+    {
         let chars: Vec<char> = line.chars().collect();
-        if let Some((kind, len)) = fence_open(&chars) {
+        if let Some((kind, len)) = fence_delim(line) {
             match fence {
                 // Same fence char and at least as long closes.
                 Some((open_kind, open_len)) if kind == open_kind && len >= open_len => {
@@ -37,24 +103,55 @@ pub fn highlight_markdown(text: &str, first_row: usize, row_count: usize) -> Vec
                     fence = Some((kind, len));
                 }
                 // A different fence run inside a fence is content.
+                // (The in-fence sentinel never matches: any longer
+                // run closes it, exactly like a real fence.)
                 Some(_) => {}
             }
-            if row >= first_row {
-                push(&mut out, row, 0, chars.len(), code_bold());
-            }
+            push(&mut out, row, 0, chars.len(), code_bold());
             continue;
         }
         if fence.is_some() {
-            if row >= first_row {
-                push(&mut out, row, 0, chars.len(), code());
-            }
+            push(&mut out, row, 0, chars.len(), code());
             continue;
         }
-        if row >= first_row {
-            highlight_line(row, &chars, &mut out);
-        }
+        highlight_line(row, &chars, &mut out);
     }
     out
+}
+
+/// A fence delimiter run: up to 3 leading spaces, then 3+ of one
+/// of `` ` `` / `~`. Returns the char and the run length.
+fn fence_delim(line: &str) -> Option<(u8, usize)> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] == b' ' {
+        i += 1;
+    }
+    if i > 3 || i >= bytes.len() {
+        return None;
+    }
+    let kind = bytes[i];
+    if kind != b'`' && kind != b'~' {
+        return None;
+    }
+    let mut len = 0;
+    while i + len < bytes.len() && bytes[i + len] == kind {
+        len += 1;
+    }
+    (len >= 3).then_some((kind, len))
+}
+
+/// Highlights for doc rows `[first_row, first_row + row_count)`.
+/// Uncached entry: fence state scans from the document head (one
+/// linear pass), so a window mid-document still knows it is inside
+/// a fence; scanning stops at the window end.
+#[must_use]
+pub fn highlight_markdown(text: &str, first_row: usize, row_count: usize) -> Vec<Highlight> {
+    let mut state = None;
+    for line in text.split('\n').take(first_row) {
+        state = step_fence(state, line);
+    }
+    highlight_window(text, first_row, row_count, state)
 }
 
 /// Push one inclusive-end highlight unless the span is empty.
@@ -94,22 +191,6 @@ fn bold() -> ratatui::style::Style {
 
 fn italic() -> ratatui::style::Style {
     style(Role::Text).add_modifier(Modifier::ITALIC)
-}
-
-/// A fence delimiter run: up to 3 leading spaces, then 3+ of one
-/// of `` ` `` / `~`. Returns the char and the run length.
-fn fence_open(chars: &[char]) -> Option<(char, usize)> {
-    let indent = chars.iter().take_while(|c| **c == ' ').count();
-    if indent > 3 {
-        return None;
-    }
-    let rest = &chars[indent..];
-    let kind = *rest.first()?;
-    if kind != '`' && kind != '~' {
-        return None;
-    }
-    let len = rest.iter().take_while(|c| **c == kind).count();
-    (len >= 3).then_some((kind, len))
 }
 
 /// Block constructs for one unfenced line: the heading owns its
@@ -473,6 +554,54 @@ mod tests {
     fn underscore_inside_words_stays_plain() {
         let out = highlight_markdown("foo_bar baz\n", 0, 8);
         assert!(out.is_empty(), "no intra-word emphasis: {out:?}");
+    }
+
+    #[test]
+    fn fence_cache_prefix_survives_a_late_edit() {
+        let text = "```\ncode\nmore\n```\n# Head\n";
+        let rows = text.lines().count();
+        let mut cache = FenceCache::default();
+        fence_cover(text, &mut cache, 0, None, rows);
+        let fence = Some((b'`', 3));
+        assert_eq!(
+            cache.starts,
+            vec![None, fence, fence, fence, None]
+        );
+        // Edit on line 4 (rev 1): the fenced prefix stays cached.
+        let mut cache2 = cache.clone();
+        fence_cover(text, &mut cache2, 1, Some(4), rows);
+        assert_eq!(&cache2.starts[..4], &cache.starts[..4]);
+        assert_eq!(cache2.starts, cache.starts);
+    }
+
+    #[test]
+    fn fence_cover_without_a_hint_rescans_from_zero() {
+        let text = "```\ncode\n";
+        let mut cache = FenceCache::default();
+        fence_cover(text, &mut cache, 0, None, 2);
+        fence_cover(text, &mut cache, 1, None, 2);
+        assert_eq!(cache.starts, vec![None, Some((b'`', 3))]);
+    }
+
+    #[test]
+    fn typing_at_the_end_of_a_big_doc_costs_the_window() {
+        let para = "# Head **bold** *em* `code` [t](http://x)\n\n- item 1\n\n> quote\n\n```rs\nlet x = 1;\n```\n\n| a | b |\n\n---\n";
+        let big: String = para.repeat(1024 * 1024 / para.len() + 1);
+        let rows = big.lines().count();
+        let mut cache = FenceCache::default();
+        fence_cover(&big, &mut cache, 0, None, rows);
+        // Type at the end: one more line, new revision.
+        let typed = format!("{big}tail\n");
+        let start = std::time::Instant::now();
+        fence_cover(&typed, &mut cache, 1, Some(rows), rows + 1);
+        let state = cache.starts[rows - 30];
+        let out = highlight_window(&typed, rows - 30, 30, state);
+        let elapsed = start.elapsed();
+        assert!(!out.is_empty(), "the window highlights");
+        assert!(
+            elapsed.as_millis() < 50,
+            "late typing paints in {elapsed:?}, budget 50 ms"
+        );
     }
 
     #[test]

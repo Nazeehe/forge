@@ -414,6 +414,121 @@
     }
 
     #[test]
+    fn double_click_selects_the_word_and_typing_replaces_it() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "foo bar\n").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "bar");
+        let press = |kind| event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: event::KeyModifiers::NONE,
+        };
+        use event::MouseButton::Left;
+        use event::MouseEventKind::{Down, Up};
+        // Two fast presses on the word: the second selects it.
+        super::super::handle_writer_mouse(&mut state, press(Down(Left)));
+        super::super::handle_writer_mouse(&mut state, press(Up(Left)));
+        super::super::handle_writer_mouse(&mut state, press(Down(Left)));
+        super::super::handle_writer_mouse(&mut state, press(Up(Left)));
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(4..7),
+            "double-click selects the word"
+        );
+        // Typing replaces through the real key path.
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Char('X')), now);
+        assert_eq!(
+            state.writers.get(&id).unwrap().doc.as_ref().unwrap().text,
+            "foo X\n",
+            "typing replaces the word"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn triple_click_selects_the_line() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "first\nsecond\n").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "second");
+        let press = |kind| event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: event::KeyModifiers::NONE,
+        };
+        use event::MouseButton::Left;
+        use event::MouseEventKind::{Down, Up};
+        for _ in 0..3 {
+            super::super::handle_writer_mouse(&mut state, press(Down(Left)));
+            super::super::handle_writer_mouse(&mut state, press(Up(Left)));
+        }
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(6..12),
+            "triple-click selects the line without its newline"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drag_past_the_bottom_edge_autoscrolls() {
+        let (mut state, id, dir) = writer_agent();
+        let text: String = (0..60).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.join("long.md"), &text).unwrap();
+        open_doc(&mut state, id, "long.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let area = editor_area(&state, id);
+        let (x, y) = find_text(&buf, "line 0");
+        // A live H1 press gesture first: stray drags never scroll.
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        let before = state
+            .writers
+            .get(&id)
+            .unwrap()
+            .editor
+            .as_ref()
+            .unwrap()
+            .viewport_offset()
+            .1;
+        // Drag onto the first row below the editor (still inside
+        // the content area, so dispatch sees it): the viewport
+        // moves and the selection grows.
+        super::super::handle_writer_mouse(
+            &mut state,
+            event::MouseEvent {
+                kind: event::MouseEventKind::Drag(event::MouseButton::Left),
+                column: x,
+                row: area.y.saturating_add(area.height),
+                modifiers: event::KeyModifiers::NONE,
+            },
+        );
+        let session = state.writers.get(&id).unwrap();
+        let after = session.editor.as_ref().unwrap().viewport_offset().1;
+        assert!(after > before, "drag past the edge scrolls: {before} -> {after}");
+        assert!(
+            session.selection.is_some(),
+            "the gesture selection grows while scrolling"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn wheel_scrolls_the_editor() {
         let (mut state, id, dir) = writer_agent();
         let text: String = (0..60).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");

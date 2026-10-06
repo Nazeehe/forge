@@ -5,8 +5,9 @@
 //! Backspace, Delete, Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z — in Insert and
 //! Visual alike. Every other CUA binding is adapter-owned on char
 //! offsets (moves in `nav`, selection/indent/word kills here), and
-//! unbound keys (clipboard until E5, find until E7, all retired emacs
-//! chords) fall through to nothing: no binding reaches the agent pane.
+//! unbound keys (find until E7, all retired emacs chords) fall
+//! through to nothing: no binding reaches the agent pane. Clipboard
+//! (E5) is adapter-owned in `clipboard`, beside the selection ops.
 //!
 //! Undo granularity: each inserted space captures its own undo step
 //! until E6 coalesces typing into word/pause groups. Deletions go

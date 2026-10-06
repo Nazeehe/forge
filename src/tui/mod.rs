@@ -602,6 +602,17 @@ fn loop_until_quit(
                 let area = f.area();
                 writer_cursor = paint_frame(f, area, state, &views, &chrome);
             })?;
+            // Queued raw sequences (OSC 52 clipboard announcements)
+            // go out after the frame they were raised in, on the
+            // same thread and never interleaved with frame bytes.
+            let announced: Vec<String> = state.take_osc52();
+            if !announced.is_empty() {
+                use std::io::Write as _;
+                for seq in announced {
+                    let _ = write!(io::stdout(), "{seq}");
+                }
+                let _ = io::stdout().flush();
+            }
             #[cfg(feature = "visual")]
             sync_visual_terminal(state, &mut *terminal)?;
             // The Writer overlay positions the terminal cursor itself;

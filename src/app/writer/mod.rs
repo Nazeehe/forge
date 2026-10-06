@@ -125,6 +125,19 @@ pub struct WriterSession {
     /// live gesture lets Drag reach EdTUI, so hover motion (which
     /// some terminals report as Drag(Left)) can never select.
     pub editor_gesture: bool,
+    /// Multi-click chain: consecutive fast presses on one cell.
+    /// The second selects a word, the third a line; any key, a
+    /// slow gap, or a move to another cell restarts at one.
+    pub last_press: Option<(u16, u16, std::time::Instant)>,
+    pub press_count: u8,
+    /// Cached fence parity for the paint highlighter, valid for
+    /// the revision it was built at.
+    pub fence_cache: markdown::FenceCache,
+    /// First doc line the fence cache no longer covers (an edit
+    /// landed there); the next paint truncates and extends from
+    /// it. `None` after a wholesale replace, which resets the
+    /// cache instead.
+    pub fence_dirty_from: Option<usize>,
     /// Keyboard-selection anchor as a char offset: set when a
     /// Shift+arrow gesture starts, cleared by any other key, the
     /// mouse, or a buffer rebuild. Lets one gesture cross back over
@@ -194,6 +207,27 @@ const MAX_FINISHED_REQUESTS: usize = 64;
 pub const MAX_PATH_CHARS: usize = 256;
 
 impl WriterSession {
+    /// An edit landed at `line`: the fence cache stays valid above
+    /// it, and the next paint truncates and extends from the
+    /// earliest such line. Only ever moves the mark earlier.
+    pub fn note_fence_edit(&mut self, line: usize) {
+        self.fence_dirty_from = Some(self.fence_dirty_from.map_or(line, |old| old.min(line)));
+    }
+
+    /// Reset the fence cache after a wholesale text replace (open,
+    /// new, close): no prefix survives a new document.
+    pub fn reset_fence_cache(&mut self) {
+        self.fence_cache = markdown::FenceCache::default();
+        self.fence_dirty_from = None;
+    }
+
+    /// Doc line of a char offset: counts newlines, one linear walk.
+    /// The sync path already walks the whole buffer per keystroke,
+    /// so this adds no new complexity class.
+    pub fn line_of_offset(text: &str, offset: usize) -> usize {
+        text.chars().take(offset).filter(|c| *c == '\n').count()
+    }
+
     /// Record a human request over a char range of the current document
     /// text; snapshots the range text for drift detection. Returns its id.
     /// Called by S4 when an action pill or the chat box sends.
@@ -250,6 +284,8 @@ impl WriterSession {
         self.sel_anchor = None;
         self.selected_proposal = None;
         self.error = None;
+        // Wholesale replace: the cache restarts at the new head.
+        self.reset_fence_cache();
         Ok(rev)
     }
 

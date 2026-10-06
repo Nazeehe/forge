@@ -199,6 +199,11 @@ pub struct AppState {
     /// Live Writer documents by session. Entered agent-side through the
     /// writer_* tools; dropped with the session. The S4 tab renders them.
     pub writers: std::collections::HashMap<crate::session::SessionId, crate::app::writer::WriterSession>,
+    /// Raw terminal sequences awaiting emission after the next frame
+    /// (OSC 52 clipboard announcements). Bounded: beyond the cap the
+    /// oldest is dropped — clipboard ops are human-paced, so the
+    /// queue drains every dirty frame and never fills in practice.
+    pub osc52: Vec<String>,
     /// Grid mode (`Ctrl-b w`): the main area tiles every session in
     /// framed cells instead of showing only the focused one.
     pub grid_mode: bool,
@@ -444,6 +449,7 @@ impl AppState {
             overlay_view: None,
             walkthroughs: std::collections::HashMap::new(),
             writers: std::collections::HashMap::new(),
+            osc52: Vec::new(),
             grid_mode: false,
             board_open: false,
             tetris_open: false,

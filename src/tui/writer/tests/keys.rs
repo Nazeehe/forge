@@ -508,6 +508,188 @@
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn shift_ctrl(code: event::KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(
+            code,
+            event::KeyModifiers::CONTROL | event::KeyModifiers::SHIFT,
+        )
+    }
+
+    fn doc_text(state: &crate::app::AppState, id: crate::session::SessionId) -> String {
+        state.writers.get(&id).unwrap().doc.as_ref().unwrap().text.clone()
+    }
+
+    #[test]
+    fn ctrl_c_copies_selection_and_queues_osc52() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        // Select "bbb" at the end through the real key path.
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        for _ in 0..3 {
+            handle_key_at(&mut state, &mut router, shift(event::KeyCode::Left), now);
+        }
+        assert_eq!(state.writers.get(&id).unwrap().selection, Some(4..7));
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('c')), now);
+        let session = state.writers.get(&id).unwrap();
+        assert_eq!(session.clip.0.borrow().clone(), "bbb", "internal clipboard");
+        assert_eq!(session.selection, Some(4..7), "copy keeps the selection");
+        let queued = state.take_osc52();
+        assert_eq!(queued.len(), 1, "one sequence queued");
+        assert_eq!(
+            queued[0], "\x1b]52;c;YmJi\x07",
+            "OSC 52 carries base64(bbb)"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_c_without_selection_queues_nothing() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('c')), now);
+        assert!(state.take_osc52().is_empty(), "no selection, no output");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_x_cuts_in_one_undo_step() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        for _ in 0..3 {
+            handle_key_at(&mut state, &mut router, shift(event::KeyCode::Left), now);
+        }
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('x')), now);
+        assert_eq!(doc_text(&state, id), "aaa ", "cut removes the range");
+        assert_eq!(
+            state.writers.get(&id).unwrap().clip.0.borrow().clone(),
+            "bbb",
+            "cut copies first"
+        );
+        assert_eq!(state.take_osc52().len(), 1, "cut announces too");
+        // One undo step restores the whole cut.
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "aaa bbb", "single undo restores");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_v_replaces_the_selection() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        // Cut "bbb" to fill the clipboard, then select "aaa".
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        for _ in 0..3 {
+            handle_key_at(&mut state, &mut router, shift(event::KeyCode::Left), now);
+        }
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('x')), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Home), now);
+        for _ in 0..3 {
+            handle_key_at(&mut state, &mut router, shift(event::KeyCode::Right), now);
+        }
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('v')), now);
+        assert_eq!(doc_text(&state, id), "bbb ", "paste replaces the selection");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_v_with_empty_clipboard_is_a_noop() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('v')), now);
+        assert_eq!(doc_text(&state, id), "aaa bbb", "nothing pasted");
+        assert!(state.take_osc52().is_empty(), "paste emits nothing");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn shift_home_end_page_and_ctrl_shift_bounds_select() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "line one\nline two\nline three\n").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        // Paint once so page moves know the viewport height.
+        paint_full(&mut state, id);
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        // Line two, four cells in: Shift+Home selects to its start.
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        for _ in 0..4 {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Right), now);
+        }
+        handle_key_at(&mut state, &mut router, shift(event::KeyCode::Home), now);
+        assert_eq!(state.writers.get(&id).unwrap().selection, Some(9..13));
+        // Shift+End extends from the same anchor to the line end.
+        handle_key_at(&mut state, &mut router, shift(event::KeyCode::End), now);
+        assert_eq!(state.writers.get(&id).unwrap().selection, Some(13..17));
+        // Ctrl+Shift+Home reaches the document head.
+        handle_key_at(
+            &mut state,
+            &mut router,
+            shift_ctrl(event::KeyCode::Home),
+            now,
+        );
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(0..13),
+            "extends to the head"
+        );
+        // Ctrl+Shift+End reaches the document end.
+        handle_key_at(
+            &mut state,
+            &mut router,
+            shift_ctrl(event::KeyCode::End),
+            now,
+        );
+        let total = doc_text(&state, id).chars().count();
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(13..total),
+            "extends to the end"
+        );
+        // Shift+PageUp/PageDown move by the painted height.
+        handle_key_at(&mut state, &mut router, shift(event::KeyCode::PageUp), now);
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(0..13),
+            "page up selects to the head"
+        );
+        handle_key_at(
+            &mut state,
+            &mut router,
+            shift(event::KeyCode::PageDown),
+            now,
+        );
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(13..total),
+            "page down selects back to the end"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn prefix_escapes_while_editing() {
         let (mut state, id, dir) = writer_agent();

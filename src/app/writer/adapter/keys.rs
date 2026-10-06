@@ -49,6 +49,12 @@ impl AppState {
     /// entry only. Everything else is forwarded as-is.
     pub fn writer_feed_key(&mut self, id: crate::session::SessionId, key: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
+        // Any key ends the multi-click chain: a later press starts
+        // over at a single click.
+        if let Some(session) = self.writers.get_mut(&id) {
+            session.press_count = 0;
+            session.last_press = None;
+        }
         // Esc always returns the editor to the known-good state: no
         // selection, Insert mode. EdTUI would park in vim Normal
         // (mouse Down while Visual strands there) with nothing ever
@@ -80,6 +86,18 @@ impl AppState {
             }
             (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
                 self.writer_select_all(id);
+                return;
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.writer_clip_copy(id);
+                return;
+            }
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                self.writer_clip_cut(id);
+                return;
+            }
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                self.writer_clip_paste(id);
                 return;
             }
             (KeyCode::Backspace, KeyModifiers::CONTROL) => {
@@ -326,9 +344,11 @@ impl AppState {
         let Some((range, replacement)) = changed_range(&doc.text, &editor_text) else {
             return;
         };
+        let edit_line = crate::app::writer::WriterSession::line_of_offset(&doc.text, range.start);
         if doc.apply_edit(range.clone(), &replacement).is_err() {
             return;
         }
+        session.note_fence_edit(edit_line);
         session.proposals.on_edit(&range);
     }
     /// Open the typed-path prompt for New / Open / Save-as (E2b:

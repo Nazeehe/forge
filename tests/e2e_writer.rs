@@ -23,7 +23,13 @@ struct Harness {
     rx: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
     parser: vt100::Parser,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Raw output bytes (capped): escape sequences the vt100
+    /// parser swallows (OSC 52) stay observable here.
+    raw: Vec<u8>,
 }
+
+/// Raw byte log cap: recent frames stay observable, memory stays flat.
+const RAW_CAP: usize = 65536;
 
 /// Boot forge with an isolated HOME (scratch agents.json, seeded
 /// files) and dismiss anything the first frame shows.
@@ -112,6 +118,7 @@ fn boot(files: &[(&str, &str)]) -> Harness {
         rx,
         parser: vt100::Parser::new(ROWS, COLS, 0),
         _child: child,
+        raw: Vec::new(),
     };
     // Whatever the first frame shows (setup dialog or not), Esc backs
     // out of it; then the idle screen must settle. The fake agent's
@@ -125,6 +132,15 @@ impl Harness {
     fn send(&mut self, bytes: &str) {
         self.writer.write_all(bytes.as_bytes()).unwrap();
         self.writer.flush().unwrap();
+    }
+
+    /// Log raw output bytes under the cap.
+    fn note_raw(&mut self, bytes: &[u8]) {
+        self.raw.extend_from_slice(bytes);
+        if self.raw.len() > RAW_CAP {
+            let drop = self.raw.len() - RAW_CAP;
+            self.raw.drain(..drop);
+        }
     }
 
     /// Drain output until `needle` appears on screen or time out.
@@ -147,7 +163,10 @@ impl Harness {
                 panic!("timed out waiting for {what} ({needle:?}):\n{text}");
             }
             match self.rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Some(bytes)) => self.parser.process(&bytes),
+                Ok(Some(bytes)) => {
+                    self.note_raw(&bytes);
+                    self.parser.process(&bytes);
+                }
                 Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     panic!(
                         "child output ended while waiting for {what} ({needle:?}):\n{}",
@@ -165,12 +184,21 @@ impl Harness {
         let end = Instant::now() + Duration::from_millis(500);
         while Instant::now() < end {
             match self.rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Some(bytes)) => self.parser.process(&bytes),
+                Ok(Some(bytes)) => {
+                    self.note_raw(&bytes);
+                    self.parser.process(&bytes);
+                }
                 Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
         screen_text(&self.parser)
+    }
+
+    /// Whether the raw log contains `needle` (escape sequences).
+    fn saw_raw(&self, needle: &str) -> bool {
+        let log = String::from_utf8_lossy(&self.raw);
+        log.contains(needle)
     }
 
     /// X10 button-less motion at 0-based cells: plain terminals
@@ -181,6 +209,16 @@ impl Harness {
         self.writer.write_all(&pkt).unwrap();
         self.writer.flush().unwrap();
         std::thread::sleep(Duration::from_millis(60));
+    }
+
+    /// Fast X10 press + release with no sleeps: chains into a
+    /// double-click inside the 500 ms window.
+    fn press(&mut self, x: u16, y: u16) {
+        let press = [0x1b, b'[', b'M', 32, (x + 1) as u8 + 32, (y + 1) as u8 + 32];
+        let release = [0x1b, b'[', b'M', 35, (x + 1) as u8 + 32, (y + 1) as u8 + 32];
+        self.writer.write_all(&press).unwrap();
+        self.writer.write_all(&release).unwrap();
+        self.writer.flush().unwrap();
     }
 
     /// Legacy X10 click (press + release) at 0-based cells: Forge
@@ -434,6 +472,61 @@ fn writer_highlights_heading_and_fence() {
         .into_iter()
         .any(|(_, fg, _, bold, _)| bold && fg != "Default");
     assert!(styled, "heading row is highlighted");
+}
+
+#[test]
+fn writer_double_click_selects_word_and_typing_replaces() {
+    let mut h = boot(&[("dbl.md", "foo bar\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("dbl.md\r");
+    let text = h.wait_for("rev0", "doc open");
+    assert!(text.contains("dbl.md"), "title names the file");
+    let (x, y) = h.find("bar").expect("word on screen");
+    // Two fast presses chain into a word selection.
+    h.press(x, y);
+    h.press(x, y);
+    // Typing replaces the selected word through the real app.
+    // (The needle squashes whitespace; the screen keeps "foo X".)
+    h.send("X");
+    let text = h.wait_for("fooX", "typed replacement");
+    assert!(text.contains("foo X"), "double-click selects, typing replaces");
+}
+
+#[test]
+fn writer_copy_paste_round_trip_emits_osc52() {
+    let mut h = boot(&[("cp.md", "aaabbb\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("cp.md\r");
+    h.wait_for("rev0", "doc open");
+    // Select "bbb" with Shift+Left and copy it.
+    h.send("\x1b[F");
+    for _ in 0..3 {
+        h.send("\x1b[1;2D");
+    }
+    h.send("\x03");
+    std::thread::sleep(Duration::from_millis(300));
+    h.settle();
+    assert!(h.saw_raw("]52;c;"), "copy announces OSC 52");
+    // Home, select "aaa", paste over it: "bbb" lands twice.
+    h.send("\x1b[H");
+    for _ in 0..3 {
+        h.send("\x1b[1;2C");
+    }
+    h.send("\x16");
+    let text = h.wait_for("bbbbbb", "pasted round trip");
+    assert!(text.contains("bbbbbb"), "paste replaces the selection");
 }
 
 #[test]

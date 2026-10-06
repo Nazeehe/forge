@@ -1,7 +1,8 @@
 //! E3 CUA text ops through the adapter: two-space indent/outdent
 //! (selection lines or current line, markers preserved), CUA word
 //! kills (selection first, single undo), select-all, and the
-//! reserved-for-later no-ops (clipboard is E5, find is E7).
+//! reserved-for-later no-ops (find is E7; clipboard moved to E5 and
+//! is covered here plus the TUI key/mouse suites).
 
 use super::super::test_support::*;
 
@@ -183,12 +184,22 @@ fn clipboard_and_find_keys_are_reserved_noops() {
     let (mut state, id, run, dir) = writer_agent();
     open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb");
     shift_select(&mut state, id, 3);
-    // Clipboard is E5, find/replace is E7: until then these keys must
-    // neither edit nor clear the selection.
+    // E5 owns the clipboard: copy keeps the selection, cut takes it
+    // in one undo step. Find/replace stays reserved until E7.
+    let (code, mods) = ctrl(crossterm::event::KeyCode::Char('c'));
+    feed_mod(&mut state, id, code, mods);
+    assert_eq!(
+        state.writers.get(&id).unwrap().selection,
+        Some(0..3),
+        "copy keeps the selection"
+    );
+    let (code, mods) = ctrl(crossterm::event::KeyCode::Char('x'));
+    feed_mod(&mut state, id, code, mods);
+    assert_eq!(doc_text(&state, id), " bbb", "cut takes the range");
+    let (code, mods) = ctrl(crossterm::event::KeyCode::Char('z'));
+    feed_mod(&mut state, id, code, mods);
+    assert_eq!(doc_text(&state, id), "aaa bbb", "one undo restores the cut");
     for code in [
-        crossterm::event::KeyCode::Char('c'),
-        crossterm::event::KeyCode::Char('x'),
-        crossterm::event::KeyCode::Char('v'),
         crossterm::event::KeyCode::Char('f'),
         crossterm::event::KeyCode::Char('h'),
     ] {
@@ -196,11 +207,6 @@ fn clipboard_and_find_keys_are_reserved_noops() {
         feed_mod(&mut state, id, code, mods);
     }
     assert_eq!(doc_text(&state, id), "aaa bbb");
-    assert_eq!(
-        state.writers.get(&id).unwrap().selection,
-        Some(0..3),
-        "selection survives reserved keys"
-    );
     assert!(state.manager.remove(id));
     std::fs::remove_dir_all(&dir).ok();
 }

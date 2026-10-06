@@ -10,6 +10,10 @@ use crossterm::event;
 use crate::app::AppState;
 use crate::ui::writer::ToolbarButton;
 
+/// Multi-click window: presses on one cell this close chain into
+/// word (second) and line (third) selection.
+const DOUBLE_CLICK_MS: u128 = 500;
+
 /// One main-area mouse event while the Writer overlay owns input.
 /// Pill clicks fire, menu rows fire, recent rows open, the editor
 /// takes cursor, drag, and wheel through the adapter (EdTUI ignores
@@ -132,10 +136,36 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
                 return;
             }
             if hits(layout.editor, mev.column, mev.row) {
-                if let Some(session) = state.writers.get_mut(&id) {
+                // Multi-click chain on one cell: the second press
+                // selects a word, the third a line, the fourth
+                // starts over at a single click.
+                let count = if let Some(session) = state.writers.get_mut(&id) {
+                    let now = std::time::Instant::now();
+                    let chained = session.last_press.is_some_and(|(x, y, at)| {
+                        x == mev.column
+                            && y == mev.row
+                            && now.duration_since(at).as_millis() <= DOUBLE_CLICK_MS
+                    });
+                    let next = if chained { session.press_count + 1 } else { 1 };
+                    let next = if next > 3 { 1 } else { next };
+                    session.last_press = Some((mev.column, mev.row, now));
+                    session.press_count = next;
                     session.editor_gesture = true;
-                }
+                    next
+                } else {
+                    1
+                };
                 state.writer_feed_mouse(id, mev);
+                match count {
+                    2 => state.writer_select_word(id),
+                    3 => {
+                        state.writer_select_line(id);
+                        if let Some(session) = state.writers.get_mut(&id) {
+                            session.press_count = 0;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         // Button-less motion is never a gesture: it dies here even
@@ -146,8 +176,29 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
                 .writers
                 .get(&id)
                 .is_some_and(|s| s.editor_gesture);
-            if gesture && hits(layout.editor, mev.column, mev.row) {
-                state.writer_feed_mouse(id, mev);
+            if gesture {
+                // Autoscroll: past the top/bottom edge the viewport
+                // moves a row and the edge-clamped drag extends the
+                // selection. Still gated on the H1 press gesture, so
+                // hover motion never scrolls or selects.
+                let ed = layout.editor;
+                if ed.width > 0 && ed.height > 0 {
+                    let mut fixed = mev;
+                    if mev.row < ed.y {
+                        state.writer_scroll_editor(id, -1);
+                        fixed.row = ed.y;
+                    } else if mev.row >= ed.y.saturating_add(ed.height) {
+                        state.writer_scroll_editor(id, 1);
+                        fixed.row = ed.y.saturating_add(ed.height).saturating_sub(1);
+                    }
+                    fixed.column = fixed.column.clamp(
+                        ed.x,
+                        ed.x.saturating_add(ed.width).saturating_sub(1),
+                    );
+                    if hits(ed, fixed.column, fixed.row) {
+                        state.writer_feed_mouse(id, fixed);
+                    }
+                }
             }
         }
         MouseEventKind::Up(_) => {

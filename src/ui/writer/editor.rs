@@ -149,17 +149,22 @@ fn paint_doc(
         }
     }
     // Markdown highlights for the visible window plus one row of
-    // lookahead: the highlighter scans fence state from the head in
-    // one linear pass and stops at the window end, so cost stays
-    // bounded (see the 1 MiB perf test in markdown.rs). Proposal
-    // marks were added above; EdTUI gives the selection priority
-    // over every highlight.
+    // lookahead: fence parity comes from the session cache (valid
+    // above the first edited line, extended forward on demand), so
+    // a paint costs only the visible lines — see the typing-at-end
+    // perf test in markdown.rs. Proposal marks were added above;
+    // EdTUI gives the selection priority over every highlight.
     let first_visible = editor.viewport_offset().1;
-    for mark in crate::app::writer::markdown::highlight_markdown(
-        &buffer,
-        first_visible,
-        edit_rect.height as usize + 1,
-    ) {
+    let window_rows = edit_rect.height as usize + 1;
+    let md_marks = {
+        let cache = &mut session.fence_cache;
+        let dirty = session.fence_dirty_from.take();
+        let through = first_visible.saturating_add(window_rows);
+        crate::app::writer::markdown::fence_cover(&buffer, cache, rev, dirty, through);
+        let fence_at_first = cache.starts.get(first_visible).copied().flatten();
+        crate::app::writer::markdown::highlight_window(&buffer, first_visible, window_rows, fence_at_first)
+    };
+    for mark in md_marks {
         editor.add_highlight(mark);
     }
     // Every EdTUI style maps to a semantic role: the defaults hide

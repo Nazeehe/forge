@@ -30,7 +30,7 @@ pub(super) enum NavMove {
 
 /// Word chars for word jumps: letters, digits, underscore.
 /// Everything else (spaces, newlines, punctuation) separates.
-fn is_word_char(c: char) -> bool {
+pub(super) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 

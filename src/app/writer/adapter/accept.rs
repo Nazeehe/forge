@@ -78,6 +78,13 @@ impl AppState {
         session.sel_anchor = None;
         session.nav_goal = None;
         session.selected_proposal = None;
+        // The accept rewrote `range`: fence parity above its first
+        // line survives, the rest re-extends on the next paint.
+        let accept_line = crate::app::writer::WriterSession::line_of_offset(
+            &session.doc.as_ref().expect("checked above").text,
+            range.start,
+        );
+        session.note_fence_edit(accept_line);
         session.evict_finished();
         self.dirty = true;
         Ok(())
@@ -160,8 +167,13 @@ impl AppState {
         target.dirty = true;
         match target.save() {
             Ok(()) => {
+                // Same text under a new revision: the cached parity
+                // survives, re-keyed to the target revision.
+                let rev = target.revision;
                 if let Some(session) = self.writers.get_mut(&id) {
                     session.doc = Some(target);
+                    session.fence_cache.rev = rev;
+                    session.fence_dirty_from = None;
                     session.open_prompt = None;
                     session.pending_confirm = None;
                     session.error = None;
@@ -217,6 +229,7 @@ impl AppState {
         session.selection = None;
         session.sel_anchor = None;
         session.selected_proposal = None;
+        session.reset_fence_cache();
         session.proposals = Proposals::default();
         session.requests.clear();
         session.thread.clear();
