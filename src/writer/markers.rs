@@ -654,7 +654,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// PRD §7: prompts over 2,000 chars never become markers. The
     /// error spans the prompt (gutter + reason anchor there), and
     /// the scan skips the whole candidate so later markers survive.

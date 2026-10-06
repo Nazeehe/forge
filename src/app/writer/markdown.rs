@@ -26,11 +26,11 @@ pub struct FenceCache {
     pub starts: Vec<Option<(u8, usize)>>,
 }
 
-/// Test-only work counters behind the typing guarantee (see
-/// `typing_at_the_end_of_a_big_doc_costs_the_window`): lines
-/// fence-stepped and lines highlight-painted. Thread-local so
-/// parallel tests never share counts; the measuring test resets
-/// first. Compiled out entirely outside test builds.
+// Test-only work counters behind the typing guarantee (see
+// `typing_at_the_end_of_a_big_doc_costs_the_window`): lines
+// fence-stepped and lines highlight-painted. Thread-local so
+// parallel tests never share counts; the measuring test resets
+// first. Compiled out entirely outside test builds.
 #[cfg(test)]
 thread_local! {
     static FENCE_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -657,10 +657,10 @@ mod tests {
         crate::infra::test_timing::assert_scales_linearly(
             "markdown 2 MiB",
             || {
-                highlight_markdown(&small, 0, small_rows);
+                let _ = highlight_markdown(&small, 0, small_rows);
             },
             || {
-                highlight_markdown(&big, 0, rows);
+                let _ = highlight_markdown(&big, 0, rows);
             },
         );
     }

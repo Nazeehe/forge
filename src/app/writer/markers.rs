@@ -418,7 +418,6 @@ mod tests {
 
     #[test]
     fn margin_anchor_drops_a_mark_whose_line_changed() {
-        let text = "alpha @@fix typo@@this is teh@@\n\n@@ask capital@@Paris@@\n";
         let mut marks = vec![
             queued_mark(1, 0, Some("fix"), "typo", "alpha @@fix typo@@this is teh@@"),
             queued_mark(1, 1, Some("ask"), "capital", "@@ask capital@@Paris@@"),
@@ -435,7 +434,6 @@ mod tests {
 
     #[test]
     fn margin_anchor_drops_vanished_markers() {
-        let text = "alpha @@fix typo@@this is teh@@\n\n@@ask capital@@Paris@@\n";
         let mut marks = vec![
             queued_mark(1, 0, Some("fix"), "typo", "alpha @@fix typo@@this is teh@@"),
             queued_mark(1, 1, Some("ask"), "capital", "@@ask capital@@Paris@@"),
