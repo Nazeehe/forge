@@ -22,7 +22,8 @@ pub fn endpoint_file_path(home: &std::path::Path) -> std::path::PathBuf {
 
 /// Publish this process's listener socket for scrubbed hook children. Called
 /// once per TUI boot; records the owner pid so a later instance never
-/// accepts another instance's records.
+/// accepts another instance's records. A file naming a live owner is left
+/// alone: a nested boot must not hijack the outer instance relays.
 pub fn write_endpoint_file(
     home: &std::path::Path,
     pid: u32,
@@ -30,6 +31,11 @@ pub fn write_endpoint_file(
 ) -> std::io::Result<()> {
     if let Some(parent) = endpoint_file_path(home).parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    if let Ok(text) = std::fs::read_to_string(endpoint_file_path(home)) {
+        if file_owner(&text).is_ok() {
+            return Ok(());
+        }
     }
     let text = format!(
         "{{\"pid\":{pid},\"sock\":{}}}",
@@ -39,8 +45,14 @@ pub fn write_endpoint_file(
 }
 
 /// Remove the live-endpoint file at orderly shutdown so orphaned hook
-/// children fail open instead of routing into whoever boots next.
+/// children fail open instead of routing into whoever boots next. A file
+/// naming a live owner is kept: only the owner deletes its own pointer.
 pub fn clear_endpoint_file(home: &std::path::Path) {
+    if let Ok(text) = std::fs::read_to_string(endpoint_file_path(home)) {
+        if file_owner(&text).is_ok() {
+            return;
+        }
+    }
     let _ = std::fs::remove_file(endpoint_file_path(home));
 }
 
@@ -459,6 +471,103 @@ mod tests {
         );
         assert_eq!(code, 0);
         assert!(out.is_empty());
+    }
+
+    /// A live process whose exe file name matches this test binary, so
+    /// `file_owner` accepts it as a same-binary owner: copies `sleep`
+    /// under the test binary file name and parks it. Models the outer
+    /// Forge TUI while the test plays the nested instance.
+    struct LiveOwner {
+        dir: std::path::PathBuf,
+        child: std::process::Child,
+    }
+
+    impl LiveOwner {
+        fn spawn(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "forge-owner-test-{}-{tag}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let exe_name = std::env::current_exe()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_os_string();
+            let copy = dir.join(exe_name);
+            let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+                .into_iter()
+                .find(|p| std::path::Path::new(p).exists())
+                .expect("test needs a sleep binary");
+            std::fs::copy(sleep, &copy).unwrap();
+            let child = std::process::Command::new(&copy)
+                .arg("60")
+                .spawn()
+                .expect("parked owner runs");
+            LiveOwner { dir, child }
+        }
+
+        fn pid(&self) -> u32 {
+            self.child.id()
+        }
+    }
+
+    impl Drop for LiveOwner {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn owner_home(tag: &str) -> std::path::PathBuf {
+        let home = std::env::temp_dir().join(format!(
+            "forge-owner-home-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        home
+    }
+
+    fn write_raw_endpoint(home: &std::path::Path, pid: u32, sock: &str) {
+        let path = endpoint_file_path(home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{{\"pid\":{pid},\"sock\":\"{sock}\"}}")).unwrap();
+    }
+
+    #[test]
+    fn write_endpoint_file_refuses_a_live_owners_file() {
+        // Grounded: a nested Forge boot overwrote the outer instance's
+        // endpoint.json (last writer wins), hijacking every scrubbed-env
+        // relay until it quit and deleted the file outright.
+        let owner = LiveOwner::spawn("write-refuse");
+        let home = owner_home("write-refuse");
+        write_raw_endpoint(&home, owner.pid(), "/tmp/owner.sock");
+        write_endpoint_file(&home, std::process::id(), std::path::Path::new("/tmp/nested.sock"))
+            .unwrap();
+        let text = std::fs::read_to_string(endpoint_file_path(&home)).unwrap();
+        assert!(
+            text.contains("/tmp/owner.sock"),
+            "live owner's endpoint kept: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn clear_endpoint_file_keeps_a_live_owners_file() {
+        // The nested quit deleted endpoint.json even though the outer
+        // instance owned it; every later relay failed open and the outer
+        // TUI went deaf to its sessions' hooks.
+        let owner = LiveOwner::spawn("clear-keep");
+        let home = owner_home("clear-keep");
+        write_raw_endpoint(&home, owner.pid(), "/tmp/owner.sock");
+        clear_endpoint_file(&home);
+        assert!(
+            endpoint_file_path(&home).exists(),
+            "live owner's endpoint survives a foreign shutdown"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
