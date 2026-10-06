@@ -11,3 +11,5 @@ pub mod ids;
 pub mod logging;
 pub mod paths;
 pub mod safe_text;
+#[cfg(test)]
+pub(crate) mod test_timing;

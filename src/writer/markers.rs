@@ -662,48 +662,27 @@ mod tests {
         }
     }
 
-    /// Fastest of three runs: damps one-sided scheduling noise.
-    /// Load-robust perf checks compare two sizes in the same run
-    /// instead of asserting absolute milliseconds.
-    fn min_of_3(work: impl Fn()) -> std::time::Duration {
-        let mut best = std::time::Duration::MAX;
-        for _ in 0..3 {
-            let start = std::time::Instant::now();
-            work();
-            best = best.min(start.elapsed());
-        }
-        best
-    }
-
     #[test]
-    fn one_mebibyte_doc_parses_within_budget() {
+    fn two_mebibyte_doc_parses_scales_linearly() {
         // Representative prose with fences, inline code, and a marker
         // every few paragraphs (plus hostile almost-markers).
         let para = "# Head @@fix typo@@this is teh\n\nsome `code @@x@@` and\n\n```\n@@f@@t@@\n```\n\ntail @@note hi @@end after\n\nstray @@ here\n\n";
-        let small: String = para.repeat(256 * 1024 / para.len() + 1);
-        let big: String = para.repeat(1024 * 1024 / para.len() + 1);
-        assert!(big.len() >= 1024 * 1024, "fixture is a full MiB");
+        let small: String = para.repeat(512 * 1024 / para.len() + 1);
+        let big: String = para.repeat(2 * 1024 * 1024 / para.len() + 1);
+        assert!(big.len() >= 2 * 1024 * 1024, "fixture is 2 MiB");
         let out = parse_markers(&big);
         assert!(!out.markers.is_empty(), "markers found");
         assert!(!out.errors.is_empty(), "strays found");
-        // Scaling, not wall clock: 1 MiB must cost ~4x a 256 KiB doc
-        // measured in the same run, so load cancels out. Catches
-        // superlinear blowups; the 2 s ceiling is a catastrophe guard
-        // only, not a budget.
-        let t_small = min_of_3(|| {
-            parse_markers(&small);
-        });
-        let t_big = min_of_3(|| {
-            parse_markers(&big);
-        });
-        assert!(
-            t_big < std::time::Duration::from_secs(2),
-            "catastrophe guard: 1 MiB parses in {t_big:?}"
-        );
-        let ratio = t_big.as_secs_f64() / t_small.as_secs_f64().max(1e-9);
-        assert!(
-            ratio <= 6.0,
-            "linear scaling: 1 MiB {t_big:?} vs 256 KiB {t_small:?}"
+        // Scaling, not wall clock: shared interleaved helper, 4x size
+        // ratio, both samples far above scheduler jitter.
+        crate::infra::test_timing::assert_scales_linearly(
+            "markers 2 MiB",
+            || {
+                parse_markers(&small);
+            },
+            || {
+                parse_markers(&big);
+            },
         );
     }
 }

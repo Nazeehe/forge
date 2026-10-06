@@ -640,49 +640,28 @@ mod tests {
         );
     }
 
-    /// Fastest of three runs: damps one-sided scheduling noise.
-    /// Load-robust perf checks compare two sizes in the same run
-    /// instead of asserting absolute milliseconds.
-    fn min_of_3(work: impl Fn()) -> std::time::Duration {
-        let mut best = std::time::Duration::MAX;
-        for _ in 0..3 {
-            let start = std::time::Instant::now();
-            work();
-            best = best.min(start.elapsed());
-        }
-        best
-    }
-
     #[test]
-    fn one_mebibyte_doc_stays_within_budget() {
+    fn two_mebibyte_doc_stays_linear() {
         // Representative prose: headings, emphasis, code, fences,
         // lists, quotes, links, rules, tables.
         let para = "# Head **bold** *em* `code` [t](http://x)\n\n- item 1\n- item 2\n\n> quote\n\n```rs\nlet x = 1;\n```\n\n| a | b |\n\n---\n";
-        let small: String = para.repeat(256 * 1024 / para.len() + 1);
-        let big: String = para.repeat(1024 * 1024 / para.len() + 1);
-        assert!(big.len() >= 1024 * 1024, "fixture is a full MiB");
+        let small: String = para.repeat(512 * 1024 / para.len() + 1);
+        let big: String = para.repeat(2 * 1024 * 1024 / para.len() + 1);
+        assert!(big.len() >= 2 * 1024 * 1024, "fixture is 2 MiB");
         let rows = big.lines().count();
         let out = highlight_markdown(&big, 0, rows);
         assert!(!out.is_empty(), "the big doc highlights");
-        // Scaling, not wall clock: 1 MiB must cost ~4x a 256 KiB doc
-        // measured in the same run, so load cancels out. Catches
-        // superlinear blowups; the 2 s ceiling is a catastrophe guard
-        // only, not a budget.
+        // Scaling, not wall clock: shared interleaved helper, 4x size
+        // ratio, both samples far above scheduler jitter.
         let small_rows = small.lines().count();
-        let t_small = min_of_3(|| {
-            highlight_markdown(&small, 0, small_rows);
-        });
-        let t_big = min_of_3(|| {
-            highlight_markdown(&big, 0, rows);
-        });
-        assert!(
-            t_big < std::time::Duration::from_secs(2),
-            "catastrophe guard: 1 MiB highlights in {t_big:?}"
-        );
-        let ratio = t_big.as_secs_f64() / t_small.as_secs_f64().max(1e-9);
-        assert!(
-            ratio <= 6.0,
-            "linear scaling: 1 MiB {t_big:?} vs 256 KiB {t_small:?}"
+        crate::infra::test_timing::assert_scales_linearly(
+            "markdown 2 MiB",
+            || {
+                highlight_markdown(&small, 0, small_rows);
+            },
+            || {
+                highlight_markdown(&big, 0, rows);
+            },
         );
     }
 }
