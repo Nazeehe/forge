@@ -64,6 +64,28 @@ pub struct RunMarker {
     pub note: Option<String>,
 }
 
+/// Margin progress mark for one run marker (M7, spec §10): the
+/// re-anchor key after live reloads. The pre-run char spans drift
+/// as the agent edits, so the paint re-parses and matches on the
+/// raw verb/prompt (first line-text match wins); a user edit on
+/// that line changes the line text and drops the mark.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunMark {
+    /// The run this mark belongs to.
+    pub run_id: u64,
+    /// Doc-wide marker index (the report vocabulary).
+    pub doc_index: usize,
+    /// Raw verb word (`None` when the header has none).
+    pub verb: Option<String>,
+    /// Raw prompt text.
+    pub prompt: String,
+    /// The marker's first buffer line at mark time.
+    pub line_text: String,
+    /// Pending → `⏳`, Started → `🔄`, Failed/Skipped → `❌`;
+    /// Done removes the mark.
+    pub status: RunMarkerStatus,
+}
+
 /// A run is open until done, turn-end, or timeout closes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WriterRunState {
@@ -152,8 +174,8 @@ impl AppState {
             &subset,
         )
         .map_err(|e| e.to_string())?;
-        for (marker, doc_index) in process.markers.iter_mut().zip(doc_indexes) {
-            marker.index = doc_index;
+        for (marker, doc_index) in process.markers.iter_mut().zip(doc_indexes.iter()) {
+            marker.index = *doc_index;
         }
         let Some(session) = self.writers.get_mut(&id) else {
             return Err("no Writer document open for this session".to_string());
@@ -196,6 +218,33 @@ impl AppState {
         };
         session.runs.push(run);
         session.queue.push_back(body);
+        // M7 margin marks: a new run retires previous runs' marks
+        // (old ❌s clear), then every riding marker shows ⏳ at
+        // once — no waiting for the agent. Raw verb/prompt plus the
+        // first buffer line form the reload re-anchor key.
+        session.run_marks.clear();
+        let chars: Vec<char> = doc_text.chars().collect();
+        let slice = |range: std::ops::Range<usize>| -> String {
+            chars.get(range).unwrap_or(&[]).iter().collect()
+        };
+        for (marker, doc_index) in subset.markers.iter().zip(doc_indexes) {
+            let mut line_start = marker.whole.start.min(chars.len());
+            while line_start > 0 && chars[line_start - 1] != '\n' {
+                line_start -= 1;
+            }
+            let line_text: String = chars[line_start..]
+                .iter()
+                .take_while(|&&c| c != '\n')
+                .collect();
+            session.run_marks.push(RunMark {
+                run_id: rid,
+                doc_index,
+                verb: marker.verb.clone().map(|v| slice(v)),
+                prompt: slice(marker.prompt.clone()),
+                line_text,
+                status: RunMarkerStatus::Pending,
+            });
+        }
         session.error = None;
         self.dirty = true;
         Ok(rid)
@@ -240,6 +289,18 @@ impl AppState {
         marker.status = status;
         marker.note = note;
         run.reported = true;
+        // M7 margin marks follow: done removes the mark (the text
+        // is gone anyway), every other report re-lights it.
+        let doc_index = index as usize;
+        if status == RunMarkerStatus::Done {
+            session.run_marks.retain(|m| !(m.run_id == rid && m.doc_index == doc_index));
+        } else if let Some(mark) = session
+            .run_marks
+            .iter_mut()
+            .find(|m| m.run_id == rid && m.doc_index == doc_index)
+        {
+            mark.status = status;
+        }
         self.dirty = true;
         Ok(format!(
             r#"{{"reported":true,"run":{rid},"index":{index},"status":"{}"}}"#,
@@ -311,6 +372,9 @@ impl AppState {
         marker.status = RunMarkerStatus::Done;
         marker.note = Some(answer.clone());
         run.reported = true;
+        // Answers close the marker: the margin mark goes with it.
+        let doc_index = index as usize;
+        session.run_marks.retain(|m| !(m.run_id == rid && m.doc_index == doc_index));
         session.push_thread_note(crate::app::writer::WriterThreadEntry {
             request_id: 0,
             answer,
@@ -414,6 +478,15 @@ impl AppState {
             }
             _ => (false, String::new()),
         };
+        // M7: only failed/skipped marks survive the finish (❌
+        // persists); pending and working marks retire with the run.
+        session.run_marks.retain(|m| {
+            m.run_id != run_id
+                || matches!(
+                    m.status,
+                    RunMarkerStatus::Failed | RunMarkerStatus::Skipped
+                )
+        });
         session.push_thread_note(crate::app::writer::WriterThreadEntry {
             request_id: 0,
             answer: note,

@@ -581,6 +581,120 @@ fn answer_auto_opens_the_panel() {
     finish(&mut state, id, &dir);
 }
 
+fn margin_marks(
+    state: &crate::app::AppState,
+    id: crate::session::SessionId,
+) -> Vec<crate::app::writer::runs::RunMark> {
+    state.writers.get(&id).unwrap().run_marks.clone()
+}
+
+fn report(
+    state: &mut crate::app::AppState,
+    run: &str,
+    rid: u64,
+    args_tail: &str,
+) -> String {
+    comms_reply(
+        state, run, "writer_run_report",
+        &format!(r#"{{"run":{rid},{args_tail}}}"#),
+    )
+}
+
+#[test]
+fn process_start_marks_every_riding_marker_queued() {
+    use crate::app::writer::runs::RunMarkerStatus;
+    let (mut state, id, _run, dir) = started_doc();
+    let rid = start(&mut state, id);
+    let marks = margin_marks(&state, id);
+    assert_eq!(marks.len(), 2, "every riding marker: {marks:?}");
+    assert!(
+        marks.iter().all(|m| m.run_id == rid && m.status == RunMarkerStatus::Pending),
+        "all queued before any report: {marks:?}"
+    );
+    assert_eq!(marks[0].doc_index, 0);
+    assert_eq!(marks[0].verb.as_deref(), Some("fix"));
+    assert_eq!(marks[0].prompt, "typo");
+    assert_eq!(
+        marks[0].line_text, "alpha @@fix typo@@this is teh@@",
+        "first buffer line at mark time"
+    );
+    assert_eq!(marks[1].doc_index, 1);
+    assert_eq!(marks[1].prompt, "capital");
+    finish(&mut state, id, &dir);
+}
+
+#[test]
+fn report_moves_marks_started_then_done_removes() {
+    use crate::app::writer::runs::RunMarkerStatus;
+    let (mut state, id, run, dir) = started_doc();
+    let rid = start(&mut state, id);
+    let reply = report(&mut state, &run, rid, r#""index":0,"status":"started""#);
+    assert!(reply.contains(r#""reported":true"#), "reply: {reply}");
+    assert_eq!(
+        margin_marks(&state, id)[0].status,
+        RunMarkerStatus::Started,
+        "started lights working"
+    );
+    let reply = report(&mut state, &run, rid, r#""index":0,"status":"done""#);
+    assert!(reply.contains(r#""reported":true"#), "reply: {reply}");
+    let marks = margin_marks(&state, id);
+    assert_eq!(marks.len(), 1, "done removes the mark: {marks:?}");
+    assert_eq!(marks[0].doc_index, 1);
+    let reply = report(
+        &mut state, &run, rid,
+        r#""index":1,"status":"failed","note":"boom""#,
+    );
+    assert!(reply.contains(r#""reported":true"#), "reply: {reply}");
+    assert_eq!(
+        margin_marks(&state, id)[0].status,
+        RunMarkerStatus::Failed,
+        "failed stays"
+    );
+    finish(&mut state, id, &dir);
+}
+
+#[test]
+fn finish_keeps_failures_and_a_new_run_clears_them() {
+    use crate::app::writer::runs::RunMarkerStatus;
+    let (mut state, id, run, dir) = started_doc();
+    let rid = start(&mut state, id);
+    report(&mut state, &run, rid, r#""index":0,"status":"failed""#);
+    let done = comms_reply(
+        &mut state, &run, "writer_run_done",
+        &format!(r#"{{"run":{rid},"summary":"s"}}"#),
+    );
+    assert!(done.contains(r#""done":true"#), "done: {done}");
+    let marks = margin_marks(&state, id);
+    assert_eq!(marks.len(), 1, "only the failure survives: {marks:?}");
+    assert_eq!(marks[0].status, RunMarkerStatus::Failed);
+    let rid2 = start(&mut state, id);
+    assert_ne!(rid2, rid, "second run");
+    let marks = margin_marks(&state, id);
+    assert_eq!(marks.len(), 2, "fresh marks: {marks:?}");
+    assert!(
+        marks.iter().all(|m| m.run_id == rid2 && m.status == RunMarkerStatus::Pending),
+        "old failures retired: {marks:?}"
+    );
+    finish(&mut state, id, &dir);
+}
+
+#[test]
+fn revert_clears_margin_marks() {
+    let (mut state, id, run, dir) = started_doc();
+    let rid = start(&mut state, id);
+    report(&mut state, &run, rid, r#""index":0,"status":"failed""#);
+    let done = comms_reply(
+        &mut state, &run, "writer_run_done",
+        &format!(r#"{{"run":{rid},"summary":"s"}}"#),
+    );
+    assert!(done.contains(r#""done":true"#), "done: {done}");
+    assert_eq!(margin_marks(&state, id).len(), 1);
+    let pre = doc_text(&state, id);
+    state.writer_process_revert(id, pre);
+    assert!(margin_marks(&state, id).is_empty(), "revert starts over");
+    finish(&mut state, id, &dir);
+}
+
 #[test]
 fn process_caps_at_64_markers_with_a_process_again_note() {
     let (mut state, id, run, dir) = writer_agent();

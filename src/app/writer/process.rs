@@ -334,6 +334,8 @@ impl AppState {
             session.proposals.on_edit(&(0..total));
             session.reset_fence_cache();
             session.selection = None;
+            // Revert starts over: no margin mark survives it.
+            session.run_marks.clear();
         }
         // The file follows the buffer (save cannot conflict: the
         // agent is done and nobody else writes mid-revert).

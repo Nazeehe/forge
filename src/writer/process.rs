@@ -45,7 +45,8 @@ impl ProcessShape {
 
 /// One parsed marker as the agent sees it: position, shape, and
 /// capped excerpts (the file holds the rest). `whole` is the
-/// pre-run char span, for the live `⟳` gutter rows.
+/// pre-run char span, for the finish-time violation walk (the M7
+/// margin re-anchors from the live parse instead).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessMarker {
     pub index: usize,

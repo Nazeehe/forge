@@ -128,6 +128,13 @@ fn paint_doc(
     // Marker cache follows the revision too: one O(n) parse per
     // edit, never per frame on a static buffer.
     crate::app::writer::markers::refresh_markers(session, &buffer, rev);
+    // M7 margin marks re-anchor to the fresh parse here (pruning
+    // dead marks), so the glyphs below follow their markers.
+    let margin: Vec<(usize, crate::app::writer::markers::MarginGlyph)> = {
+        let parsed = &session.markers;
+        let marks = &mut session.run_marks;
+        crate::app::writer::markers::run_margin_marks(&buffer, parsed, marks)
+    };
     let editor = session.editor.as_mut().expect("editor built on open");
     // Fresh highlights every frame: stale ranges must never linger.
     editor.clear_highlights();
@@ -281,6 +288,33 @@ fn paint_doc(
                 .sum::<isize>()
         };
         let base = prefix(cursor_row);
+        // M7 run margin: the 2-cell side padding left of the text
+        // (frame border plus one), on each marked row's FIRST
+        // screen row only. The editor rect never moves, so the text
+        // column is identical with or without glyphs.
+        let margin_x = area.x.saturating_add(1);
+        let mut margin_rows: Vec<u16> = Vec::with_capacity(margin.len());
+        for (row, glyph) in &margin {
+            let y =
+                edit_rect.y as isize + rel + (prefix(*row) as isize - base);
+            if y >= edit_rect.y as isize
+                && y < (edit_rect.y + edit_rect.height) as isize
+            {
+                let style = match glyph {
+                    crate::app::writer::markers::MarginGlyph::Queued => style(Role::Warning),
+                    crate::app::writer::markers::MarginGlyph::Working => style(Role::Info),
+                    crate::app::writer::markers::MarginGlyph::Failed => style(Role::Danger),
+                };
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![Span::styled(
+                        glyph.symbol(),
+                        style,
+                    )])),
+                    Rect::new(margin_x, y as u16, 2, 1),
+                );
+                margin_rows.push(y as u16);
+            }
+        }
         // The range's first/last (row, col): partial rows only mark
         // the wrapped chunks the range touches.
         let (first_row, first_col) = range_mark_start(&buffer, &mark_range);
@@ -303,6 +337,10 @@ fn paint_doc(
             for k in from..=to.min(last_chunk) {
                 let y =
                     edit_rect.y as isize + rel + (prefix(row) as isize + k as isize - base);
+                // The run margin wins shared rows during a run.
+                if margin_rows.contains(&(y as u16)) {
+                    continue;
+                }
                 if y >= edit_rect.y as isize
                     && y < (edit_rect.y + edit_rect.height) as isize
                     && gut_rect.width > 0
@@ -326,6 +364,10 @@ fn paint_doc(
             for k in 0..=height.saturating_sub(1) {
                 let y =
                     edit_rect.y as isize + rel + (prefix(row) as isize + k as isize - base);
+                // The run margin wins shared rows during a run.
+                if margin_rows.contains(&(y as u16)) {
+                    continue;
+                }
                 if y >= edit_rect.y as isize
                     && y < (edit_rect.y + edit_rect.height) as isize
                     && gut_rect.width > 0
@@ -334,28 +376,6 @@ fn paint_doc(
                         Paragraph::new(Line::from(vec![Span::styled(
                             "✕",
                             style(Role::Danger),
-                        )])),
-                        Rect::new(gut_rect.x, y as u16, 1, 1),
-                    );
-                }
-            }
-        }
-        // The run's started markers spin every wrapped chunk of
-        // their rows with `⟳`, after the error marks: a started
-        // marker parsed cleanly, so the two never share a row.
-        for row in crate::app::writer::markers::process_spin_rows(&buffer, session) {
-            let height = wrapped_height(doc_rows[row], width);
-            for k in 0..=height.saturating_sub(1) {
-                let y =
-                    edit_rect.y as isize + rel + (prefix(row) as isize + k as isize - base);
-                if y >= edit_rect.y as isize
-                    && y < (edit_rect.y + edit_rect.height) as isize
-                    && gut_rect.width > 0
-                {
-                    f.render_widget(
-                        Paragraph::new(Line::from(vec![Span::styled(
-                            "⟳",
-                            style(Role::Info),
                         )])),
                         Rect::new(gut_rect.x, y as u16, 1, 1),
                     );

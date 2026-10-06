@@ -229,6 +229,10 @@ pub struct WriterSession {
     pub process: Option<process::ProcessLock>,
     /// Counts of the last finished run for the status row.
     pub last_run: Option<process::LastRun>,
+    /// Margin progress marks (M7, spec §10): one per run marker,
+    /// re-anchored by the paint after every reload. A new run
+    /// retires the previous runs' marks; revert clears them all.
+    pub run_marks: Vec<runs::RunMark>,
     /// Next run id (1-based, like requests).
     pub next_run_id: u64,
     pub next_request_id: u64,

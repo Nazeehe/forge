@@ -115,36 +115,96 @@ pub fn error_at(out: &ParseOutput, offset: usize) -> Option<&MarkerError> {
     out.errors.iter().find(|e| e.range.contains(&offset))
 }
 
-/// Buffer rows of the locked run's started markers: the live `⟳`
-/// gutter follows the reported index. Spans are pre-run positions
-/// and drift as the agent edits (the M2 wrapped-row drift, logged
-/// for W6); the mark is brightest right after `started`, before
-/// the write lands.
-pub fn process_spin_rows(text: &str, session: &WriterSession) -> Vec<usize> {
-    use crate::app::writer::runs::{RunMarkerStatus, WriterRunState};
-    let Some(lock) = session.process.as_ref() else {
-        return Vec::new();
-    };
-    let Some(run) = session
-        .runs
-        .iter()
-        .find(|r| r.id == lock.run_id && matches!(r.state, WriterRunState::Active))
-    else {
-        return Vec::new();
-    };
-    let mut rows = Vec::new();
-    for marker in &run.markers {
-        if marker.status != RunMarkerStatus::Started {
-            continue;
-        }
-        let first = offset_to_index2(text, marker.marker.whole.start).row;
-        let last = offset_to_index2(text, marker.marker.whole.end.saturating_sub(1)).row;
-        for row in first..=last {
-            if !rows.contains(&row) {
-                rows.push(row);
-            }
+/// Margin glyph state (M7, spec §10): the shape carries the
+/// state, never color alone — `⏳` queued, `🔄` working, `❌`
+/// failed or skipped. Sort order is paint priority: on a shared
+/// row the highest glyph wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MarginGlyph {
+    Queued,
+    Working,
+    Failed,
+}
+
+impl MarginGlyph {
+    /// The painted symbol: single codepoint, no VS16.
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            MarginGlyph::Queued => "⏳",
+            MarginGlyph::Working => "🔄",
+            MarginGlyph::Failed => "❌",
         }
     }
+
+    fn of(status: super::runs::RunMarkerStatus) -> Option<Self> {
+        use super::runs::RunMarkerStatus;
+        match status {
+            RunMarkerStatus::Pending => Some(MarginGlyph::Queued),
+            RunMarkerStatus::Started => Some(MarginGlyph::Working),
+            RunMarkerStatus::Failed | RunMarkerStatus::Skipped => Some(MarginGlyph::Failed),
+            RunMarkerStatus::Done => None,
+        }
+    }
+}
+
+/// Re-anchor margin marks to the CURRENT parse (M7 tracking): the
+/// pre-run spans drift as the agent edits, so marks match on the
+/// raw verb/prompt, taking the first candidate whose whole-start
+/// line still equals the mark-time line. A user edit on that line
+/// (or a vanished marker) drops the mark; shifts elsewhere keep
+/// it. Returns buffer rows with glyphs, deduped to the highest
+/// glyph per row, and prunes dead marks in place.
+pub fn run_margin_marks(
+    text: &str,
+    parsed: &ParseOutput,
+    marks: &mut Vec<super::runs::RunMark>,
+) -> Vec<(usize, MarginGlyph)> {
+    let chars: Vec<char> = text.chars().collect();
+    let slice = |range: std::ops::Range<usize>| -> String {
+        chars.get(range).unwrap_or(&[]).iter().collect()
+    };
+    let line_of = |offset: usize| -> (usize, String) {
+        let row = offset_to_index2(text, offset.min(chars.len())).row;
+        let mut start = offset.min(chars.len());
+        while start > 0 && chars[start - 1] != '\n' {
+            start -= 1;
+        }
+        let line: String = chars[start..]
+            .iter()
+            .take_while(|&&c| c != '\n')
+            .collect();
+        (row, line)
+    };
+    let mut kept = Vec::with_capacity(marks.len());
+    let mut rows: Vec<(usize, MarginGlyph)> = Vec::with_capacity(marks.len());
+    for mark in marks.drain(..) {
+        let Some(glyph) = MarginGlyph::of(mark.status) else {
+            continue;
+        };
+        let anchored = parsed
+            .markers
+            .iter()
+            .filter(|m| {
+                m.verb.clone().map(|v| slice(v)) == mark.verb
+                    && slice(m.prompt.clone()) == mark.prompt
+            })
+            .map(|m| line_of(m.whole.start))
+            .find(|(_, line)| *line == mark.line_text);
+        match anchored {
+            Some((row, _)) => {
+                // Shared rows keep the highest glyph (❌ over 🔄
+                // over ⏳): one margin, one symbol.
+                match rows.iter_mut().find(|(r, _)| *r == row) {
+                    Some(slot) if slot.1 < glyph => slot.1 = glyph,
+                    Some(_) => {}
+                    None => rows.push((row, glyph)),
+                }
+                kept.push(mark);
+            }
+            None => {}
+        }
+    }
+    *marks = kept;
     rows.sort();
     rows
 }
@@ -323,5 +383,83 @@ mod tests {
         let out = parse_markers(text);
         assert_eq!(out.errors.len(), 1);
         assert_eq!(error_rows(text, &out), vec![1, 2]);
+    }
+
+    use crate::app::writer::runs::{RunMark, RunMarkerStatus};
+
+    fn queued_mark(run_id: u64, doc_index: usize, verb: Option<&str>, prompt: &str, line: &str) -> RunMark {
+        RunMark {
+            run_id,
+            doc_index,
+            verb: verb.map(str::to_string),
+            prompt: prompt.to_string(),
+            line_text: line.to_string(),
+            status: RunMarkerStatus::Pending,
+        }
+    }
+
+    #[test]
+    fn margin_anchor_follows_markers_as_lines_shift() {
+        let text = "alpha @@fix typo@@this is teh@@\n\n@@ask capital@@Paris@@\n";
+        let mut marks = vec![
+            queued_mark(1, 0, Some("fix"), "typo", "alpha @@fix typo@@this is teh@@"),
+            queued_mark(1, 1, Some("ask"), "capital", "@@ask capital@@Paris@@"),
+        ];
+        let out = parse_markers(text);
+        let rows = run_margin_marks(text, &out, &mut marks);
+        assert_eq!(rows, vec![(0, MarginGlyph::Queued), (2, MarginGlyph::Queued)]);
+        // A reload inserts a line above: both glyphs follow.
+        let shifted = "new head\n".to_string() + text;
+        let out = parse_markers(&shifted);
+        let rows = run_margin_marks(&shifted, &out, &mut marks);
+        assert_eq!(rows, vec![(1, MarginGlyph::Queued), (3, MarginGlyph::Queued)]);
+        assert_eq!(marks.len(), 2, "shifts never drop marks");
+    }
+
+    #[test]
+    fn margin_anchor_drops_a_mark_whose_line_changed() {
+        let text = "alpha @@fix typo@@this is teh@@\n\n@@ask capital@@Paris@@\n";
+        let mut marks = vec![
+            queued_mark(1, 0, Some("fix"), "typo", "alpha @@fix typo@@this is teh@@"),
+            queued_mark(1, 1, Some("ask"), "capital", "@@ask capital@@Paris@@"),
+        ];
+        // The user fixes the typo on the first marker's line: the
+        // marker still parses, but its line changed.
+        let edited = "alpha @@fix typo@@this is the@@\n\n@@ask capital@@Paris@@\n";
+        let out = parse_markers(edited);
+        let rows = run_margin_marks(edited, &out, &mut marks);
+        assert_eq!(rows, vec![(2, MarginGlyph::Queued)], "edited line drops");
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].doc_index, 1);
+    }
+
+    #[test]
+    fn margin_anchor_drops_vanished_markers() {
+        let text = "alpha @@fix typo@@this is teh@@\n\n@@ask capital@@Paris@@\n";
+        let mut marks = vec![
+            queued_mark(1, 0, Some("fix"), "typo", "alpha @@fix typo@@this is teh@@"),
+            queued_mark(1, 1, Some("ask"), "capital", "@@ask capital@@Paris@@"),
+        ];
+        let gone = "alpha done\n\n@@ask capital@@Paris@@\n";
+        let out = parse_markers(gone);
+        let rows = run_margin_marks(gone, &out, &mut marks);
+        assert_eq!(rows, vec![(2, MarginGlyph::Queued)]);
+        assert!(marks.iter().all(|m| m.doc_index == 1));
+    }
+
+    #[test]
+    fn margin_rows_dedupe_sharing_a_row_to_the_highest_glyph() {
+        let text = "@@fix a@@b@@ @@note c@@end\n";
+        let mut marks = vec![
+            RunMark {
+                status: RunMarkerStatus::Failed,
+                ..queued_mark(1, 0, Some("fix"), "a", "@@fix a@@b@@ @@note c@@end")
+            },
+            queued_mark(1, 1, Some("note"), "c", "@@fix a@@b@@ @@note c@@end"),
+        ];
+        let out = parse_markers(text);
+        assert_eq!(out.markers.len(), 2, "fixture shares row 0");
+        let rows = run_margin_marks(text, &out, &mut marks);
+        assert_eq!(rows, vec![(0, MarginGlyph::Failed)], "❌ wins the row");
     }
 }

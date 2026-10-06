@@ -905,7 +905,9 @@ fn writer_process_pill_locks_and_blocks_typing() {
     // Click (Process) through the real mouse path.
     let (x, y) = h.find("Process").expect("process pill");
     h.press(x, y);
-    h.wait_for("processingrun1", "lock status");
+    // M7: the hourglass lands on the next frame, before any agent
+    // report (the fake never reports at all).
+    h.wait_for("⏳", "hourglass margin");
     // Typing is refused with the notice; the marker text is intact.
     h.send("x");
     let text = h.wait_for("Processing", "lock notice");
@@ -914,7 +916,8 @@ fn writer_process_pill_locks_and_blocks_typing() {
     // The pill now offers Stop; arrow keys still move (no notice).
     h.send("\x1b[C");
     let text = h.settle();
-    assert!(text.contains("processingrun1") || text.contains("processing run 1"), "still locked");
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squashed.contains("⏳"), "still locked: {squashed:?}");
     // Esc stops: the fake harness carries no interrupt bytes, so the
     // run asks to wind down and stays locked (the ESC-bytes path is
     // covered in-repo against the codex adapter).
@@ -924,14 +927,40 @@ fn writer_process_pill_locks_and_blocks_typing() {
     assert!(squashed.contains("@@fixtypo@@thisisteh@@"), "doc intact: {squashed:?}");
     // Esc again force-stops: the run finishes at once (the status
     // keeps its counts) and typing lands in the freed document.
+    // The pending hourglass retires with the run.
     h.send("\x1b");
-    h.wait_for("Run:0done", "force stop");
+    let text = h.wait_for("Run:0done", "force stop");
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(!squashed.contains("⏳"), "glyph removed: {squashed:?}");
     h.send("\x1b[H");
     h.send("x");
     std::thread::sleep(Duration::from_millis(300));
     let text = h.settle();
     let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(squashed.contains("x@@fixtypo@@thisisteh@@"), "typing lands: {squashed:?}");
+}
+
+/// M7: Process shows the queued hourglass on the next frame, on
+/// the marker's own row, before the silent fake reports anything.
+#[test]
+fn writer_process_shows_hourglass_on_the_next_frame() {
+    let mut h = boot(&[("run.md", "alpha @@fix typo@@this is teh@@ gamma\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("run.md\r");
+    h.wait_for("rev0", "doc open");
+    let (x, y) = h.find("Process").expect("process pill");
+    h.press(x, y);
+    h.wait_for("⏳", "hourglass on the next frame");
+    let (gx, gy) = h.find("⏳").expect("hourglass cell");
+    let row: String = row_cells(&h.parser, gy);
+    assert!(row.contains("@@fix"), "hourglass rides the marker row: {row:?}");
+    assert!(gx < 4, "hourglass lives in the left margin: {row:?}");
 }
 
 /// M4: the marker protocol round-trips through the real editor. The

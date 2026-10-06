@@ -231,8 +231,9 @@ pub(super) fn paint_chat(
 /// rect: revision, 1-based line:col, word/char counts (plus the
 /// selection's when one exists), agent activity word, the word
 /// `unsaved` while dirty, the last save result, and the process
-/// run state (`processing run N` while locked; `Run: D done…`
-/// with `(Details)` for the last finished run).
+/// run state (`Waiting for agent… (Stop)` while the request is
+/// queued, `run N: W working · Q queued` once delivered; `Run: D
+/// done…` with `(Details)` for the last finished run).
 pub fn status_text(
     session: &WriterSession,
     buffer: &str,
@@ -285,7 +286,55 @@ pub fn status_text(
         ));
     }
     if let Some(lock) = session.process.as_ref() {
-        text.push_str(&format!(" · processing run {}", lock.run_id));
+        use crate::app::writer::runs::{RunMarkerStatus, WriterRunState};
+        let active = session
+            .runs
+            .iter()
+            .find(|r| r.id == lock.run_id && matches!(r.state, WriterRunState::Active));
+        match active {
+            // The request still queued: the ⏳s are already visible.
+            Some(_) if session.queue.iter().any(|q| {
+                q.contains(&format!("<writer-process id=\"{}\"", lock.run_id))
+            }) =>
+            {
+                text.push_str(" · Waiting for agent… (Stop)");
+            }
+            Some(run) => {
+                let working = run
+                    .markers
+                    .iter()
+                    .filter(|m| m.status == RunMarkerStatus::Started)
+                    .count();
+                let queued = run
+                    .markers
+                    .iter()
+                    .filter(|m| m.status == RunMarkerStatus::Pending)
+                    .count();
+                text.push_str(&format!(
+                    " · run {}: {working} working · {queued} queued",
+                    lock.run_id
+                ));
+                let failed = run
+                    .markers
+                    .iter()
+                    .filter(|m| m.status == RunMarkerStatus::Failed)
+                    .count();
+                if failed > 0 {
+                    text.push_str(&format!(" · {failed} failed"));
+                }
+                let skipped = run
+                    .markers
+                    .iter()
+                    .filter(|m| m.status == RunMarkerStatus::Skipped)
+                    .count();
+                if skipped > 0 {
+                    text.push_str(&format!(" · {skipped} skipped"));
+                }
+            }
+            None => {
+                text.push_str(&format!(" · processing run {}", lock.run_id));
+            }
+        }
     }
     if let Some(last) = session.last_run.as_ref() {
         text.push_str(&format!(" · Run: {} done", last.done));
