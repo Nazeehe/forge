@@ -977,12 +977,12 @@
         });
         let shut = paint_doc_to(&mut session, 120, 30);
         let row = row_text(&shut, layout.error.y, layout.error.x, layout.error.x + 120);
-        assert!(row.contains("▸Replace"), "closed toggle: {row:?}");
-        assert!(row.contains("Alt+H"), "hint: {row:?}");
+        assert!(row.contains("Replace ▸"), "closed toggle: {row:?}");
+        assert!(row.contains("Alt+H replace"), "hint: {row:?}");
         session.find.as_mut().unwrap().replace_open = true;
         let open = paint_doc_to(&mut session, 120, 30);
         let row = row_text(&open, layout.error.y, layout.error.x, layout.error.x + 120);
-        assert!(row.contains("▾Replace"), "open toggle: {row:?}");
+        assert!(row.contains("Replace ▾"), "open toggle: {row:?}");
         assert!(row.contains("Replace next"), "action pill: {row:?}");
         assert!(row.contains("Replace all"), "action pill: {row:?}");
     }

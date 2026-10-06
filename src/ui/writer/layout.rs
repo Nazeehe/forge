@@ -558,8 +558,9 @@ pub fn find_case_label(find: &crate::app::writer::WriterFind) -> &'static str {
 }
 
 /// Lay out the bar left to right: `Find [query] count (Aa)` plus
-/// the replace toggle `(▸Replace)` (closed, with an `Alt+H` hint)
-/// or `(▾Replace) [text] (Replace next) (Replace all)` (open).
+/// the replace toggle `(Replace ▸)` (closed, with an `Alt+H
+/// replace` hint) or `(Replace ▾) [text] (Replace next)
+/// (Replace all)` (open).
 /// Fixed segments reserve first; the fields split what is left
 /// (query 3/5, replace 2/5). Anything past the slot edge clips in
 /// the paint; the pills keep their rects.
@@ -576,9 +577,9 @@ pub fn find_bar_rects(
     let counter = find_counter(find);
     let counter_w = counter.chars().count() as u16;
     let case_w = pill_width(find_case_label(find), find.focus == FindFocus::CaseBtn);
-    // The toggle always carries a mark (▸/▾, or > focused), so its
+    // The toggle label always carries its trailing glyph, so its
     // width never moves between states.
-    let toggle_w = pill_width("Replace", true);
+    let toggle_w = pill_width("Replace ▸", false);
     let replace_open = find.replace_open;
     let replace_next_w = pill_width("Replace next", find.focus == FindFocus::ReplaceNextBtn);
     let replace_all_w = pill_width("Replace all", find.focus == FindFocus::ReplaceAllBtn);
@@ -592,7 +593,7 @@ pub fn find_bar_rects(
     if replace_open {
         fixed += 1 + replace_next_w + 1 + replace_all_w;
     } else {
-        fixed += 6;
+        fixed += 14;
     }
     // Past the `Find ` label; the query field owns the rest.
     let mut x = slot.x.saturating_add(5);

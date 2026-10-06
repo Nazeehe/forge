@@ -132,6 +132,16 @@ impl AppState {
                 self.writer_delete_word(id, true);
                 return;
             }
+            // Reliable word-kill twin: legacy terminals deliver
+            // Ctrl+Backspace as 0x08, which crossterm decodes as
+            // Ctrl+H (never as Backspace+Control), so the Control
+            // arm only fires on enhancement terminals. Alt+Backspace
+            // arrives as ESC 0x7F everywhere and always deletes a
+            // word here.
+            (KeyCode::Backspace, KeyModifiers::ALT) => {
+                self.writer_delete_word(id, true);
+                return;
+            }
             (KeyCode::Delete, KeyModifiers::CONTROL) => {
                 self.writer_delete_word(id, false);
                 return;

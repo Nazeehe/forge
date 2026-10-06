@@ -53,21 +53,22 @@ pub fn paint_find_bar(
         case_focused,
         case_focused.then_some('>'),
     ));
-    // The replace toggle doubles as the field's label: ▸ opens,
-    // ▾ collapses. Closed, the Alt+H twin rides along as muted
-    // text so replace is discoverable without the shortcut.
+    // The replace toggle doubles as the field's label: `Replace ▸`
+    // opens, `Replace ▾` collapses. Closed, the Alt+H twin rides
+    // along as muted hint text so replace is discoverable without
+    // the shortcut. The glyph is the state cue (never color alone);
+    // Tab focus shows as the emphasized fill, with no `>` mark, so
+    // the pill never changes width between states.
     spans.push(Span::raw(" ".to_string()));
     let toggle_focused = find.focus == FindFocus::ToggleBtn;
     spans.extend(pill_spans(
-        "Replace",
-        toggle_focused,
-        Some(if toggle_focused {
-            '>'
-        } else if find.replace_open {
-            '▾'
+        if find.replace_open {
+            "Replace ▾"
         } else {
-            '▸'
-        }),
+            "Replace ▸"
+        },
+        toggle_focused,
+        None,
     ));
     if find.replace_open {
         spans.push(Span::raw(" ".to_string()));
@@ -92,7 +93,10 @@ pub fn paint_find_bar(
             all_focused.then_some('>'),
         ));
     } else {
-        spans.push(Span::styled(" Alt+H".to_string(), style(Role::Muted)));
+        spans.push(Span::styled(
+            " Alt+H replace".to_string(),
+            style(Role::Muted),
+        ));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), slot);
     if session.focus != WriterFocus::Editor {

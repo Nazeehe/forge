@@ -99,6 +99,11 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
                 }
                 return;
             }
+            // 0x08 decodes here: intentional Ctrl+H, but also
+            // legacy Ctrl+Backspace and ^H-mode Backspace keys,
+            // which share the byte and can never be told apart
+            // (industry-standard ambiguity; terminals should send
+            // 0x7F for Backspace). Alt+H is the reliable twin.
             KeyCode::Char('h') => {
                 state.writer_find_open(id, true);
                 return;

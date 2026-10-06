@@ -942,14 +942,14 @@
         let now = std::time::Instant::now();
         handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('f')), now);
         let buf = paint_full(&mut state, id);
-        let (x, y) = find_text(&buf, "▸Replace");
+        let (x, y) = find_text(&buf, "Replace ▸");
         super::super::handle_writer_mouse(&mut state, click_at(x, y));
         assert!(
             state.writers.get(&id).unwrap().find.as_ref().is_some_and(|f| f.replace_open),
             "toggle opened"
         );
         let buf = paint_full(&mut state, id);
-        let (x, y) = find_text(&buf, "▾Replace");
+        let (x, y) = find_text(&buf, "Replace ▾");
         super::super::handle_writer_mouse(&mut state, click_at(x, y));
         assert!(
             state.writers.get(&id).unwrap().find.as_ref().is_some_and(|f| !f.replace_open),

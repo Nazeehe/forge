@@ -410,3 +410,26 @@ fn replace_toggle_opens_and_collapses_via_tab() {
     assert!(state.manager.remove(id));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn replace_all_redo_restores_replaced_text() {
+    let (mut state, id, dir) = writer_agent();
+    std::fs::write(dir.join("d.md"), "aa aa aa").unwrap();
+    open_doc(&mut state, id, "d.md");
+    state.open_writer_overlay();
+    let mut router = InputRouter::new();
+    ctrl_f(&mut state, &mut router);
+    type_str(&mut state, &mut router, "aa");
+    press(&mut state, &mut router, ctrl(event::KeyCode::Char('h')));
+    type_str(&mut state, &mut router, "b");
+    press(&mut state, &mut router, key(event::KeyCode::Tab));
+    press(&mut state, &mut router, key(event::KeyCode::Tab));
+    press(&mut state, &mut router, key(event::KeyCode::Enter));
+    assert_eq!(doc_text(&state, id), "b b b");
+    press(&mut state, &mut router, ctrl(event::KeyCode::Char('z')));
+    assert_eq!(doc_text(&state, id), "aa aa aa", "one undo restores all");
+    press(&mut state, &mut router, ctrl(event::KeyCode::Char('y')));
+    assert_eq!(doc_text(&state, id), "b b b", "redo returns the replaced text");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}

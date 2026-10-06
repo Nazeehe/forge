@@ -1011,3 +1011,25 @@
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn alt_backspace_deletes_a_word_back() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        // End of "aaa bbb", then the reliable word-kill twin.
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        handle_key_at(
+            &mut state,
+            &mut router,
+            event::KeyEvent::new(event::KeyCode::Backspace, event::KeyModifiers::ALT),
+            now,
+        );
+        assert_eq!(doc_text(&state, id), "aaa ");
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('z')), now);
+        assert_eq!(doc_text(&state, id), "aaa bbb", "one undo restores");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
