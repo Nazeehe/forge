@@ -223,3 +223,164 @@ fn clipboard_cut_is_one_undo_step() {
     assert!(state.manager.remove(id));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// B1: Backspace over a selection must delete exactly the selection.
+// "aaa bbb ccc" with "bbb" selected: the two spaces survive, and
+// one undo restores the word.
+#[test]
+fn backspace_over_a_mid_line_selection_deletes_only_the_selection() {
+    use crossterm::event::KeyCode;
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb ccc");
+    for _ in 0..4 {
+        feed(&mut state, id, KeyCode::Right);
+    }
+    shift_select(&mut state, id, 3);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(4..7));
+    feed(&mut state, id, KeyCode::Backspace);
+    assert_eq!(doc_text(&state, id), "aaa  ccc");
+    let (code, mods) = ctrl(KeyCode::Char('z'));
+    feed_mod(&mut state, id, code, mods);
+    assert_eq!(doc_text(&state, id), "aaa bbb ccc", "one undo restores it");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: Delete over a selection deletes exactly the selection too.
+#[test]
+fn delete_over_a_selection_deletes_only_the_selection() {
+    use crossterm::event::KeyCode;
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb ccc");
+    for _ in 0..4 {
+        feed(&mut state, id, KeyCode::Right);
+    }
+    shift_select(&mut state, id, 3);
+    feed(&mut state, id, KeyCode::Delete);
+    assert_eq!(doc_text(&state, id), "aaa  ccc");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: a selection at the start of the line takes nothing before it.
+#[test]
+fn backspace_over_a_line_start_selection_keeps_the_break() {
+    use crossterm::event::KeyCode;
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb ccc");
+    shift_select(&mut state, id, 3);
+    feed(&mut state, id, KeyCode::Backspace);
+    assert_eq!(doc_text(&state, id), " bbb ccc");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: a selection at the end of the line takes nothing after it.
+#[test]
+fn backspace_over_an_end_of_line_selection_keeps_the_space() {
+    use crossterm::event::KeyCode;
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb ccc");
+    for _ in 0..8 {
+        feed(&mut state, id, KeyCode::Right);
+    }
+    shift_select(&mut state, id, 3);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(8..11));
+    feed(&mut state, id, KeyCode::Backspace);
+    assert_eq!(doc_text(&state, id), "aaa bbb ");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: a multi-line selection deletes exactly its span, breaks included.
+#[test]
+fn backspace_over_a_multiline_selection_deletes_exactly() {
+    use crossterm::event::KeyCode;
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "ab\ncd\nef");
+    shift_select(&mut state, id, 5);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..5));
+    feed(&mut state, id, KeyCode::Backspace);
+    assert_eq!(doc_text(&state, id), "\nef");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: select-all plus Backspace empties the document.
+#[test]
+fn backspace_over_the_whole_document_empties_it() {
+    use crossterm::event::KeyCode;
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb ccc");
+    let (code, mods) = ctrl(KeyCode::Char('a'));
+    feed_mod(&mut state, id, code, mods);
+    feed(&mut state, id, KeyCode::Backspace);
+    assert_eq!(doc_text(&state, id), "");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: a single-char selection deletes just that char.
+#[test]
+fn backspace_over_a_single_char_selection() {
+    use crossterm::event::KeyCode;
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb ccc");
+    for _ in 0..4 {
+        feed(&mut state, id, KeyCode::Right);
+    }
+    shift_select(&mut state, id, 1);
+    feed(&mut state, id, KeyCode::Backspace);
+    assert_eq!(doc_text(&state, id), "aaa bb ccc");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: Ctrl+Backspace over a whole-row selection kills the word and
+// keeps the structural break (the whole-row extract quirk).
+#[test]
+fn ctrl_backspace_over_a_whole_row_selection_keeps_the_break() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "para\nnext\n");
+    for _ in 0..4 {
+        feed(&mut state, id, KeyCode::Right);
+    }
+    shift_left(&mut state, id, 4);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..4));
+    feed_mod(&mut state, id, KeyCode::Backspace, KeyModifiers::CONTROL);
+    assert_eq!(doc_text(&state, id), "\nnext\n");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: Ctrl+Delete over a whole-row selection, same guard.
+#[test]
+fn ctrl_delete_over_a_whole_row_selection_keeps_the_break() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "para\nnext\n");
+    shift_select(&mut state, id, 4);
+    assert_eq!(state.writers.get(&id).unwrap().selection, Some(0..4));
+    feed_mod(&mut state, id, KeyCode::Delete, KeyModifiers::CONTROL);
+    assert_eq!(doc_text(&state, id), "\nnext\n");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// B1: Alt+Backspace (the reliable word-kill twin) over a selection
+// deletes exactly the selection.
+#[test]
+fn alt_backspace_over_a_selection_deletes_only_the_selection() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let (mut state, id, run, dir) = writer_agent();
+    open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb ccc");
+    for _ in 0..4 {
+        feed(&mut state, id, KeyCode::Right);
+    }
+    shift_select(&mut state, id, 3);
+    feed_mod(&mut state, id, KeyCode::Backspace, KeyModifiers::ALT);
+    assert_eq!(doc_text(&state, id), "aaa  ccc");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}

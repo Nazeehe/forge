@@ -130,6 +130,11 @@ impl AppState {
             sel.end = offset_to_index2(&buffer, end.saturating_sub(1).max(start));
         }
         editor.execute(DeleteSelection);
+        // B1: the whole-row extract quirk eats a structural break
+        // when the killed span covers full rows (a whole word can
+        // be a whole row); repair like every other DeleteSelection
+        // path.
+        super::editor_verify_replace(editor, &buffer, start..end, "");
         editor.mode = EditorMode::Insert;
         session.sel_anchor = None;
         session.nav_goal = None;

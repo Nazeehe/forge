@@ -1089,3 +1089,37 @@ fn writer_marker_protocol_survives_save_byte_exact() {
     let saved = std::fs::read_to_string(h.cwd.join("run.md")).expect("saved file");
     assert_eq!(saved, body, "saved bytes are the agent input");
 }
+
+/// B1: the operator's exact repro through the real binary.
+/// "aaa bbb ccc" with exactly "bbb" selected, Backspace, save:
+/// the file keeps both spaces ("aaa  ccc"), not "aaa ccc".
+#[test]
+fn writer_backspace_over_a_selection_keeps_both_spaces() {
+    let mut h = boot(&[("bs.md", "aaa bbb ccc")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("bs.md\r");
+    h.wait_for("rev0", "doc open");
+    // Cursor right four onto the first "b", then Shift+Right three
+    // to take exactly "bbb".
+    for _ in 0..4 {
+        h.send("\x1b[C");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for _ in 0..3 {
+        h.send("\x1b[1;2C");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    h.send("\x7f");
+    std::thread::sleep(Duration::from_millis(500));
+    h.send("\x13");
+    std::thread::sleep(Duration::from_millis(500));
+    h.settle();
+    let saved = std::fs::read_to_string(h.cwd.join("bs.md")).expect("saved file");
+    assert_eq!(saved, "aaa  ccc", "Backspace takes only the selection");
+}

@@ -301,6 +301,23 @@ fn process_lock_allows(key: &crossterm::event::KeyEvent) -> bool {
                     }
                 }
             }
+            // B1: a selection delete IS the Backspace/Delete.
+            // Consume the key here: the register below would
+            // delete one more char past the selection. Enter
+            // still falls through — it deletes the selection
+            // AND splits the line. The kill keeps its own
+            // DeleteSelection capture: one undo step.
+            if had_selection
+                && matches!(
+                    (key.code, key.modifiers),
+                    (KeyCode::Backspace, KeyModifiers::NONE)
+                        | (KeyCode::Delete, KeyModifiers::NONE)
+                )
+            {
+                self.writer_sync_editor(id);
+                self.dirty = true;
+                return;
+            }
             // Enter on a list item continues or exits it; with a
             // selection, or off-list, the register keeps its break.
             if matches!(
