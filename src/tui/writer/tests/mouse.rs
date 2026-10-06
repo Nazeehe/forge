@@ -69,19 +69,19 @@
     }
 
     #[test]
-    fn disabled_preview_never_fires() {
+    fn preview_stays_disabled_without_a_doc() {
         let (mut state, id, dir) = writer_agent();
-        open_doc(&mut state, id, "d.md");
         state.term_size = (30, 120);
         state.open_writer_overlay();
         let buf = paint_full(&mut state, id);
         let (x, y) = find_text(&buf, "Preview");
         super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        // E8 enables Preview only with a doc: without one the dimmed
+        // pill dies silently.
         let session = state.writers.get(&id).unwrap();
+        assert!(!session.preview, "no preview without a doc");
         assert!(session.open_prompt.is_none(), "no prompt");
-        assert!(!session.more_open, "no menu");
-        assert!(!session.panel_visible, "panel untouched");
-        assert!(session.doc.is_some(), "doc untouched");
+        assert!(session.doc.is_none(), "no doc opened");
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -524,6 +524,83 @@
             session.selection.is_some(),
             "the gesture selection grows while scrolling"
         );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preview_pill_fires_from_painted_cells() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        // The Preview pill paints in the view group past the │ rule.
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Preview");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert!(state.writers.get(&id).unwrap().preview, "pill opens preview");
+        let buf = paint_full(&mut state, id);
+        assert!(
+            find_all_text(&buf, "✓Preview").len() == 1,
+            "pressed pill carries its marker"
+        );
+        let (x, y) = find_text(&buf, "Preview");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert!(!state.writers.get(&id).unwrap().preview, "pill closes preview");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preview_wheel_scrolls_and_clicks_rest() {
+        let (mut state, id, dir) = writer_agent();
+        let text: String = (0..60).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.join("long.md"), &text).unwrap();
+        open_doc(&mut state, id, "long.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        state.writer_toggle_preview(id);
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "line 0");
+        // Wheel over the preview scrolls three rows a notch.
+        super::super::handle_writer_mouse(
+            &mut state,
+            event::MouseEvent {
+                kind: event::MouseEventKind::ScrollDown,
+                column: x,
+                row: y,
+                modifiers: event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(state.writers.get(&id).unwrap().preview_scroll, 3);
+        // Clicks in the preview move nothing and select nothing.
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        let session = state.writers.get(&id).unwrap();
+        assert_eq!(session.selection, None, "no selection in preview");
+        assert_eq!(
+            session.editor.as_ref().unwrap().cursor,
+            edtui::Index2::new(0, 0),
+            "cursor rests while previewing"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn more_menu_toggles_line_numbers() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 80);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "More");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Line numbers");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        let session = state.writers.get(&id).unwrap();
+        assert!(!session.more_open, "firing closes the menu");
+        assert!(session.line_numbers, "numbers toggle on");
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }

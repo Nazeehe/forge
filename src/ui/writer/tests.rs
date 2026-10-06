@@ -101,6 +101,62 @@
     }
 
     #[test]
+    fn preview_renders_the_heading_without_its_hash() {
+        let mut session = doc_session("# Head\n\nbody\n");
+        session.preview = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let head = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("Head"))
+            .expect("heading previews");
+        assert!(
+            !row_text(&buf, head, 0, 120).contains('#'),
+            "no hash markers in preview"
+        );
+        // The paint never touches editor state: cursor and scroll
+        // survive preview.
+        assert_eq!(
+            session.editor.as_ref().unwrap().cursor,
+            edtui::Index2::new(0, 0)
+        );
+    }
+
+    #[test]
+    fn status_counts_words_chars_selection_and_save() {
+        let mut session = doc_session("hello world\nfoo\n");
+        session.doc.as_mut().unwrap().dirty = true;
+        session.selection = Some(0..5);
+        session.save_note = Some("saved".to_string());
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let status = (0..30)
+            .map(|y| row_text(&buf, y, 0, 120))
+            .find(|row| row.contains("rev 0"))
+            .expect("status row");
+        assert!(status.contains("3w 16c"), "words and chars: {status:?}");
+        assert!(status.contains("sel 1w 5c"), "selection counts: {status:?}");
+        assert!(status.contains("unsaved"), "unsaved word: {status:?}");
+        assert!(status.contains("saved"), "save result: {status:?}");
+    }
+
+    #[test]
+    fn line_numbers_show_and_shrink_the_text_width() {
+        let mut session = doc_session("a\nb\n");
+        paint_doc_to(&mut session, 120, 30);
+        let plain_cols = session.editor_cols;
+        session.line_numbers = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let layout = super::layout::writer_layout(ratatui::layout::Rect::new(0, 0, 120, 30), false);
+        // The head holds the rule plus one padding row (A6); the
+        // first text row with its number gutter sits below them.
+        let text_y = layout.editor.y.saturating_add(super::layout::DOC_PROMPT_OFF);
+        assert_eq!(buf[(layout.editor.x, text_y)].symbol(), "1");
+        assert_eq!(
+            session.editor_cols,
+            plain_cols.saturating_sub(2),
+            "number gutter leaves the wrap math exact"
+        );
+    }
+
+    #[test]
     fn doc_paints_title_editor_status_and_actions() {
         let mut session = doc_session("aaa bbb");
         // Panel-era UI needs the assistant shown (hidden default).
@@ -560,7 +616,7 @@
         let menu = super::layout::more_menu_rect(more_rect);
         assert_eq!(menu.x, more_rect.x, "menu under the More pill");
         assert_eq!(menu.y, layout.title.y + 1);
-        assert_eq!(menu.height, 3, "Save as, Preview, Assistant");
+        assert_eq!(menu.height, 4, "Save as, Preview, Assistant, numbers");
     }
 
     #[test]
@@ -627,7 +683,8 @@
         let row = row_text(&buf, layout.title.y, layout.title.x, layout.title.x + layout.title.width);
         assert!(row.contains("New"), "toolbar in the title row: {row:?}");
         assert!(row.contains("Open"), "toolbar open: {row:?}");
-        assert!(row.contains("░Preview░"), "preview disabled: {row:?}");
+        assert!(row.contains("Preview"), "preview enabled with a doc: {row:?}");
+        assert!(!row.contains("░Preview░"), "no disabled marks: {row:?}");
         assert!(row.contains("d.md"), "file name in the title row: {row:?}");
         assert!(row.find("d.md").unwrap() > row.find("New").unwrap(), "name trails the pills");
         session.doc.as_mut().unwrap().dirty = true;

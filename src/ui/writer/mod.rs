@@ -8,12 +8,14 @@
 pub mod editor;
 pub mod empty;
 pub mod layout;
+pub mod preview;
 pub mod thread;
 pub mod toolbar;
 #[cfg(test)]
 mod tests;
 
 pub use editor::paint;
+pub use preview::{preview_height, preview_text};
 pub use layout::{
     action_pill_rect, chip_detach_rect, confirm_pill_rects, more_menu_item_rects, more_menu_rect,
     panel_collapsed, pill_width, prompt_button_rects, prompt_sugg_rect, prompt_suggestions,

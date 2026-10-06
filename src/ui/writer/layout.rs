@@ -182,6 +182,9 @@ pub enum ToolbarButton {
     Close,
     Preview,
     Assistant,
+    /// More-menu-only toggle for the editor gutter numbers (E8):
+    /// never in the toolbar row itself.
+    LineNumbers,
     /// Narrow-mode overflow holding Save-as, Preview, Assistant.
     More,
 }
@@ -223,19 +226,24 @@ pub fn toolbar_label(button: ToolbarButton) -> &'static str {
         B::Close => "Close",
         B::Preview => "Preview",
         B::Assistant => "Assistant",
+        B::LineNumbers => "Line numbers",
         B::More => "▾ More",
     }
 }
 
-/// Marker for one toolbar pill: `✓` while the Assistant toggle is
-/// pressed, `*` on a fresh New (no doc, no prompt). Paint and hit
-/// rects share this, so a marked pill never outpaints its rect and a
-/// later pill never drifts.
+/// Marker for one toolbar pill: `✓` while a toggle (Assistant,
+/// Preview, line numbers) is pressed, `*` on a fresh New (no doc,
+/// no prompt). Paint and hit rects share this, so a marked pill
+/// never outpaints its rect and a later pill never drifts.
 pub fn toolbar_mark(
     session: &crate::app::writer::WriterSession,
     button: ToolbarButton,
 ) -> Option<char> {
     if button == ToolbarButton::Assistant && session.panel_visible {
+        Some('✓')
+    } else if button == ToolbarButton::Preview && session.preview {
+        Some('✓')
+    } else if button == ToolbarButton::LineNumbers && session.line_numbers {
         Some('✓')
     } else if matches!(button, ToolbarButton::New)
         && session.doc.is_none()
@@ -247,11 +255,11 @@ pub fn toolbar_mark(
     }
 }
 
-/// Whether a toolbar button fires now. Save needs a dirty doc,
-/// Save-as and Close need a doc, Preview is disabled until E8, and
-/// the rest (including the Assistant toggle) always fire. Disabled
-/// pills render dimmed with `░` markers — never color alone — and
-/// never fire.
+/// Whether a toolbar button fires now. Save needs a dirty doc;
+/// Save-as, Close, Preview and line numbers need a doc; the rest
+/// (including the Assistant toggle) always fire. Disabled pills
+/// render dimmed with `░` markers — never color alone — and never
+/// fire.
 pub fn toolbar_enabled(
     session: &crate::app::writer::WriterSession,
     button: ToolbarButton,
@@ -260,8 +268,7 @@ pub fn toolbar_enabled(
     match button {
         B::New | B::Open | B::Assistant | B::More => true,
         B::Save => session.doc.as_ref().is_some_and(|d| d.dirty),
-        B::SaveAs | B::Close => session.doc.is_some(),
-        B::Preview => false,
+        B::SaveAs | B::Close | B::Preview | B::LineNumbers => session.doc.is_some(),
     }
 }
 
@@ -357,21 +364,21 @@ pub fn confirm_pill_rects(
     out
 }
 
-/// The More overflow menu: three pill rows under the More pill,
-/// wide enough for the longest row plus side padding.
+/// The More overflow menu: pill rows under the More pill, wide
+/// enough for the longest row plus side padding.
 pub fn more_menu_rect(more: Rect) -> Rect {
     if more.width == 0 {
         return Rect::default();
     }
-    Rect::new(more.x, more.y.saturating_add(1), 22, 3)
+    Rect::new(more.x, more.y.saturating_add(1), 22, 4)
 }
 
-/// Hit rects for the three More-menu rows: Save-as, Preview,
-/// Assistant. Paint and mouse dispatch share these.
+/// Hit rects for the More-menu rows: Save-as, Preview, Assistant,
+/// line numbers. Paint and mouse dispatch share these.
 pub fn more_menu_item_rects(
     menu: Rect,
     session: &crate::app::writer::WriterSession,
-) -> [(Rect, ToolbarButton); 3] {
+) -> [(Rect, ToolbarButton); 4] {
     use ToolbarButton as B;
     let row = |i: u16, label: &str, mark: bool| {
         Rect::new(
@@ -383,10 +390,17 @@ pub fn more_menu_item_rects(
     };
     [
         (row(0, "Save as", false), B::SaveAs),
-        (row(1, "Preview", false), B::Preview),
+        (
+            row(1, "Preview", toolbar_mark(session, B::Preview).is_some()),
+            B::Preview,
+        ),
         (
             row(2, "Assistant", toolbar_mark(session, B::Assistant).is_some()),
             B::Assistant,
+        ),
+        (
+            row(3, "Line numbers", toolbar_mark(session, B::LineNumbers).is_some()),
+            B::LineNumbers,
         ),
     ]
 }

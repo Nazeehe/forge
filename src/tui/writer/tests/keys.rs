@@ -690,6 +690,97 @@
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn alt(code: event::KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, event::KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn alt_p_toggles_preview_and_needs_a_doc() {
+        let (mut state, id, dir) = writer_agent();
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        // No doc: Alt+P is a silent no-op, like the Assistant key.
+        handle_key_at(&mut state, &mut router, alt(event::KeyCode::Char('p')), now);
+        assert!(!state.writers.get(&id).unwrap().preview);
+        open_doc(&mut state, id, "d.md");
+        handle_key_at(&mut state, &mut router, alt(event::KeyCode::Char('p')), now);
+        assert!(state.writers.get(&id).unwrap().preview, "preview on");
+        handle_key_at(&mut state, &mut router, alt(event::KeyCode::Char('p')), now);
+        assert!(!state.writers.get(&id).unwrap().preview, "preview off");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preview_scroll_keys_clamp_and_home_end() {
+        let (mut state, id, dir) = writer_agent();
+        let text: String = (0..60).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.join("d.md"), &text).unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        paint_full(&mut state, id);
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, alt(event::KeyCode::Char('p')), now);
+        for _ in 0..3 {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Down), now);
+        }
+        assert_eq!(state.writers.get(&id).unwrap().preview_scroll, 3);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Up), now);
+        assert_eq!(state.writers.get(&id).unwrap().preview_scroll, 2);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::PageDown), now);
+        assert!(state.writers.get(&id).unwrap().preview_scroll > 2, "page moves");
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Home), now);
+        assert_eq!(state.writers.get(&id).unwrap().preview_scroll, 0);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        let scrolled = state.writers.get(&id).unwrap().preview_scroll;
+        assert!(scrolled > 0, "end reaches the tail");
+        // Pinned: scrolling again past the end changes nothing.
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::PageDown), now);
+        assert_eq!(state.writers.get(&id).unwrap().preview_scroll, scrolled);
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn preview_ignores_typing_and_esc_exits() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, alt(event::KeyCode::Char('p')), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Char('!')), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Enter), now);
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Backspace), now);
+        assert_eq!(doc_text(&state, id), "aaa bbb", "read-only in preview");
+        assert!(state.writers.get(&id).unwrap().preview, "still previewing");
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Esc), now);
+        assert!(!state.writers.get(&id).unwrap().preview, "esc exits preview");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ctrl_s_records_the_save_note() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "aaa bbb").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::Char('!')), now);
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('s')), now);
+        assert_eq!(state.writers.get(&id).unwrap().save_note.as_deref(), Some("saved"));
+        let buf = paint_full(&mut state, id);
+        let text: String = buf.content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("saved"), "status shows the save");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn prefix_escapes_while_editing() {
         let (mut state, id, dir) = writer_agent();

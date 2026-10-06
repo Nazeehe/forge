@@ -178,28 +178,60 @@ fn paint_doc(
         .selection_style(style(Role::Focus))
         .line_numbers_style(style(Role::Muted))
         .hide_status_line();
-    f.render_widget(
-        EditorView::new(editor).wrap(true).theme(theme),
-        edit_rect,
-    );
+    // Absolute numbers take the same gutter EdTUI reserves: digits
+    // of the row count plus one. The text width below subtracts it,
+    // so wrap math, paging and clicks stay exact while numbered.
+    let number_width = if session.line_numbers {
+        (editor.lines.len().max(1).to_string().len() + 1) as u16
+    } else {
+        0
+    };
+    let text_cols = edit_rect.width.saturating_sub(number_width);
+    if session.preview {
+        // Read-only render: the editor keeps its cursor and scroll
+        // underneath, and proposal gutter marks stay off (their
+        // ranges are source rows, which preview reflows).
+        let rendered = super::preview_text(&buffer);
+        f.render_widget(
+            Paragraph::new(rendered)
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .scroll((session.preview_scroll, 0)),
+            edit_rect,
+        );
+    } else {
+        f.render_widget(
+            EditorView::new(editor)
+                .wrap(true)
+                .theme(theme)
+                .line_numbers(if session.line_numbers {
+                    edtui::LineNumbers::Absolute
+                } else {
+                    edtui::LineNumbers::None
+                }),
+            edit_rect,
+        );
+    }
     // Page keys move by the last painted editor height, vertical
     // moves wrap by its width; the adapter cannot see the viewport,
     // so the paint layer reports both here (shrunk while the prompt
-    // overlays the editor head).
+    // overlays the editor head, narrowed by the number gutter).
     session.editor_rows = edit_rect.height;
-    session.editor_cols = edit_rect.width;
+    session.editor_cols = text_cols;
     // Wrap-exact gutter mapping, anchored on the cursor: screen rows
     // of every doc row are counted from the cursor with the same
     // greedy wrap EdTUI's LineWrapper uses, so wrapped rows can never
     // desync the marks. Every highlighted screen row gets a mark.
     let mut cursor = None;
-    if let Some(pos) = session
-        .editor
-        .as_ref()
-        .expect("rendered above")
-        .cursor_screen_position()
-    {
-        let width = edit_rect.width.max(1) as usize;
+    // Preview shows no editor cursor and no gutter marks: the
+    // ranges are source rows, which the render reflows.
+    if !session.preview {
+        if let Some(pos) = session
+            .editor
+            .as_ref()
+            .expect("rendered above")
+            .cursor_screen_position()
+        {
+        let width = text_cols.max(1) as usize;
         let rel = pos.y.saturating_sub(edit_rect.y) as isize;
         let cursor_row = row_of(
             &buffer,
@@ -255,6 +287,7 @@ fn paint_doc(
         }
         if session.focus == WriterFocus::Editor {
             cursor = Some(pos);
+        }
         }
     }
     // The panel, chat box, and action row exist only while the

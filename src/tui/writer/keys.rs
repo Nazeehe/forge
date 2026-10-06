@@ -100,6 +100,13 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
         state.writer_toggle_assistant(id);
         return;
     }
+    // Preview rides the same Alt family: Alt+P is free in the CUA
+    // register, outside the Forge prefix, and unlike Ctrl+Shift+V
+    // no terminal steals it for paste.
+    if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('p') {
+        state.writer_toggle_preview(id);
+        return;
+    }
     // F6 owns focus cycling (Editor → Chat → Thread) now that Tab
     // indents. The prompt keeps its own keys above.
     if key.code == KeyCode::F(6) {

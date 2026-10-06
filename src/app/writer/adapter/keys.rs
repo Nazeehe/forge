@@ -55,6 +55,28 @@ impl AppState {
             session.press_count = 0;
             session.last_press = None;
         }
+        // Preview is read-only: arrows and pages scroll, Home/End
+        // jump, Ctrl+S still saves, Esc leaves. Edits never land,
+        // and the editor cursor rests underneath for the way back.
+        if self.writers.get(&id).is_some_and(|s| s.preview) {
+            let rows = self
+                .writers
+                .get(&id)
+                .map(|s| s.editor_rows.max(1) as isize)
+                .unwrap_or(1);
+            match (key.code, key.modifiers) {
+                (KeyCode::Up, _) => self.writer_preview_scroll(id, -1),
+                (KeyCode::Down, _) => self.writer_preview_scroll(id, 1),
+                (KeyCode::PageUp, _) => self.writer_preview_scroll(id, -rows),
+                (KeyCode::PageDown, _) => self.writer_preview_scroll(id, rows),
+                (KeyCode::Home, _) => self.writer_preview_edge(id, false),
+                (KeyCode::End, _) => self.writer_preview_edge(id, true),
+                (KeyCode::Char('s'), KeyModifiers::CONTROL) => self.writer_save(id),
+                (KeyCode::Esc, KeyModifiers::NONE) => self.writer_toggle_preview(id),
+                _ => {}
+            }
+            return;
+        }
         // Esc always returns the editor to the known-good state: no
         // selection, Insert mode. EdTUI would park in vim Normal
         // (mouse Down while Visual strands there) with nothing ever
@@ -942,6 +964,86 @@ impl AppState {
     /// Toolbar `(Assistant)` / `(Assistant*)`: the real E10 toggle.
     pub fn writer_toolbar_assistant(&mut self, id: crate::session::SessionId) {
         self.writer_toggle_assistant(id);
+    }
+
+    /// Toolbar `(Preview)`: the read-only rendered view (E8).
+    /// Entering resets the scroll to the head; the editor keeps its
+    /// cursor and viewport underneath, so leaving resumes exactly.
+    pub fn writer_toolbar_preview(&mut self, id: crate::session::SessionId) {
+        self.writer_toggle_preview(id);
+    }
+
+    /// Toggle the rendered preview. Without a doc it is a silent
+    /// no-op, like the Assistant toggle: the pill is dimmed there
+    /// and the key has nothing to show.
+    /// `pub(crate)`: the pill, the More row and Alt+P share it.
+    pub(crate) fn writer_toggle_preview(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        if session.doc.is_none() {
+            return;
+        }
+        session.preview = !session.preview;
+        if session.preview {
+            session.preview_scroll = 0;
+            session.error = None;
+        }
+        self.dirty = true;
+    }
+
+    /// Toggle absolute line numbers in the editor gutter (E8, off by
+    /// default). Without a doc, a silent no-op like Preview.
+    /// `pub(crate)`: the More menu row calls this directly.
+    pub(crate) fn writer_toggle_line_numbers(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        if session.doc.is_none() {
+            return;
+        }
+        session.line_numbers = !session.line_numbers;
+        self.dirty = true;
+    }
+
+    /// Scroll the rendered preview by `dy` rows, clamped to the
+    /// rendered text. No preview, no doc, or empty text: no-op.
+    /// `pub(crate)`: wheel, arrows, PgUp/PgDn, Home/End share it.
+    pub(crate) fn writer_preview_scroll(&mut self, id: crate::session::SessionId, dy: isize) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        if !session.preview {
+            return;
+        }
+        let Some(doc) = session.doc.as_ref() else {
+            return;
+        };
+        let height = crate::ui::writer::preview_height(&doc.text, session.editor_cols as usize);
+        let next = session.preview_scroll as isize + dy;
+        session.preview_scroll = next.clamp(0, height.saturating_sub(1) as isize) as u16;
+        self.dirty = true;
+    }
+
+    /// Scroll the preview to its head or tail.
+    /// `pub(crate)`: Home/End in preview share it.
+    pub(crate) fn writer_preview_edge(&mut self, id: crate::session::SessionId, tail: bool) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        if !session.preview {
+            return;
+        }
+        let Some(doc) = session.doc.as_ref() else {
+            return;
+        };
+        let height = crate::ui::writer::preview_height(&doc.text, session.editor_cols as usize);
+        session.preview_scroll = if tail {
+            height.saturating_sub(1) as u16
+        } else {
+            0
+        };
+        self.dirty = true;
     }
 
     /// Toggle the narrow-mode More menu; firing a menu row closes it.

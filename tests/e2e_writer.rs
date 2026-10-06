@@ -195,7 +195,7 @@ impl Harness {
         screen_text(&self.parser)
     }
 
-    /// Whether the raw log contains `needle` (escape sequences).
+        /// Whether the raw log contains `needle` (escape sequences).
     fn saw_raw(&self, needle: &str) -> bool {
         let log = String::from_utf8_lossy(&self.raw);
         log.contains(needle)
@@ -314,6 +314,14 @@ fn row_signature(parser: &vt100::Parser, y: u16) -> Vec<(String, String, String,
                 })
                 .unwrap_or_default()
         })
+        .collect()
+}
+
+/// One screen row as a cell string (wide-glyph safe).
+fn row_cells(parser: &vt100::Parser, y: u16) -> String {
+    let screen = parser.screen();
+    (0..screen.size().1)
+        .map(|x| screen.cell(y, x).map(|c| c.contents()).unwrap_or_default())
         .collect()
 }
 
@@ -527,6 +535,34 @@ fn writer_copy_paste_round_trip_emits_osc52() {
     h.send("\x16");
     let text = h.wait_for("bbbbbb", "pasted round trip");
     assert!(text.contains("bbbbbb"), "paste replaces the selection");
+}
+
+#[test]
+fn writer_preview_toggle_renders_and_keeps_the_cursor() {
+    let mut h = boot(&[("pv.md", "# Title\n\nbody text\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("pv.md\r");
+    let text = h.wait_for("rev0", "doc open");
+    assert!(text.contains("pv.md"), "title names the file");
+    // Alt+P renders: the heading row loses its hash.
+    h.send("\x1bp");
+    std::thread::sleep(Duration::from_millis(300));
+    h.settle();
+    let (_, y) = h.find("Title").expect("rendered heading on screen");
+    let row: String = row_cells(&h.parser, y);
+    assert!(!row.contains('#'), "preview renders without hashes: {row:?}");
+    // Alt+P again leaves preview; the cursor never moved, so typing
+    // lands at the document head, ahead of the hash.
+    h.send("\x1bp");
+    h.send("X");
+    let text = h.wait_for("X#Title", "typed at the kept cursor");
+    assert!(text.contains("X# Title"), "cursor kept across preview");
 }
 
 #[test]

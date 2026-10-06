@@ -16,7 +16,7 @@ use crate::app::writer::{PendingConfirm, WriterSession};
 use crate::ui::theme::{style, Role};
 
 /// Toolbar row: file pills left, the `│` view-group separator, then
-/// Preview (disabled until E8) and the Assistant toggle; the open
+/// Preview (read-only render) and the Assistant toggle; the open
 /// file name trails right with its dirty dot. Disabled pills render
 /// dimmed with `░` markers — never color alone — and never fire.
 pub(super) fn paint_toolbar(

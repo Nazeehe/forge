@@ -225,8 +225,9 @@ pub(super) fn paint_chat(
     ))
 }
 
-/// Status row: revision, 1-based line:col, agent activity word, and
-/// the word `unsaved` while dirty.
+/// Status row: revision, 1-based line:col, word/char counts (plus
+/// the selection's when one exists), agent activity word, the word
+/// `unsaved` while dirty, and the last save result.
 pub(super) fn paint_status(
     f: &mut Frame,
     area: Rect,
@@ -244,17 +245,38 @@ pub(super) fn paint_status(
             (row_of(buffer, off) + 1, off - line_start(buffer, off) + 1)
         })
         .unwrap_or((1, 1));
+    let (words, chars) = counts(buffer);
     let mut text = format!(
-        "rev {rev} · {line}:{col} · {}",
+        "rev {rev} · {line}:{col} · {words}w {chars}c · {}",
         crate::comms::Broker::activity_label(activity)
     );
+    if let Some(range) = session.selection.as_ref() {
+        let selected: String = buffer
+            .chars()
+            .skip(range.start)
+            .take(range.end.saturating_sub(range.start))
+            .collect();
+        let (sel_words, sel_chars) = counts(&selected);
+        text.push_str(&format!(" · sel {sel_words}w {sel_chars}c"));
+    }
     if dirty {
         text.push_str(" · unsaved");
+    }
+    if let Some(note) = session.save_note.as_ref() {
+        text.push_str(&format!(" · {note}"));
     }
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(text, style(Role::Muted))])),
         area,
     );
+}
+
+/// Words (whitespace runs) and chars of `text`.
+fn counts(text: &str) -> (usize, usize) {
+    (
+        text.split_whitespace().count(),
+        text.chars().count(),
+    )
 }
 
 /// Start offset of the line holding `offset`.

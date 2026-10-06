@@ -135,7 +135,13 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
                 fire_panel_click(state, id, click);
                 return;
             }
-            if hits(layout.editor, mev.column, mev.row) {
+            // Preview is read-only: presses in the render move no
+            // cursor and start no gesture (the Up arm drops without
+            // one), but the event still dies here, never reaching
+            // the agent pane behind the overlay.
+            if hits(layout.editor, mev.column, mev.row)
+                && !state.writers.get(&id).is_some_and(|s| s.preview)
+            {
                 // Multi-click chain on one cell: the second press
                 // selects a word, the third a line, the fourth
                 // starts over at a single click.
@@ -215,7 +221,19 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             if hits(layout.editor, mev.column, mev.row) {
-                state.writer_feed_mouse(id, mev);
+                // Three rows a notch, mirroring the editor wheel: in
+                // preview the render scrolls instead of the editor.
+                if state.writers.get(&id).is_some_and(|s| s.preview) {
+                    state.writer_preview_scroll(
+                        id,
+                        match mev.kind {
+                            MouseEventKind::ScrollUp => -3,
+                            _ => 3,
+                        },
+                    );
+                } else {
+                    state.writer_feed_mouse(id, mev);
+                }
             }
         }
         _ => {}
@@ -239,8 +257,7 @@ fn toolbar_at(
         .map(|(_, button)| button)
 }
 
-/// Fire one toolbar pill; disabled pills (and Preview until E8) die
-/// silently.
+/// Fire one toolbar pill; disabled pills die silently.
 fn fire_toolbar_button(state: &mut AppState, id: crate::session::SessionId, button: ToolbarButton) {
     let enabled = state
         .writers
@@ -255,8 +272,9 @@ fn fire_toolbar_button(state: &mut AppState, id: crate::session::SessionId, butt
         ToolbarButton::Save => state.writer_toolbar_save(id),
         ToolbarButton::SaveAs => state.writer_toolbar_save_as(id),
         ToolbarButton::Close => state.writer_toolbar_close(id),
-        ToolbarButton::Preview => {}
+        ToolbarButton::Preview => state.writer_toolbar_preview(id),
         ToolbarButton::Assistant => state.writer_toolbar_assistant(id),
+        ToolbarButton::LineNumbers => state.writer_toggle_line_numbers(id),
         ToolbarButton::More => state.writer_toggle_more(id),
     }
 }
@@ -294,7 +312,9 @@ fn fire_menu_button(state: &mut AppState, id: crate::session::SessionId, button:
     }
     match button {
         ToolbarButton::SaveAs => state.writer_toolbar_save_as(id),
+        ToolbarButton::Preview => state.writer_toolbar_preview(id),
         ToolbarButton::Assistant => state.writer_toolbar_assistant(id),
+        ToolbarButton::LineNumbers => state.writer_toggle_line_numbers(id),
         _ => {}
     }
 }

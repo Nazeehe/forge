@@ -126,12 +126,15 @@ impl AppState {
         match doc.save() {
             Ok(()) => {
                 session.error = None;
+                session.save_note = Some("saved".to_string());
             }
             Err(crate::writer::WriterError::ConflictOnSave) => {
                 session.error = Some("save conflict: file changed on disk".to_string());
+                session.save_note = Some("not saved".to_string());
             }
             Err(other) => {
                 session.error = Some(format!("save failed: {other}"));
+                session.save_note = Some("not saved".to_string());
             }
         }
         self.dirty = true;

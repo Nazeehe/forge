@@ -130,6 +130,16 @@ pub struct WriterSession {
     /// slow gap, or a move to another cell restarts at one.
     pub last_press: Option<(u16, u16, std::time::Instant)>,
     pub press_count: u8,
+    /// Read-only rendered view (E8): the editor keeps its cursor
+    /// and scroll underneath, so toggling back resumes exactly.
+    pub preview: bool,
+    /// Preview scroll offset in rows, clamped to the rendered text.
+    pub preview_scroll: u16,
+    /// Absolute line numbers in the editor gutter (E8, off default).
+    pub line_numbers: bool,
+    /// Last save result for the status row (`Some("saved")` after a
+    /// clean save). Failures also land in the fixed error slot.
+    pub save_note: Option<String>,
     /// Cached fence parity for the paint highlighter, valid for
     /// the revision it was built at.
     pub fence_cache: markdown::FenceCache,
