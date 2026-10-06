@@ -621,6 +621,43 @@ fn writer_preview_toggle_renders_and_keeps_the_cursor() {
 }
 
 #[test]
+fn writer_preview_hides_marker_delimiters() {
+    let mut h = boot(&[(
+        "mk.md",
+        "alpha @@fix typo@@this is teh@@ gamma\n\n@@ask capital@@end\n\n@@oops\n",
+    )]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("mk.md\r");
+    h.wait_for("rev0", "doc open");
+    // Alt+P renders: wrap shows its target, standalone shows the
+    // muted label, the unterminated marker stays raw.
+    h.send("\x1bp");
+    std::thread::sleep(Duration::from_millis(300));
+    h.settle();
+    let screen = screen_text(&h.parser);
+    let flat: String = screen.replace([' ', '\n'], "");
+    assert!(flat.contains("thisisteh"), "target text shows");
+    assert!(flat.contains("[ask:capital]"), "standalone label shows");
+    assert!(!flat.contains("@@fix"), "no wrap header");
+    assert!(!flat.contains("@@ask"), "no standalone header");
+    assert!(!flat.contains("@@end"), "no closers");
+    assert!(!flat.contains("teh@@"), "no target closer");
+    assert!(flat.contains("@@oops"), "error stays raw");
+    // Esc leaves preview; the cursor never moved, so typing lands
+    // at the document head.
+    h.send("\x1bp");
+    h.send("X");
+    let text = h.wait_for("Xalpha", "typed at the kept cursor");
+    assert!(text.contains("Xalpha"), "cursor kept across preview");
+}
+
+#[test]
 fn writer_typing_groups_words_for_undo() {
     let mut h = boot(&[("grp.md", "")]);
     create_session(&mut h);

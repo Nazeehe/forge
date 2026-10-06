@@ -1175,6 +1175,33 @@
     /// PRD §7 answers: an over-long prompt paints exactly like a
     /// parse error (error style, gutter ✕, actionable reason), and
     /// the run exclusion keeps it out of the markup.
+    /// M6 (§5.2): preview hides the delimiters and headers — the
+    /// wrap shows its target, the standalone its muted label, the
+    /// error its raw text — through the real paint.
+    #[test]
+    fn preview_hides_markers_and_mutes_the_label() {
+        let mut session = doc_session(
+            "alpha @@fix typo@@this is teh@@\n\n@@ask capital@@end\n\n@@oops\n",
+        );
+        session.preview = true;
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let text = buffer_text(&buf);
+        for gone in ["@@fix", "@@ask", "@@end", "teh@@"] {
+            assert!(!text.contains(gone), "hidden {gone}: {text:?}");
+        }
+        assert!(text.contains("this is teh"), "target shows: {text:?}");
+        assert!(text.contains("[ask: capital]"), "label shows: {text:?}");
+        assert!(text.contains("@@oops"), "error stays raw: {text:?}");
+        let row = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("[ask: capital]"))
+            .expect("label row");
+        let x = (0..120)
+            .find(|x| row_text(&buf, row, *x, 120).starts_with("[ask"))
+            .expect("label cell");
+        let muted = crate::ui::theme::style(crate::ui::theme::Role::Muted);
+        assert_eq!(Some(buf[(x, row)].fg), muted.fg, "label muted");
+    }
+
     #[test]
     fn overlong_prompt_paints_as_an_error() {
         let long = "p".repeat(2001);
