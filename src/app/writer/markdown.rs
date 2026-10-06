@@ -26,6 +26,32 @@ pub struct FenceCache {
     pub starts: Vec<Option<(u8, usize)>>,
 }
 
+/// Test-only work counters behind the typing guarantee (see
+/// `typing_at_the_end_of_a_big_doc_costs_the_window`): lines
+/// fence-stepped and lines highlight-painted. Thread-local so
+/// parallel tests never share counts; the measuring test resets
+/// first. Compiled out entirely outside test builds.
+#[cfg(test)]
+thread_local! {
+    static FENCE_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LINES_HIGHLIGHTED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn test_reset_work_counts() {
+    FENCE_STEPS.with(|c| c.set(0));
+    LINES_HIGHLIGHTED.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+fn test_work_counts() -> (usize, usize) {
+    (
+        FENCE_STEPS.with(|c| c.get()),
+        LINES_HIGHLIGHTED.with(|c| c.get()),
+    )
+}
+
 /// Cover line starts through `through` (exclusive): on a revision
 /// change the cache truncates to `dirty_from` (or zero without a
 /// hint) and rescans forward from there. One linear walk, byte
@@ -63,6 +89,8 @@ pub fn fence_cover(
 /// the highlighter uses: a same-char run at least as long closes,
 /// anything else passes through.
 fn step_fence(fence: Option<(u8, usize)>, line: &str) -> Option<(u8, usize)> {
+    #[cfg(test)]
+    FENCE_STEPS.with(|c| c.set(c.get() + 1));
     match (fence_delim(line), fence) {
         (Some((kind, len)), Some((open_kind, open_len))) if kind == open_kind && len >= open_len => {
             None
@@ -197,6 +225,8 @@ fn italic() -> ratatui::style::Style {
 /// whole line, rules and quote/list prefixes are muted spans, and
 /// the remainder goes through inline parsing.
 fn highlight_line(row: usize, chars: &[char], out: &mut Vec<Highlight>) {
+    #[cfg(test)]
+    LINES_HIGHLIGHTED.with(|c| c.set(c.get() + 1));
     if chars.is_empty() {
         return;
     }
@@ -590,18 +620,37 @@ mod tests {
         let rows = big.lines().count();
         let mut cache = FenceCache::default();
         fence_cover(&big, &mut cache, 0, None, rows);
-        // Type at the end: one more line, new revision.
+        // Type at the end: one more line, new revision. The
+        // guarantee is work, not wall clock: fence work and painted
+        // lines stay window-bounded no matter the doc size or load.
         let typed = format!("{big}tail\n");
-        let start = std::time::Instant::now();
+        test_reset_work_counts();
         fence_cover(&typed, &mut cache, 1, Some(rows), rows + 1);
         let state = cache.starts[rows - 30];
         let out = highlight_window(&typed, rows - 30, 30, state);
-        let elapsed = start.elapsed();
+        let (fence_steps, lines_highlighted) = test_work_counts();
         assert!(!out.is_empty(), "the window highlights");
         assert!(
-            elapsed.as_millis() < 50,
-            "late typing paints in {elapsed:?}, budget 50 ms"
+            fence_steps <= 64,
+            "fence rescans only new lines, stepped {fence_steps}"
         );
+        assert!(
+            lines_highlighted <= 64,
+            "paint costs the window, highlighted {lines_highlighted}"
+        );
+    }
+
+    /// Fastest of three runs: damps one-sided scheduling noise.
+    /// Load-robust perf checks compare two sizes in the same run
+    /// instead of asserting absolute milliseconds.
+    fn min_of_3(work: impl Fn()) -> std::time::Duration {
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            work();
+            best = best.min(start.elapsed());
+        }
+        best
     }
 
     #[test]
@@ -609,21 +658,31 @@ mod tests {
         // Representative prose: headings, emphasis, code, fences,
         // lists, quotes, links, rules, tables.
         let para = "# Head **bold** *em* `code` [t](http://x)\n\n- item 1\n- item 2\n\n> quote\n\n```rs\nlet x = 1;\n```\n\n| a | b |\n\n---\n";
-        let repeats = 1024 * 1024 / para.len() + 1;
-        let big: String = para.repeat(repeats);
+        let small: String = para.repeat(256 * 1024 / para.len() + 1);
+        let big: String = para.repeat(1024 * 1024 / para.len() + 1);
         assert!(big.len() >= 1024 * 1024, "fixture is a full MiB");
         let rows = big.lines().count();
-        let start = std::time::Instant::now();
         let out = highlight_markdown(&big, 0, rows);
-        let elapsed = start.elapsed();
         assert!(!out.is_empty(), "the big doc highlights");
-        // Budget: one linear pass, no per-line allocation beyond the
-        // output. Measured ~80 ms in a debug build (fixture build
-        // included); pinned at 3x headroom. Raise only with a
-        // measured reason.
+        // Scaling, not wall clock: 1 MiB must cost ~4x a 256 KiB doc
+        // measured in the same run, so load cancels out. Catches
+        // superlinear blowups; the 2 s ceiling is a catastrophe guard
+        // only, not a budget.
+        let small_rows = small.lines().count();
+        let t_small = min_of_3(|| {
+            highlight_markdown(&small, 0, small_rows);
+        });
+        let t_big = min_of_3(|| {
+            highlight_markdown(&big, 0, rows);
+        });
         assert!(
-            elapsed.as_millis() < 250,
-            "1 MiB highlights in {elapsed:?}, budget 250 ms"
+            t_big < std::time::Duration::from_secs(2),
+            "catastrophe guard: 1 MiB highlights in {t_big:?}"
+        );
+        let ratio = t_big.as_secs_f64() / t_small.as_secs_f64().max(1e-9);
+        assert!(
+            ratio <= 6.0,
+            "linear scaling: 1 MiB {t_big:?} vs 256 KiB {t_small:?}"
         );
     }
 }

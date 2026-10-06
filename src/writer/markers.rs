@@ -4,9 +4,10 @@
 //! `@@[verb ]prompt@@target@@` (wrap, `@@end` close accepted),
 //! `@@[verb ]prompt @@end` (standalone). `\@@` escapes; markers
 //! inside fenced blocks and inline code are immune. Nesting is an
-//! opener `@@` where the target should be (a blank target can only
-//! mean a forgotten or doubled delimiter); `@@p@@end` is standalone
-//! by the grammar (the end check runs at the header close).
+//! opener `@@` where the target should be and more marker text
+//! follows (a doubled delimiter); a blank target at the end of the
+//! text is EmptyTarget instead. `@@p@@end` is standalone by the
+//! grammar (the end check runs at the header close).
 
 use std::ops::Range;
 
@@ -40,8 +41,12 @@ pub enum ErrorKind {
     /// Nothing (after trimming) between opener and header close.
     EmptyHeader,
     /// An opener where the target should be: the target so far is
-    /// blank and the closer is not a `@@end` close.
+    /// blank and more marker text follows (a doubled delimiter).
     Nesting,
+    /// A wrap whose target is blank: the closer sits where the
+    /// target should be and nothing but whitespace follows it
+    /// ("wrap has no text to apply to").
+    EmptyTarget,
     /// A lone `@@` with no partner ahead.
     StrayCloser,
 }
@@ -102,9 +107,10 @@ pub fn parse_markers(text: &str) -> ParseOutput {
         }
         let after = next_delim(&chars, &immune, h + 2);
         if after == Some(h + 2) {
-            // A `@@` where the target should be: the target is blank,
-            // which can only mean a forgotten or doubled delimiter —
-            // unless it is a `@@end` close (an empty-target wrap).
+            // A `@@` where the target should be: the target is blank.
+            // A `@@end` close still accepts it (an empty-target wrap);
+            // trailing off into whitespace ends the text with nothing
+            // to apply to; anything else is a doubled delimiter.
             if is_end_word(&chars, h + 4) {
                 out.markers.push(Marker {
                     whole: o..h + 7,
@@ -114,6 +120,12 @@ pub fn parse_markers(text: &str) -> ParseOutput {
                     target: Some(h + 2..h + 2),
                 });
                 pos = h + 7;
+            } else if chars[h + 4..].iter().all(|c| c.is_whitespace()) {
+                out.errors.push(MarkerError {
+                    range: o..h + 4,
+                    kind: ErrorKind::EmptyTarget,
+                });
+                pos = h + 4;
             } else {
                 out.errors.push(MarkerError {
                     range: o..h + 4,
@@ -552,6 +564,18 @@ mod tests {
                 vec![(0..10, 2..5, Some(2..5), 5..5, None)],
                 vec![],
             ),
+            case(
+                "blank wrap target is its own error",
+                "@@p@@@@",
+                vec![],
+                vec![(0..7, E::EmptyTarget)],
+            ),
+            case(
+                "blank wrap target with trailing whitespace",
+                "@@p@@@@ \n",
+                vec![],
+                vec![(0..7, E::EmptyTarget)],
+            ),
         ]
     }
 
@@ -638,24 +662,48 @@ mod tests {
         }
     }
 
+    /// Fastest of three runs: damps one-sided scheduling noise.
+    /// Load-robust perf checks compare two sizes in the same run
+    /// instead of asserting absolute milliseconds.
+    fn min_of_3(work: impl Fn()) -> std::time::Duration {
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            work();
+            best = best.min(start.elapsed());
+        }
+        best
+    }
+
     #[test]
     fn one_mebibyte_doc_parses_within_budget() {
         // Representative prose with fences, inline code, and a marker
         // every few paragraphs (plus hostile almost-markers).
         let para = "# Head @@fix typo@@this is teh\n\nsome `code @@x@@` and\n\n```\n@@f@@t@@\n```\n\ntail @@note hi @@end after\n\nstray @@ here\n\n";
+        let small: String = para.repeat(256 * 1024 / para.len() + 1);
         let big: String = para.repeat(1024 * 1024 / para.len() + 1);
         assert!(big.len() >= 1024 * 1024, "fixture is a full MiB");
-        let start = std::time::Instant::now();
         let out = parse_markers(&big);
-        let elapsed = start.elapsed();
         assert!(!out.markers.is_empty(), "markers found");
         assert!(!out.errors.is_empty(), "strays found");
-        // Budget: linear char scans, no per-line allocation beyond
-        // the output. Pinned with headroom; raise only with a
-        // measured reason (E4 precedent: 250 ms for a MiB).
+        // Scaling, not wall clock: 1 MiB must cost ~4x a 256 KiB doc
+        // measured in the same run, so load cancels out. Catches
+        // superlinear blowups; the 2 s ceiling is a catastrophe guard
+        // only, not a budget.
+        let t_small = min_of_3(|| {
+            parse_markers(&small);
+        });
+        let t_big = min_of_3(|| {
+            parse_markers(&big);
+        });
         assert!(
-            elapsed.as_millis() < 250,
-            "1 MiB parses in {elapsed:?}, budget 250 ms"
+            t_big < std::time::Duration::from_secs(2),
+            "catastrophe guard: 1 MiB parses in {t_big:?}"
+        );
+        let ratio = t_big.as_secs_f64() / t_small.as_secs_f64().max(1e-9);
+        assert!(
+            ratio <= 6.0,
+            "linear scaling: 1 MiB {t_big:?} vs 256 KiB {t_small:?}"
         );
     }
 }
