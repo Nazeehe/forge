@@ -282,7 +282,11 @@ impl AppState {
                 return Err(format!("request {rid} was cancelled"));
             }
         }
-        session.thread.push(WriterThreadEntry { request_id: rid, answer });
+        session.thread.push(WriterThreadEntry {
+            request_id: rid,
+            answer,
+            run: None,
+        });
         while session.thread.len() > crate::writer::MAX_THREAD_ENTRIES {
             session.thread.remove(0);
         }

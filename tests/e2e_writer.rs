@@ -847,3 +847,32 @@ fn writer_quit_with_dirty_doc_shows_confirm() {
     let text = h.settle();
     assert!(text.contains("xaaa"), "doc intact: {text:?}");
 }
+
+/// M4: the marker protocol round-trips through the real editor. The
+/// agent reads the saved file bytes, so a wrap marker and a
+/// `@@end`-closed standalone must survive open → save byte-exact,
+/// and the status must count both markers.
+#[test]
+fn writer_marker_protocol_survives_save_byte_exact() {
+    let body = "@@fix typo@@this is teh@@\n\n@@ask capital@@end\n";
+    let mut h = boot(&[("run.md", body)]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("run.md\r");
+    h.wait_for("rev0", "doc open");
+    // Both markers parse: the status counts them before any edit.
+    let text = h.settle();
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squashed.contains("2markers"), "status counts both: {squashed:?}");
+    // Ctrl+S saves through the real key path; the bytes the agent
+    // will read back must match the opened file exactly.
+    h.send("\x13");
+    h.wait_for("rev0", "saved");
+    let saved = std::fs::read_to_string(h.cwd.join("run.md")).expect("saved file");
+    assert_eq!(saved, body, "saved bytes are the agent input");
+}

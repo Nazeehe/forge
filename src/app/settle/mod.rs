@@ -150,6 +150,8 @@ impl AppState {
         // Writer request bodies ride the same gates through their own
         // per-session queues (cap 8, never drops).
         self.settle_writer_queues(now);
+        // Process runs finish on turn-end or silence on the same tick.
+        self.settle_writer_runs(now);
     }
 
     /// Send staged Enters whose beat has elapsed. Same gates as bodies —

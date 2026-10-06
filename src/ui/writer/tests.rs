@@ -258,6 +258,7 @@
         session.thread.push(crate::app::writer::WriterThreadEntry {
             request_id: 1,
             answer: "# Why\n\nbecause reasons".to_string(),
+            run: None,
         });
         let buf = paint_doc_to(&mut session, 120, 30);
         let text = buffer_text(&buf);

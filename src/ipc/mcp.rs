@@ -393,9 +393,11 @@ fn instructions(srv: &ServerCtx) -> String {
         Keep set_session_status current as your phase changes and clear it when \
         it stops describing reality. Use request_attention only when you are \
         blocked waiting on the operator, never to report completion. Writer tools \
-        (writer_open, writer_read, writer_propose, writer_answer) exist for the \
-        session's document: while a Writer document is open, change it only \
-        through writer_propose, never your own file tools.";
+        (writer_open, writer_read, writer_propose, writer_answer, writer_run_report, \
+        writer_run_done) exist for the session's document: answer requests with \
+        proposals, and edit the file directly only inside a <writer-process> run — \
+        markers read @@verb prompt@@target@@ (or @@prompt @@end); report each marker \
+        and close the run when done, never your own file tools outside a run.";
     if srv.instructions_extra.is_empty() {
         base.to_string()
     } else {
@@ -551,6 +553,16 @@ fn tool_defs() -> Vec<ToolDef> {
             name: "writer_answer",
             description: "Answer a Writer request with Markdown for the Assistant thread. Errors when the request id is unknown, cancelled, or already answered.",
             schema: r#"{"type":"object","properties":{"request_id":{"type":"integer"},"answer":{"type":"string"}},"required":["request_id","answer"]}"#,
+        },
+        ToolDef {
+            name: "writer_run_report",
+            description: "Report one process-run marker as started, done, or blocked, with an optional note. Refuses unknown runs, finished runs, and bad marker indexes.",
+            schema: r#"{"type":"object","properties":{"run":{"type":"integer"},"index":{"type":"integer"},"status":{"type":"string"},"note":{"type":"string"}},"required":["run","index","status"]}"#,
+        },
+        ToolDef {
+            name: "writer_run_done",
+            description: "Close a process run with a one-line summary; posts the single thread note. Refuses unknown or already-finished runs.",
+            schema: r#"{"type":"object","properties":{"run":{"type":"integer"},"summary":{"type":"string"}},"required":["run","summary"]}"#,
         },
         #[cfg(feature = "visual")]
         ToolDef {
@@ -839,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn instructions_carry_the_writer_propose_only_rule() {
+    fn instructions_carry_the_writer_run_rule() {
         let res = handle_line(
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
             &ctx(),
@@ -848,7 +860,13 @@ mod tests {
         )
         .expect("initialize answers");
         assert!(res.contains("writer_propose"), "writer tools named: {res}");
-        assert!(res.contains("never your own file tools"), "propose-only rule: {res}");
+        assert!(res.contains("writer_run_report"), "run tools named: {res}");
+        assert!(res.contains("writer_run_done"), "run tools named: {res}");
+        assert!(res.contains("@@verb prompt@@target@@"), "marker shape: {res}");
+        assert!(
+            !res.contains("change it only through writer_propose"),
+            "propose-only rule dropped: {res}"
+        );
     }
 
     fn call_ctx() -> CallCtx {
@@ -876,6 +894,31 @@ mod tests {
         assert!(res.contains(r#""name":"forge""#), "res: {res}");
         assert!(res.contains(r#""tools""#), "res: {res}");
         assert!(res.contains(r#""instructions":""#), "res: {res}");
+    }
+
+    /// The Writer surface is exactly six tools: adding or dropping one
+    /// is a deliberate spec change, so the full set is pinned here.
+    #[test]
+    fn tools_list_advertises_exactly_the_six_writer_tools() {
+        let res = handle_line(
+            r#"{"jsonrpc":"2.0","id":"a","method":"tools/list","params":{}}"#,
+            &ctx(),
+            &stub,
+            &call_ctx(),
+        )
+        .expect("tools/list answers");
+        for tool in [
+            "writer_open",
+            "writer_read",
+            "writer_propose",
+            "writer_answer",
+            "writer_run_report",
+            "writer_run_done",
+        ] {
+            assert!(res.contains(&format!("\"name\":\"{tool}\"")), "missing {tool}: {res}");
+        }
+        // No seventh Writer tool may slip in unnoticed.
+        assert_eq!(res.matches("\"name\":\"writer_").count(), 6, "writer tool count: {res}");
     }
 
     #[test]
@@ -912,6 +955,8 @@ mod tests {
             "writer_read",
             "writer_propose",
             "writer_answer",
+            "writer_run_report",
+            "writer_run_done",
             #[cfg(feature = "visual")]
             "visual_show",
         ] {

@@ -45,12 +45,12 @@
         id: Id,
     ) {
         for _ in 0..4 {
-            handle_key_at(state, router, key(event::KeyCode::Right), now);
+            handle_key_at(&mut *state, &mut *router, key(event::KeyCode::Right), now);
         }
         for _ in 0..3 {
             handle_key_at(
-                state,
-                router,
+                &mut *state,
+                &mut *router,
                 event::KeyEvent::new(
                     event::KeyCode::Right,
                     event::KeyModifiers::SHIFT,
@@ -241,6 +241,73 @@
             state.writers.get(&id).unwrap().selection,
             Some(start..start + "verb prompt".len()),
             "placeholder selected"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    #[test]
+    fn trailing_space_stays_outside_the_markers() {
+        // Shift+Ctrl+Right grabs "bbb " (word plus trailing space):
+        // the closer must not glue to the next word.
+        let (mut state, id, dir, mut router, now) = setup();
+        std::fs::write(dir.join("e.md"), "aaa bbb ccc").unwrap();
+        open_doc(&mut state, id, "e.md");
+        for _ in 0..4 {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Right), now);
+        }
+        for _ in 0..4 {
+            handle_key_at(
+                &mut state,
+                &mut router,
+                event::KeyEvent::new(
+                    event::KeyCode::Right,
+                    event::KeyModifiers::SHIFT,
+                ),
+                now,
+            );
+        }
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(4..8),
+            "bbb plus trailing space"
+        );
+        handle_key_at(&mut state, &mut router, at(), now);
+        handle_key_at(&mut state, &mut router, at(), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "aaa @@verb prompt@@bbb@@ ccc",
+            "space outside the closer"
+        );
+        teardown(&mut state, id, &dir);
+    }
+
+    #[test]
+    fn leading_space_stays_outside_the_markers() {
+        let (mut state, id, dir, mut router, now) = setup();
+        for _ in 0..3 {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Right), now);
+        }
+        for _ in 0..4 {
+            handle_key_at(
+                &mut state,
+                &mut router,
+                event::KeyEvent::new(
+                    event::KeyCode::Right,
+                    event::KeyModifiers::SHIFT,
+                ),
+                now,
+            );
+        }
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            Some(3..7),
+            "space plus bbb"
+        );
+        handle_key_at(&mut state, &mut router, alt_m(), now);
+        assert_eq!(
+            doc_text(&state, id),
+            "aaa @@verb prompt@@bbb@@",
+            "space outside the opener"
         );
         teardown(&mut state, id, &dir);
     }

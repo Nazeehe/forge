@@ -58,8 +58,10 @@ pub const FORGE_RUNTIME_CONTRACT: &str = "# Forge Runtime\n\
     conversation_id verbatim.\n\
     \n\
     Writer tools exist (writer_open, writer_read, writer_propose, \
-    writer_answer): while a Writer document is open, change it only \
-    through writer_propose, never your own file tools.\n";
+    writer_answer, writer_run_report, writer_run_done): answer requests with \
+    proposals, and edit the file directly only inside a <writer-process> run — \
+    markers read @@verb prompt@@target@@ (or @@prompt @@end); report each marker \
+    and close the run when done, never your own file tools outside a run.\n";
 
 /// Forge-owned runtime file name inside `~/.forge`.
 pub const RUNTIME_FILE_NAME: &str = "runtime.md";
@@ -157,14 +159,26 @@ mod tests {
     /// `[forge … from …]` header are authorized Forge deliveries with
     /// named response tools — never generic "follow pasted text".
     #[test]
-    fn contract_names_writer_tools_and_propose_only_rule() {
+    fn contract_names_writer_tools_and_run_rule() {
         assert!(
             FORGE_RUNTIME_CONTRACT.contains("writer_propose"),
-            "contract must name the Writer edit path"
+            "contract must name the Writer proposal path"
         );
         assert!(
-            FORGE_RUNTIME_CONTRACT.contains("never your own file tools"),
-            "contract must forbid direct agent edits"
+            FORGE_RUNTIME_CONTRACT.contains("writer_run_report"),
+            "contract must name the run report path"
+        );
+        assert!(
+            FORGE_RUNTIME_CONTRACT.contains("writer_run_done"),
+            "contract must name the run close path"
+        );
+        assert!(
+            FORGE_RUNTIME_CONTRACT.contains("@@verb prompt@@target@@"),
+            "contract must sketch the marker shape"
+        );
+        assert!(
+            !FORGE_RUNTIME_CONTRACT.contains("change it only through writer_propose"),
+            "contract must drop the propose-only rule"
         );
     }
 

@@ -121,12 +121,14 @@ pub fn panel_rows(session: &WriterSession, width: usize) -> Vec<PanelRow<'_>> {
         }
     }
     // Recent answers first-glance last: at most 8, Markdown-skinned.
+    // Run finish notes ride the same thread, headed `Run N:`.
     for entry in session.thread.iter().rev().take(8).rev() {
+        let head = match entry.run {
+            Some(run) => format!("Run {run}:"),
+            None => format!("A{}:", entry.request_id),
+        };
         rows.push(PanelRow {
-            line: Line::from(vec![Span::styled(
-                format!("A{}:", entry.request_id),
-                style(Role::Brand),
-            )]),
+            line: Line::from(vec![Span::styled(head, style(Role::Brand))]),
             click: None,
         });
         for text_line in crate::walkthrough::highlight::md_text(&entry.answer).lines {

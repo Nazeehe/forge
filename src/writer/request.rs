@@ -171,7 +171,8 @@ fn truncate_selection(selection: &str) -> (String, bool) {
 
 /// Replace C0 controls (except \n and \t), DEL, and C1 controls with
 /// U+FFFD so they cannot smuggle formatting into the agent's markup.
-fn sanitize_text(text: &str) -> String {
+/// `pub(crate)`: the process markup shares it.
+pub(crate) fn sanitize_text(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' | '\t' => c,
@@ -184,13 +185,26 @@ fn sanitize_text(text: &str) -> String {
 /// Tag prefixes that would break out of the request markup (any case).
 /// The spec named only `</writer-request`; the inner `</selection>` and
 /// `</instruction>` close early and let pasted or agent-supplied text forge
-/// a new field, so they are refused in both fields as well.
+/// a new field, so they are refused in both fields as well. The process
+/// markup keeps its own list (same shape, its own tags) so neither
+/// family false-refuses the other's legitimate text.
 const FORBIDDEN_TAGS: [&str; 3] = ["</writer-request", "</selection", "</instruction"];
 
 /// Refuse text that would break out of the request markup.
 fn check_hostile(field: &'static str, text: &str) -> Result<(), WriterError> {
+    check_hostile_tags(field, text, &FORBIDDEN_TAGS)
+}
+
+/// Refuse text containing any closing-tag prefix from `tags` (any
+/// case). `pub(crate)`: the process markup shares the predicate
+/// with its own tag list.
+pub(crate) fn check_hostile_tags(
+    field: &'static str,
+    text: &str,
+    tags: &[&str],
+) -> Result<(), WriterError> {
     let lower = text.to_lowercase();
-    if FORBIDDEN_TAGS.iter().any(|tag| lower.contains(tag)) {
+    if tags.iter().any(|tag| lower.contains(tag)) {
         return Err(WriterError::HostileMarkup(field));
     }
     Ok(())
@@ -199,7 +213,7 @@ fn check_hostile(field: &'static str, text: &str) -> Result<(), WriterError> {
 /// Make a file name safe for the single-line `[forge writer "…"]` header:
 /// controls (including newline and tab) become U+FFFD and `"` becomes `'`,
 /// so the header stays one line with exactly its two delimiting quotes.
-fn sanitize_header(name: &str) -> String {
+pub(crate) fn sanitize_header(name: &str) -> String {
     name.chars()
         .map(|c| match c {
             '"' => '\'',

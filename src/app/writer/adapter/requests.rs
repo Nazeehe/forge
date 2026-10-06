@@ -198,7 +198,8 @@ impl AppState {
 
     /// File name for the request header: the jail-relative path's final
     /// component, so the markup never carries directories.
-    fn writer_doc_name(path_rel: &str) -> String {
+    /// `pub(crate)`: run starts share it.
+    pub(crate) fn writer_doc_name(path_rel: &str) -> String {
         std::path::Path::new(path_rel)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -217,7 +218,7 @@ impl AppState {
     /// the session hasn't exited, and it has an agent tab. A fast
     /// pre-check only — the flush path re-gates on the agent's live
     /// state and holds (never drops) when the pane write fails.
-    fn writer_agent_live(&self, id: crate::session::SessionId) -> bool {
+    pub(crate) fn writer_agent_live(&self, id: crate::session::SessionId) -> bool {
         let Some(rec) = self.manager.get(id) else {
             return false;
         };

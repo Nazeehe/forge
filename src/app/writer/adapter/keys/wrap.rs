@@ -108,7 +108,30 @@ impl AppState {
             .skip(range.start)
             .take(range.end.saturating_sub(range.start))
             .collect();
-        let wrapped = format!("@@{PLACEHOLDER}@@{text}@@");
+        // Edge whitespace stays outside the markers (`beta ` wraps
+        // as `@@…@@beta@@ `), so the closer never glues to the next
+        // word. An all-whitespace selection wraps whole (degenerate).
+        let leading: String = text.chars().take_while(|c| c.is_whitespace()).collect();
+        let trailing: String = text
+            .chars()
+            .rev()
+            .take_while(|c| c.is_whitespace())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        let core = text
+            .strip_prefix(leading.as_str())
+            .unwrap_or(text.as_str())
+            .strip_suffix(trailing.as_str())
+            .unwrap_or(text.as_str());
+        let (lead, core, trail) = if core.is_empty() {
+            (String::new(), text.as_str(), String::new())
+        } else {
+            (leading, core, trailing)
+        };
+        let wrapped = format!("{lead}@@{PLACEHOLDER}@@{core}@@{trail}");
+        let marker_start = range.start + lead.chars().count();
         let Some(session) = self.writers.get_mut(&id) else {
             return false;
         };
@@ -136,18 +159,18 @@ impl AppState {
         // selection object, so re-enter Visual first (the accept
         // path does the same).
         let after = editor.lines.to_string();
-        editor.cursor = offset_to_index2(&after, range.start + 2 + PLACEHOLDER.len());
+        editor.cursor = offset_to_index2(&after, marker_start + 2 + PLACEHOLDER.len());
         editor.execute(SwitchMode(EditorMode::Visual));
         if let Some(sel) = editor.selection.as_mut() {
-            sel.start = offset_to_index2(&after, range.start + 2);
-            sel.end = offset_to_index2(&after, range.start + 2 + PLACEHOLDER.len() - 1);
+            sel.start = offset_to_index2(&after, marker_start + 2);
+            sel.end = offset_to_index2(&after, marker_start + 2 + PLACEHOLDER.len() - 1);
         }
         editor.mode = EditorMode::Insert;
         session.type_group = None;
         session.sel_anchor = None;
         session.nav_goal = None;
         session.wrap = Some(WrapState::Wrapping {
-            start: range.start,
+            start: marker_start,
             original: (range, text),
         });
         session.banner = None;

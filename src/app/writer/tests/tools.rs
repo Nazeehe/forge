@@ -57,6 +57,11 @@ fn foreign_run_id_is_refused_for_all_writer_tools() {
         ("writer_read", "{}"),
         ("writer_propose", r#"{"text":"x","start_line":1,"end_line":1}"#),
         ("writer_answer", r#"{"request_id":1,"answer":"x"}"#),
+        (
+            "writer_run_report",
+            r#"{"run":1,"index":0,"status":"done"}"#,
+        ),
+        ("writer_run_done", r#"{"run":1,"summary":"x"}"#),
     ] {
         let reply = comms_reply(&mut state, "bogus-run", tool, args);
         assert!(reply.contains("unknown or stale run ID"), "{tool}: {reply}");

@@ -15,6 +15,7 @@ use crate::writer::request::WriterAction;
 pub mod adapter;
 pub mod markdown;
 pub mod markers;
+pub mod runs;
 pub mod tools;
 pub mod watch;
 #[cfg(test)]
@@ -50,6 +51,8 @@ pub struct WriterRequestRecord {
 pub struct WriterThreadEntry {
     pub request_id: u64,
     pub answer: String,
+    /// Run finish note (not tied to a request); paints as `Run N:`.
+    pub run: Option<u64>,
 }
 
 /// Keyboard focus inside the Writer overlay: the editor, the chat
@@ -213,6 +216,10 @@ pub struct WriterSession {
     /// wrapping with the placeholder live. Cleared by Esc, finish,
     /// navigation, focus moves, preview, and the mouse.
     pub wrap: Option<adapter::keys::wrap::WrapState>,
+    /// Process runs (§6.1) with per-marker agent progress.
+    pub runs: Vec<runs::WriterRun>,
+    /// Next run id (1-based, like requests).
+    pub next_run_id: u64,
     pub next_request_id: u64,
     /// Optional label from `writer_open`; titles the Writer tab.
     pub title: Option<String>,
@@ -426,6 +433,15 @@ impl WriterSession {
             ordered.into_iter().take(drop_count).collect();
         self.requests.retain(|r| !drop.contains(&r.id));
     }
+
+    /// Push one thread entry, evicting the oldest past the cap.
+    /// `pub(crate)`: run finishes share it with answers.
+    pub(crate) fn push_thread_note(&mut self, entry: WriterThreadEntry) {
+        self.thread.push(entry);
+        while self.thread.len() > crate::writer::MAX_THREAD_ENTRIES {
+            self.thread.remove(0);
+        }
+    }
 }
 
 impl AppState {
@@ -482,7 +498,8 @@ impl AppState {
         args: &str,
     ) -> Option<Result<String, String>> {
         match tool {
-            "writer_open" | "writer_read" | "writer_propose" | "writer_answer" => {}
+            "writer_open" | "writer_read" | "writer_propose" | "writer_answer" | "writer_run_report"
+            | "writer_run_done" => {}
             _ => return None,
         }
         let id = match self.resolve_tool_caller(run_id) {
@@ -493,7 +510,10 @@ impl AppState {
             "writer_open" => Some(self.writer_open(id, args)),
             "writer_read" => Some(self.writer_read(id, args)),
             "writer_propose" => Some(self.writer_propose(id, args)),
-            _ => Some(self.writer_answer(id, args)),
+            "writer_answer" => Some(self.writer_answer(id, args)),
+            "writer_run_report" => Some(self.writer_run_report(id, args)),
+            "writer_run_done" => Some(self.writer_run_done(id, args)),
+            _ => None,
         }
     }
 }

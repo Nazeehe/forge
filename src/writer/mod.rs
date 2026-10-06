@@ -10,6 +10,7 @@
 
 pub mod document;
 pub mod markers;
+pub mod process;
 pub mod proposal;
 pub mod recent;
 pub mod request;
@@ -46,6 +47,20 @@ pub const MAX_SETTLED_PROPOSALS: usize = 64;
 
 /// Marker appended when a selection is cut for the agent (spec §4.8).
 pub const TRUNCATION_MARKER: &str = "[…truncated, call writer_read for full text]";
+
+/// Longest wrap-target excerpt carried in a process marker list, in
+/// chars (spec §8 M4 row). The file holds the rest; the excerpt
+/// names `writer_read` for it via [`TRUNCATION_MARKER`].
+pub const TARGET_EXCERPT_CHARS: usize = 500;
+
+/// Most runs kept per document; the oldest finished are evicted
+/// first, and a new run is refused while all slots hold active runs
+/// (spec §6.1).
+pub const MAX_RUNS_PER_DOC: usize = 8;
+
+/// A run with no report that lives this long is force-finished
+/// (spec §6.1). Runs that report finish on done or turn-end instead.
+pub const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Errors for document open/save, proposals, and request markup.
 #[derive(Clone, Debug, PartialEq, Eq)]
