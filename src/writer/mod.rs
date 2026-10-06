@@ -9,6 +9,7 @@
 //! Full shifting arrives in a later task.
 
 pub mod document;
+pub mod markers;
 pub mod proposal;
 pub mod recent;
 pub mod request;
