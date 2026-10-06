@@ -500,6 +500,60 @@ fn stop_without_bytes_requests_and_waits_for_the_marker() {
     finish(&mut state, id, &dir);
 }
 
+/// M5-fix: a second Stop force-finishes at once (the agent may
+/// never yield). What landed collapses to one undo, the violation
+/// check runs on it, and late tool calls bounce as finished.
+#[test]
+fn second_stop_force_finishes_with_collapse_and_check() {
+    let (mut state, id, run, dir) = writer_agent_with("muse");
+    std::fs::write(dir.join("n.md"), DOC).unwrap();
+    let run_id = state.manager.get(id).unwrap().run_id.as_str().to_string();
+    assert!(open_doc(&mut state, &run_id, "n.md").contains(r#""ok":true"#));
+    let mut now = std::time::Instant::now();
+    let rid = state.writer_process_start(id, None, now).expect("starts");
+    // The agent lands one marker plus an outside edit, then goes silent.
+    let landed = "beta DONE0\n\n@@ask capital@@Paris@@\n";
+    std::fs::write(dir.join("n.md"), landed).unwrap();
+    now += std::time::Duration::from_secs(2);
+    state.writer_poll_files_now(now);
+    state.writer_process_stop(id);
+    assert!(
+        state.writers.get(&id).unwrap().process.is_some(),
+        "first stop waits"
+    );
+    state.writer_process_stop(id);
+    let session = state.writers.get(&id).unwrap();
+    assert!(session.process.is_none(), "force unlocks at once");
+    let note = session.thread.last().expect("details note");
+    assert!(note.answer.contains("stopped by user"), "status: {}", note.answer);
+    assert!(
+        session.pending_confirm.is_some(),
+        "violation checked on what landed"
+    );
+    // Late tool calls bounce as finished.
+    let late = comms_reply(
+        &mut state, &run, "writer_run_report",
+        &format!(r#"{{"run":{rid},"index":0,"status":"done"}}"#),
+    );
+    assert!(late.contains("already finished"), "late report: {late}");
+    let late_done = comms_reply(
+        &mut state, &run, "writer_run_done",
+        &format!(r#"{{"run":{rid},"summary":"x"}}"#),
+    );
+    assert!(late_done.contains("already finished"), "late done: {late_done}");
+    // What landed collapses to one undo step.
+    let session = state.writers.get_mut(&id).unwrap();
+    let editor = session.editor.as_mut().expect("editor live");
+    editor.execute(edtui::actions::Undo);
+    assert_eq!(editor.lines.to_string(), DOC, "one undo reverts the landing");
+    // A later agent write rides the normal watch (clean reload).
+    std::fs::write(dir.join("n.md"), "late\n").unwrap();
+    now += std::time::Duration::from_secs(2);
+    state.writer_poll_files_now(now);
+    assert_eq!(doc_text(&state, id), "late\n", "normal reload after force");
+    finish(&mut state, id, &dir);
+}
+
 #[test]
 fn stop_without_a_lock_is_a_noop() {
     let (mut state, id, _run, dir) = started_doc();

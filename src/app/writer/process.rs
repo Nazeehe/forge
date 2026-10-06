@@ -225,13 +225,27 @@ impl AppState {
     /// Stop a locked run: interrupt the agent, or ask it to wind
     /// down when its harness carries no interrupt. Completed markers
     /// stay; the lock lifts on done or turn-end (timeout when the
-    /// agent goes silent). Stopping twice, or with no lock, is a
-    /// no-op. `pub(crate)`: the toggle, Esc, and tests share it.
+    /// agent goes silent). Stopping again force-finishes at once
+    /// ("stopped by user": collapse, violation check, unlock), so a
+    /// silent agent can never hold the document hostage. No lock is
+    /// a no-op. `pub(crate)`: the toggle, Esc, and tests share it.
     pub(crate) fn writer_process_stop(&mut self, id: crate::session::SessionId) {
         let rid = match self.writers.get(&id).and_then(|s| s.process.as_ref()) {
-            Some(lock) if !lock.stopped => lock.run_id,
-            _ => return,
+            Some(lock) => lock.run_id,
+            None => return,
         };
+        if self
+            .writers
+            .get(&id)
+            .is_some_and(|s| s.process.as_ref().is_some_and(|l| l.stopped))
+        {
+            // Force stop: finish now over whatever landed. The
+            // pre-flight capture is still atop the undo stack
+            // (reloads never capture), so the landing collapses to
+            // one undo; the shared finish runs the violation check.
+            self.finish_writer_run(id, rid, "stopped by user".to_string());
+            return;
+        }
         // A dead agent never dones: finish at once instead of
         // stranding the lock on settle paths that need its activity.
         // (Untestable in unit tests: fixtures always hold a live

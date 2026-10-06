@@ -237,17 +237,19 @@ pub fn toolbar_label(button: ToolbarButton) -> &'static str {
 }
 
 /// Session-aware pill label: the Process pill reads Stop while a
-/// run holds the read-only lock (same pill, same funnel). Paint and
-/// hit rects share this, so the Stop text never outpaints its rect.
+/// run holds the read-only lock, Force stop once stopping (a second
+/// press finishes at once). Same pill, same funnel; paint and hit
+/// rects share this, so the text never outpaints its rect.
 pub fn toolbar_action_label(
     session: &crate::app::writer::WriterSession,
     button: ToolbarButton,
 ) -> &'static str {
-    if button == ToolbarButton::Process && session.process.is_some() {
-        "Stop"
-    } else {
-        toolbar_label(button)
+    if button == ToolbarButton::Process {
+        if let Some(lock) = session.process.as_ref() {
+            return if lock.stopped { "Force stop" } else { "Stop" };
+        }
     }
+    toolbar_label(button)
 }
 
 /// Marker for one toolbar pill: `✓` while a toggle (Assistant,

@@ -885,6 +885,16 @@ fn writer_process_pill_locks_and_blocks_typing() {
     let text = h.wait_for("Stoprequested", "stop request");
     let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(squashed.contains("@@fixtypo@@thisisteh@@"), "doc intact: {squashed:?}");
+    // Esc again force-stops: the run finishes at once (the status
+    // keeps its counts) and typing lands in the freed document.
+    h.send("\x1b");
+    h.wait_for("Run:0done", "force stop");
+    h.send("\x1b[H");
+    h.send("x");
+    std::thread::sleep(Duration::from_millis(300));
+    let text = h.settle();
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squashed.contains("x@@fixtypo@@thisisteh@@"), "typing lands: {squashed:?}");
 }
 
 /// M4: the marker protocol round-trips through the real editor. The

@@ -1279,6 +1279,28 @@
         session
     }
 
+    /// M5-fix: after the first Stop the pill offers Force stop
+    /// (same pill, same funnel; the rect comes from the same label
+    /// the paint uses).
+    #[test]
+    fn process_pill_reads_stop_then_force_stop() {
+        let mut session = run_session();
+        assert_eq!(
+            super::layout::toolbar_action_label(&session, ToolbarButton::Process),
+            "Stop"
+        );
+        session.process.as_mut().unwrap().stopped = true;
+        assert_eq!(
+            super::layout::toolbar_action_label(&session, ToolbarButton::Process),
+            "Force stop"
+        );
+        session.process = None;
+        assert_eq!(
+            super::layout::toolbar_action_label(&session, ToolbarButton::Process),
+            "Process"
+        );
+    }
+
     #[test]
     fn started_marker_paints_the_spin_gutter() {
         let mut session = run_session();
