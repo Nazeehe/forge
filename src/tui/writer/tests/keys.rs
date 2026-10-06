@@ -1033,3 +1033,22 @@
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn ctrl_h_deletes_a_word_back_and_opens_nothing() {
+        // 0x08 decodes as Char('h')+CONTROL through crossterm: on
+        // legacy terminals this IS Ctrl+Backspace (and ^H-mode
+        // Backspace), the far more common habit, so it word-deletes
+        // instead of opening replace (Alt+H owns that).
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, key(event::KeyCode::End), now);
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('h')), now);
+        assert_eq!(doc_text(&state, id), "aaa ");
+        assert!(state.writers.get(&id).unwrap().find.is_none(), "no bar");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }

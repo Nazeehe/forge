@@ -914,7 +914,7 @@
         for c in "aa".chars() {
             handle_key_at(&mut state, &mut router, key(event::KeyCode::Char(c)), now);
         }
-        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('h')), now);
+        handle_key_at(&mut state, &mut router, event::KeyEvent::new(event::KeyCode::Char('h'), event::KeyModifiers::ALT), now);
         for c in "b".chars() {
             handle_key_at(&mut state, &mut router, key(event::KeyCode::Char(c)), now);
         }

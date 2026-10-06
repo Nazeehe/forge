@@ -140,8 +140,8 @@ impl AppState {
                     session.pending_confirm = Some(crate::app::writer::PendingConfirm {
                         message: format!("Changed on disk: {rel}"),
                         actions: vec![
-                            crate::app::writer::ConfirmAction::ReloadFromDisk,
                             crate::app::writer::ConfirmAction::KeepMine,
+                            crate::app::writer::ConfirmAction::ReloadFromDisk,
                         ],
                     });
                     session.error = None;

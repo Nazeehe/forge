@@ -18,6 +18,15 @@ fn ctrl_f(state: &mut crate::app::AppState, router: &mut InputRouter) {
     press(state, router, ctrl(event::KeyCode::Char('f')));
 }
 
+fn alt_h(state: &mut crate::app::AppState, router: &mut InputRouter) {
+    // Replace lives on Alt+H: 0x08 (Ctrl+H) word-deletes instead.
+    press(
+        state,
+        router,
+        event::KeyEvent::new(event::KeyCode::Char('h'), event::KeyModifiers::ALT),
+    );
+}
+
 fn type_str(state: &mut crate::app::AppState, router: &mut InputRouter, text: &str) {
     for c in text.chars() {
         press(state, router, key(event::KeyCode::Char(c)));
@@ -216,11 +225,11 @@ fn replace_current_swaps_and_advances() {
     let (mut state, id, dir) = writer_agent();
     open_foo(&mut state, id, &dir);
     let mut router = InputRouter::new();
-    // Ctrl+H opens straight into the replace field; the query goes
+    // Alt+H opens straight into the replace field; the query goes
     // through the find field first via Ctrl+F.
     ctrl_f(&mut state, &mut router);
     type_str(&mut state, &mut router, "foo");
-    press(&mut state, &mut router, ctrl(event::KeyCode::Char('h')));
+    alt_h(&mut state, &mut router);
     type_str(&mut state, &mut router, "qux");
     // Enter in the replace field replaces the current match.
     press(&mut state, &mut router, key(event::KeyCode::Enter));
@@ -239,7 +248,7 @@ fn replace_all_is_one_undo_step() {
     let mut router = InputRouter::new();
     ctrl_f(&mut state, &mut router);
     type_str(&mut state, &mut router, "aa");
-    press(&mut state, &mut router, ctrl(event::KeyCode::Char('h')));
+    alt_h(&mut state, &mut router);
     type_str(&mut state, &mut router, "b");
     // Tab cycles Replace field → (Replace) → (Replace all); Enter fires it.
     press(&mut state, &mut router, key(event::KeyCode::Tab));
@@ -272,7 +281,7 @@ fn replace_all_past_the_cap_is_refused() {
     type_str(&mut state, &mut router, "a");
     let find = find_of(&state, id);
     assert!(find.overflow, "cap trips");
-    press(&mut state, &mut router, ctrl(event::KeyCode::Char('h')));
+    alt_h(&mut state, &mut router);
     type_str(&mut state, &mut router, "b");
     press(&mut state, &mut router, key(event::KeyCode::Tab));
     press(&mut state, &mut router, key(event::KeyCode::Tab));
@@ -420,7 +429,7 @@ fn replace_all_redo_restores_replaced_text() {
     let mut router = InputRouter::new();
     ctrl_f(&mut state, &mut router);
     type_str(&mut state, &mut router, "aa");
-    press(&mut state, &mut router, ctrl(event::KeyCode::Char('h')));
+    alt_h(&mut state, &mut router);
     type_str(&mut state, &mut router, "b");
     press(&mut state, &mut router, key(event::KeyCode::Tab));
     press(&mut state, &mut router, key(event::KeyCode::Tab));

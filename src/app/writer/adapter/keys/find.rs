@@ -7,9 +7,10 @@
 //! ignored, prompt parity. Enter activates the Tab-focused control,
 //! F3/Shift+F3 and Up/Down step through matches with wrap-around,
 //! Esc closes through `writer_dismiss_top` and leaves the cursor on
-//! the current match. Ctrl+F toggles; Ctrl+H opens straight into
-//! the replace field (Alt+H is the reachable twin: legacy terminals
-//! deliver Ctrl+H as Backspace, which can never carry Control).
+//! the current match. Ctrl+F toggles; Alt+H (and the toggle pill)
+//! opens straight into the replace field. Ctrl+H word-deletes: 0x08
+//! is Ctrl+Backspace far more often than Ctrl+H on legacy
+//! terminals, and the two can never be told apart.
 
 use super::chat::word_edge;
 use super::{editor_selection_to_range, index2_to_offset, offset_to_index2};
@@ -94,8 +95,8 @@ impl AppState {
     /// Open the find bar, seeding the query from a live selection.
     /// With replace already open this only reveals the replace field.
     /// Preview turns off: search runs on the source and the matches
-    /// highlight in the editor. `pub(crate)`: Ctrl+F/Ctrl+H/Alt+H
-    /// arrive through the TUI input layer.
+    /// highlight in the editor. `pub(crate)`: Ctrl+F/Alt+H arrive
+    /// through the TUI input layer.
     pub(crate) fn writer_find_open(&mut self, id: crate::session::SessionId, with_replace: bool) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;

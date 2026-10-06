@@ -252,11 +252,13 @@ impl AppState {
                     // An existing confirm (close, save-as, another
                     // banner) wins; the next poll retries.
                     if let Some(session) = self.writers.get_mut(&id) {
+                        // Keep mine first: the default must never throw
+                        // away unsaved edits.
                         session.pending_confirm = Some(PendingConfirm {
                             message: format!("Changed on disk: {rel}"),
                             actions: vec![
-                                ConfirmAction::ReloadFromDisk,
                                 ConfirmAction::KeepMine,
+                                ConfirmAction::ReloadFromDisk,
                             ],
                         });
                     }
@@ -461,5 +463,68 @@ mod tests {
             .iter()
             .position(|a| a == want)
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod default_tests {
+    use super::super::test_support::*;
+
+    fn open_d(
+        state: &mut crate::app::AppState,
+        id: crate::session::SessionId,
+        run: &str,
+        dir: &std::path::Path,
+        text: &str,
+    ) {
+        std::fs::write(dir.join("d.md"), text).unwrap();
+        open_doc(state, run, "d.md");
+        open_editor(state, id);
+    }
+
+    fn dirty(state: &mut crate::app::AppState, id: crate::session::SessionId) {
+        state
+            .writers
+            .get_mut(&id)
+            .unwrap()
+            .doc
+            .as_mut()
+            .unwrap()
+            .apply_edit(0..0, "x")
+            .unwrap();
+    }
+
+    #[test]
+    fn dirty_banner_enter_keeps_text() {
+        let (mut state, id, run, dir) = writer_agent();
+        open_d(&mut state, id, &run, &dir, "aaa");
+        dirty(&mut state, id);
+        std::fs::write(dir.join("d.md"), "external").unwrap();
+        state.writer_poll_files();
+        // Enter fires the default (first) action: it must not throw
+        // away unsaved edits.
+        state.writer_fire_confirm(id, 0);
+        let session = state.writers.get(&id).unwrap();
+        assert_eq!(session.doc.as_ref().unwrap().text, "xaaa", "text kept");
+        assert!(session.pending_confirm.is_none(), "banner settled");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deleted_banner_enter_recreates() {
+        let (mut state, id, run, dir) = writer_agent();
+        open_d(&mut state, id, &run, &dir, "aaa");
+        dirty(&mut state, id);
+        std::fs::remove_file(dir.join("d.md")).unwrap();
+        state.writer_poll_files();
+        // Enter fires the default (first) action: recreate, not close.
+        state.writer_fire_confirm(id, 0);
+        assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "xaaa");
+        let session = state.writers.get(&id).unwrap();
+        assert!(session.doc.is_some(), "doc kept open");
+        assert!(!session.doc.as_ref().unwrap().dirty, "recreate is clean");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

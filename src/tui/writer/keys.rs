@@ -99,20 +99,20 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
                 }
                 return;
             }
-            // 0x08 decodes here: intentional Ctrl+H, but also
-            // legacy Ctrl+Backspace and ^H-mode Backspace keys,
-            // which share the byte and can never be told apart
-            // (industry-standard ambiguity; terminals should send
-            // 0x7F for Backspace). Alt+H is the reliable twin.
+            // 0x08 decodes here on every legacy terminal, and it is
+            // Ctrl+Backspace far more often than Ctrl+H (both share
+            // the byte with ^H-mode Backspace keys and can never be
+            // told apart), so this word-deletes like Alt+Backspace.
+            // Replace lives on Alt+H and the (Replace ▸) pill only.
             KeyCode::Char('h') => {
-                state.writer_find_open(id, true);
+                state.writer_delete_word(id, true);
                 return;
             }
             _ => {}
         }
     }
-    // Alt+H is the reachable replace twin: legacy terminals deliver
-    // Ctrl+H as Backspace, which can never carry Control.
+    // Alt+H opens replace: the only reachable twin, since 0x08
+    // (Ctrl+H) word-deletes above and can never mean Ctrl+H alone.
     if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('h') {
         state.writer_find_open(id, true);
         return;
