@@ -76,6 +76,10 @@ impl AppState {
     /// half-typed message must never ride along and be lost.
     /// `pub(crate)`: the TUI input layer calls this directly.
     pub(crate) fn writer_rephrase(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         self.writer_send_request(id, WriterAction::Rephrase, String::new());
     }
 
@@ -83,6 +87,10 @@ impl AppState {
     /// is none. The chat box is the instruction and clears on send.
     /// `pub(crate)`: the TUI input layer calls this directly.
     pub(crate) fn writer_chat_send(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let instruction = self
             .writers
             .get(&id)
@@ -207,7 +215,9 @@ impl AppState {
     }
 
     /// Record a fixed-slot error without touching anything else.
-    pub(super) fn writer_fail(&mut self, id: crate::session::SessionId, message: &str) {
+    /// `pub(crate)`: the process toggle surfaces start failures (a
+    /// caller outside the adapter folder).
+    pub(crate) fn writer_fail(&mut self, id: crate::session::SessionId, message: &str) {
         if let Some(session) = self.writers.get_mut(&id) {
             session.error = Some(message.to_string());
         }

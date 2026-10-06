@@ -22,6 +22,10 @@ impl AppState {
         id: crate::session::SessionId,
         proposal_id: u64,
     ) -> Result<(), String> {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return Err(crate::app::writer::process::PROCESS_NOTICE.to_string());
+        }
         let session = self
             .writers
             .get_mut(&id)
@@ -97,6 +101,10 @@ impl AppState {
         id: crate::session::SessionId,
         proposal_id: u64,
     ) -> Result<(), String> {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return Err(crate::app::writer::process::PROCESS_NOTICE.to_string());
+        }
         let session = self
             .writers
             .get_mut(&id)
@@ -115,6 +123,10 @@ impl AppState {
     /// Save through S2; conflicts land in the fixed error slot.
     /// `pub(crate)`: the TUI input layer calls this directly.
     pub(crate) fn writer_save(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let Some(session) = self.writers.get_mut(&id) else {
             return;
         };

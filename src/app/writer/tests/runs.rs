@@ -28,7 +28,7 @@
     fn start_run_enqueues_markup_and_tracks_state() {
         let (mut state, id, _run, dir) = seeded();
         let now = std::time::Instant::now();
-        let rid = state.writer_start_run(id, now).expect("run starts");
+        let rid = state.writer_start_run(id, now, None).expect("run starts");
         let session = state.writers.get(&id).unwrap();
         assert_eq!(rid, 1);
         let run = session.runs.iter().find(|r| r.id == rid).expect("run kept");
@@ -54,7 +54,7 @@
         std::fs::write(dir.join("p.md"), "plain text\n").unwrap();
         assert!(open_doc(&mut state, &run, "p.md").contains(r#""ok":true"#));
         let err = state
-            .writer_start_run(id, std::time::Instant::now())
+            .writer_start_run(id, std::time::Instant::now(), None)
             .unwrap_err();
         assert!(err.contains("No markers in"), "err: {err}");
         assert!(state.writers.get(&id).unwrap().runs.is_empty(), "no orphan run");
@@ -66,7 +66,7 @@
         let (mut state, id, _run, dir) = seeded();
         state.writers.get_mut(&id).unwrap().queue.resize(8, String::new());
         let err = state
-            .writer_start_run(id, std::time::Instant::now())
+            .writer_start_run(id, std::time::Instant::now(), None)
             .unwrap_err();
         assert!(err.contains("queue full"), "err: {err}");
         assert!(state.writers.get(&id).unwrap().runs.is_empty(), "run held, not dropped");
@@ -83,7 +83,7 @@
             .tabs
             .retain(|tab| tab.kind != crate::session::TabKind::Agent);
         let err = state
-            .writer_start_run(id, std::time::Instant::now())
+            .writer_start_run(id, std::time::Instant::now(), None)
             .unwrap_err();
         assert!(err.contains("no live agent"), "err: {err}");
         finish(&mut state, id, &dir);
@@ -93,7 +93,7 @@
     fn report_updates_status_and_done_closes_with_a_note() {
         let (mut state, id, run, dir) = seeded();
         let now = std::time::Instant::now();
-        let rid = state.writer_start_run(id, now).expect("run starts");
+        let rid = state.writer_start_run(id, now, None).expect("run starts");
         let reply = comms_reply(
             &mut state,
             &run,
@@ -139,7 +139,7 @@
     fn report_refuses_bad_run_index_and_status() {
         let (mut state, id, run, dir) = seeded();
         let now = std::time::Instant::now();
-        let rid = state.writer_start_run(id, now).expect("run starts");
+        let rid = state.writer_start_run(id, now, None).expect("run starts");
         let unknown = comms_reply(
             &mut state,
             &run,
@@ -182,7 +182,7 @@
     fn turn_end_without_done_finishes_the_run() {
         let (mut state, id, _run, dir) = seeded();
         let t0 = std::time::Instant::now();
-        let rid = state.writer_start_run(id, t0).expect("run starts");
+        let rid = state.writer_start_run(id, t0, None).expect("run starts");
         // Idle from the start: no turn happened, the run survives.
         state.settle_writer_runs(t0);
         assert!(
@@ -214,7 +214,7 @@
     fn answer_by_run_and_index_posts_and_closes_the_marker() {
         let (mut state, id, run, dir) = seeded();
         let now = std::time::Instant::now();
-        let rid = state.writer_start_run(id, now).expect("run starts");
+        let rid = state.writer_start_run(id, now, None).expect("run starts");
         let reply = comms_reply(
             &mut state,
             &run,
@@ -240,7 +240,7 @@
     fn answer_by_run_refuses_unknown_finished_and_missing_fields() {
         let (mut state, id, run, dir) = seeded();
         let now = std::time::Instant::now();
-        let rid = state.writer_start_run(id, now).expect("run starts");
+        let rid = state.writer_start_run(id, now, None).expect("run starts");
         let unknown = comms_reply(
             &mut state,
             &run,
@@ -290,7 +290,7 @@
     fn timeout_finishes_a_silent_run_but_not_a_reporting_one() {
         let (mut state, id, run, dir) = seeded();
         let t0 = std::time::Instant::now();
-        let silent = state.writer_start_run(id, t0).expect("silent run");
+        let silent = state.writer_start_run(id, t0, None).expect("silent run");
         let late = t0 + std::time::Duration::from_secs(121);
         state.settle_writer_runs(late);
         let session = state.writers.get(&id).unwrap();
@@ -302,7 +302,7 @@
         }
         // A run that reported is the turn's problem, not the timer's.
         let t1 = late + std::time::Duration::from_secs(1);
-        let talking = state.writer_start_run(id, t1).expect("talking run");
+        let talking = state.writer_start_run(id, t1, None).expect("talking run");
         comms_reply(
             &mut state,
             &run,
@@ -322,9 +322,9 @@
     fn run_list_evicts_oldest_finished_first() {
         let (mut state, id, run, dir) = seeded();
         let mut now = std::time::Instant::now();
-        for _ in 0..8 {
+        for _ in 0..16 {
             now += std::time::Duration::from_secs(1);
-            let rid = state.writer_start_run(id, now).expect("run starts");
+            let rid = state.writer_start_run(id, now, None).expect("run starts");
             // The settle path delivers the queued markup; drain it here.
             state.writers.get_mut(&id).unwrap().queue.pop_front();
             comms_reply(
@@ -335,10 +335,10 @@
             );
         }
         now += std::time::Duration::from_secs(1);
-        let ninth = state.writer_start_run(id, now).expect("evicts finished");
+        let next = state.writer_start_run(id, now, None).expect("evicts finished");
         let ids: Vec<u64> = state.writers.get(&id).unwrap().runs.iter().map(|r| r.id).collect();
-        assert_eq!(ids.len(), 8);
+        assert_eq!(ids.len(), 16, "PRD §7 keeps 16 runs");
         assert!(!ids.contains(&1), "oldest finished evicted");
-        assert!(ids.contains(&ninth));
+        assert!(ids.contains(&next));
         finish(&mut state, id, &dir);
     }

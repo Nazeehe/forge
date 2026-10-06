@@ -206,6 +206,10 @@ impl AppState {
     /// confirms) keep the prompt open with the reason in the fixed
     /// error slot.
     pub fn writer_submit_open(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let (buffer, kind) = match self.writers.get(&id).and_then(|s| s.open_prompt.as_ref()) {
             Some(prompt) => (prompt.buffer.clone(), prompt.kind),
             None => return,
@@ -346,6 +350,10 @@ impl AppState {
     /// Open the keyboard-selected recent row, if any.
     /// `pub(crate)`: the TUI input layer calls this directly.
     pub(crate) fn writer_recent_open(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let sel = self.writers.get(&id).map(|s| s.recent_sel).unwrap_or(0);
         self.writer_open_recent_at(id, sel);
     }
@@ -353,6 +361,10 @@ impl AppState {
     /// Open one cached recent row by index; out-of-range opens nothing.
     /// `pub(crate)`: mouse clicks land on rows, not the selection.
     pub(crate) fn writer_open_recent_at(&mut self, id: crate::session::SessionId, index: usize) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let rel = self
             .writers
             .get(&id)
@@ -535,6 +547,10 @@ impl AppState {
                 self.dirty = true;
             }
             crate::app::writer::ConfirmAction::CloseDoc => self.writer_do_close(id),
+            crate::app::writer::ConfirmAction::RevertRun(pre) => {
+                self.writer_process_revert(id, pre);
+            }
+            crate::app::writer::ConfirmAction::Keep => {}
         }
     }
 

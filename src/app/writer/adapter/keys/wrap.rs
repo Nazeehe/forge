@@ -84,6 +84,10 @@ impl AppState {
     /// `@`). False when there is nothing to wrap.
     /// `pub(crate)`: the TUI input layer calls this directly.
     pub(crate) fn writer_wrap_selection(&mut self, id: crate::session::SessionId) -> bool {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return false;
+        }
         let Some(session) = self.writers.get(&id) else {
             return false;
         };

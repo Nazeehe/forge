@@ -48,6 +48,51 @@ impl AppState {
         self.dirty = true;
     }
 
+/// Keys the read-only lock lets through: cursor moves and selection
+/// (plain, Shift, Ctrl word jumps, doc bounds), select-all, copy,
+/// the Alt view twins, and focus cycling. Everything else (typing,
+/// Enter, Tab, deletes, undo/redo, cut/paste) is an edit.
+fn process_lock_allows(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers as KM};
+    if key.modifiers == KM::empty() || key.modifiers == KM::SHIFT {
+        if matches!(
+            key.code,
+            KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+        ) {
+            return true;
+        }
+    }
+    if key.modifiers == KM::CONTROL || key.modifiers == (KM::SHIFT | KM::CONTROL) {
+        if matches!(
+            key.code,
+            KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End
+        ) {
+            return true;
+        }
+        // Select-all and copy; cut (x) stays an edit.
+        if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('c')) {
+            return true;
+        }
+    }
+    // Assistant / preview toggles and focus cycling: read-only views.
+    if key.modifiers == KM::ALT
+        && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('p'))
+    {
+        return true;
+    }
+    if key.code == KeyCode::F(6) {
+        return true;
+    }
+    false
+}
+
     /// Feed one terminal key to the editor and sync back. Movement is
     /// adapter-owned on top of char offsets, because EdTUI's char
     /// motions stop at line ends and can never cross `\n`, its word
@@ -83,6 +128,19 @@ impl AppState {
                 _ => {}
             }
             return;
+        }
+        // Read-only lock (§6): Esc stops the run; navigation,
+        // selection, copy, and the view twins flow on; every edit
+        // shows the Processing notice instead of landing.
+        if self.writers.get(&id).is_some_and(|s| s.process.is_some()) {
+            if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::empty() {
+                self.writer_process_stop(id);
+                return;
+            }
+            if !Self::process_lock_allows(&key) {
+                self.writer_process_deny(id);
+                return;
+            }
         }
         // The §5.1 wrap gesture steers its keys before anything
         // else: arming, finishing, and restoring consume the key,
@@ -414,7 +472,9 @@ impl AppState {
     /// Diff the buffer against the document and apply the change.
     /// The document stays the single source of truth; proposals hear
     /// about every edit exactly once, whether typed or accepted.
-    pub(super) fn writer_sync_editor(&mut self, id: crate::session::SessionId) {
+    /// `pub(crate)`: pre-flight syncs before saving (a caller outside
+    /// the adapter folder).
+    pub(crate) fn writer_sync_editor(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;
         };

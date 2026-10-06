@@ -33,6 +33,14 @@ pub(super) fn writer_tmp_dir() -> std::path::PathBuf {
 }
 
 pub(super) fn writer_agent() -> (AppState, crate::session::SessionId, String, std::path::PathBuf) {
+    writer_agent_with("codex")
+}
+
+/// Same rig under another harness (interrupt-bytes paths differ per
+/// adapter: codex carries ESC, muse carries nothing).
+pub(super) fn writer_agent_with(
+    tool: &str,
+) -> (AppState, crate::session::SessionId, String, std::path::PathBuf) {
     let dir = writer_tmp_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let mut state = AppState::new();
@@ -43,7 +51,7 @@ pub(super) fn writer_agent() -> (AppState, crate::session::SessionId, String, st
             &dir,
             "exec cat",
             crate::infra::ids::RunId::generate(),
-            "codex",
+            tool,
         )
         .unwrap();
     let run = state.manager.get(id).unwrap().run_id.as_str().to_string();

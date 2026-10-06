@@ -15,6 +15,7 @@ use crate::writer::request::WriterAction;
 pub mod adapter;
 pub mod markdown;
 pub mod markers;
+pub mod process;
 pub mod runs;
 pub mod tools;
 pub mod watch;
@@ -155,6 +156,12 @@ pub enum ConfirmAction {
     CreateInstead(PathBuf),
     /// Disk changed under a dirty buffer: drop the buffer, take disk.
     ReloadFromDisk,
+    /// Process violation: restore the carried pre-run snapshot (one
+    /// undo step). The snapshot rides the action because the lock
+    /// lifts at finish, before the banner.
+    RevertRun(String),
+    /// Process violation: keep the agent's text, drop the row.
+    Keep,
     /// Disk changed under a dirty buffer: keep the buffer, adopt the
     /// on-disk hash as the new baseline (the next save overwrites).
     KeepMine,
@@ -218,6 +225,10 @@ pub struct WriterSession {
     pub wrap: Option<adapter::keys::wrap::WrapState>,
     /// Process runs (§6.1) with per-marker agent progress.
     pub runs: Vec<runs::WriterRun>,
+    /// Read-only lock while a process run is open; `None` edits free.
+    pub process: Option<process::ProcessLock>,
+    /// Counts of the last finished run for the status row.
+    pub last_run: Option<process::LastRun>,
     /// Next run id (1-based, like requests).
     pub next_run_id: u64,
     pub next_request_id: u64,

@@ -53,10 +53,18 @@ pub const TRUNCATION_MARKER: &str = "[…truncated, call writer_read for full te
 /// names `writer_read` for it via [`TRUNCATION_MARKER`].
 pub const TARGET_EXCERPT_CHARS: usize = 500;
 
-/// Most runs kept per document; the oldest finished are evicted
-/// first, and a new run is refused while all slots hold active runs
-/// (spec §6.1).
-pub const MAX_RUNS_PER_DOC: usize = 8;
+/// Most runs kept per document (spec §7 keeps the last 16); the
+/// oldest finished are evicted first, and a new run is refused
+/// while all slots hold active runs (spec §6.1).
+pub const MAX_RUNS_PER_DOC: usize = 16;
+
+/// Most markers one process run takes; extras stay for a later run
+/// ("process again for the rest", spec §7).
+pub const MAX_MARKERS_PER_RUN: usize = 64;
+
+/// Most prompt chars one marker carries; longer prompts never
+/// become markers (§7 answers). Char count, like the excerpts.
+pub const MAX_PROMPT_CHARS: usize = 2000;
 
 /// A run with no report that lives this long is force-finished
 /// (spec §6.1). Runs that report finish on done or turn-end instead.

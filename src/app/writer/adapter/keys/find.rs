@@ -475,6 +475,10 @@ impl AppState {
     /// field, replace under the replace field and its pill).
     /// `pub(crate)`: the TUI input layer calls this directly.
     pub(crate) fn writer_find_activate(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let focus = self
             .writers
             .get(&id)
@@ -521,6 +525,10 @@ impl AppState {
     /// `pub(crate)`: the (Replace) pill and the replace field's
     /// Enter arrive through the TUI input layer.
     pub(crate) fn writer_find_replace_current(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let (range, replacement) = {
             let Some(session) = self.writers.get_mut(&id) else {
                 return;
@@ -570,6 +578,10 @@ impl AppState {
     /// count; refused past the match cap until the query narrows.
     /// `pub(crate)`: the (Replace all) pill calls this.
     pub(crate) fn writer_find_replace_all(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let (matches, replacement) = {
             let Some(session) = self.writers.get_mut(&id) else {
                 return;

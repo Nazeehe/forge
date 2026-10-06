@@ -35,6 +35,16 @@ pub trait AgentAdapter: Sync {
         Vec::new()
     }
 
+    /// Bytes that interrupt the agent's current turn when written to
+    /// its PTY (a user-initiated Esc, exempt from the busy gate).
+    /// `None` unless the harness's interrupt key is verified:
+    /// claude and codex read ESC as interrupt; muse, agy, and the
+    /// generic fallback carry nothing, and Stop waits for
+    /// done/turn-end/timeout instead.
+    fn interrupt_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// Extra argv for a *resume* launch carrying the contract. Empty
     /// unless the agent has a verified resume-safe transport. Codex
     /// stays empty (`-c developer_instructions` on `codex resume` is
@@ -161,6 +171,18 @@ mod tests {
     fn adapter_names_match_registry_order() {
         let names: Vec<_> = all().iter().map(|a| a.name()).collect();
         assert_eq!(names, ["claude", "codex", "muse", "agy"]);
+    }
+
+    /// PRD §6 answers: only harnesses with a verified interrupt
+    /// carry bytes (claude and codex: ESC); everything else sends
+    /// nothing and the run ends on done/turn-end/timeout.
+    #[test]
+    fn interrupt_bytes_are_esc_for_verified_harnesses_only() {
+        assert_eq!(adapter_for("claude").interrupt_bytes(), Some(b"\x1b".as_slice()));
+        assert_eq!(adapter_for("codex").interrupt_bytes(), Some(b"\x1b".as_slice()));
+        assert_eq!(adapter_for("muse").interrupt_bytes(), None);
+        assert_eq!(adapter_for("agy").interrupt_bytes(), None);
+        assert_eq!(adapter_for("something-custom").interrupt_bytes(), None);
     }
 
     #[test]

@@ -80,6 +80,22 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
                 state.writer_fire_confirm(id, index);
                 return;
             }
+            // Status row `(Details)`: opens the panel on the run
+            // details. The rect derives from the painted text, so
+            // the click can never desync from it.
+            if state
+                .writers
+                .get(&id)
+                .is_some_and(|s| s.last_run.is_some())
+                && details_at(state, id, &layout, mev.column, mev.row)
+            {
+                if let Some(session) = state.writers.get_mut(&id) {
+                    session.panel_visible = true;
+                    session.focus = crate::app::writer::WriterFocus::Thread;
+                }
+                state.dirty = true;
+                return;
+            }
             // Find bar pills and fields in the fixed error slot (a
             // pending confirm paints over it, handled above).
             if state
@@ -286,6 +302,7 @@ fn fire_toolbar_button(state: &mut AppState, id: crate::session::SessionId, butt
         ToolbarButton::Assistant => state.writer_toolbar_assistant(id),
         ToolbarButton::LineNumbers => state.writer_toggle_line_numbers(id),
         ToolbarButton::More => state.writer_toggle_more(id),
+        ToolbarButton::Process => state.writer_process_toggle(id),
     }
 }
 
@@ -344,6 +361,30 @@ fn confirm_at(
         .enumerate()
         .find(|(_, rect)| hits(*rect, x, y))
         .map(|(index, _)| index)
+}
+
+/// True when one cell hits the status row's `(Details)` pill.
+fn details_at(
+    state: &AppState,
+    id: crate::session::SessionId,
+    layout: &crate::ui::writer::WriterLayout,
+    x: u16,
+    y: u16,
+) -> bool {
+    let Some(session) = state.writers.get(&id) else {
+        return false;
+    };
+    let Some(doc) = session.doc.as_ref() else {
+        return false;
+    };
+    let activity = state
+        .manager
+        .get(id)
+        .map(|rec| rec.activity)
+        .unwrap_or(crate::session::Activity::Idle);
+    let text = crate::ui::writer::status_text(session, &doc.text, doc.revision, doc.dirty, activity);
+    crate::ui::writer::status_details_rect(layout.status, &text)
+        .is_some_and(|rect| hits(rect, x, y))
 }
 
 /// One empty-state click: prompt suggestions fill, prompt buttons

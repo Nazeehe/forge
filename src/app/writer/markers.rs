@@ -34,6 +34,7 @@ pub fn error_reason(kind: ErrorKind) -> &'static str {
         ErrorKind::EmptyTarget => {
             "wrap has no text: select text first or use @@end for a standalone marker"
         }
+        ErrorKind::PromptTooLong => "prompt too long (max 2000 chars): shorten it",
     }
 }
 
@@ -114,6 +115,40 @@ pub fn error_at(out: &ParseOutput, offset: usize) -> Option<&MarkerError> {
     out.errors.iter().find(|e| e.range.contains(&offset))
 }
 
+/// Buffer rows of the locked run's started markers: the live `⟳`
+/// gutter follows the reported index. Spans are pre-run positions
+/// and drift as the agent edits (the M2 wrapped-row drift, logged
+/// for W6); the mark is brightest right after `started`, before
+/// the write lands.
+pub fn process_spin_rows(text: &str, session: &WriterSession) -> Vec<usize> {
+    use crate::app::writer::runs::{RunMarkerStatus, WriterRunState};
+    let Some(lock) = session.process.as_ref() else {
+        return Vec::new();
+    };
+    let Some(run) = session
+        .runs
+        .iter()
+        .find(|r| r.id == lock.run_id && matches!(r.state, WriterRunState::Active))
+    else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for marker in &run.markers {
+        if marker.status != RunMarkerStatus::Started {
+            continue;
+        }
+        let first = offset_to_index2(text, marker.marker.whole.start).row;
+        let last = offset_to_index2(text, marker.marker.whole.end.saturating_sub(1)).row;
+        for row in first..=last {
+            if !rows.contains(&row) {
+                rows.push(row);
+            }
+        }
+    }
+    rows.sort();
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +201,10 @@ mod tests {
         assert_eq!(
             error_reason(ErrorKind::EmptyTarget),
             "wrap has no text: select text first or use @@end for a standalone marker"
+        );
+        assert_eq!(
+            error_reason(ErrorKind::PromptTooLong),
+            "prompt too long (max 2000 chars): shorten it"
         );
     }
 

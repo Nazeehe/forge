@@ -91,12 +91,16 @@ impl AppState {
     /// Start a run over the open document's markers: refuse empty
     /// docs, full queues, silent agents, and full run lists first (no
     /// orphans), then record the run and queue its markup for the
-    /// settle flush. Returns the run id. `pub(crate)`: the Process
-    /// control (M5) calls this; tests drive it directly.
+    /// settle flush. With `only_in`, only markers fully inside the
+    /// range ride (process-selection-only); at most
+    /// [`MAX_MARKERS_PER_RUN`] ride, extras wait for a later run.
+    /// Returns the run id. `pub(crate)`: the Process control (M5)
+    /// calls this; tests drive it directly.
     pub(crate) fn writer_start_run(
         &mut self,
         id: crate::session::SessionId,
         now: Instant,
+        only_in: Option<std::ops::Range<usize>>,
     ) -> Result<u64, String> {
         if !self.writer_agent_live(id) {
             return Err("no live agent tab".to_string());
@@ -115,17 +119,42 @@ impl AppState {
         };
         let name = Self::writer_doc_name(&path_rel);
         let parsed = parse_markers(&doc_text);
-        if parsed.markers.is_empty() {
+        // Doc-wide indexes ride along: reports and markup name the
+        // same index whether the run covers all markers or a subset.
+        let eligible: Vec<(usize, crate::writer::markers::Marker)> = parsed
+            .markers
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                only_in.as_ref().is_none_or(|r| {
+                    r.start <= m.whole.start && m.whole.end <= r.end
+                })
+            })
+            .map(|(i, m)| (i, m.clone()))
+            .collect();
+        if eligible.is_empty() {
             return Err(format!("No markers in {name}"));
         }
-        let process = WriterProcess::over_markers(
+        let capped: Vec<(usize, crate::writer::markers::Marker)> = eligible
+            .into_iter()
+            .take(crate::writer::MAX_MARKERS_PER_RUN)
+            .collect();
+        let doc_indexes: Vec<usize> = capped.iter().map(|(i, _)| *i).collect();
+        let subset = crate::writer::markers::ParseOutput {
+            markers: capped.into_iter().map(|(_, m)| m).collect(),
+            errors: Vec::new(),
+        };
+        let mut process = WriterProcess::over_markers(
             self.writers.get(&id).map(|s| s.next_run_id + 1).unwrap_or(1),
             &name,
             &doc_text,
             rev,
-            &parsed,
+            &subset,
         )
         .map_err(|e| e.to_string())?;
+        for (marker, doc_index) in process.markers.iter_mut().zip(doc_indexes) {
+            marker.index = doc_index;
+        }
         let Some(session) = self.writers.get_mut(&id) else {
             return Err("no Writer document open for this session".to_string());
         };
@@ -137,7 +166,10 @@ impl AppState {
                     session.runs.remove(oldest);
                 }
                 None => {
-                    return Err("run list full (8); wait for a run to finish".to_string());
+                    return Err(format!(
+                        "run list full ({}); wait for a run to finish",
+                        MAX_RUNS_PER_DOC
+                    ));
                 }
             }
         }
@@ -284,6 +316,9 @@ impl AppState {
             answer,
             run: Some(rid),
         });
+        // Answers surface in the panel: auto-open it so the human
+        // sees them arrive (§6 Panel).
+        session.panel_visible = true;
         self.dirty = true;
         Ok(format!(r#"{{"answered":true,"run":{rid},"index":{index}}}"#))
     }
@@ -300,10 +335,12 @@ impl AppState {
         }
     }
 
-    /// Finish a run with `summary`: finished state plus the single
-    /// thread note. Reports never post notes; done, turn-end, and
-    /// timeout all land here.
-    fn finish_writer_run(
+    /// Finish a run with `summary`: finished state, the details
+    /// thread note (counts plus skipped/failed reasons), the status
+    /// counts, unlock, and the violation check. Reports never post
+    /// notes; done, turn-end, and timeout all land here.
+    /// `pub(super)`: the stop path shares it.
+    pub(super) fn finish_writer_run(
         &mut self,
         id: crate::session::SessionId,
         run_id: u64,
@@ -318,11 +355,92 @@ impl AppState {
         run.state = WriterRunState::Finished {
             summary: summary.clone(),
         };
+        let mut done = 0;
+        let mut skipped = 0;
+        let mut failed = 0;
+        let mut reasons: Vec<String> = Vec::new();
+        for marker in &run.markers {
+            match marker.status {
+                RunMarkerStatus::Done => done += 1,
+                RunMarkerStatus::Skipped => {
+                    skipped += 1;
+                    reasons.push(format!(
+                        "· [{}] {}: {}",
+                        marker.marker.index,
+                        marker.marker.verb.as_deref().unwrap_or("?"),
+                        marker.note.as_deref().unwrap_or("skipped"),
+                    ));
+                }
+                RunMarkerStatus::Failed => {
+                    failed += 1;
+                    reasons.push(format!(
+                        "· [{}] {}: {}",
+                        marker.marker.index,
+                        marker.marker.verb.as_deref().unwrap_or("?"),
+                        marker.note.as_deref().unwrap_or("failed"),
+                    ));
+                }
+                RunMarkerStatus::Pending | RunMarkerStatus::Started => {}
+            }
+        }
+        let mut note = format!("Run {run_id}: {summary}\n{done} done · {skipped} skipped · {failed} failed");
+        for reason in reasons {
+            note.push('\n');
+            note.push_str(&reason);
+        }
+        // The violation walk needs the lock and the final text; both
+        // are read before the lock lifts below. The snapshot rides
+        // the Revert action, since the lock is gone by banner time.
+        let (violated, snapshot) = match session.process.as_ref() {
+            Some(lock) if lock.run_id == run_id => {
+                let final_text = session.doc.as_ref().map(|d| d.text.as_str()).unwrap_or("");
+                let mut verbatim = vec![false; lock.spans.len()];
+                for marker in &run.markers {
+                    if matches!(
+                        marker.status,
+                        RunMarkerStatus::Skipped | RunMarkerStatus::Failed
+                    ) && marker.marker.index < verbatim.len()
+                    {
+                        verbatim[marker.marker.index] = true;
+                    }
+                }
+                let bad = !crate::app::AppState::process_run_intact(
+                    &lock.pre_text,
+                    &lock.spans,
+                    &verbatim,
+                    final_text,
+                );
+                (bad, lock.pre_text.clone())
+            }
+            _ => (false, String::new()),
+        };
         session.push_thread_note(crate::app::writer::WriterThreadEntry {
             request_id: 0,
-            answer: summary,
+            answer: note,
             run: Some(run_id),
         });
+        session.last_run = Some(crate::app::writer::process::LastRun {
+            id: run_id,
+            done,
+            skipped,
+            failed,
+        });
+        if session.process.as_ref().is_some_and(|l| l.run_id == run_id) {
+            session.process = None;
+            if session.banner.as_deref() == Some(crate::app::writer::process::PROCESS_NOTICE)
+            {
+                session.banner = None;
+            }
+        }
+        if violated {
+            session.pending_confirm = Some(crate::app::writer::PendingConfirm {
+                message: "Agent changed text outside markers".to_string(),
+                actions: vec![
+                    crate::app::writer::ConfirmAction::RevertRun(snapshot),
+                    crate::app::writer::ConfirmAction::Keep,
+                ],
+            });
+        }
         self.dirty = true;
     }
 

@@ -848,6 +848,45 @@ fn writer_quit_with_dirty_doc_shows_confirm() {
     assert!(text.contains("xaaa"), "doc intact: {text:?}");
 }
 
+/// M5: the (Process) pill locks through the real mouse path.
+/// Typing is refused with the notice and the doc is untouched;
+/// the scripted 3-step flow (paints, one-undo, violation) rides
+/// the in-repo hook equivalent, since the harness fake agent
+/// cannot call back into the MCP tools.
+#[test]
+fn writer_process_pill_locks_and_blocks_typing() {
+    let mut h = boot(&[("run.md", "@@fix typo@@this is teh@@\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("run.md\r");
+    h.wait_for("rev0", "doc open");
+    // Click (Process) through the real mouse path.
+    let (x, y) = h.find("Process").expect("process pill");
+    h.press(x, y);
+    h.wait_for("processingrun1", "lock status");
+    // Typing is refused with the notice; the marker text is intact.
+    h.send("x");
+    let text = h.wait_for("Processing", "lock notice");
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squashed.contains("@@fixtypo@@thisisteh@@"), "doc intact: {squashed:?}");
+    // The pill now offers Stop; arrow keys still move (no notice).
+    h.send("\x1b[C");
+    let text = h.settle();
+    assert!(text.contains("processingrun1") || text.contains("processing run 1"), "still locked");
+    // Esc stops: the fake harness carries no interrupt bytes, so the
+    // run asks to wind down and stays locked (the ESC-bytes path is
+    // covered in-repo against the codex adapter).
+    h.send("\x1b");
+    let text = h.wait_for("Stoprequested", "stop request");
+    let squashed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squashed.contains("@@fixtypo@@thisisteh@@"), "doc intact: {squashed:?}");
+}
+
 /// M4: the marker protocol round-trips through the real editor. The
 /// agent reads the saved file bytes, so a wrap marker and a
 /// `@@end`-closed standalone must survive open → save byte-exact,

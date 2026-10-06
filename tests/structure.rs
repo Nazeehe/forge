@@ -88,7 +88,18 @@ const AGENT_NAMES: &[&str] = &["claude", "codex", "muse", "agy"];
 
 /// (file substring, literal substring, reason). Empty: no leaks are allowed
 /// outside `src/agents/`. Add entries only with a written reason.
-const ALLOWLIST: &[(&str, &str, &str)] = &[];
+const ALLOWLIST: &[(&str, &str, &str)] = &[
+    (
+        "app/writer/tests/process.rs",
+        "codex",
+        "M5 stop tests spawn the harness carrying interrupt bytes (ESC)",
+    ),
+    (
+        "app/writer/tests/process.rs",
+        "muse",
+        "M5 stop tests spawn the harness carrying no interrupt bytes",
+    ),
+];
 
 fn is_skipped_file(rel: &str) -> bool {
     if rel.starts_with("agents/") {

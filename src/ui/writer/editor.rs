@@ -340,6 +340,28 @@ fn paint_doc(
                 }
             }
         }
+        // The run's started markers spin every wrapped chunk of
+        // their rows with `⟳`, after the error marks: a started
+        // marker parsed cleanly, so the two never share a row.
+        for row in crate::app::writer::markers::process_spin_rows(&buffer, session) {
+            let height = wrapped_height(doc_rows[row], width);
+            for k in 0..=height.saturating_sub(1) {
+                let y =
+                    edit_rect.y as isize + rel + (prefix(row) as isize + k as isize - base);
+                if y >= edit_rect.y as isize
+                    && y < (edit_rect.y + edit_rect.height) as isize
+                    && gut_rect.width > 0
+                {
+                    f.render_widget(
+                        Paragraph::new(Line::from(vec![Span::styled(
+                            "⟳",
+                            style(Role::Info),
+                        )])),
+                        Rect::new(gut_rect.x, y as u16, 1, 1),
+                    );
+                }
+            }
+        }
         if session.focus == WriterFocus::Editor {
             cursor = Some(pos);
         }

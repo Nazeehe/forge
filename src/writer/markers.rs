@@ -43,6 +43,10 @@ pub enum ErrorKind {
     /// An opener where the target should be: the target so far is
     /// blank and more marker text follows (a doubled delimiter).
     Nesting,
+    /// A prompt over [`MAX_PROMPT_CHARS`]: never a marker (§7
+    /// answers). The error spans the prompt; the run excludes it
+    /// and names its line.
+    PromptTooLong,
     /// A wrap whose target is blank: the closer sits where the
     /// target should be and nothing but whitespace follows it
     /// ("wrap has no text to apply to").
@@ -93,6 +97,31 @@ pub fn parse_markers(text: &str) -> ParseOutput {
             continue;
         }
         let (verb, prompt) = split_header(&chars, o + 2, h);
+        if prompt.len() > crate::writer::MAX_PROMPT_CHARS {
+            // Over-long prompts never become markers: the error
+            // spans the prompt, and the scan skips the whole
+            // candidate (the same shape walk as a valid marker, minus
+            // the push) so one bad marker cannot hide later ones. A
+            // missing closer ends the skip at the header close, like
+            // any other scan.
+            out.errors.push(MarkerError {
+                range: prompt.clone(),
+                kind: ErrorKind::PromptTooLong,
+            });
+            if is_end_word(&chars, h + 2) {
+                pos = h + 5;
+            } else {
+                let after = next_delim(&chars, &immune, h + 2);
+                if after == Some(h + 2) {
+                    pos = if is_end_word(&chars, h + 4) { h + 7 } else { h + 4 };
+                } else if let Some(t) = after {
+                    pos = if is_end_word(&chars, t + 2) { t + 5 } else { t + 2 };
+                } else {
+                    pos = h + 2;
+                }
+            }
+            continue;
+        }
         if is_end_word(&chars, h + 2) {
             // Standalone: the header close is followed by `end`.
             out.markers.push(Marker {
@@ -626,6 +655,30 @@ mod tests {
     }
 
     #[test]
+    /// PRD §7: prompts over 2,000 chars never become markers. The
+    /// error spans the prompt (gutter + reason anchor there), and
+    /// the scan skips the whole candidate so later markers survive.
+    #[test]
+    fn prompt_over_2000_chars_is_an_error_not_a_marker() {
+        let long = "p".repeat(2001);
+        let text = format!("@@{long}@@target@@\n\n@@ok@@end\n");
+        let out = parse_markers(&text);
+        assert!(out.markers.len() == 1, "only the valid marker: {out:?}");
+        assert_eq!(out.markers[0].prompt, text.find("ok").unwrap()..text.find("ok").unwrap() + 2);
+        assert_eq!(out.errors.len(), 1, "one prompt error: {out:?}");
+        assert_eq!(out.errors[0].kind, ErrorKind::PromptTooLong);
+        assert_eq!(out.errors[0].range, 2..2003, "the prompt span");
+    }
+
+    #[test]
+    fn prompt_at_exactly_2000_chars_stays_a_marker() {
+        let long = "p".repeat(2000);
+        let text = format!("@@{long}@@target@@\n");
+        let out = parse_markers(&text);
+        assert_eq!(out.markers.len(), 1, "boundary rides: {out:?}");
+        assert!(out.errors.is_empty(), "no errors: {out:?}");
+    }
+
     fn hostile_inputs_do_not_panic() {
         // The parser runs on live buffer text; degenerate inputs must
         // complete (markers/errors unchecked here, covered above).

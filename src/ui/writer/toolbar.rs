@@ -32,7 +32,7 @@ pub(super) fn paint_toolbar(
         if rect.width == 0 {
             continue;
         }
-        let label = toolbar_label(*button);
+        let label = super::layout::toolbar_action_label(session, *button);
         let spans = if toolbar_enabled(session, *button) {
             // One shared marker source with the hit rects: a marked
             // pill never outpaints its rect.

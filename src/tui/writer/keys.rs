@@ -42,6 +42,16 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
         }
         return;
     }
+    // Read-only lock (§6): Esc stops the run instead of dismissing
+    // anything; every other key gates downstream (adapter edits,
+    // guarded fns).
+    if key.code == KeyCode::Esc
+        && key.modifiers == KeyModifiers::NONE
+        && state.writers.get(&id).is_some_and(|s| s.process.is_some())
+    {
+        state.writer_process_stop(id);
+        return;
+    }
     // Esc dismisses the topmost transient first; otherwise it falls
     // through to its normal target (prompt cancel above, editor
     // selection clearing below).
@@ -139,6 +149,13 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
     // no terminal steals it for paste.
     if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('p') {
         state.writer_toggle_preview(id);
+        return;
+    }
+    // Process rides beside Preview: legacy terminals send Alt+Enter
+    // as ESC CR, which crossterm decodes to Enter+ALT distinctly
+    // from bare Enter (pty-probed), so no twin is needed.
+    if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Enter {
+        state.writer_process_toggle(id);
         return;
     }
     // F6 owns focus cycling (Editor → Chat → Thread) now that Tab

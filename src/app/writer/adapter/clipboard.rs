@@ -78,6 +78,10 @@ impl AppState {
     /// step. No selection: nothing happens.
     /// `pub(crate)`: Ctrl+X arrives through the TUI input layer.
     pub(crate) fn writer_clip_cut(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let has_selection = self.writers.get(&id).is_some_and(|session| {
             session.editor.as_ref().is_some_and(|editor| {
                 editor_selection_to_range(editor).is_some()
@@ -103,6 +107,10 @@ impl AppState {
     /// else at the cursor. Empty clip: nothing happens.
     /// `pub(crate)`: Ctrl+V arrives through the TUI input layer.
     pub(crate) fn writer_clip_paste(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let clip: String = match self.writers.get(&id) {
             Some(session) => session.clip.0.borrow().clone(),
             None => return,

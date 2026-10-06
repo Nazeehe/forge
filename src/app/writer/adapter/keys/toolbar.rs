@@ -7,19 +7,33 @@ use crate::app::AppState;
 impl AppState {
     /// Toolbar dispatch (E2b): every toolbar pill funnels through
     /// these, so mouse clicks and shortcut keys share one path.
-    /// Toolbar `(*New document)`: the New-kind prompt.
+    /// Toolbar `(*New document)`: the New-kind prompt. Refused under
+    /// the process lock (a doc switch mid-run strands the agent).
     pub fn writer_toolbar_new(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         self.writer_prompt_open(id, crate::app::writer::PromptKind::New);
     }
 
     /// Toolbar `(Open…)`: the Open-kind prompt, with completion and
-    /// the create-instead confirm.
+    /// the create-instead confirm. Refused under the process lock.
     pub fn writer_toolbar_open(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         self.writer_prompt_open(id, crate::app::writer::PromptKind::Open);
     }
 
     /// Toolbar `(Save)`: plain S2 save; no doc is a fixed-slot error.
+    /// Refused under the process lock (the agent owns the file now).
     pub fn writer_toolbar_save(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         self.writer_save(id);
     }
 
@@ -27,6 +41,10 @@ impl AppState {
     /// would have nothing to write. The entry is created first so the
     /// refusal lands in the fixed error slot instead of vanishing.
     pub fn writer_toolbar_save_as(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let has_doc = self.writers.entry(id).or_default().doc.is_some();
         if !has_doc {
             self.writer_fail(id, "no document open");
@@ -36,7 +54,12 @@ impl AppState {
     }
 
     /// Toolbar `(Close)`: clean closes at once, dirty confirms.
+    /// Refused under the process lock.
     pub fn writer_toolbar_close(&mut self, id: crate::session::SessionId) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         self.writer_close_doc(id);
     }
 

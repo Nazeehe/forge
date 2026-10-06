@@ -958,3 +958,53 @@
         assert!(state.manager.remove(id));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn process_pill_click_starts_the_run() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "alpha @@fix typo@@this is teh@@\n").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Process");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert!(
+            state.writers.get(&id).unwrap().process.is_some(),
+            "pill click locks"
+        );
+        // The pill now reads Stop (clicking it stops; covered once
+        // the stop tell lands).
+        let buf = paint_full(&mut state, id);
+        find_text(&buf, "Stop");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn details_click_opens_the_panel_on_the_thread() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        state.writers.get_mut(&id).unwrap().last_run =
+            Some(crate::app::writer::process::LastRun {
+                id: 3,
+                done: 2,
+                skipped: 0,
+                failed: 0,
+            });
+        assert!(!state.writers.get(&id).unwrap().panel_visible);
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "(Details)");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        let session = state.writers.get(&id).unwrap();
+        assert!(session.panel_visible, "details opens the panel");
+        assert_eq!(
+            session.focus,
+            crate::app::writer::WriterFocus::Thread,
+            "focus lands on the thread"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }

@@ -87,6 +87,10 @@ impl AppState {
     /// `DeleteSelection`: one undo step.
     /// `pub(crate)`: Ctrl+Backspace/Delete arrive through the TUI layer.
     pub(crate) fn writer_delete_word(&mut self, id: crate::session::SessionId, backward: bool) {
+        if self.writer_process_locked(id) {
+            self.writer_process_deny(id);
+            return;
+        }
         let Some(session) = self.writers.get_mut(&id) else {
             return;
         };

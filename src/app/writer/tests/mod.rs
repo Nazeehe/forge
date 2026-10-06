@@ -4,6 +4,7 @@
 mod cua;
 mod editing;
 mod lifecycle;
+mod process;
 mod requests;
 mod runs;
 mod tools;

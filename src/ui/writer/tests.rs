@@ -579,6 +579,7 @@
                     ToolbarButton::Close,
                     ToolbarButton::Preview,
                     ToolbarButton::Assistant,
+                    ToolbarButton::Process,
                 ],
                 "order at {width}"
             );
@@ -1171,6 +1172,32 @@
         assert!(row.contains("boom") && !row.contains("doubled"), "error wins: {row:?}");
     }
 
+    /// PRD §7 answers: an over-long prompt paints exactly like a
+    /// parse error (error style, gutter ✕, actionable reason), and
+    /// the run exclusion keeps it out of the markup.
+    #[test]
+    fn overlong_prompt_paints_as_an_error() {
+        let long = "p".repeat(2001);
+        let text = format!("@@{long}@@target@@\n");
+        let mut session = doc_session(&text);
+        // Park the cursor on the prompt span so its reason shows.
+        session.editor.as_mut().unwrap().cursor = edtui::Index2::new(0, 5);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let buf = paint_doc_to(&mut session, 120, 30);
+        assert!(
+            (0..30).any(|y| buf[(layout.gutter.x, y)].symbol() == "✕"),
+            "gutter marks the prompt rows"
+        );
+        let slot = row_text(&buf, layout.error.y, layout.error.x, layout.error.x + 60);
+        assert!(slot.contains("prompt too long"), "reason: {slot:?}");
+        let status = (0..30)
+            .map(|y| row_text(&buf, y, 0, 120))
+            .find(|row| row.contains("rev 0"))
+            .expect("status row");
+        assert!(status.contains("1 error"), "count: {status:?}");
+        assert!(!status.contains("marker"), "no marker: {status:?}");
+    }
+
     #[test]
     fn status_counts_markers_and_errors() {
         let mut session = doc_session("@@fix a@@b@@ and @@c@@d@@\ntext @@ more\n");
@@ -1197,4 +1224,109 @@
             .expect("status row");
         assert!(!status.contains("marker"), "no markers, no count: {status:?}");
         assert!(!status.contains("error"), "no errors, no count: {status:?}");
+    }
+
+    fn run_session() -> WriterSession {
+        use crate::app::writer::runs::{RunMarkerStatus, WriterRun, WriterRunState};
+        use crate::app::writer::runs::RunMarker;
+        use crate::writer::process::ProcessShape;
+        let mut session =
+            doc_session("alpha @@fix typo@@this is teh@@\n\n@@ask capital@@Paris@@\n");
+        session.runs.push(WriterRun {
+            id: 1,
+            file: "d.md".to_string(),
+            rev: 0,
+            started_at: std::time::Instant::now(),
+            markers: vec![
+                RunMarker {
+                    marker: crate::writer::process::ProcessMarker {
+                        index: 0,
+                        line: 1,
+                        whole: 6..31,
+                        shape: ProcessShape::Wrap,
+                        verb: Some("fix".to_string()),
+                        prompt: "typo".to_string(),
+                        target: Some("this is teh".to_string()),
+                    },
+                    status: RunMarkerStatus::Started,
+                    note: None,
+                },
+                RunMarker {
+                    marker: crate::writer::process::ProcessMarker {
+                        index: 1,
+                        line: 3,
+                        whole: 33..55,
+                        shape: ProcessShape::Wrap,
+                        verb: Some("ask".to_string()),
+                        prompt: "capital".to_string(),
+                        target: Some("Paris".to_string()),
+                    },
+                    status: RunMarkerStatus::Pending,
+                    note: None,
+                },
+            ],
+            state: WriterRunState::Active,
+            saw_activity: true,
+            reported: true,
+        });
+        session.process = Some(crate::app::writer::process::ProcessLock {
+            run_id: 1,
+            pre_text: "alpha @@fix typo@@this is teh@@\n\n@@ask capital@@Paris@@\n".to_string(),
+            outside: vec!["alpha ".to_string(), "\n\n".to_string(), "\n".to_string()],
+            spans: vec![6..31, 33..55],
+            stopped: false,
+        });
+        session
+    }
+
+    #[test]
+    fn started_marker_paints_the_spin_gutter() {
+        let mut session = run_session();
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let row = (0..30)
+            .find(|y| row_text(&buf, *y, 0, 120).contains("teh"))
+            .expect("marker row");
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        assert_eq!(
+            buf[(layout.gutter.x, row)].symbol(),
+            "⟳",
+            "gutter spins on the started marker"
+        );
+    }
+
+    #[test]
+    fn run_status_shows_counts_and_details() {
+        let mut session = run_session();
+        session.process = None;
+        session.last_run = Some(crate::app::writer::process::LastRun {
+            id: 3,
+            done: 3,
+            skipped: 1,
+            failed: 0,
+        });
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let status = row_text(&buf, layout.status.y, 0, 120);
+        assert!(
+            status.contains("Run: 3 done · 1 skipped (Details)"),
+            "status: {status:?}"
+        );
+    }
+
+    #[test]
+    fn violation_banner_paints_revert_and_keep_pills() {
+        let mut session = run_session();
+        session.pending_confirm = Some(crate::app::writer::PendingConfirm {
+            message: "Agent changed text outside markers".to_string(),
+            actions: vec![
+                crate::app::writer::ConfirmAction::RevertRun("pre".to_string()),
+                crate::app::writer::ConfirmAction::Keep,
+            ],
+        });
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let slot = row_text(&buf, layout.error.y, 0, 120);
+        assert!(slot.contains("Agent changed text outside markers"), "slot: {slot:?}");
+        assert!(slot.contains("Revert run"), "slot: {slot:?}");
+        assert!(slot.contains("Keep"), "slot: {slot:?}");
     }

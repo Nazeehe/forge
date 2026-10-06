@@ -187,6 +187,9 @@ pub enum ToolbarButton {
     LineNumbers,
     /// Narrow-mode overflow holding Save-as, Preview, Assistant.
     More,
+    /// Run the marker protocol (§6): starts a process run, or stops
+    /// the locked one. Wide row only; narrow terminals use Alt+Enter.
+    Process,
 }
 
 /// Visible toolbar buttons: the full row, or the short set plus the
@@ -204,6 +207,7 @@ pub fn toolbar_buttons(narrow: bool) -> Vec<ToolbarButton> {
             B::Close,
             B::Preview,
             B::Assistant,
+            B::Process,
         ]
     }
 }
@@ -228,6 +232,21 @@ pub fn toolbar_label(button: ToolbarButton) -> &'static str {
         B::Assistant => "Assistant",
         B::LineNumbers => "Line numbers",
         B::More => "▾ More",
+        B::Process => "Process",
+    }
+}
+
+/// Session-aware pill label: the Process pill reads Stop while a
+/// run holds the read-only lock (same pill, same funnel). Paint and
+/// hit rects share this, so the Stop text never outpaints its rect.
+pub fn toolbar_action_label(
+    session: &crate::app::writer::WriterSession,
+    button: ToolbarButton,
+) -> &'static str {
+    if button == ToolbarButton::Process && session.process.is_some() {
+        "Stop"
+    } else {
+        toolbar_label(button)
     }
 }
 
@@ -268,7 +287,7 @@ pub fn toolbar_enabled(
     match button {
         B::New | B::Open | B::Assistant | B::More => true,
         B::Save => session.doc.as_ref().is_some_and(|d| d.dirty),
-        B::SaveAs | B::Close | B::Preview | B::LineNumbers => session.doc.is_some(),
+        B::SaveAs | B::Close | B::Preview | B::LineNumbers | B::Process => session.doc.is_some(),
     }
 }
 
@@ -292,7 +311,7 @@ pub fn toolbar_pill_rects(
         }
         first = false;
         let mark = toolbar_mark(session, button);
-        let label = toolbar_label(button);
+        let label = toolbar_action_label(session, button);
         let enabled = toolbar_enabled(session, button);
         let width = if enabled {
             pill_width(label, mark.is_some())
@@ -336,6 +355,8 @@ pub fn confirm_label(action: &crate::app::writer::ConfirmAction) -> &'static str
         A::OpenInstead(_) => "Open",
         A::CreateInstead(_) => "Create",
         A::ReloadFromDisk => "Reload",
+        A::RevertRun(_) => "Revert run",
+        A::Keep => "Keep",
         A::KeepMine => "Keep mine",
         A::SaveToRecreate => "Save to recreate",
         A::CloseDoc => "Close",
@@ -375,6 +396,23 @@ pub fn more_menu_rect(more: Rect) -> Rect {
         return Rect::default();
     }
     Rect::new(more.x, more.y.saturating_add(1), 22, 4)
+}
+
+/// Hit rect for the status row's `(Details)` pill, derived from the
+/// painted text the same way the paint builds it: the pill trails
+/// the run counts. Paint and mouse dispatch share this, so the
+/// click can never desync from the text.
+pub fn status_details_rect(status: Rect, text: &str) -> Option<Rect> {
+    let label = "(Details)";
+    let byte = text.find(label)?;
+    let x = status
+        .x
+        .saturating_add(text[..byte].chars().count() as u16);
+    let width = label.len() as u16;
+    if x.saturating_add(width) > status.x.saturating_add(status.width) {
+        return None;
+    }
+    Some(Rect::new(x, status.y, width, 1.min(status.height)))
 }
 
 /// Hit rects for the More-menu rows: Save-as, Preview, Assistant,

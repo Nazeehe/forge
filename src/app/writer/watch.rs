@@ -65,6 +65,15 @@ impl AppState {
             .and_then(|session| session.doc.as_ref())
             .map(|doc| doc.text.chars().count())
             .unwrap_or(0);
+        // Under the process lock the buffer is always clean (edits
+        // are denied), so the reload lands — but it must not
+        // recreate the editor (that would wipe the undo stack
+        // holding the pre-run capture) nor clear the banner (that
+        // would drop the Processing notice).
+        let locked = self
+            .writers
+            .get(&id)
+            .is_some_and(|s| s.process.is_some());
         {
             let Some(session) = self.writers.get_mut(&id) else {
                 return Err("no writer session".to_string());
@@ -76,11 +85,27 @@ impl AppState {
             session.proposals.on_edit(&(0..old_len));
             session.reset_fence_cache();
             session.type_group = None;
-            session.banner = None;
+            if !locked {
+                session.banner = None;
+            }
         }
-        // Rebuild the buffer from the new text, then clamp the cursor:
-        // the offsets above belong to the old text.
-        self.writer_open_editor(id);
+        if locked {
+            // In place: lines assign directly, which never captures,
+            // so the pre-run boundary survives every agent write.
+            if let Some(session) = self.writers.get_mut(&id) {
+                if let Some(text) =
+                    session.doc.as_ref().map(|doc| doc.text.clone())
+                {
+                    if let Some(editor) = session.editor.as_mut() {
+                        editor.lines = edtui::Lines::from(text.as_str());
+                    }
+                }
+            }
+        } else {
+            // Rebuild the buffer from the new text, then clamp the cursor:
+            // the offsets above belong to the old text.
+            self.writer_open_editor(id);
+        }
         let total = self
             .writers
             .get(&id)

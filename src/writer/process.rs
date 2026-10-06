@@ -44,11 +44,13 @@ impl ProcessShape {
 }
 
 /// One parsed marker as the agent sees it: position, shape, and
-/// capped excerpts (the file holds the rest).
+/// capped excerpts (the file holds the rest). `whole` is the
+/// pre-run char span, for the live `⟳` gutter rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessMarker {
     pub index: usize,
     pub line: u32,
+    pub whole: std::ops::Range<usize>,
     pub shape: ProcessShape,
     pub verb: Option<String>,
     pub prompt: String,
@@ -97,6 +99,7 @@ impl WriterProcess {
             markers.push(ProcessMarker {
                 index,
                 line,
+                whole: m.whole.clone(),
                 shape: if m.target.is_some() {
                     ProcessShape::Wrap
                 } else {
@@ -154,7 +157,7 @@ impl WriterProcess {
 /// Self-contained run rules: everything the agent needs, no PRD.
 /// Processing a marker REPLACES it: the marker text leaves the file
 /// and its result takes its place.
-const PROCESS_RULES: &str = "Process the markers below in index order, one at a time, editing <file> directly with your file tools. WRAP (@@verb prompt@@target@@): replace the WHOLE marker (from the opening @@ through the closing @@ or @@end) with the target rewritten per the prompt. STANDALONE (@@verb prompt @@end): replace the WHOLE marker with the content the prompt asks for, written at that position. QUESTION (verb ask or ending in ?): do not rewrite; replace the marker with its target text unchanged (standalone: remove it), and send the answer with writer_answer(run, index, answer). After EACH marker, write the file before starting the next (the user watches it change live). Change nothing outside marker spans; all other text must stay byte-identical. Line numbers are pre-run positions; earlier edits shift them, so re-locate each marker by its text. Report started before editing (it lights the progress gutter), then each marker with writer_run_report(run, index, status, note) where status is done | skipped | failed (failed/skipped: leave that marker untouched, give the reason in note). When all markers are handled, call writer_run_done(run, summary) even if some failed.";
+const PROCESS_RULES: &str = "Process the markers below in index order, one at a time, editing the file named in file= above directly with your file tools. WRAP (@@verb prompt@@target@@): replace the WHOLE marker (from the opening @@ through the closing @@ or @@end) with the target rewritten per the prompt. STANDALONE (@@verb prompt @@end): replace the WHOLE marker with the content the prompt asks for, written at that position. QUESTION (verb ask or ending in ?): do not rewrite; replace the marker with its target text unchanged (standalone: remove it), and send the answer with writer_answer(run, index, answer). After EACH marker, write the file before starting the next (the user watches it change live). Change nothing outside marker spans; all other text must stay byte-identical. Line numbers are pre-run positions; earlier edits shift them, so re-locate each marker by its text. Report started before editing (it lights the progress gutter), then each marker with writer_run_report(run, index, status, note) where status is done | skipped | failed (failed/skipped: leave that marker untouched, give the reason in note). When all markers are handled, call writer_run_done(run, summary) even if some failed.";
 
 /// First [`TARGET_EXCERPT_CHARS`] chars plus the truncation marker
 /// when cut (it names `writer_read` for the rest).

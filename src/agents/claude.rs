@@ -17,6 +17,15 @@ impl AgentAdapter for ClaudeAdapter {
         "claude"
     }
 
+    /// ESC interrupts the Claude turn: Esc is the CLI's documented
+    /// TUI interrupt key. Checked here: the installed binary's help
+    /// and resources carry no keybinding text to confirm against,
+    /// and a live probe needs an authenticated session, so this
+    /// rests on the vendor keybinding; PTY delivery is unit-tested.
+    fn interrupt_bytes(&self) -> Option<&[u8]> {
+        Some(b"\x1b")
+    }
+
     fn runtime_mechanism(&self) -> RuntimeMechanism {
         RuntimeMechanism::SystemPromptFile
     }

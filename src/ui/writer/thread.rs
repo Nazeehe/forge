@@ -227,18 +227,19 @@ pub(super) fn paint_chat(
     ))
 }
 
-/// Status row: revision, 1-based line:col, word/char counts (plus
-/// the selection's when one exists), agent activity word, the word
-/// `unsaved` while dirty, and the last save result.
-pub(super) fn paint_status(
-    f: &mut Frame,
-    area: Rect,
+/// Status row text, shared by the paint and the `(Details)` hit
+/// rect: revision, 1-based line:col, word/char counts (plus the
+/// selection's when one exists), agent activity word, the word
+/// `unsaved` while dirty, the last save result, and the process
+/// run state (`processing run N` while locked; `Run: D done…`
+/// with `(Details)` for the last finished run).
+pub fn status_text(
     session: &WriterSession,
     buffer: &str,
     rev: u64,
     dirty: bool,
     activity: crate::session::Activity,
-) {
+) -> String {
     let (line, col) = session
         .editor
         .as_ref()
@@ -283,6 +284,33 @@ pub(super) fn paint_status(
             if error_count == 1 { "" } else { "s" }
         ));
     }
+    if let Some(lock) = session.process.as_ref() {
+        text.push_str(&format!(" · processing run {}", lock.run_id));
+    }
+    if let Some(last) = session.last_run.as_ref() {
+        text.push_str(&format!(" · Run: {} done", last.done));
+        if last.skipped > 0 {
+            text.push_str(&format!(" · {} skipped", last.skipped));
+        }
+        if last.failed > 0 {
+            text.push_str(&format!(" · {} failed", last.failed));
+        }
+        text.push_str(" (Details)");
+    }
+    text
+}
+
+/// Status row: the shared text, muted.
+pub(super) fn paint_status(
+    f: &mut Frame,
+    area: Rect,
+    session: &WriterSession,
+    buffer: &str,
+    rev: u64,
+    dirty: bool,
+    activity: crate::session::Activity,
+) {
+    let text = status_text(session, buffer, rev, dirty, activity);
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(text, style(Role::Muted))])),
         area,
