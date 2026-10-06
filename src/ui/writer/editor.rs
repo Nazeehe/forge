@@ -148,6 +148,20 @@ fn paint_doc(
             }
         }
     }
+    // Markdown highlights for the visible window plus one row of
+    // lookahead: the highlighter scans fence state from the head in
+    // one linear pass and stops at the window end, so cost stays
+    // bounded (see the 1 MiB perf test in markdown.rs). Proposal
+    // marks were added above; EdTUI gives the selection priority
+    // over every highlight.
+    let first_visible = editor.viewport_offset().1;
+    for mark in crate::app::writer::markdown::highlight_markdown(
+        &buffer,
+        first_visible,
+        edit_rect.height as usize + 1,
+    ) {
+        editor.add_highlight(mark);
+    }
     // Every EdTUI style maps to a semantic role: the defaults hide
     // hard-coded RGB (white-on-black cursor, yellow selection, gray
     // line numbers) that no theme remap could reach.

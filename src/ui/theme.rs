@@ -41,6 +41,13 @@ pub enum Role {
     BorderModal,
     KeyHint,
     KeyDesc,
+    /// Markdown heading markers and text (bold cyan).
+    MdHeading,
+    /// Markdown inline code and fenced code blocks (green).
+    MdCode,
+    /// Markdown link text (underlined cyan); brackets and URLs
+    /// stay Muted so the destination never shouts.
+    MdLink,
 }
 
 /// Absolute-color overrides from the OS theme. Hue roles are absent on
@@ -699,6 +706,13 @@ fn builtin_style(role: Role) -> Style {
         Role::BorderModal => Style::default().fg(Color::Cyan),
         Role::KeyHint => Style::default().fg(Color::Cyan),
         Role::KeyDesc => Style::default().fg(Color::White),
+        Role::MdHeading => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        Role::MdCode => Style::default().fg(Color::Green),
+        Role::MdLink => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::UNDERLINED),
     }
 }
 

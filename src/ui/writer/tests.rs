@@ -57,6 +57,50 @@
     }
 
     #[test]
+    fn markdown_styles_land_on_painted_cells() {
+        let mut session = doc_session("# Head\n\n```rs\nlet x = 1;\n```\n**bold** and *em*\n");
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let find_row = |needle: &str| -> u16 {
+            (0..30)
+                .find(|y| row_text(&buf, *y, 0, 120).contains(needle))
+                .expect("painted row")
+        };
+        let head = find_row("# Head");
+        // The '#' cell may carry the cursor; assert past it.
+        let hcell = buf[(6, head)].clone();
+        assert_eq!(hcell.fg, ratatui::style::Color::Cyan, "heading hue");
+        assert!(
+            hcell.modifier.contains(ratatui::style::Modifier::BOLD),
+            "heading bold"
+        );
+        let code = find_row("let x = 1;");
+        assert_eq!(
+            buf[(4, code)].fg,
+            ratatui::style::Color::Green,
+            "fence content one code style"
+        );
+        let fence = find_row("```rs");
+        assert_eq!(
+            buf[(4, fence)].fg,
+            ratatui::style::Color::Green,
+            "fence delimiter code-styled"
+        );
+        let text = buffer_text(&buf);
+        for marker in ["# Head", "```rs", "```", "**bold**", "*em*"] {
+            assert!(text.contains(marker), "marker stays in the buffer: {marker}");
+        }
+        let bold = find_row("**bold**");
+        // Cell scan, not byte find: the box border is multibyte.
+        let bcol = (0..120)
+            .find(|x| row_text(&buf, bold, *x, 120).starts_with("bold"))
+            .expect("bold cell");
+        assert!(
+            buf[(bcol, bold)].modifier.contains(ratatui::style::Modifier::BOLD),
+            "bold span bold"
+        );
+    }
+
+    #[test]
     fn doc_paints_title_editor_status_and_actions() {
         let mut session = doc_session("aaa bbb");
         // Panel-era UI needs the assistant shown (hidden default).

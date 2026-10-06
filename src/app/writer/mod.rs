@@ -13,6 +13,7 @@ use crate::writer::proposal::Proposals;
 use crate::writer::request::WriterAction;
 
 pub mod adapter;
+pub mod markdown;
 pub mod tools;
 #[cfg(test)]
 mod tests;

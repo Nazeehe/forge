@@ -414,6 +414,29 @@ fn writer_hover_motion_paints_no_highlight() {
 }
 
 #[test]
+fn writer_highlights_heading_and_fence() {
+    let mut h = boot(&[("md.md", "# Title\n\n```rs\nlet x = 1;\n```\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("md.md\r");
+    let text = h.wait_for("rev0", "doc open");
+    assert!(text.contains("md.md"), "title names the file");
+    let (_, y) = h.find("Title").expect("heading on screen");
+    h.settle();
+    // The heading row carries styled cells (bold, non-default fg);
+    // plain body text would be neither.
+    let styled = row_signature(&h.parser, y)
+        .into_iter()
+        .any(|(_, fg, _, bold, _)| bold && fg != "Default");
+    assert!(styled, "heading row is highlighted");
+}
+
+#[test]
 fn writer_prompt_home_fixes_first_char() {
     let mut h = boot(&[("needed.md", "need\n")]);
     create_session(&mut h);
