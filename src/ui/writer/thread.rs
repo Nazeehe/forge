@@ -339,3 +339,14 @@ pub(super) fn paint_error_slot(f: &mut Frame, area: Rect, error: Option<&str>) {
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// Watch notice for the fixed slot: informational (Info, never the
+/// error Danger), painted only when no confirm, bar, or error owns
+/// the row.
+pub(super) fn paint_banner_slot(f: &mut Frame, area: Rect, banner: Option<&str>) {
+    let line = match banner {
+        Some(message) => Line::from(vec![Span::styled(message.to_string(), style(Role::Info))]),
+        None => Line::from(vec![Span::styled(String::new(), Style::default())]),
+    };
+    f.render_widget(Paragraph::new(line), area);
+}
+

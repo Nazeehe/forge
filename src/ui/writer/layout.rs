@@ -335,6 +335,10 @@ pub fn confirm_label(action: &crate::app::writer::ConfirmAction) -> &'static str
         A::Cancel => "Cancel",
         A::OpenInstead(_) => "Open",
         A::CreateInstead(_) => "Create",
+        A::ReloadFromDisk => "Reload",
+        A::KeepMine => "Keep mine",
+        A::SaveToRecreate => "Save to recreate",
+        A::CloseDoc => "Close",
     }
 }
 

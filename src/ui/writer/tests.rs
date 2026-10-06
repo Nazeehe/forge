@@ -33,6 +33,7 @@
             text: text.to_string(),
             revision: 0,
             disk_hash: 0,
+            mtime: None,
             dirty: false,
         });
         let mut editor = EditorState::new(Lines::from(text));
@@ -985,4 +986,33 @@
         assert!(row.contains("Replace ▾"), "open toggle: {row:?}");
         assert!(row.contains("Replace next"), "action pill: {row:?}");
         assert!(row.contains("Replace all"), "action pill: {row:?}");
+    }
+
+    #[test]
+    fn fixed_slot_priority_is_confirm_bar_error_banner() {
+        use crate::app::writer::{ConfirmAction, PendingConfirm};
+        let mut session = doc_session("aaa");
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let slot = |buf: &ratatui::buffer::Buffer| {
+            row_text(&buf, layout.error.y, layout.error.x, layout.error.x + 60)
+        };
+        session.banner = Some("Reloaded: changed on disk".to_string());
+        let row = slot(&paint_doc_to(&mut session, 120, 30));
+        assert!(row.contains("Reloaded"), "banner alone: {row:?}");
+        session.error = Some("boom".to_string());
+        let row = slot(&paint_doc_to(&mut session, 120, 30));
+        assert!(row.contains("boom") && !row.contains("Reloaded"), "error wins: {row:?}");
+        session.find = Some(crate::app::writer::WriterFind {
+            query: "a".to_string(),
+            cursor: 1,
+            ..Default::default()
+        });
+        let row = slot(&paint_doc_to(&mut session, 120, 30));
+        assert!(row.contains("Find") && !row.contains("boom"), "bar wins: {row:?}");
+        session.pending_confirm = Some(PendingConfirm {
+            message: "Changed on disk: d.md".to_string(),
+            actions: vec![ConfirmAction::ReloadFromDisk, ConfirmAction::KeepMine],
+        });
+        let row = slot(&paint_doc_to(&mut session, 120, 30));
+        assert!(row.contains("Changed on disk"), "confirm wins: {row:?}");
     }

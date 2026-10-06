@@ -422,6 +422,9 @@ impl AppState {
         }
         session.note_fence_edit(edit_line);
         session.proposals.on_edit(&range);
+        // Watch notices describe the just-replaced text; an edit
+        // supersedes them.
+        session.banner = None;
     }
 
     /// Type one plain char with undo grouping (E6): a char that

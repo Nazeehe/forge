@@ -50,7 +50,23 @@ pub(super) fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     if state.theme_dialog.is_some() {
         return;
     }
+    // The quit/kill confirm fires its buttons on left-click (the
+    // same outcomes as its keys); anything else on the modal dies.
     if state.confirm.is_some() {
+        if matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+            let (rows, cols) = state.term_size;
+            let area = crate::ui::dialogs::quit::confirm_area(ratatui::layout::Rect::new(
+                0, 0, cols, rows,
+            ));
+            let outcome = state
+                .confirm
+                .as_mut()
+                .and_then(|d| d.click(mev.column, mev.row, area));
+            if let Some(outcome) = outcome {
+                crate::tui::dialogs::settle_confirm_outcome(state, outcome);
+                state.dirty = true;
+            }
+        }
         return;
     }
     let (rows, cols) = state.term_size;

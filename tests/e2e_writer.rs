@@ -381,14 +381,16 @@ fn writer_opens_types_and_keeps_modal_intact() {
     h.send("X");
     let text = h.wait_for("seed!X", "tab kept focus");
     assert!(text.contains("seed!X"), "tab does not lose focus");
-    // The quit modal paints last over the live editor.
+    // The quit modal paints last over the live editor. The typed
+    // chars dirtied the doc (E9), so it names the file with
+    // Save/Discard/Cancel instead of the clean question.
     h.send("\x02");
     std::thread::sleep(Duration::from_millis(200));
     h.send("q");
-    let text = h.wait_for("Areyousureyouwanttoquit?", "quit modal");
+    let text = h.wait_for("Unsavedchanges", "quit modal");
     assert!(
-        text.chars().filter(|c| !c.is_whitespace()).collect::<String>().contains("Areyousureyouwanttoquit?"),
-        "modal text intact"
+        text.chars().filter(|c| !c.is_whitespace()).collect::<String>().contains("seeded.md"),
+        "modal names the dirty file"
     );
     h.send("\x1b");
     // Dismissal shows no new text: settle, then the modal is gone and
@@ -748,4 +750,47 @@ fn writer_replace_all_then_undo() {
     std::thread::sleep(Duration::from_millis(300));
     h.send("\x1a");
     h.wait_for("aaaaaa", "one undo restores");
+}
+
+#[test]
+fn writer_external_write_auto_reloads() {
+    let mut h = boot(&[("watch.md", "aaa")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("watch.md\r");
+    h.wait_for("rev0", "doc open");
+    // External write from outside the terminal: the 1 s poll picks
+    // it up and the fixed slot banners the reload.
+    std::fs::write(h.cwd.join("watch.md"), "external").unwrap();
+    h.wait_for("Reloaded:changedondisk", "auto-reload banner");
+}
+
+#[test]
+fn writer_quit_with_dirty_doc_shows_confirm() {
+    let mut h = boot(&[("dirty.md", "aaa")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("dirty.md\r");
+    h.wait_for("rev0", "doc open");
+    // Type into the doc, then ask to quit: the modal names the file.
+    h.send("x");
+    h.wait_for("unsaved", "doc dirty");
+    h.send("\x02q");
+    h.wait_for("Unsavedchanges", "quit names dirty docs");
+    h.wait_for("dirty.md", "file named");
+    // Cancel: Forge keeps running with the doc intact.
+    h.send("\x1b");
+    h.wait_for("unsaved", "still dirty after cancel");
+    let text = h.settle();
+    assert!(text.contains("xaaa"), "doc intact: {text:?}");
 }

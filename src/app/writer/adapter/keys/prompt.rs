@@ -505,6 +505,36 @@ impl AppState {
                 }
             }
             crate::app::writer::ConfirmAction::DiscardClose => self.writer_do_close(id),
+            crate::app::writer::ConfirmAction::ReloadFromDisk => {
+                if let Err(message) = self.writer_reload_from_disk(id) {
+                    self.writer_fail(id, &message);
+                }
+            }
+            crate::app::writer::ConfirmAction::KeepMine => {
+                if let Err(message) = self.writer_keep_mine(id) {
+                    self.writer_fail(id, &message);
+                }
+            }
+            crate::app::writer::ConfirmAction::SaveToRecreate => {
+                let saved = match self.writers.get_mut(&id) {
+                    Some(session) => match session.doc.as_mut() {
+                        Some(doc) => doc.save_force().map_err(|e| e.to_string()),
+                        None => Err("no document open".to_string()),
+                    },
+                    None => return,
+                };
+                match saved {
+                    Ok(()) => {
+                        if let Some(session) = self.writers.get_mut(&id) {
+                            session.error = None;
+                            session.save_note = Some("saved".to_string());
+                        }
+                    }
+                    Err(message) => self.writer_fail(id, &message),
+                }
+                self.dirty = true;
+            }
+            crate::app::writer::ConfirmAction::CloseDoc => self.writer_do_close(id),
         }
     }
 

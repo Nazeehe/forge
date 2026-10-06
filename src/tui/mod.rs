@@ -519,6 +519,9 @@ fn loop_until_quit(
         // Sidebar Tetris gravity: steps at most once per interval and
         // only while open, so idle agents never pay for the game.
         state.tetris_tick(Instant::now());
+        // Writer file watch: self-throttled to one pass a second
+        // across all sessions (E9), so idle frames pay nothing.
+        state.writer_poll_files();
         // Which-key clock: a prefix held past the delay earns its HUD;
         // a sequence finished fast never paints.
         state.dirty |= state.whichkey.poll(router.is_pending(), Instant::now());

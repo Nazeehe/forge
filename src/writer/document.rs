@@ -23,6 +23,10 @@ pub struct Document {
     pub revision: u64,
     /// Hash of the bytes at load/last save.
     pub disk_hash: u64,
+    /// mtime at load/last save; the watch polls it and hashes only
+    /// on a change. `None` for a never-saved new file or when the
+    /// platform withholds it.
+    pub mtime: Option<std::time::SystemTime>,
     /// True once the buffer differs from what was loaded or saved.
     pub dirty: bool,
 }
@@ -48,6 +52,7 @@ impl Document {
                     text: String::new(),
                     revision: 0,
                     disk_hash: hash_bytes(&[]),
+                    mtime: None,
                     dirty: false,
                 });
             }
@@ -76,11 +81,13 @@ impl Document {
             return Err(WriterError::TooLarge(actual));
         }
         let disk_hash = hash_bytes(&bytes);
+        let mtime = meta.modified().ok();
         let text = String::from_utf8(bytes).map_err(|_| WriterError::InvalidUtf8)?;
         Ok(Document {
             path_rel: rel.to_string(),
             abs_path,
             disk_hash,
+            mtime,
             text,
             revision: 0,
             dirty: false,
@@ -130,6 +137,67 @@ impl Document {
             }
         }
         self.disk_hash = hash_bytes(self.text.as_bytes());
+        self.mtime = std::fs::metadata(&self.abs_path).ok().and_then(|m| m.modified().ok());
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Write the buffer back without a conflict check (the file was
+    /// deleted on disk, so there is nothing to conflict with).
+    /// New files get 0644 like a first save.
+    pub fn save_force(&mut self) -> Result<(), WriterError> {
+        fs_atomic::write_atomic(&self.abs_path, self.text.as_bytes())
+            .map_err(|e| WriterError::Io(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(&self.abs_path).is_ok() {
+                let _ = std::fs::set_permissions(
+                    &self.abs_path,
+                    std::fs::Permissions::from_mode(0o644),
+                );
+            }
+        }
+        self.disk_hash = hash_bytes(self.text.as_bytes());
+        self.mtime = std::fs::metadata(&self.abs_path).ok().and_then(|m| m.modified().ok());
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Re-read the file through the same jail as open (size cap,
+    /// regular-file refusal, UTF-8): the disk may hold anything now.
+    /// A file deleted since load is `FileDeleted`, not an I/O error,
+    /// so the watch can offer to recreate it.
+    pub fn reload(&mut self) -> Result<(), WriterError> {
+        let meta = match std::fs::symlink_metadata(&self.abs_path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(WriterError::FileDeleted);
+            }
+            Err(e) => return Err(WriterError::Io(e.to_string())),
+        };
+        let file_type = meta.file_type();
+        if file_type.is_symlink() || !file_type.is_file() {
+            return Err(WriterError::NotRegularFile(self.path_rel.clone()));
+        }
+        if meta.len() > MAX_DOC_BYTES as u64 {
+            return Err(WriterError::TooLarge(meta.len()));
+        }
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&self.abs_path)
+            .map_err(|e| WriterError::Io(e.to_string()))?
+            .take(MAX_DOC_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| WriterError::Io(e.to_string()))?;
+        if bytes.len() as u64 > MAX_DOC_BYTES as u64 {
+            return Err(WriterError::TooLarge(bytes.len() as u64));
+        }
+        let text = String::from_utf8(bytes).map_err(|_| WriterError::InvalidUtf8)?;
+        self.text = text;
+        self.disk_hash = hash_bytes(self.text.as_bytes());
+        self.mtime = meta.modified().ok();
+        self.revision += 1;
         self.dirty = false;
         Ok(())
     }

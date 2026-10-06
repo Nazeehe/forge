@@ -132,6 +132,9 @@ pub struct AppState {
     /// "Saving sessions..." modal, shown after Yes while the quit
     /// snapshot persists. The loop saves, then exits.
     pub quit_saving: bool,
+    /// Last file-watch poll across all Writer sessions; the poll runs
+    /// at most once a second (E9). `None` until the first pass.
+    pub(crate) last_watch_poll: Option<std::time::Instant>,
     /// Open theme picker (`Ctrl-b e`), if any. Captures all input
     /// while present like every other modal.
     pub theme_dialog: Option<crate::ui::dialogs::theme::ThemeDialog>,
@@ -434,6 +437,7 @@ impl AppState {
             confirm: None,
             oobe_dialog: None,
             quit_saving: false,
+            last_watch_poll: None,
             theme_dialog: None,
             themes_dir: None,
             permission_mode: crate::infra::config::PermissionMode::Yolo,

@@ -230,36 +230,71 @@ pub(super) fn settle_quit_save(state: &mut AppState, home: &std::path::Path) -> 
 }
 
 /// One confirm-modal key: Yes runs the confirmed action (quit forge
-/// or kill the targeted session), anything else keeps running.
+/// or kill the targeted session), anything else keeps running. The
+/// dirty Save/Discard variants save first (aborting on failure, with
+/// the reason in the writer slot) or skip saving, then proceed.
 pub(super) fn handle_confirm_key(state: &mut AppState, key: event::KeyEvent) {
     let outcome = state.confirm.as_mut().map(|d| d.key(&key));
+    if let Some(outcome) = outcome {
+        settle_confirm_outcome(state, outcome);
+    }
+    state.dirty = true;
+}
+
+/// Settle one confirm outcome from keys or mouse clicks (shared, so
+/// both paths can never disagree).
+pub(super) fn settle_confirm_outcome(
+    state: &mut AppState,
+    outcome: crate::ui::dialogs::quit::ConfirmOutcome,
+) {
+    use crate::ui::dialogs::quit::ConfirmOutcome as O;
     match outcome {
-        Some(crate::ui::dialogs::quit::ConfirmOutcome::Confirmed) => {
-            match state.confirm.as_ref().map(|d| d.kind()) {
-                Some(crate::ui::dialogs::quit::ConfirmKind::QuitForge) => {
-                    state.confirm = None;
-                    // Yes swaps the confirm for the saving modal: it
-                    // paints this tick, then the loop persists the
-                    // snapshot and exits.
-                    state.quit_saving = true;
-                    state.should_quit = true;
-                }
-                Some(crate::ui::dialogs::quit::ConfirmKind::KillSession(id)) => {
-                    state.confirm = None;
-                    state.terminate_session(id);
-                    fit_active_pane(state);
-                }
-                None => {}
+        O::Confirmed | O::DiscardDirty => {
+            settle_confirm_proceed(state);
+            state.dirty = true;
+        }
+        O::SaveDirty => {
+            let scope = match state.confirm.as_ref().map(|d| d.kind()) {
+                Some(crate::ui::dialogs::quit::ConfirmKind::QuitForge) => None,
+                Some(crate::ui::dialogs::quit::ConfirmKind::KillSession(id)) => Some(id),
+                None => None,
+            };
+            if state.writer_save_all_dirty(scope).is_empty() {
+                settle_confirm_proceed(state);
+            } else {
+                // A save failed (conflict banners and error slots say
+                // why): stay, so no work is lost with the quit.
+                state.confirm = None;
             }
             state.dirty = true;
         }
-        Some(crate::ui::dialogs::quit::ConfirmOutcome::Dismissed) => {
+        O::Dismissed => {
             state.confirm = None;
             state.dirty = true;
         }
-        _ => {
+        O::Pending => {
             state.dirty = true;
         }
+    }
+}
+
+/// Run the confirmed quit/kill after the modal closes.
+fn settle_confirm_proceed(state: &mut AppState) {
+    match state.confirm.as_ref().map(|d| d.kind()) {
+        Some(crate::ui::dialogs::quit::ConfirmKind::QuitForge) => {
+            state.confirm = None;
+            // Yes swaps the confirm for the saving modal: it
+            // paints this tick, then the loop persists the
+            // snapshot and exits.
+            state.quit_saving = true;
+            state.should_quit = true;
+        }
+        Some(crate::ui::dialogs::quit::ConfirmKind::KillSession(id)) => {
+            state.confirm = None;
+            state.terminate_session(id);
+            fit_active_pane(state);
+        }
+        None => {}
     }
 }
 
@@ -648,4 +683,189 @@ mod tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod quit_dirty_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn scratch() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "forge-quit-dirty-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn agent_with_doc(
+        state: &mut AppState,
+        dir: &std::path::Path,
+        name: &str,
+        file: &str,
+        text: &str,
+    ) -> crate::session::SessionId {
+        let id = state
+            .manager
+            .spawn_agent(
+                name,
+                dir,
+                "exec sleep 30",
+                crate::infra::ids::RunId::generate(),
+                "claude",
+            )
+            .expect("spawn agent");
+        let doc =
+            crate::writer::document::Document::open(dir, file).unwrap_or_else(|_| {
+                std::fs::write(dir.join(file), text).unwrap();
+                crate::writer::document::Document::open(dir, file).unwrap()
+            });
+        state.writers.entry(id).or_default().doc = Some(doc);
+        state.writer_open_editor(id);
+        id
+    }
+
+    fn dirty_doc(state: &mut AppState, id: crate::session::SessionId, insert: &str) {
+        state
+            .writers
+            .get_mut(&id)
+            .unwrap()
+            .doc
+            .as_mut()
+            .unwrap()
+            .apply_edit(0..0, insert)
+            .unwrap();
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn quit_confirm_names_dirty_writer_docs() {
+        let dir = scratch();
+        std::fs::write(dir.join("d.md"), "aaa").unwrap();
+        let mut state = AppState::new();
+        let id = agent_with_doc(&mut state, &dir, "a", "d.md", "aaa");
+        dirty_doc(&mut state, id, "x");
+        state.open_quit_confirm();
+        let files = state.confirm.as_ref().unwrap().dirty_files().to_vec();
+        assert_eq!(files, vec!["d.md".to_string()]);
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn quit_save_dirty_saves_and_quits() {
+        let dir = scratch();
+        std::fs::write(dir.join("d.md"), "aaa").unwrap();
+        let mut state = AppState::new();
+        let id = agent_with_doc(&mut state, &dir, "a", "d.md", "aaa");
+        dirty_doc(&mut state, id, "x");
+        state.open_quit_confirm();
+        handle_confirm_key(&mut state, key(KeyCode::Char('s')));
+        assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "xaaa");
+        assert!(state.should_quit, "saved quit proceeds");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn quit_discard_quits_without_saving() {
+        let dir = scratch();
+        std::fs::write(dir.join("d.md"), "aaa").unwrap();
+        let mut state = AppState::new();
+        let id = agent_with_doc(&mut state, &dir, "a", "d.md", "aaa");
+        dirty_doc(&mut state, id, "x");
+        state.open_quit_confirm();
+        handle_confirm_key(&mut state, key(KeyCode::Char('d')));
+        assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "aaa");
+        assert!(state.should_quit, "discarded quit proceeds");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn quit_save_aborts_on_conflict_with_banner() {
+        let dir = scratch();
+        std::fs::write(dir.join("d.md"), "aaa").unwrap();
+        let mut state = AppState::new();
+        let id = agent_with_doc(&mut state, &dir, "a", "d.md", "aaa");
+        dirty_doc(&mut state, id, "x");
+        // External change after load: the quit-time save conflicts.
+        std::fs::write(dir.join("d.md"), "external").unwrap();
+        state.open_quit_confirm();
+        handle_confirm_key(&mut state, key(KeyCode::Char('s')));
+        assert!(!state.should_quit, "failed save aborts the quit");
+        let session = state.writers.get(&id).unwrap();
+        assert!(
+            session.pending_confirm.as_ref().is_some_and(|c| c
+                .actions
+                .iter()
+                .any(|a| matches!(a, crate::app::writer::ConfirmAction::ReloadFromDisk))),
+            "conflict banner offers reload"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn kill_confirm_scopes_dirty_docs_to_the_target() {
+        let dir = scratch();
+        std::fs::write(dir.join("d.md"), "aaa").unwrap();
+        std::fs::write(dir.join("e.md"), "bbb").unwrap();
+        let mut state = AppState::new();
+        let clean = agent_with_doc(&mut state, &dir, "clean", "e.md", "bbb");
+        let dirty = agent_with_doc(&mut state, &dir, "dirty", "d.md", "aaa");
+        dirty_doc(&mut state, dirty, "x");
+        // Kill the clean session: no dirty files named.
+        assert!(state.manager.switch(clean));
+        state.open_kill_confirm();
+        assert!(
+            state.confirm.as_ref().unwrap().dirty_files().is_empty(),
+            "clean kill stays a plain confirm"
+        );
+        state.confirm = None;
+        // Kill the dirty session: its file is named.
+        assert!(state.manager.switch(dirty));
+        state.open_kill_confirm();
+        assert_eq!(
+            state.confirm.as_ref().unwrap().dirty_files(),
+            &["d.md".to_string()]
+        );
+        assert!(state.manager.remove(clean));
+        assert!(state.manager.remove(dirty));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn modal_click_on_save_saves_and_quits() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let dir = scratch();
+        std::fs::write(dir.join("d.md"), "aaa").unwrap();
+        let mut state = AppState::new();
+        let id = agent_with_doc(&mut state, &dir, "a", "d.md", "aaa");
+        dirty_doc(&mut state, id, "x");
+        state.open_quit_confirm();
+        // 80x24 terminal: the 52x7 modal centers at (14, 8); the Save
+        // pill opens the button row. Clicking its second cell fires.
+        state.term_size = (24, 80);
+        crate::tui::mouse::forward_mouse(
+            &mut state,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 24,
+                row: 11,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "xaaa");
+        assert!(state.should_quit, "clicked save quits");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

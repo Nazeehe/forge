@@ -15,6 +15,7 @@ use crate::writer::request::WriterAction;
 pub mod adapter;
 pub mod markdown;
 pub mod tools;
+pub mod watch;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -148,6 +149,15 @@ pub enum ConfirmAction {
     OpenInstead(PathBuf),
     /// Open missed: create the file instead.
     CreateInstead(PathBuf),
+    /// Disk changed under a dirty buffer: drop the buffer, take disk.
+    ReloadFromDisk,
+    /// Disk changed under a dirty buffer: keep the buffer, adopt the
+    /// on-disk hash as the new baseline (the next save overwrites).
+    KeepMine,
+    /// File deleted on disk: write the buffer back, recreating it.
+    SaveToRecreate,
+    /// File deleted on disk: drop the document without saving.
+    CloseDoc,
 }
 
 /// Per-session Writer state: the open document plus everything about it.
@@ -223,6 +233,10 @@ pub struct WriterSession {
     /// Find bar, if open. Paints in the fixed error slot; a pending
     /// confirm takes the slot instead until it clears.
     pub find: Option<WriterFind>,
+    /// Watch notice for the fixed slot (auto-reload info and the like).
+    /// Actionable banners live in `pending_confirm`; this is text only
+    /// and paints under errors. Cleared by the next edit or save.
+    pub banner: Option<String>,
     /// Last painted editor height in rows (0 before the first paint).
     /// PageUp/PageDown move by this; the adapter cannot see the
     /// viewport, so the paint layer reports it here.

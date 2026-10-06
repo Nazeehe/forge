@@ -342,6 +342,8 @@ fn paint_doc(
     if prompt_cursor.is_some() {
         cursor = prompt_cursor;
     }
+    // Fixed-slot priority, defined: an actionable confirm wins,
+    // then the find bar, then errors, then watch notices.
     match session.pending_confirm.as_ref() {
         Some(confirm) => paint_confirm_slot(f, layout.error, confirm),
         None if session.find.is_some() => {
@@ -352,7 +354,10 @@ fn paint_doc(
                 cursor = Some(pos);
             }
         }
-        None => paint_error_slot(f, layout.error, session.error.as_deref()),
+        None => match session.error.as_deref() {
+            Some(_) => paint_error_slot(f, layout.error, session.error.as_deref()),
+            None => super::thread::paint_banner_slot(f, layout.error, session.banner.as_deref()),
+        },
     }
     cursor
 }

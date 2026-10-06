@@ -62,6 +62,8 @@ pub enum WriterError {
     NotRegularFile(String),
     /// On-disk content changed since load/last save; save refused.
     ConflictOnSave,
+    /// File deleted on disk since load; reload refused.
+    FileDeleted,
     /// Filesystem I/O failure; carries the message.
     Io(String),
     /// Char range outside the document.
@@ -89,6 +91,7 @@ impl std::fmt::Display for WriterError {
             WriterError::InvalidUtf8 => write!(f, "file is not valid UTF-8"),
             WriterError::NotRegularFile(p) => write!(f, "not a regular file: {p}"),
             WriterError::ConflictOnSave => write!(f, "file changed on disk; save refused"),
+            WriterError::FileDeleted => write!(f, "file deleted on disk"),
             WriterError::Io(m) => write!(f, "i/o error: {m}"),
             WriterError::RangeOutOfBounds => write!(f, "range outside the document"),
             WriterError::ProposalTooLarge(n) => write!(f, "proposal too large ({n} chars)"),

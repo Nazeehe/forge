@@ -126,11 +126,29 @@ impl AppState {
         match doc.save() {
             Ok(()) => {
                 session.error = None;
+                session.banner = None;
                 session.save_note = Some("saved".to_string());
             }
             Err(crate::writer::WriterError::ConflictOnSave) => {
-                session.error = Some("save conflict: file changed on disk".to_string());
+                // The same banner the watch raises for a dirty buffer
+                // whose disk moved: Reload drops the buffer, Keep
+                // mine adopts the baseline so the next save wins. A
+                // crowded slot keeps the bare error instead.
+                let rel = doc.path_rel.clone();
                 session.save_note = Some("not saved".to_string());
+                if session.pending_confirm.is_none() {
+                    session.pending_confirm = Some(crate::app::writer::PendingConfirm {
+                        message: format!("Changed on disk: {rel}"),
+                        actions: vec![
+                            crate::app::writer::ConfirmAction::ReloadFromDisk,
+                            crate::app::writer::ConfirmAction::KeepMine,
+                        ],
+                    });
+                    session.error = None;
+                } else {
+                    session.error =
+                        Some("save conflict: file changed on disk".to_string());
+                }
             }
             Err(other) => {
                 session.error = Some(format!("save failed: {other}"));

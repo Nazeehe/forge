@@ -230,6 +230,7 @@ mod tests {
             text: text.to_string(),
             revision: 0,
             disk_hash: 0,
+            mtime: None,
             dirty: false,
         }
     }

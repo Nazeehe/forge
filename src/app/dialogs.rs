@@ -24,22 +24,29 @@ impl AppState {
         self.dirty = true;
     }
 
+    /// Ask before quitting. Dirty Writer docs anywhere turn the
+    /// Yes/No into Save/Discard/Cancel over the named files.
     pub fn open_quit_confirm(&mut self) {
-        self.confirm = Some(crate::ui::dialogs::quit::Confirm::new(
+        let dirty = self.writer_dirty_docs(None);
+        self.confirm = Some(crate::ui::dialogs::quit::Confirm::with_dirty(
             crate::ui::dialogs::quit::ConfirmKind::QuitForge,
             self.pill_tabs,
+            dirty,
         ));
         self.dirty = true;
     }
 
     /// Ask before killing the active session (`Ctrl-b x`). Nothing
     /// opens when no session is live; Yes terminates the session that
-    /// was active here.
+    /// was active here. A dirty Writer doc in that session turns the
+    /// Yes/No into Save/Discard/Cancel over its file.
     pub fn open_kill_confirm(&mut self) {
         if let Some(active) = self.manager.active() {
-            self.confirm = Some(crate::ui::dialogs::quit::Confirm::new(
+            let dirty = self.writer_dirty_docs(Some(active));
+            self.confirm = Some(crate::ui::dialogs::quit::Confirm::with_dirty(
                 crate::ui::dialogs::quit::ConfirmKind::KillSession(active),
                 self.pill_tabs,
+                dirty,
             ));
             self.dirty = true;
         }

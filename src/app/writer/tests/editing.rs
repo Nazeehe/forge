@@ -375,12 +375,15 @@ fn save_writes_and_conflicts_land_in_the_slot() {
     state.writer_save(id);
     assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "!hello");
     assert_eq!(state.writers.get(&id).unwrap().error, None);
-    // External change, then save: conflict goes to the fixed slot.
+    // External change, then save: the conflict raises the Reload /
+    // Keep mine banner (E9), not the bare error.
     std::fs::write(dir.join("d.md"), "theirs").unwrap();
     feed(&mut state, id, crossterm::event::KeyCode::Char('?'));
     state.writer_save(id);
     let session = state.writers.get(&id).unwrap();
-    assert_eq!(session.error.as_deref(), Some("save conflict: file changed on disk"));
+    assert_eq!(session.error, None);
+    let confirm = session.pending_confirm.as_ref().expect("conflict banner");
+    assert_eq!(confirm.message, "Changed on disk: d.md");
     assert_eq!(std::fs::read_to_string(dir.join("d.md")).unwrap(), "theirs");
     assert!(state.manager.remove(id));
     std::fs::remove_dir_all(&dir).ok();
