@@ -512,14 +512,16 @@ pub fn chip_detach_rect(chat: Rect, selection: Option<&std::ops::Range<usize>>) 
 
 
 /// Find-bar hit rects inside the fixed error slot: the two fields
-/// plus the three pills. Paint and mouse dispatch share them, so
-/// clicks can never desync from what is on screen.
+/// plus the four pills (the replace toggle is always present).
+/// Paint and mouse dispatch share them, so clicks can never desync
+/// from what is on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FindBarRects {
     pub query: Rect,
     pub replace: Rect,
     pub case: Rect,
-    pub replace_btn: Rect,
+    pub toggle: Rect,
+    pub replace_next_btn: Rect,
     pub replace_all_btn: Rect,
 }
 
@@ -555,8 +557,9 @@ pub fn find_case_label(find: &crate::app::writer::WriterFind) -> &'static str {
     }
 }
 
-/// Lay out the bar left to right: `Find [query] count (Aa)` plus,
-/// with replace open, `Replace [text] (Replace) (Replace all)`.
+/// Lay out the bar left to right: `Find [query] count (Aa)` plus
+/// the replace toggle `(▸Replace)` (closed, with an `Alt+H` hint)
+/// or `(▾Replace) [text] (Replace next) (Replace all)` (open).
 /// Fixed segments reserve first; the fields split what is left
 /// (query 3/5, replace 2/5). Anything past the slot edge clips in
 /// the paint; the pills keep their rects.
@@ -573,17 +576,23 @@ pub fn find_bar_rects(
     let counter = find_counter(find);
     let counter_w = counter.chars().count() as u16;
     let case_w = pill_width(find_case_label(find), find.focus == FindFocus::CaseBtn);
+    // The toggle always carries a mark (▸/▾, or > focused), so its
+    // width never moves between states.
+    let toggle_w = pill_width("Replace", true);
     let replace_open = find.replace_open;
-    let replace_btn_w = pill_width("Replace", find.focus == FindFocus::ReplaceBtn);
+    let replace_next_w = pill_width("Replace next", find.focus == FindFocus::ReplaceNextBtn);
     let replace_all_w = pill_width("Replace all", find.focus == FindFocus::ReplaceAllBtn);
     // Fixed cells after the query field: separators plus the counter,
-    // the case pill, and the replace group when open.
-    let mut fixed = 1 + case_w;
+    // the case pill, the toggle, and the replace group when open
+    // (closed, the Alt+H hint instead of the group).
+    let mut fixed = 1 + case_w + 1 + toggle_w;
     if !counter.is_empty() {
         fixed += 1 + counter_w;
     }
     if replace_open {
-        fixed += 1 + 8 + 1 + replace_btn_w + 1 + replace_all_w;
+        fixed += 1 + replace_next_w + 1 + replace_all_w;
+    } else {
+        fixed += 6;
     }
     // Past the `Find ` label; the query field owns the rest.
     let mut x = slot.x.saturating_add(5);
@@ -603,13 +612,15 @@ pub fn find_bar_rects(
     }
     x = x.saturating_add(1);
     out.case = Rect::new(x, y, case_w, 1);
-    x = x.saturating_add(case_w);
+    x = x.saturating_add(case_w).saturating_add(1);
+    out.toggle = Rect::new(x, y, toggle_w, 1);
+    x = x.saturating_add(toggle_w);
     if replace_open {
-        x = x.saturating_add(1 + 8);
+        x = x.saturating_add(1);
         out.replace = Rect::new(x, y, replace_w, 1);
         x = x.saturating_add(replace_w).saturating_add(1);
-        out.replace_btn = Rect::new(x, y, replace_btn_w, 1);
-        x = x.saturating_add(replace_btn_w).saturating_add(1);
+        out.replace_next_btn = Rect::new(x, y, replace_next_w, 1);
+        x = x.saturating_add(replace_next_w).saturating_add(1);
         out.replace_all_btn = Rect::new(x, y, replace_all_w, 1);
     }
     out

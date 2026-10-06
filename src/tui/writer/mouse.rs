@@ -484,8 +484,12 @@ fn find_click(
         state.writer_find_toggle_case(id);
         return true;
     }
+    if hits(rects.toggle, x, y) {
+        state.writer_find_toggle_replace(id);
+        return true;
+    }
     if find.replace_open {
-        if hits(rects.replace_btn, x, y) {
+        if hits(rects.replace_next_btn, x, y) {
             state.writer_find_replace_current(id);
             return true;
         }

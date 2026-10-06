@@ -418,9 +418,31 @@ impl AppState {
         self.dirty = true;
     }
 
-    /// Tab: cycle Query → case pill → replace group → back. The
-    /// replace group is skipped while closed (only the query field
-    /// and the toggle exist). `pub(crate)`: the TUI input layer.
+    /// Open or collapse the replace field. Expanding focuses the
+    /// replace field; collapsing returns to the query field. The
+    /// typed replacement survives a collapse.
+    /// `pub(crate)`: the toggle pill (click or Tab+Enter) calls this.
+    pub(crate) fn writer_find_toggle_replace(&mut self, id: crate::session::SessionId) {
+        let Some(session) = self.writers.get_mut(&id) else {
+            return;
+        };
+        let Some(find) = session.find.as_mut() else {
+            return;
+        };
+        find.replace_open = !find.replace_open;
+        find.focus = if find.replace_open {
+            FindFocus::Replace
+        } else {
+            FindFocus::Query
+        };
+        find.select_all = false;
+        find.note = None;
+        self.dirty = true;
+    }
+
+    /// Tab: cycle Query → case pill → replace toggle → replace
+    /// group → back. The replace group is skipped while closed.
+    /// `pub(crate)`: the TUI input layer.
     pub(crate) fn writer_find_tab(&mut self, id: crate::session::SessionId) {
         let Some(session) = self.writers.get_mut(&id) else {
             return;
@@ -431,14 +453,16 @@ impl AppState {
         find.focus = if find.replace_open {
             match find.focus {
                 FindFocus::Query => FindFocus::CaseBtn,
-                FindFocus::CaseBtn => FindFocus::Replace,
-                FindFocus::Replace => FindFocus::ReplaceBtn,
-                FindFocus::ReplaceBtn => FindFocus::ReplaceAllBtn,
+                FindFocus::CaseBtn => FindFocus::ToggleBtn,
+                FindFocus::ToggleBtn => FindFocus::Replace,
+                FindFocus::Replace => FindFocus::ReplaceNextBtn,
+                FindFocus::ReplaceNextBtn => FindFocus::ReplaceAllBtn,
                 FindFocus::ReplaceAllBtn => FindFocus::Query,
             }
         } else {
             match find.focus {
                 FindFocus::Query => FindFocus::CaseBtn,
+                FindFocus::CaseBtn => FindFocus::ToggleBtn,
                 _ => FindFocus::Query,
             }
         };
@@ -456,11 +480,12 @@ impl AppState {
             .and_then(|session| session.find.as_ref())
             .map(|find| find.focus);
         match focus {
-            Some(FindFocus::Replace | FindFocus::ReplaceBtn) => {
+            Some(FindFocus::Replace | FindFocus::ReplaceNextBtn) => {
                 self.writer_find_replace_current(id);
             }
             Some(FindFocus::ReplaceAllBtn) => self.writer_find_replace_all(id),
             Some(FindFocus::CaseBtn) => self.writer_find_toggle_case(id),
+            Some(FindFocus::ToggleBtn) => self.writer_find_toggle_replace(id),
             _ => self.writer_find_next(id, 1),
         }
     }

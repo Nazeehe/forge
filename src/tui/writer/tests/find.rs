@@ -386,3 +386,27 @@ fn seeded_query_types_to_replace() {
     assert!(state.manager.remove(id));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn replace_toggle_opens_and_collapses_via_tab() {
+    let (mut state, id, dir) = writer_agent();
+    open_foo(&mut state, id, &dir);
+    let mut router = InputRouter::new();
+    ctrl_f(&mut state, &mut router);
+    // Closed cycle: Query -> case -> toggle -> Query.
+    press(&mut state, &mut router, key(event::KeyCode::Tab));
+    press(&mut state, &mut router, key(event::KeyCode::Tab));
+    press(&mut state, &mut router, key(event::KeyCode::Enter));
+    let find = find_of(&state, id);
+    assert!(find.replace_open, "toggle opened");
+    assert_eq!(find.focus, crate::app::writer::FindFocus::Replace);
+    // Open cycle reaches the toggle five Tabs past Replace.
+    for _ in 0..5 {
+        press(&mut state, &mut router, key(event::KeyCode::Tab));
+    }
+    press(&mut state, &mut router, key(event::KeyCode::Enter));
+    let find = find_of(&state, id);
+    assert!(!find.replace_open, "toggle collapsed");
+    assert!(state.manager.remove(id));
+    std::fs::remove_dir_all(&dir).ok();
+}

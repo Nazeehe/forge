@@ -963,3 +963,26 @@
             "current match reverses"
         );
     }
+
+    #[test]
+    fn find_replace_toggle_paints_both_states() {
+        let mut session = doc_session("foo bar foo");
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        session.find = Some(crate::app::writer::WriterFind {
+            query: "foo".to_string(),
+            cursor: 3,
+            matches: vec![0..3, 8..11],
+            current: 0,
+            ..Default::default()
+        });
+        let shut = paint_doc_to(&mut session, 120, 30);
+        let row = row_text(&shut, layout.error.y, layout.error.x, layout.error.x + 120);
+        assert!(row.contains("▸Replace"), "closed toggle: {row:?}");
+        assert!(row.contains("Alt+H"), "hint: {row:?}");
+        session.find.as_mut().unwrap().replace_open = true;
+        let open = paint_doc_to(&mut session, 120, 30);
+        let row = row_text(&open, layout.error.y, layout.error.x, layout.error.x + 120);
+        assert!(row.contains("▾Replace"), "open toggle: {row:?}");
+        assert!(row.contains("Replace next"), "action pill: {row:?}");
+        assert!(row.contains("Replace all"), "action pill: {row:?}");
+    }

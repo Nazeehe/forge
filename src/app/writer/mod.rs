@@ -89,8 +89,9 @@ pub enum FindFocus {
     #[default]
     Query,
     CaseBtn,
+    ToggleBtn,
     Replace,
-    ReplaceBtn,
+    ReplaceNextBtn,
     ReplaceAllBtn,
 }
 

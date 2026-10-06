@@ -53,8 +53,24 @@ pub fn paint_find_bar(
         case_focused,
         case_focused.then_some('>'),
     ));
+    // The replace toggle doubles as the field's label: ▸ opens,
+    // ▾ collapses. Closed, the Alt+H twin rides along as muted
+    // text so replace is discoverable without the shortcut.
+    spans.push(Span::raw(" ".to_string()));
+    let toggle_focused = find.focus == FindFocus::ToggleBtn;
+    spans.extend(pill_spans(
+        "Replace",
+        toggle_focused,
+        Some(if toggle_focused {
+            '>'
+        } else if find.replace_open {
+            '▾'
+        } else {
+            '▸'
+        }),
+    ));
     if find.replace_open {
-        spans.push(Span::raw(" Replace ".to_string()));
+        spans.push(Span::raw(" ".to_string()));
         spans.extend(field_spans(
             &find.replace,
             find.replace_cursor,
@@ -62,9 +78,9 @@ pub fn paint_find_bar(
             rects.replace.width,
         ));
         spans.push(Span::raw(" ".to_string()));
-        let replace_focused = find.focus == FindFocus::ReplaceBtn;
+        let replace_focused = find.focus == FindFocus::ReplaceNextBtn;
         spans.extend(pill_spans(
-            "Replace",
+            "Replace next",
             replace_focused,
             replace_focused.then_some('>'),
         ));
@@ -75,6 +91,8 @@ pub fn paint_find_bar(
             all_focused,
             all_focused.then_some('>'),
         ));
+    } else {
+        spans.push(Span::styled(" Alt+H".to_string(), style(Role::Muted)));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), slot);
     if session.focus != WriterFocus::Editor {
