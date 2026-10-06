@@ -692,3 +692,60 @@ fn writer_panel_shows_divider_and_pinned_status() {
     let status_row: String = grid[bottom - 3].concat();
     assert!(status_row.contains("rev"), "pinned status row: {status_row:?}");
 }
+
+#[test]
+fn writer_find_next_wraps() {
+    let mut h = boot(&[("find.md", "alpha beta alpha")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("find.md\r");
+    h.wait_for("rev0", "doc open");
+    h.send("\x06");
+    h.wait_for("Find", "bar open");
+    h.send("alpha");
+    h.wait_for("1/2", "first of two");
+    h.send("\r");
+    h.wait_for("2/2", "second match");
+    // Past the last wraps to the first.
+    h.send("\r");
+    h.wait_for("1/2", "wrapped");
+    let text = h.settle();
+    assert!(text.contains("Find"), "bar still open: {text:?}");
+}
+
+#[test]
+fn writer_replace_all_then_undo() {
+    let mut h = boot(&[("repl.md", "aa aa aa")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("repl.md\r");
+    h.wait_for("rev0", "doc open");
+    h.send("\x06");
+    h.wait_for("Find", "bar open");
+    h.send("aa");
+    h.wait_for("1/3", "three matches");
+    // Alt+H: legacy terminals deliver Ctrl+H as Backspace, so the
+    // reachable replace twin is Alt+H (ESC h on the wire).
+    h.send("\x1bh");
+    h.wait_for("Replace", "replace field open");
+    h.send("b");
+    // Tab cycles Replace field -> (Replace) -> (Replace all).
+    h.send("\t\t");
+    h.send("\r");
+    h.wait_for("3replaced", "count reported");
+    // Esc closes the bar; one Ctrl+Z restores all three.
+    h.send("\x1b");
+    std::thread::sleep(Duration::from_millis(300));
+    h.send("\x1a");
+    h.wait_for("aaaaaa", "one undo restores");
+}

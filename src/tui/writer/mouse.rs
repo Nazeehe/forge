@@ -80,6 +80,16 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
                 state.writer_fire_confirm(id, index);
                 return;
             }
+            // Find bar pills and fields in the fixed error slot (a
+            // pending confirm paints over it, handled above).
+            if state
+                .writers
+                .get(&id)
+                .is_some_and(|s| s.find.is_some() && s.pending_confirm.is_none())
+                && find_click(state, id, &layout, mev.column, mev.row)
+            {
+                return;
+            }
             if !has_doc {
                 empty_click(state, id, &layout, mev.column, mev.row);
                 return;
@@ -451,6 +461,54 @@ fn cell_to_char(text: &str, dx: u16) -> usize {
         }
     }
     text.chars().count()
+}
+
+/// One click on the find bar row: pills fire, fields take focus
+/// (and Editor focus, so typing lands in the bar). True when a
+/// control was hit; misses fall through to the handlers below.
+fn find_click(
+    state: &mut AppState,
+    id: crate::session::SessionId,
+    layout: &crate::ui::writer::WriterLayout,
+    x: u16,
+    y: u16,
+) -> bool {
+    let Some(session) = state.writers.get(&id) else {
+        return false;
+    };
+    let Some(find) = session.find.as_ref() else {
+        return false;
+    };
+    let rects = crate::ui::writer::find_bar_rects(layout.error, find);
+    if hits(rects.case, x, y) {
+        state.writer_find_toggle_case(id);
+        return true;
+    }
+    if find.replace_open {
+        if hits(rects.replace_btn, x, y) {
+            state.writer_find_replace_current(id);
+            return true;
+        }
+        if hits(rects.replace_all_btn, x, y) {
+            state.writer_find_replace_all(id);
+            return true;
+        }
+        if hits(rects.replace, x, y) {
+            if let Some(session) = state.writers.get_mut(&id) {
+                session.focus = crate::app::writer::WriterFocus::Editor;
+            }
+            state.writer_find_focus_replace(id);
+            return true;
+        }
+    }
+    if hits(rects.query, x, y) {
+        if let Some(session) = state.writers.get_mut(&id) {
+            session.focus = crate::app::writer::WriterFocus::Editor;
+        }
+        state.writer_find_focus_query(id);
+        return true;
+    }
+    false
 }
 
 fn hits(area: ratatui::layout::Rect, x: u16, y: u16) -> bool {

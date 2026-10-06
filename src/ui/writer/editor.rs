@@ -122,6 +122,9 @@ fn paint_doc(
             layout.gutter.height.saturating_sub(shift),
         );
     }
+    // Find matches refresh from the doc revision before any
+    // highlight reads them; the borrow ends before the editor's.
+    crate::app::writer::adapter::keys::find::refresh_find_matches(session);
     let editor = session.editor.as_mut().expect("editor built on open");
     // Fresh highlights every frame: stale ranges must never linger.
     editor.clear_highlights();
@@ -146,6 +149,26 @@ fn paint_doc(
                     style(Role::TabActive),
                 ));
             }
+        }
+    }
+    // Find matches highlight under the proposal marks: every hit
+    // in Warning, the current one reversed too, so it reads without
+    // color. The editor selection (the current match) still wins:
+    // EdTUI gives the selection priority over every highlight.
+    if let Some(find) = session.find.as_ref() {
+        for (index, range) in find.matches.iter().enumerate() {
+            let mut mark = style(Role::Warning);
+            if index == find.current {
+                mark = mark.add_modifier(ratatui::style::Modifier::REVERSED);
+            }
+            editor.add_highlight(Highlight::new(
+                crate::app::writer::adapter::offset_to_index2(&buffer, range.start),
+                crate::app::writer::adapter::offset_to_index2(
+                    &buffer,
+                    range.end.saturating_sub(1).max(range.start),
+                ),
+                mark,
+            ));
         }
     }
     // Markdown highlights for the visible window plus one row of
@@ -321,6 +344,14 @@ fn paint_doc(
     }
     match session.pending_confirm.as_ref() {
         Some(confirm) => paint_confirm_slot(f, layout.error, confirm),
+        None if session.find.is_some() => {
+            // The find bar owns the fixed error slot while open, so
+            // the layout never shifts; its cursor wins like the
+            // prompt cursor above.
+            if let Some(pos) = super::paint_find_bar(f, layout.error, session) {
+                cursor = Some(pos);
+            }
+        }
         None => paint_error_slot(f, layout.error, session.error.as_deref()),
     }
     cursor

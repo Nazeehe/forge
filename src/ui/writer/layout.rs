@@ -510,3 +510,107 @@ pub fn chip_detach_rect(chat: Rect, selection: Option<&std::ops::Range<usize>>) 
     Some(Rect::new(x, chat.y, 3, 1))
 }
 
+
+/// Find-bar hit rects inside the fixed error slot: the two fields
+/// plus the three pills. Paint and mouse dispatch share them, so
+/// clicks can never desync from what is on screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FindBarRects {
+    pub query: Rect,
+    pub replace: Rect,
+    pub case: Rect,
+    pub replace_btn: Rect,
+    pub replace_all_btn: Rect,
+}
+
+/// Match counter (or the transient note) for the bar's middle
+/// slot: `3/12`, `0/0` with no hits, `10000+`-suffixed past the
+/// cap, empty with no query. Paint and layout share it so the
+/// reserved width is exactly what renders.
+pub fn find_counter(find: &crate::app::writer::WriterFind) -> String {
+    if let Some(note) = find.note.as_deref() {
+        return note.to_string();
+    }
+    if find.query.is_empty() {
+        return String::new();
+    }
+    let total = if find.overflow {
+        "10000+".to_string()
+    } else {
+        find.matches.len().to_string()
+    };
+    if find.matches.is_empty() {
+        return format!("0/{total}");
+    }
+    format!("{}/{}", find.current + 1, total)
+}
+
+/// Case pill label: the letter case IS the state cue (never color
+/// alone) — `Aa` sensitive, `aa` not.
+pub fn find_case_label(find: &crate::app::writer::WriterFind) -> &'static str {
+    if find.case_sensitive {
+        "Aa"
+    } else {
+        "aa"
+    }
+}
+
+/// Lay out the bar left to right: `Find [query] count (Aa)` plus,
+/// with replace open, `Replace [text] (Replace) (Replace all)`.
+/// Fixed segments reserve first; the fields split what is left
+/// (query 3/5, replace 2/5). Anything past the slot edge clips in
+/// the paint; the pills keep their rects.
+pub fn find_bar_rects(
+    slot: Rect,
+    find: &crate::app::writer::WriterFind,
+) -> FindBarRects {
+    let mut out = FindBarRects::default();
+    if slot.height == 0 || slot.width == 0 {
+        return out;
+    }
+    use crate::app::writer::FindFocus;
+    let y = slot.y;
+    let counter = find_counter(find);
+    let counter_w = counter.chars().count() as u16;
+    let case_w = pill_width(find_case_label(find), find.focus == FindFocus::CaseBtn);
+    let replace_open = find.replace_open;
+    let replace_btn_w = pill_width("Replace", find.focus == FindFocus::ReplaceBtn);
+    let replace_all_w = pill_width("Replace all", find.focus == FindFocus::ReplaceAllBtn);
+    // Fixed cells after the query field: separators plus the counter,
+    // the case pill, and the replace group when open.
+    let mut fixed = 1 + case_w;
+    if !counter.is_empty() {
+        fixed += 1 + counter_w;
+    }
+    if replace_open {
+        fixed += 1 + 8 + 1 + replace_btn_w + 1 + replace_all_w;
+    }
+    // Past the `Find ` label; the query field owns the rest.
+    let mut x = slot.x.saturating_add(5);
+    let end = slot.x.saturating_add(slot.width);
+    let avail = end.saturating_sub(x).saturating_sub(fixed);
+    let (query_w, replace_w) = if replace_open {
+        let query_w = (avail * 3 / 5).max(2).min(avail);
+        (query_w, avail.saturating_sub(query_w))
+    } else {
+        (avail, 0)
+    };
+    out.query = Rect::new(x, y, query_w, 1);
+    x = x.saturating_add(query_w);
+    if !counter.is_empty() {
+        x = x.saturating_add(1);
+        x = x.saturating_add(counter_w);
+    }
+    x = x.saturating_add(1);
+    out.case = Rect::new(x, y, case_w, 1);
+    x = x.saturating_add(case_w);
+    if replace_open {
+        x = x.saturating_add(1 + 8);
+        out.replace = Rect::new(x, y, replace_w, 1);
+        x = x.saturating_add(replace_w).saturating_add(1);
+        out.replace_btn = Rect::new(x, y, replace_btn_w, 1);
+        x = x.saturating_add(replace_btn_w).saturating_add(1);
+        out.replace_all_btn = Rect::new(x, y, replace_all_w, 1);
+    }
+    out
+}

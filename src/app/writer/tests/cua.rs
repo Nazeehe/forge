@@ -1,8 +1,9 @@
 //! E3 CUA text ops through the adapter: two-space indent/outdent
 //! (selection lines or current line, markers preserved), CUA word
 //! kills (selection first, single undo), select-all, and the
-//! reserved-for-later no-ops (find is E7; clipboard moved to E5 and
-//! is covered here plus the TUI key/mouse suites).
+//! clipboard ops (E5, covered here plus the TUI key/mouse suites).
+//! Find/replace moved to E7: the bar, search and replace live in the
+//! TUI find suite and `adapter::keys::find`.
 
 use super::super::test_support::*;
 
@@ -177,12 +178,12 @@ fn indent_is_one_undo_step_after_e6() {
 }
 
 #[test]
-fn clipboard_and_find_keys_are_reserved_noops() {
+fn clipboard_cut_is_one_undo_step() {
     let (mut state, id, run, dir) = writer_agent();
     open_text(&mut state, id, &run, &dir, "d.md", "aaa bbb");
     shift_select(&mut state, id, 3);
     // E5 owns the clipboard: copy keeps the selection, cut takes it
-    // in one undo step. Find/replace stays reserved until E7.
+    // in one undo step.
     let (code, mods) = ctrl(crossterm::event::KeyCode::Char('c'));
     feed_mod(&mut state, id, code, mods);
     assert_eq!(
@@ -196,14 +197,6 @@ fn clipboard_and_find_keys_are_reserved_noops() {
     let (code, mods) = ctrl(crossterm::event::KeyCode::Char('z'));
     feed_mod(&mut state, id, code, mods);
     assert_eq!(doc_text(&state, id), "aaa bbb", "one undo restores the cut");
-    for code in [
-        crossterm::event::KeyCode::Char('f'),
-        crossterm::event::KeyCode::Char('h'),
-    ] {
-        let (code, mods) = ctrl(code);
-        feed_mod(&mut state, id, code, mods);
-    }
-    assert_eq!(doc_text(&state, id), "aaa bbb");
     assert!(state.manager.remove(id));
     std::fs::remove_dir_all(&dir).ok();
 }

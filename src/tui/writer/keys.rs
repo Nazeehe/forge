@@ -87,8 +87,30 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
                 state.writer_toolbar_save(id);
                 return;
             }
+            KeyCode::Char('f') => {
+                if state
+                    .writers
+                    .get(&id)
+                    .is_some_and(|session| session.find.is_some())
+                {
+                    state.writer_find_close(id);
+                } else {
+                    state.writer_find_open(id, false);
+                }
+                return;
+            }
+            KeyCode::Char('h') => {
+                state.writer_find_open(id, true);
+                return;
+            }
             _ => {}
         }
+    }
+    // Alt+H is the reachable replace twin: legacy terminals deliver
+    // Ctrl+H as Backspace, which can never carry Control.
+    if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('h') {
+        state.writer_find_open(id, true);
+        return;
     }
     if key.modifiers == KeyModifiers::ALT && key.code == KeyCode::Char('r') {
         state.writer_rephrase(id);
@@ -118,7 +140,37 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
     // own Tab (completion) above.
     if key.code == KeyCode::Tab {
         if focus == Some(crate::app::writer::WriterFocus::Editor) {
-            state.writer_feed_key(id, key);
+            if state
+                .writers
+                .get(&id)
+                .is_some_and(|session| session.find.is_some())
+            {
+                state.writer_find_tab(id);
+            } else {
+                state.writer_feed_key(id, key);
+            }
+        }
+        return;
+    }
+    // The find bar owns its keys while open with Editor focus: text
+    // and navigation edit the focused field, Enter activates the
+    // Tab-focused control, F3/Shift+F3 (and Up/Down) step through
+    // matches. Undo/redo still reach the editor, so a replace-all
+    // can be reverted with the bar open; anything else is ignored,
+    // prompt parity.
+    if focus == Some(crate::app::writer::WriterFocus::Editor)
+        && state
+            .writers
+            .get(&id)
+            .is_some_and(|session| session.find.is_some())
+    {
+        use event::KeyCode as KC;
+        use event::KeyModifiers as KM;
+        match (key.code, key.modifiers) {
+            (KC::Char('z'), KM::CONTROL)
+            | (KC::Char('y'), KM::CONTROL)
+            | (KC::Char('Z'), KM::CONTROL | KM::SHIFT) => state.writer_feed_key(id, key),
+            _ => handle_find_key(state, id, key),
         }
         return;
     }
@@ -126,6 +178,35 @@ pub(crate) fn handle_writer_key(state: &mut AppState, key: event::KeyEvent) {
         Some(crate::app::writer::WriterFocus::Chat) => handle_chat_key(state, id, key),
         Some(crate::app::writer::WriterFocus::Thread) => handle_thread_key(state, id, key),
         _ => state.writer_feed_key(id, key),
+    }
+}
+
+/// One key with the find bar open and Editor focus: text edits the
+/// Tab-focused field (same editing as the path prompt), Enter
+/// activates the Tab-focused control, F3/Shift+F3 and Up/Down step
+/// through matches with wrap-around. Esc never arrives here: it
+/// closes the bar through `writer_dismiss_top` above.
+fn handle_find_key(state: &mut AppState, id: crate::session::SessionId, key: event::KeyEvent) {
+    use event::{KeyCode, KeyModifiers};
+    match (key.code, key.modifiers) {
+        (KeyCode::Enter, KeyModifiers::NONE) => state.writer_find_activate(id),
+        (KeyCode::Enter, KeyModifiers::SHIFT) => state.writer_find_next(id, -1),
+        (KeyCode::F(3), KeyModifiers::NONE) => state.writer_find_next(id, 1),
+        (KeyCode::F(3), KeyModifiers::SHIFT) => state.writer_find_next(id, -1),
+        (KeyCode::Up, KeyModifiers::NONE) => state.writer_find_next(id, -1),
+        (KeyCode::Down, KeyModifiers::NONE) => state.writer_find_next(id, 1),
+        (KeyCode::Backspace, _) => state.writer_find_backspace(id),
+        (KeyCode::Delete, _) => state.writer_find_delete(id),
+        (KeyCode::Left, KeyModifiers::NONE) => state.writer_find_move(id, -1),
+        (KeyCode::Right, KeyModifiers::NONE) => state.writer_find_move(id, 1),
+        (KeyCode::Home, _) => state.writer_find_home(id),
+        (KeyCode::End, _) => state.writer_find_end(id),
+        (KeyCode::Left, KeyModifiers::CONTROL) => state.writer_find_word(id, -1),
+        (KeyCode::Right, KeyModifiers::CONTROL) => state.writer_find_word(id, 1),
+        (KeyCode::Char('a'), KeyModifiers::CONTROL) => state.writer_find_select_all(id),
+        (KeyCode::Char(c), KeyModifiers::NONE) => state.writer_find_char(id, c),
+        (KeyCode::Char(c), KeyModifiers::SHIFT) => state.writer_find_char(id, c),
+        _ => {}
     }
 }
 

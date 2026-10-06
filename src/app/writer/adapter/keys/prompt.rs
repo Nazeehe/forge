@@ -372,17 +372,28 @@ impl AppState {
     /// dismissed, so keys fall through to their normal target
     /// otherwise. `pub(crate)`: the TUI input layer calls this directly.
     pub(crate) fn writer_dismiss_top(&mut self, id: crate::session::SessionId) -> bool {
-        let Some(session) = self.writers.get_mut(&id) else {
-            return false;
+        // The bar close below needs `self`, so the transient checks
+        // run in a scope that ends the session borrow first.
+        let find_open = {
+            let Some(session) = self.writers.get_mut(&id) else {
+                return false;
+            };
+            if session.more_open {
+                session.more_open = false;
+                self.dirty = true;
+                return true;
+            }
+            if session.pending_confirm.is_some() {
+                session.pending_confirm = None;
+                self.dirty = true;
+                return true;
+            }
+            session.find.is_some()
         };
-        if session.more_open {
-            session.more_open = false;
-            self.dirty = true;
-            return true;
-        }
-        if session.pending_confirm.is_some() {
-            session.pending_confirm = None;
-            self.dirty = true;
+        // Esc closes the find bar after the menu and confirms,
+        // leaving the cursor on the current match.
+        if find_open {
+            self.writer_find_close(id);
             return true;
         }
         false

@@ -515,10 +515,6 @@
         )
     }
 
-    fn doc_text(state: &crate::app::AppState, id: crate::session::SessionId) -> String {
-        state.writers.get(&id).unwrap().doc.as_ref().unwrap().text.clone()
-    }
-
     #[test]
     fn ctrl_c_copies_selection_and_queues_osc52() {
         let (mut state, id, dir) = writer_agent();

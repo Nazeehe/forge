@@ -81,6 +81,48 @@ pub struct WriterOpenPrompt {
     pub select_all: bool,
 }
 
+/// Which find-bar control Tab has focused: a field or a pill.
+/// Enter activates the focused control; the pills are also clickable.
+/// The case pill cycles always; the replace group only while open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FindFocus {
+    #[default]
+    Query,
+    CaseBtn,
+    Replace,
+    ReplaceBtn,
+    ReplaceAllBtn,
+}
+
+/// Find bar state (E7): incremental search over the open document.
+/// Paints in the fixed error slot while open, so the layout never
+/// shifts. `rev` is the doc revision the matches were computed at;
+/// anything newer recomputes before use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WriterFind {
+    pub query: String,
+    pub cursor: usize,
+    pub select_all: bool,
+    pub replace: String,
+    pub replace_cursor: usize,
+    pub replace_open: bool,
+    pub focus: FindFocus,
+    pub case_sensitive: bool,
+    pub current: usize,
+    pub matches: Vec<std::ops::Range<usize>>,
+    pub overflow: bool,
+    pub rev: u64,
+    pub note: Option<String>,
+}
+
+/// Cap on highlighted find matches; the counter reads `10000+`
+/// past it, and Replace-all refuses until the query narrows.
+pub const MAX_FIND_MATCHES: usize = 10_000;
+/// Find query bound, same order as the typed-path prompt.
+pub const MAX_FIND_CHARS: usize = 256;
+/// Replace text bound: long enough for a paragraph, bounded anyway.
+pub const MAX_REPLACE_CHARS: usize = 4096;
+
 /// One actionable error-slot row: a message plus clickable pills.
 /// Also used for confirmations (overwrite, unsaved close).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,6 +219,9 @@ pub struct WriterSession {
     pub queue: std::collections::VecDeque<String>,
     /// Empty-state typed-path prompt, if open.
     pub open_prompt: Option<WriterOpenPrompt>,
+    /// Find bar, if open. Paints in the fixed error slot; a pending
+    /// confirm takes the slot instead until it clears.
+    pub find: Option<WriterFind>,
     /// Last painted editor height in rows (0 before the first paint).
     /// PageUp/PageDown move by this; the adapter cannot see the
     /// viewport, so the paint layer reports it here.
@@ -292,6 +337,7 @@ impl WriterSession {
         self.proposals = Proposals::default();
         self.requests.clear();
         self.thread.clear();
+        self.find = None;
         self.selection = None;
         self.sel_anchor = None;
         self.selected_proposal = None;

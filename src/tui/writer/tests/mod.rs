@@ -2,6 +2,7 @@
 //! editing through real keys, and the assistant panel toggle.
 
 mod editing;
+mod find;
 mod keys;
 mod mouse;
 mod panel;

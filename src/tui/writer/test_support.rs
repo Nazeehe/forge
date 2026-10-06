@@ -44,6 +44,10 @@ pub(super) fn panel_text(
     s
 }
 
+pub(super) fn doc_text(state: &AppState, id: crate::session::SessionId) -> String {
+    state.writers.get(&id).unwrap().doc.as_ref().unwrap().text.clone()
+}
+
 pub(super) fn cursor_offset(state: &AppState, id: crate::session::SessionId) -> usize {
     let session = state.writers.get(&id).unwrap();
     crate::app::writer::adapter::editor_cursor_offset(session.editor.as_ref().unwrap())

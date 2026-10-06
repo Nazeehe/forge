@@ -10,6 +10,7 @@
 //! vim Normal strands the keyboard with nothing ever returning.
 
 mod chat;
+pub mod find;
 mod prompt;
 mod toolbar;
 

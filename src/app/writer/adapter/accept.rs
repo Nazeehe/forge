@@ -241,6 +241,7 @@ impl AppState {
         session.open_prompt = None;
         session.pending_confirm = None;
         session.error = None;
+        session.find = None;
         session.focus = crate::app::writer::WriterFocus::Editor;
         self.dirty = true;
     }

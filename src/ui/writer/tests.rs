@@ -893,3 +893,73 @@
         let same = row_text(&clean, layout.error.y, layout.error.x, layout.error.x + 20);
         assert_eq!(same.trim(), "", "slot row: {same:?}");
     }
+
+    #[test]
+    fn find_bar_paints_in_the_error_slot_without_shifting() {
+        let mut session = doc_session("foo bar foo");
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        let editor_rows: Vec<String> = (layout.body.y..layout.status.y)
+            .map(|y| row_text(&paint_doc_to(&mut session, 120, 30), y, 0, 120))
+            .collect();
+        session.find = Some(crate::app::writer::WriterFind {
+            query: "foo".to_string(),
+            cursor: 3,
+            matches: vec![0..3, 8..11],
+            current: 0,
+            ..Default::default()
+        });
+        let buf = paint_doc_to(&mut session, 120, 30);
+        // Full width: the query field pads to its rect, so the
+        // counter and pills sit further right.
+        let bar = row_text(&buf, layout.error.y, layout.error.x, layout.error.x + 120);
+        assert!(bar.contains("Find"), "bar row: {bar:?}");
+        assert!(bar.contains("1/2"), "counter: {bar:?}");
+        assert!(bar.contains("aa"), "case pill: {bar:?}");
+        // Every editor row above the status paints exactly as without
+        // the bar: the fixed slot shifts nothing.
+        for (i, y) in (layout.body.y..layout.status.y).enumerate() {
+            assert_eq!(
+                row_text(&buf, y, 0, 120),
+                editor_rows[i],
+                "editor row {y} moved"
+            );
+        }
+    }
+
+    #[test]
+    fn find_matches_highlight_with_current_reversed() {
+        let mut session = doc_session("foo bar foo");
+        session.find = Some(crate::app::writer::WriterFind {
+            query: "foo".to_string(),
+            cursor: 3,
+            matches: vec![0..3, 8..11],
+            current: 1,
+            ..Default::default()
+        });
+        let buf = paint_doc_to(&mut session, 120, 30);
+        let layout = writer_layout(Rect::new(0, 0, 120, 30), false);
+        // A rule and a padding row sit under the toolbar (shared
+        // DOC_PROMPT_OFF with the paint); the gutter takes one cell,
+        // so the text starts one cell into the editor rect.
+        let y = layout.body.y.saturating_add(DOC_PROMPT_OFF);
+        let x0 = layout.editor.x;
+        // Cell right of the editor cursor (which masks the first
+        // match cell, like the E4 heading test's `#`).
+        assert_eq!(buf[(x0 + 1, y)].symbol(), "o", "match cell");
+        let plain = buf[(x0 + 1, y)].clone();
+        assert_eq!(
+            plain.fg,
+            ratatui::style::Color::LightYellow,
+            "match hue"
+        );
+        assert!(
+            !plain.modifier.contains(ratatui::style::Modifier::REVERSED),
+            "only the current reverses"
+        );
+        let current = buf[(x0 + 8, y)].clone();
+        assert_eq!(current.symbol(), "f", "second match cell");
+        assert!(
+            current.modifier.contains(ratatui::style::Modifier::REVERSED),
+            "current match reverses"
+        );
+    }

@@ -875,3 +875,58 @@
         std::fs::remove_dir_all(&dir).ok();
     }
 
+
+    #[test]
+    fn find_case_pill_toggles_on_click() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "Foo foo").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('f')), now);
+        for c in "foo".chars() {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Char(c)), now);
+        }
+        assert_eq!(state.writers.get(&id).unwrap().find.as_ref().unwrap().matches.len(), 2);
+        // Paint once so the click reads off the bar the paint drew.
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "aa");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        let find = state.writers.get(&id).unwrap().find.clone().unwrap();
+        assert!(find.case_sensitive, "pill toggled");
+        assert_eq!(find.matches, vec![4..7], "research narrowed");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_replace_all_pill_fires_on_click() {
+        let (mut state, id, dir) = writer_agent();
+        std::fs::write(dir.join("d.md"), "aa aa aa").unwrap();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let mut router = InputRouter::new();
+        let now = std::time::Instant::now();
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('f')), now);
+        for c in "aa".chars() {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Char(c)), now);
+        }
+        handle_key_at(&mut state, &mut router, ctrl(event::KeyCode::Char('h')), now);
+        for c in "b".chars() {
+            handle_key_at(&mut state, &mut router, key(event::KeyCode::Char(c)), now);
+        }
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "Replace all");
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        assert_eq!(doc_text(&state, id), "b b b", "all replaced");
+        assert_eq!(
+            state.writers.get(&id).unwrap().find.as_ref().unwrap().note.as_deref(),
+            Some("3 replaced"),
+            "count reported"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
