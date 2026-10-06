@@ -173,6 +173,16 @@ impl Harness {
         screen_text(&self.parser)
     }
 
+    /// X10 button-less motion at 0-based cells: plain terminals
+    /// report hover as Cb 67 (Moved); Ghostty reports it as Cb 64
+    /// (which decodes as Drag(Left)). Neither may select.
+    fn motion(&mut self, cb: u8, x: u16, y: u16) {
+        let pkt = [0x1b, b'[', b'M', cb, (x + 1) as u8 + 32, (y + 1) as u8 + 32];
+        self.writer.write_all(&pkt).unwrap();
+        self.writer.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(60));
+    }
+
     /// Legacy X10 click (press + release) at 0-based cells: Forge
     /// enables plain mouse capture, not SGR.
     fn click(&mut self, x: u16, y: u16) {
@@ -244,6 +254,29 @@ impl Drop for Harness {
         std::fs::remove_dir_all(&self.home).ok();
         std::fs::remove_dir_all(&self.cwd).ok();
     }
+}
+
+/// Full style signature of one screen row: EdTUI paints its Visual
+/// selection with the Focus role (yellow bold), so a hover that
+/// selects changes this row's signature. Compared before/after.
+fn row_signature(parser: &vt100::Parser, y: u16) -> Vec<(String, String, String, bool, bool)> {
+    let screen = parser.screen();
+    (0..screen.size().1)
+        .map(|x| {
+            screen
+                .cell(y, x)
+                .map(|c| {
+                    (
+                        c.contents(),
+                        format!("{:?}", c.fgcolor()),
+                        format!("{:?}", c.bgcolor()),
+                        c.bold(),
+                        c.inverse(),
+                    )
+                })
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn screen_text(parser: &vt100::Parser) -> String {
@@ -351,6 +384,35 @@ fn writer_topbar_click_and_narrow_resize_keep_writer() {
 
 /// Prompt line editing over the wire: type a path with a wrong first
 /// char, Home, fix it, Enter opens the right file.
+#[test]
+fn writer_hover_motion_paints_no_highlight() {
+    let mut h = boot(&[("hover.md", "alpha beta gamma\nsecond line\n")]);
+    create_session(&mut h);
+    h.send("\x02");
+    std::thread::sleep(Duration::from_millis(200));
+    h.send("d");
+    h.wait_for("Markdowneditor", "writer empty state");
+    h.send("o");
+    h.wait_for("Opendocumentin", "open prompt");
+    h.send("hover.md\r");
+    let text = h.wait_for("rev0", "doc open");
+    assert!(text.contains("hover.md"), "title names the file");
+    let (x, y) = h.find("alpha").expect("doc text on screen");
+    h.settle();
+    let baseline = row_signature(&h.parser, y);
+    // Sweep the pointer across the word in both motion encodings.
+    for dx in 0..8 {
+        h.motion(67, x + dx, y);
+        h.motion(64, x + dx, y);
+    }
+    h.settle();
+    assert_eq!(
+        row_signature(&h.parser, y),
+        baseline,
+        "hover motion paints no highlight"
+    );
+}
+
 #[test]
 fn writer_prompt_home_fixes_first_char() {
     let mut h = boot(&[("needed.md", "need\n")]);

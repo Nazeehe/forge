@@ -43,6 +43,12 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
         .is_some_and(|session| session.doc.is_some());
     match mev.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // A new press ends any editor gesture first: only a
+            // press ON the editor below re-arms it, so a drag that
+            // started on chrome can never grow a selection.
+            if let Some(session) = state.writers.get_mut(&id) {
+                session.editor_gesture = false;
+            }
             // The open More menu floats above everything: its rows
             // fire, the More pill toggles it shut, any other click
             // closes it and dies (menus swallow their dismissal).
@@ -126,11 +132,33 @@ pub(crate) fn handle_writer_mouse(state: &mut AppState, mev: event::MouseEvent) 
                 return;
             }
             if hits(layout.editor, mev.column, mev.row) {
+                if let Some(session) = state.writers.get_mut(&id) {
+                    session.editor_gesture = true;
+                }
                 state.writer_feed_mouse(id, mev);
             }
         }
-        MouseEventKind::Drag(_) | MouseEventKind::Up(_) => {
-            if hits(layout.editor, mev.column, mev.row) {
+        // Button-less motion is never a gesture: it dies here even
+        // when the terminal reports it as Drag(Left).
+        MouseEventKind::Moved => {}
+        MouseEventKind::Drag(_) => {
+            let gesture = state
+                .writers
+                .get(&id)
+                .is_some_and(|s| s.editor_gesture);
+            if gesture && hits(layout.editor, mev.column, mev.row) {
+                state.writer_feed_mouse(id, mev);
+            }
+        }
+        MouseEventKind::Up(_) => {
+            // Up ends the gesture wherever it lands, so a release
+            // off-editor cannot leave hover selecting afterwards.
+            let gesture = state
+                .writers
+                .get_mut(&id)
+                .map(|s| std::mem::replace(&mut s.editor_gesture, false))
+                .unwrap_or(false);
+            if gesture && hits(layout.editor, mev.column, mev.row) {
                 state.writer_feed_mouse(id, mev);
             }
         }

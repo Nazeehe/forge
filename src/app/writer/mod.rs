@@ -119,6 +119,11 @@ pub struct WriterSession {
     /// Editor selection as an exclusive char range; synced from the
     /// editor after every event by the adapter.
     pub selection: Option<std::ops::Range<usize>>,
+    /// Mouse gesture live in the editor: set by Down(Left) on an
+    /// editor cell, cleared by any other press and by Up. Only a
+    /// live gesture lets Drag reach EdTUI, so hover motion (which
+    /// some terminals report as Drag(Left)) can never select.
+    pub editor_gesture: bool,
     /// Keyboard-selection anchor as a char offset: set when a
     /// Shift+arrow gesture starts, cleared by any other key, the
     /// mouse, or a buffer rebuild. Lets one gesture cross back over

@@ -292,6 +292,128 @@
     }
 
     #[test]
+    fn hover_motion_never_selects() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        // Paint once so EdTUI learns its screen area.
+        let before = paint_full(&mut state, id);
+        let (x, y) = find_text(&before, "bbb");
+        let cursor = state.writers.get(&id).unwrap().editor.as_ref().unwrap().cursor;
+        // Plain motion, then the Ghostty form: motion arriving as a
+        // button-less Drag(Left). Neither may select or repaint.
+        for kind in [
+            event::MouseEventKind::Moved,
+            event::MouseEventKind::Drag(event::MouseButton::Left),
+        ] {
+            super::super::handle_writer_mouse(
+                &mut state,
+                event::MouseEvent {
+                    kind,
+                    column: x,
+                    row: y,
+                    modifiers: event::KeyModifiers::NONE,
+                },
+            );
+        }
+        let session = state.writers.get(&id).unwrap();
+        assert_eq!(session.selection, None, "hover leaves no selection");
+        assert_eq!(
+            session.editor.as_ref().unwrap().cursor,
+            cursor,
+            "hover never moves the cursor"
+        );
+        assert_eq!(
+            session.editor.as_ref().unwrap().mode,
+            edtui::EditorMode::Insert,
+            "hover never leaves Insert"
+        );
+        assert_eq!(paint_full(&mut state, id), before, "hover repaints nothing");
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn down_drag_up_selects_and_later_motion_changes_nothing() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        let (x, y) = find_text(&buf, "bbb");
+        let at = |kind| event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: event::KeyModifiers::NONE,
+        };
+        super::super::handle_writer_mouse(&mut state, click_at(x, y));
+        super::super::handle_writer_mouse(
+            &mut state,
+            at(event::MouseEventKind::Drag(event::MouseButton::Left)),
+        );
+        assert_eq!(state.writers.get(&id).unwrap().selection, Some(4..5));
+        super::super::handle_writer_mouse(
+            &mut state,
+            at(event::MouseEventKind::Up(event::MouseButton::Left)),
+        );
+        let selected = state.writers.get(&id).unwrap().selection.clone();
+        // The gesture ended at Up: motion here and a stray drag three
+        // cells over keep whatever the gesture left behind.
+        super::super::handle_writer_mouse(&mut state, at(event::MouseEventKind::Moved));
+        super::super::handle_writer_mouse(
+            &mut state,
+            event::MouseEvent {
+                kind: event::MouseEventKind::Drag(event::MouseButton::Left),
+                column: x.saturating_add(3),
+                row: y,
+                modifiers: event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            selected,
+            "post-gesture motion changes nothing"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn drag_starting_off_the_editor_never_selects() {
+        let (mut state, id, dir) = writer_agent();
+        open_doc(&mut state, id, "d.md");
+        state.term_size = (30, 120);
+        state.open_writer_overlay();
+        let buf = paint_full(&mut state, id);
+        // Press the gutter cell left of the editor, then drag into
+        // the text: the gesture started off-editor, so nothing selects.
+        let gutter = editor_area(&state, id);
+        super::super::handle_writer_mouse(
+            &mut state,
+            click_at(gutter.x.saturating_sub(1), gutter.y),
+        );
+        let (x, y) = find_text(&buf, "bbb");
+        super::super::handle_writer_mouse(
+            &mut state,
+            event::MouseEvent {
+                kind: event::MouseEventKind::Drag(event::MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: event::KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            state.writers.get(&id).unwrap().selection,
+            None,
+            "off-editor press plus drag selects nothing"
+        );
+        assert!(state.manager.remove(id));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn wheel_scrolls_the_editor() {
         let (mut state, id, dir) = writer_agent();
         let text: String = (0..60).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
