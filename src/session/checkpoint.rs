@@ -185,11 +185,13 @@ fn parse(text: &str) -> Option<SessionsFile> {
 }
 
 /// Startup restore picker: newest entry preselected, Enter loads it,
-/// Esc starts fresh. Keyboard-first like every other dialog. Full
-/// entries ride along so a pick restores without re-reading the file.
+/// Esc starts fresh, `d` asks for the delete-confirm modal.
+/// Keyboard-first like every other dialog. Full entries ride along so
+/// a pick restores without re-reading the file.
 pub struct RestorePicker {
     entries: Vec<SavedEntry>,
     selected: usize,
+    source: Option<std::path::PathBuf>,
 }
 
 /// Dialog result after one input.
@@ -200,6 +202,8 @@ pub enum RestoreOutcome {
     Fresh,
     /// Load entries[selected].
     Pick(usize),
+    /// Open the delete-confirm modal for the selected entry.
+    ConfirmDelete,
 }
 
 impl RestorePicker {
@@ -211,7 +215,15 @@ impl RestorePicker {
         Some(RestorePicker {
             entries: file.entries.clone(),
             selected,
+            source: None,
         })
+    }
+
+    /// Remember the file the entries were loaded from, so a confirmed
+    /// delete saves the survivors back to it.
+    pub fn with_source(mut self, path: &std::path::Path) -> Self {
+        self.source = Some(path.to_path_buf());
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -225,6 +237,24 @@ impl RestorePicker {
     /// Clone the selected entry for the restore path.
     pub fn take_selected(&self) -> Option<SavedEntry> {
         self.entries.get(self.selected).cloned()
+    }
+
+    /// Remove the selected entry and clamp the selection. The caller
+    /// persists via [`RestorePicker::save`].
+    pub fn delete_selected(&mut self) {
+        if self.selected < self.entries.len() {
+            self.entries.remove(self.selected);
+        }
+        self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+    }
+
+    /// Persist the surviving entries to the source file. No source
+    /// (pure in-memory use): nothing to write, still success.
+    pub fn save(&self) -> std::io::Result<()> {
+        match &self.source {
+            Some(path) => SessionsFile { entries: self.entries.clone() }.save(path),
+            None => Ok(()),
+        }
     }
 
     pub fn key(&mut self, key: &crossterm::event::KeyEvent) -> RestoreOutcome {
@@ -251,6 +281,7 @@ impl RestorePicker {
                 self.selected = (self.selected + 1).min(self.entries.len().saturating_sub(1));
                 RestoreOutcome::Pending
             }
+            KeyCode::Char('d') if key.modifiers.is_empty() => RestoreOutcome::ConfirmDelete,
             _ => RestoreOutcome::Pending,
         }
     }
@@ -270,7 +301,8 @@ impl RestorePicker {
     /// Content keeps border padding; roomy boxes pin the hint to the
     /// bottom row, and long labels truncate with an ellipsis so rows
     /// never spill past the frame. The cursor marker is `>`, the same
-    /// language the other pickers speak.
+    /// language the other pickers speak. Deletes confirm through the
+    /// shared Yes/No modal, so the hint only advertises the key.
     pub fn view(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         use ratatui::widgets::{Block, Borders, Paragraph};
         let block = Block::default()
@@ -323,7 +355,7 @@ impl RestorePicker {
         }
         if row < end {
             frame.render_widget(
-                Paragraph::new("Enter load • Esc fresh start"),
+                Paragraph::new("Enter load • d delete • Esc fresh start"),
                 ratatui::layout::Rect::new(cx, row, cw, 1),
             );
         }
@@ -498,6 +530,56 @@ mod tests {
         assert_eq!(row.chars().count(), 58);
         assert!(row.contains("…"), "truncated: {row:?}");
         assert!(!row.contains("xxxxxxxxxx "), "no overflow past the box");
+    }
+
+    #[test]
+    fn d_requests_a_modal_confirm_and_removes_nothing() {
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved("a")], 100));
+        file.push(make_entry(vec![saved("b")], 200));
+        let mut picker = RestorePicker::new(&file).unwrap();
+        assert_eq!(
+            picker.key(&key(KeyCode::Char('d'))),
+            RestoreOutcome::ConfirmDelete,
+            "'d' asks for the modal, it must not delete inline"
+        );
+        assert_eq!(picker.len(), 2, "nothing removed yet");
+        assert_eq!(picker.selected(), 1, "selection untouched");
+    }
+
+    #[test]
+    fn delete_selected_removes_and_clamps() {
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved("a")], 100));
+        file.push(make_entry(vec![saved("b")], 200));
+        let mut picker = RestorePicker::new(&file).unwrap();
+        picker.delete_selected();
+        assert_eq!(picker.len(), 1, "newest removed");
+        assert_eq!(picker.selected(), 0, "selection clamps");
+        assert!(
+            picker.take_selected().unwrap().label.contains('a'),
+            "the other entry survives"
+        );
+        picker.delete_selected();
+        assert_eq!(picker.len(), 0, "last removal empties");
+    }
+
+    #[test]
+    fn save_persists_survivors_to_the_source_file() {
+        let dir = std::env::temp_dir().join(format!("forge-ckpt-delsrc-{}", std::process::id()));
+        let path = dir.join("sessions.json");
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved("a")], 100));
+        file.push(make_entry(vec![saved("b")], 200));
+        file.save(&path).unwrap();
+        let mut picker =
+            RestorePicker::new(&SessionsFile::load(&path)).unwrap().with_source(&path);
+        picker.delete_selected();
+        picker.save().unwrap();
+        let back = SessionsFile::load(&path);
+        assert_eq!(back.entries.len(), 1, "one entry deleted from disk");
+        assert!(back.entries[0].label.contains('a'), "the survivor persists");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

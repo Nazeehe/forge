@@ -22,6 +22,8 @@ pub enum ConfirmOutcome {
 pub enum ConfirmKind {
     QuitForge,
     KillSession(crate::session::SessionId),
+    /// Delete the restore picker's selected snapshot.
+    DeleteSnapshot,
 }
 
 impl ConfirmKind {
@@ -29,6 +31,7 @@ impl ConfirmKind {
         match self {
             ConfirmKind::QuitForge => "Are you sure you want to quit?",
             ConfirmKind::KillSession(_) => "Are you sure you want to kill this session?",
+            ConfirmKind::DeleteSnapshot => "Are you sure you want to delete this snapshot?",
         }
     }
 }
@@ -207,6 +210,7 @@ impl Confirm {
         let title = match self.kind {
             ConfirmKind::QuitForge => " Quit ",
             ConfirmKind::KillSession(_) => " Kill session ",
+            ConfirmKind::DeleteSnapshot => " Delete snapshot ",
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -451,6 +455,25 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect();
         assert!(text.contains("Are you sure you want to kill this session?"));
+        assert!(text.contains("Yes"));
+        assert!(text.contains("No"));
+    }
+
+    #[test]
+    fn delete_question_paints_delete_snapshot_text() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let dialog = Confirm::new(ConfirmKind::DeleteSnapshot, true);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| dialog.view(f, confirm_area(f.area())))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = buf
+            .content
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(text.contains("Are you sure you want to delete this snapshot?"));
         assert!(text.contains("Yes"));
         assert!(text.contains("No"));
     }

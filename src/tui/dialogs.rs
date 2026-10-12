@@ -257,6 +257,9 @@ pub(super) fn settle_confirm_outcome(
             let scope = match state.confirm.as_ref().map(|d| d.kind()) {
                 Some(crate::ui::dialogs::quit::ConfirmKind::QuitForge) => None,
                 Some(crate::ui::dialogs::quit::ConfirmKind::KillSession(id)) => Some(id),
+                // A snapshot delete never carries dirty files (it uses
+                // the plain Yes/No modal), so this scope never fires.
+                Some(crate::ui::dialogs::quit::ConfirmKind::DeleteSnapshot) => None,
                 None => None,
             };
             if state.writer_save_all_dirty(scope).is_empty() {
@@ -278,7 +281,7 @@ pub(super) fn settle_confirm_outcome(
     }
 }
 
-/// Run the confirmed quit/kill after the modal closes.
+/// Run the confirmed quit/kill/delete after the modal closes.
 fn settle_confirm_proceed(state: &mut AppState) {
     match state.confirm.as_ref().map(|d| d.kind()) {
         Some(crate::ui::dialogs::quit::ConfirmKind::QuitForge) => {
@@ -293,6 +296,22 @@ fn settle_confirm_proceed(state: &mut AppState) {
             state.confirm = None;
             state.terminate_session(id);
             fit_active_pane(state);
+        }
+        Some(crate::ui::dialogs::quit::ConfirmKind::DeleteSnapshot) => {
+            state.confirm = None;
+            // The modal froze picker input while open, so the
+            // selection is still the entry `d` targeted. A missing
+            // picker (or save failure) warns instead of failing:
+            // the file stays truthful either way.
+            if let Some(picker) = state.restore_picker.as_mut() {
+                picker.delete_selected();
+                if let Err(e) = picker.save() {
+                    eprintln!("warning: cannot save sessions: {e}");
+                }
+                if picker.len() == 0 {
+                    state.restore_picker = None;
+                }
+            }
         }
         None => {}
     }
@@ -484,6 +503,57 @@ mod tests {
         assert_ne!(state.manager.active(), Some(victim));
         let survivor = state.manager.active().unwrap();
         assert!(state.manager.remove(survivor));
+    }
+
+    #[test]
+    fn delete_snapshot_confirm_removes_entry_and_closes_modal() {
+        use crate::session::checkpoint::{make_entry, RestorePicker, SavedSession, SessionsFile};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let dir = std::env::temp_dir().join(format!("forge-del-snap-{}", std::process::id()));
+        let path = dir.join("sessions.json");
+        let saved = |name: &str| SavedSession {
+            name: name.to_string(),
+            cli_tool: "shell".to_string(),
+            cwd: "/tmp/proj".to_string(),
+            groups: Vec::new(),
+            harness_session_id: None,
+        };
+        let mut file = SessionsFile::default();
+        file.push(make_entry(vec![saved("a")], 1_700_000_000));
+        file.push(make_entry(vec![saved("b")], 1_700_000_001));
+        file.save(&path).unwrap();
+        let mut state = AppState::new();
+        state.restore_picker =
+            RestorePicker::new(&SessionsFile::load(&path)).map(|p| p.with_source(&path));
+        let open_modal = |state: &mut AppState| {
+            let pills = state.pill_tabs;
+            state.confirm = Some(crate::ui::dialogs::quit::Confirm::new(
+                crate::ui::dialogs::quit::ConfirmKind::DeleteSnapshot,
+                pills,
+            ));
+        };
+        // No dismisses: nothing is deleted, the picker stays open.
+        open_modal(&mut state);
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Char('n'), none));
+        assert!(state.confirm.is_none(), "modal closed");
+        assert!(state.restore_picker.is_some(), "picker stays open");
+        assert_eq!(SessionsFile::load(&path).entries.len(), 2, "disk untouched");
+        // Yes deletes the selected ("b") entry and closes the modal.
+        open_modal(&mut state);
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Char('y'), none));
+        assert!(state.confirm.is_none(), "modal closed");
+        assert!(state.restore_picker.is_some(), "survivors keep the picker open");
+        let back = SessionsFile::load(&path);
+        assert_eq!(back.entries.len(), 1, "one entry deleted from disk");
+        assert!(back.entries[0].label.contains('a'), "the survivor persists");
+        // Deleting the last entry closes the picker over an empty file.
+        open_modal(&mut state);
+        handle_confirm_key(&mut state, KeyEvent::new(KeyCode::Char('y'), none));
+        assert!(state.confirm.is_none(), "modal closed");
+        assert!(state.restore_picker.is_none(), "empty picker closes");
+        assert!(SessionsFile::load(&path).entries.is_empty(), "file emptied");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -112,14 +112,17 @@ pub(crate) fn paint_frame(
     if let Some(dialog) = state.theme_dialog.as_ref() {
         dialog.view(f, crate::ui::dialogs::theme::theme_area(area));
     }
+    // The restore picker paints beneath the confirm modal: `d`
+    // opens the delete confirm over it, and the modal owns input
+    // while open.
+    if let Some(picker) = state.restore_picker.as_ref() {
+        picker.view(f, crate::session::checkpoint::RestorePicker::picker_area(area));
+    }
     if let Some(dialog) = state.confirm.as_ref() {
         dialog.view(f, crate::ui::dialogs::quit::confirm_area(area));
     }
     if state.quit_saving {
         crate::ui::dialogs::quit::view_saving(f, crate::ui::dialogs::quit::saving_area(area));
-    }
-    if let Some(picker) = state.restore_picker.as_ref() {
-        picker.view(f, crate::session::checkpoint::RestorePicker::picker_area(area));
     }
     // First run sits above every other modal (below the tour):
     // it owns input while present, so it paints on top.
@@ -367,8 +370,11 @@ fn loop_until_quit(
     state.apply(AppEvent::Resize(size.height, size.width));
     // Saved snapshots offer themselves before anything else: a pick
     // restores the whole topology, Esc starts fresh.
-    let file = crate::session::checkpoint::SessionsFile::load(&crate::infra::branding::sessions_file(home));
-    if let Some(picker) = crate::session::checkpoint::RestorePicker::new(&file) {
+    let sessions_path = crate::infra::branding::sessions_file(home);
+    let file = crate::session::checkpoint::SessionsFile::load(&sessions_path);
+    if let Some(picker) = crate::session::checkpoint::RestorePicker::new(&file)
+        .map(|p| p.with_source(&sessions_path))
+    {
         state.restore_picker = Some(picker);
         state.dirty = true;
     }
@@ -416,7 +422,7 @@ fn loop_until_quit(
                     input_this_tick = true;
                     if state.oobe_dialog.is_some() {
                         handle_oobe_key(state, home, key);
-                    } else if state.restore_picker.is_some() {
+                    } else if state.restore_picker.is_some() && state.confirm.is_none() {
                         handle_restore_key(state, key);
                     } else if state.create_dialog.is_some() {
                         handle_dialog_key(state, key);
@@ -693,6 +699,71 @@ mod tests {
             w.capacity() >= 64 * 1024,
             "buffer must hold a full frame's worth of escape sequences without flushing early"
         );
+    }
+
+    #[test]
+    fn delete_modal_paints_over_the_restore_picker() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        let mut file = crate::session::checkpoint::SessionsFile::default();
+        file.push(crate::session::checkpoint::make_entry(
+            vec![crate::session::checkpoint::SavedSession {
+                name: "a".to_string(),
+                cli_tool: "shell".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                groups: Vec::new(),
+                harness_session_id: None,
+            }],
+            1_700_000_000,
+        ));
+        state.restore_picker = crate::session::checkpoint::RestorePicker::new(&file);
+        let pills = state.pill_tabs;
+        state.confirm = Some(crate::ui::dialogs::quit::Confirm::new(
+            crate::ui::dialogs::quit::ConfirmKind::DeleteSnapshot,
+            pills,
+        ));
+        let views = state.views();
+        let info = state.sidebar_info();
+        let chrome = ui::Chrome {
+            tabs: state.tabs(),
+            topbar: state.topbar(),
+            detail: info.session,
+            sessions: info.sessions,
+            active: info.active,
+            fleet_cursor: info.fleet_cursor,
+            fleet_scroll: info.fleet_scroll,
+            other_timers: info.other_timers,
+            pending: 0,
+            mode: "yolo",
+            telegram: "off",
+            telegram_badge: None,
+            board_open: false,
+            board: None,
+            tetris_open: false,
+            tetris: None,
+            grid: false,
+            pills,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                paint_frame(f, area, &mut state, &views, &chrome);
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol().to_string())
+            .collect();
+        assert!(
+            text.contains("Are you sure you want to delete this snapshot?"),
+            "modal question visible above the picker"
+        );
+        assert!(text.contains("Restore session"), "picker still behind the modal");
     }
 
     #[test]

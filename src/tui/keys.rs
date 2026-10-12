@@ -414,7 +414,8 @@ fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
 }
 
 /// One restore-picker key: a pick recreates the whole entry and fits
-/// the panes, Esc starts fresh. Either way the picker closes.
+/// the panes, Esc starts fresh, `d` opens the delete-confirm modal.
+/// Pick and fresh close the picker; the modal settles the delete.
 pub(super) fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
     let outcome = state.restore_picker.as_mut().map(|p| p.key(&key));
     match outcome {
@@ -429,6 +430,16 @@ pub(super) fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
         }
         Some(crate::session::checkpoint::RestoreOutcome::Fresh) => {
             state.restore_picker = None;
+            state.dirty = true;
+        }
+        Some(crate::session::checkpoint::RestoreOutcome::ConfirmDelete) => {
+            // The picker stays open behind the modal; the confirm
+            // settle deletes from it on Yes.
+            let pills = state.pill_tabs;
+            state.confirm = Some(crate::ui::dialogs::quit::Confirm::new(
+                crate::ui::dialogs::quit::ConfirmKind::DeleteSnapshot,
+                pills,
+            ));
             state.dirty = true;
         }
         Some(crate::session::checkpoint::RestoreOutcome::Pending) | None => {}
@@ -1213,6 +1224,38 @@ mod tests {
         // Esc dismisses; the tested keys above left no selection damage.
         handle_restore_key(&mut state, key(KeyCode::Esc));
         assert!(state.restore_picker.is_none());
+    }
+
+    #[test]
+    fn restore_picker_d_opens_the_delete_modal() {
+        use crate::session::checkpoint::{make_entry, RestorePicker, SavedSession, SessionsFile};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        let mut file = SessionsFile::default();
+        file.push(make_entry(
+            vec![SavedSession {
+                name: "a".to_string(),
+                cli_tool: "shell".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                groups: Vec::new(),
+                harness_session_id: None,
+            }],
+            1_700_000_000,
+        ));
+        state.restore_picker = RestorePicker::new(&file);
+        assert!(state.confirm.is_none(), "no modal yet");
+        handle_restore_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+        );
+        assert!(state.restore_picker.is_some(), "picker stays open behind the modal");
+        assert!(
+            matches!(
+                state.confirm.as_ref().map(|d| d.kind()),
+                Some(crate::ui::dialogs::quit::ConfirmKind::DeleteSnapshot)
+            ),
+            "'d' opens the delete modal"
+        );
     }
 
     #[test]
