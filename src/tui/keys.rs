@@ -417,6 +417,10 @@ fn handle_board_key(state: &mut AppState, key: event::KeyEvent) {
 /// the panes, Esc starts fresh, `d` opens the delete-confirm modal.
 /// Pick and fresh close the picker; the modal settles the delete.
 pub(super) fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
+    // Navigation moves the highlight without resolving: snapshot the
+    // visible position so a real move repaints at once instead of
+    // waiting out the next background tick.
+    let before = state.restore_picker.as_ref().map(|p| (p.selected(), p.len()));
     let outcome = state.restore_picker.as_mut().map(|p| p.key(&key));
     match outcome {
         Some(crate::session::checkpoint::RestoreOutcome::Pick(_)) => {
@@ -442,7 +446,12 @@ pub(super) fn handle_restore_key(state: &mut AppState, key: event::KeyEvent) {
             ));
             state.dirty = true;
         }
-        Some(crate::session::checkpoint::RestoreOutcome::Pending) | None => {}
+        Some(crate::session::checkpoint::RestoreOutcome::Pending) | None => {
+            let after = state.restore_picker.as_ref().map(|p| (p.selected(), p.len()));
+            if after != before {
+                state.dirty = true;
+            }
+        }
     }
 }
 
@@ -1224,6 +1233,44 @@ mod tests {
         // Esc dismisses; the tested keys above left no selection damage.
         handle_restore_key(&mut state, key(KeyCode::Esc));
         assert!(state.restore_picker.is_none());
+    }
+
+    #[test]
+    fn restore_picker_navigation_marks_dirty() {
+        use crate::session::checkpoint::{make_entry, RestorePicker, SavedSession, SessionsFile};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::new();
+        let mut file = SessionsFile::default();
+        file.push(make_entry(
+            vec![SavedSession {
+                name: "a".to_string(),
+                cli_tool: "shell".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                groups: Vec::new(),
+                harness_session_id: None,
+            }],
+            1_700_000_000,
+        ));
+        file.push(make_entry(
+            vec![SavedSession {
+                name: "b".to_string(),
+                cli_tool: "shell".to_string(),
+                cwd: "/tmp/proj".to_string(),
+                groups: Vec::new(),
+                harness_session_id: None,
+            }],
+            1_700_000_001,
+        ));
+        state.restore_picker = RestorePicker::new(&file);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        // A move changes what the next frame must show: repaint at once.
+        state.dirty = false;
+        handle_restore_key(&mut state, key(KeyCode::Up));
+        assert!(state.dirty, "moved selection repaints immediately");
+        // A dead key changes nothing: no wasted frame.
+        state.dirty = false;
+        handle_restore_key(&mut state, key(KeyCode::Char('x')));
+        assert!(!state.dirty, "dead keys stay clean");
     }
 
     #[test]
