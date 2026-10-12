@@ -10,6 +10,41 @@ use super::input;
 #[cfg(feature = "visual")]
 use super::visual::visual_viewport;
 
+/// URL under a Ctrl+Left-click (or Cmd+Left-click on macOS) on the
+/// active pane, if any. Only when the pane runs no mouse protocol of its
+/// own: an app that wants the mouse keeps every click, the way the outer
+/// terminal keeps clicks for fullscreen apps. The position maps through
+/// the same grid rect the wheel scroll uses onto the raw styled rows,
+/// and the hit must land inside an openable `http(s)` URL. Plain clicks
+/// stay dead so focusing a pane can never launch a browser.
+fn pane_click_url(
+    state: &AppState,
+    mev: &event::MouseEvent,
+    areas: &ui::layout::ChromeAreas,
+) -> Option<String> {
+    if !matches!(mev.kind, event::MouseEventKind::Down(event::MouseButton::Left)) {
+        return None;
+    }
+    if !(mev.modifiers.contains(event::KeyModifiers::CONTROL)
+        || mev.modifiers.contains(event::KeyModifiers::SUPER))
+    {
+        return None;
+    }
+    let active = state.manager.active()?;
+    if state.manager.mouse_mode(active) != vt100::MouseProtocolMode::None {
+        return None;
+    }
+    let (col, row) =
+        ui::layout::translate_mouse(ui::layout::pane_grid_area(areas), mev.column, mev.row)?;
+    let rows = state.manager.styled_rows(active);
+    let line: String = rows
+        .get(row as usize - 1)?
+        .iter()
+        .map(|c| c.text.clone())
+        .collect();
+    crate::infra::urls::find_url_at(&line, col as usize - 1)
+}
+
 /// Route an outer mouse event: session-bar clicks switch sessions, the
 /// main area forwards to the active pane when it wants mouse reporting,
 /// and everything else (sidebar, status bar, borders) is chrome-owned.
@@ -446,6 +481,14 @@ pub(super) fn forward_mouse(state: &mut AppState, mev: event::MouseEvent) {
     if state.overlay_active() { return; }
     let mode = state.manager.mouse_mode(active);
     if mode == vt100::MouseProtocolMode::None {
+        // Ctrl+Left-click (Cmd on macOS) on a printed URL opens it in
+        // the desktop browser: with mouse capture on, the outer terminal
+        // never sees the click, so Forge does the hit-test itself. Best
+        // effort — a missing browser just errors here.
+        if let Some(url) = pane_click_url(state, &mev, &areas) {
+            let _ = crate::infra::urls::open_url(&url);
+            return;
+        }
         // No mouse protocol: the wheel scrolls this pane instead of dying
         // silently, so every session scrolls whether or not its app
         // reports mouse. Normal screen moves the scrollback viewport;
@@ -1081,6 +1124,70 @@ mod tests {
         assert_eq!(state.manager.active(), Some(order[1]));
         assert!(state.manager.remove(order[0]));
         assert!(state.manager.remove(order[1]));
+    }
+
+    #[test]
+    fn ctrl_click_on_pane_url_resolves_it() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut state = AppState::new();
+        state.apply(AppEvent::Resize(24, 80));
+        spawn_shell_cmd(
+            &mut state,
+            "printf 'visit https://example.com/docs now\\n'; exec sleep 30",
+        );
+        let id = state.manager.active().unwrap();
+        let needle = "https://example.com/docs";
+        // Wait for the harness line through the real parser, then read
+        // the click point back off the painted rows (never hand-computed
+        // pane geometry beyond the shared grid rect).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let (row_idx, col_idx) = loop {
+            let mut found = None;
+            for (r, line) in state.manager.styled_rows(id).iter().enumerate() {
+                let text: String = line.iter().map(|c| c.text.clone()).collect();
+                if let Some(c) = text.find(needle) {
+                    found = Some((r, c + 2));
+                    break;
+                }
+            }
+            if let Some(pos) = found {
+                break pos;
+            }
+            assert!(std::time::Instant::now() < deadline, "url never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let areas = ui::layout::chrome_areas(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let grid = ui::layout::pane_grid_area(&areas);
+        let at = |column, row, modifiers| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers,
+        };
+        let (outer_col, outer_row) = (
+            grid.x + 1 + col_idx as u16,
+            grid.y + 1 + row_idx as u16,
+        );
+        assert_eq!(
+            pane_click_url(&state, &at(outer_col, outer_row, KeyModifiers::CONTROL), &areas),
+            Some(needle.to_string()),
+            "ctrl+click on the url resolves it"
+        );
+        assert_eq!(
+            pane_click_url(&state, &at(outer_col, outer_row, KeyModifiers::NONE), &areas),
+            None,
+            "a plain click never launches a browser"
+        );
+        assert_eq!(
+            pane_click_url(
+                &state,
+                &at(grid.x + 1, grid.y + 1, KeyModifiers::CONTROL),
+                &areas
+            ),
+            None,
+            "ctrl+click off the url stays dead"
+        );
+        assert!(state.manager.remove(id));
     }
 
 }
