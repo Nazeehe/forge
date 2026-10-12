@@ -469,15 +469,15 @@ mod tests {
         assert_eq!(segs[0].cap, Some(Color::Yellow));
         assert_eq!(segs[0].style.bg, Some(Color::Yellow));
         assert_eq!(segs[0].style.fg, Some(Color::Black));
-        // Grouped rest fills the group color with dark text.
+        // Grouped rest fills the group color with contrast text.
         let g = group_palette(2);
         assert_eq!(segs[1].cap, Some(g));
         assert_eq!(segs[1].style.bg, Some(g));
-        assert_eq!(segs[1].style.fg, Some(Color::Black));
-        // Ungrouped rest sits in the dim container with dark text.
+        assert_eq!(segs[1].style.fg, Some(Color::White));
+        // Ungrouped rest sits in the dim container with light text.
         assert_eq!(segs[2].cap, Some(Color::DarkGray));
         assert_eq!(segs[2].style.bg, Some(Color::DarkGray));
-        assert_eq!(segs[2].style.fg, Some(Color::Black));
+        assert_eq!(segs[2].style.fg, Some(Color::White));
     }
 
     #[test]

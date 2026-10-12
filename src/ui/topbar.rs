@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(buf[(2, 0)].bg, Color::Yellow, "selected fill");
         // Next pill starts at x12 (2-cell gap): cap, pad, text.
         assert_eq!(buf[(13, 0)].bg, Color::DarkGray, "inactive fill");
-        assert_eq!(buf[(14, 0)].fg, Color::Black, "inactive dark label");
+        assert_eq!(buf[(14, 0)].fg, Color::White, "inactive label reads light");
     }
 
 }

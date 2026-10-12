@@ -401,8 +401,10 @@ mod tests {
         assert_eq!(spans[8].content, "No");
         assert_eq!(
             spans[8].style,
-            crate::ui::theme::style(crate::ui::theme::Role::TabInactive),
-            "chosen button keeps its rest color"
+            crate::ui::theme::with_contrast_text(crate::ui::theme::style(
+                crate::ui::theme::Role::TabInactive
+            )),
+            "chosen button keeps its rest container with readable text"
         );
         assert_eq!(spans[6].style.fg, Some(ratatui::style::Color::Yellow));
         assert_eq!(spans[10].style.fg, Some(ratatui::style::Color::DarkGray));

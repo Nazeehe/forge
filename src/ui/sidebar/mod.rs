@@ -331,9 +331,9 @@ pub fn sidebar_paint(
 fn kanban_line(info: &SidebarInfo, pills: bool) -> Line<'static> {
     if pills {
         let (style, cap) = if info.board_open {
-            (theme::style(theme::Role::TabActive), Color::Yellow)
+            (theme::with_contrast_text(theme::style(theme::Role::TabActive)), Color::Yellow)
         } else {
-            (theme::style(theme::Role::TabInactive), Color::DarkGray)
+            (theme::with_contrast_text(theme::style(theme::Role::TabInactive)), Color::DarkGray)
         };
         Line::from(vec![
             Span::raw("  "),
@@ -381,13 +381,13 @@ fn footer_lines(info: &SidebarInfo, rich: bool, pills: bool) -> Vec<Line<'static
         // mode filled. The overlay widgets below paint the same cells.
         let (off_style, yolo_style) = if info.mode == "yolo" {
             (
-                theme::style(theme::Role::TabInactive),
-                theme::style(theme::Role::TabActive),
+                theme::with_contrast_text(theme::style(theme::Role::TabInactive)),
+                theme::with_contrast_text(theme::style(theme::Role::TabActive)),
             )
         } else {
             (
-                theme::style(theme::Role::TabActive),
-                theme::style(theme::Role::TabInactive),
+                theme::with_contrast_text(theme::style(theme::Role::TabActive)),
+                theme::with_contrast_text(theme::style(theme::Role::TabInactive)),
             )
         };
         let (off_cap, yolo_cap) = if info.mode == "yolo" {
@@ -937,7 +937,7 @@ mod tests {
         let cell_x = rows[y][..byte_x].chars().count() as u16;
         let buf = terminal.backend().buffer();
         assert_eq!(buf[(cell_x - 1, y as u16)].bg, Color::DarkGray, "inactive yolo fill");
-        assert_eq!(buf[(cell_x, y as u16)].fg, Color::Black, "inactive yolo label");
+        assert_eq!(buf[(cell_x, y as u16)].fg, Color::White, "inactive yolo label reads light");
     }
 
     #[test]

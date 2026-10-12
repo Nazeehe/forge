@@ -77,7 +77,7 @@ pub fn visual_button_spans(pills: bool, chat_open: bool) -> Vec<SpanView> {
         // uses the active container: a bare focus style has no
         // background and paints terminal-black in the middle.
         let gray = || Style::default().fg(Color::DarkGray);
-        let label = theme::style(theme::Role::TabInactive);
+        let label = theme::with_contrast_text(theme::style(theme::Role::TabInactive));
         let (chat_fill, chat_left, chat_right) = theme::button_chrome(
             chat_open,
             theme::style(theme::Role::TabActive),
@@ -107,11 +107,11 @@ pub fn visual_button_spans(pills: bool, chat_open: bool) -> Vec<SpanView> {
         spans
     } else {
         let button = theme::style(theme::Role::Focus);
-        let chat = if chat_open {
+        let chat = theme::with_contrast_text(if chat_open {
             button
         } else {
             theme::style(theme::Role::TabInactive)
-        };
+        });
         vec![
             SpanView { text: VISUAL_ZOOM_IN_LABEL.to_string(), style: button },
             SpanView { text: "  ".to_string(), style: Style::default() },
@@ -365,7 +365,11 @@ mod tests {
         assert_eq!(open[at + 2].style, Style::default().fg(Color::Yellow), "right cap");
         let closed = visual_button_spans(true, false);
         let at = closed.iter().position(|s| s.text == VISUAL_CHAT_TEXT).expect("chat pill");
-        assert_eq!(closed[at].style, theme::style(theme::Role::TabInactive), "closed fill");
+        assert_eq!(
+            closed[at].style,
+            theme::with_contrast_text(theme::style(theme::Role::TabInactive)),
+            "closed fill with readable text"
+        );
         assert_eq!(closed[at - 2].style, Style::default().fg(Color::DarkGray), "left cap");
         assert_eq!(closed[at + 2].style, Style::default().fg(Color::DarkGray), "right cap");
     }

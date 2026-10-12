@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(buf[(36, 14)].fg, Color::Black, "create dark label");
         assert_eq!(buf[(41, 14)].fg, Color::DarkGray, "dim cancel cap");
         assert_eq!(buf[(43, 14)].bg, Color::DarkGray, "cancel dim fill");
-        assert_eq!(buf[(43, 14)].fg, Color::Black, "cancel dark label");
+        assert_eq!(buf[(43, 14)].fg, Color::White, "cancel light label");
         // Chosen Cancel: `>` marker plus filled container.
         step(&mut d, &names, 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));

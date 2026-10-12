@@ -161,10 +161,129 @@ pub fn button_chrome(
     rest: Style,
     rest_cap: Color,
 ) -> (Style, Color, Color) {
+    // The fill text always contrasts its background at runtime: role
+    // styles (and external overrides) pair any fg with any bg, so a
+    // fixed fg reads black-on-dark whenever the bg goes dark.
     match (highlight_mode(), emphasized) {
-        (ButtonHighlight::Left, true) => (rest, Color::Yellow, rest_cap),
-        (_, true) => (accent, Color::Yellow, Color::Yellow),
-        (_, false) => (rest, rest_cap, rest_cap),
+        (ButtonHighlight::Left, true) => (with_contrast_text(rest), Color::Yellow, rest_cap),
+        (_, true) => (with_contrast_text(accent), Color::Yellow, Color::Yellow),
+        (_, false) => (with_contrast_text(rest), rest_cap, rest_cap),
+    }
+}
+
+/// WCAG 2.x relative luminance of an sRGB color, 0 (black) to 1
+/// (white). Channels linearize through the sRGB transfer curve first:
+/// raw gamma-weighted averages (BT.601 luma) misjudge saturated and
+/// mid-tone colors, which is exactly where text goes unreadable.
+pub fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
+    fn linear(c: u8) -> f64 {
+        let s = c as f64 / 255.0;
+        if s <= 0.03928 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// WCAG contrast ratio between two luminances, 1 (identical) to 21
+/// (black on white).
+pub fn contrast_ratio(a: f64, b: f64) -> f64 {
+    let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// sRGB triple for a terminal color. Named colors follow the standard
+/// VGA palette (bright-black at 85, the dark gray terminals actually
+/// render for `DarkGray`); indexed colors follow the xterm 256-color
+/// formulas (0-15 reuse the named set). `Reset` — the terminal's own
+/// default — has no knowable value.
+pub fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    let named = |n: u8| -> (u8, u8, u8) {
+        match n {
+            0 => (0, 0, 0),
+            1 => (170, 0, 0),
+            2 => (0, 170, 0),
+            3 => (170, 85, 0),
+            4 => (0, 0, 170),
+            5 => (170, 0, 170),
+            6 => (0, 170, 170),
+            7 => (170, 170, 170),
+            8 => (85, 85, 85),
+            9 => (255, 85, 85),
+            10 => (85, 255, 85),
+            11 => (255, 255, 85),
+            12 => (85, 85, 255),
+            13 => (255, 85, 255),
+            14 => (85, 255, 255),
+            _ => (255, 255, 255),
+        }
+    };
+    Some(match color {
+        Color::Reset => return None,
+        Color::Black => named(0),
+        Color::Red => named(1),
+        Color::Green => named(2),
+        Color::Yellow => named(11),
+        Color::Blue => named(4),
+        Color::Magenta => named(5),
+        Color::Cyan => named(14),
+        Color::Gray => named(7),
+        Color::DarkGray => named(8),
+        Color::LightRed => named(9),
+        Color::LightGreen => named(10),
+        Color::LightYellow => named(11),
+        Color::LightBlue => named(12),
+        Color::LightMagenta => named(13),
+        Color::LightCyan => named(14),
+        Color::White => named(15),
+        Color::Indexed(i) if i < 16 => named(i),
+        Color::Indexed(i) if i < 232 => {
+            let v = i - 16;
+            let level = |n: u8| match n {
+                0 => 0,
+                1 => 95,
+                2 => 135,
+                3 => 175,
+                4 => 215,
+                _ => 255,
+            };
+            (level(v / 36), level((v % 36) / 6), level(v % 6))
+        }
+        Color::Indexed(i) => {
+            let g = 8 + 10 * (i - 232);
+            (g, g, g)
+        }
+        Color::Rgb(r, g, b) => (r, g, b),
+    })
+}
+
+/// Readable text color for `bg`: whichever of white and black gives
+/// the greater WCAG contrast ratio — never a fixed brightness cutoff.
+/// `Reset` falls back to white, matching the dark-first builtin look.
+pub fn contrast_text(bg: Color) -> Color {
+    match color_rgb(bg) {
+        None => Color::White,
+        Some((r, g, b)) => {
+            let lum = relative_luminance(r, g, b);
+            if contrast_ratio(1.0, lum) >= contrast_ratio(lum, 0.0) {
+                Color::White
+            } else {
+                Color::Black
+            }
+        }
+    }
+}
+
+/// Label style for a filled background: keeps the fill's background
+/// and modifiers, but computes the text color from the background at
+/// runtime. Fills without a background pass through untouched — with
+/// no background there is nothing to contrast against.
+pub fn with_contrast_text(fill: Style) -> Style {
+    match fill.bg {
+        Some(bg) => fill.fg(contrast_text(bg)),
+        None => fill,
     }
 }
 
@@ -812,6 +931,51 @@ pub fn focus_row() -> Style {
 mod tests {
     use super::*;
 
+    #[test]
+    fn contrast_picks_the_more_readable_text_color() {
+        // WCAG max-ratio choice, never a brightness cutoff: dark
+        // fills read white, light fills read black.
+        assert_eq!(contrast_text(Color::Yellow), Color::Black);
+        assert_eq!(contrast_text(Color::DarkGray), Color::White);
+        assert_eq!(contrast_text(Color::Black), Color::White);
+        assert_eq!(contrast_text(Color::White), Color::Black);
+        assert_eq!(contrast_text(Color::Rgb(10, 20, 60)), Color::White);
+        assert_eq!(contrast_text(Color::Rgb(240, 230, 140)), Color::Black);
+    }
+
+    #[test]
+    fn luminance_spans_black_to_white() {
+        assert_eq!(relative_luminance(0, 0, 0), 0.0);
+        assert_eq!(relative_luminance(255, 255, 255), 1.0);
+        // The tie point where black and white text read equally.
+        let mid = relative_luminance(119, 119, 119);
+        assert!(
+            (contrast_ratio(mid, 0.0) - contrast_ratio(1.0, mid)).abs() < 0.6,
+            "near the 0.179 crossover: {mid}"
+        );
+    }
+
+    #[test]
+    fn with_contrast_text_fixes_unreadable_fills_only() {
+        let fixed = with_contrast_text(Style::default().fg(Color::Black).bg(Color::DarkGray));
+        assert_eq!(fixed.fg, Some(Color::White), "dark fill reads white");
+        assert_eq!(fixed.bg, Some(Color::DarkGray), "background untouched");
+        let kept = with_contrast_text(Style::default().fg(Color::Black).bg(Color::Yellow));
+        assert_eq!(kept.fg, Some(Color::Black), "readable fill keeps its text");
+        let unknown = with_contrast_text(Style::default().fg(Color::Black));
+        assert_eq!(unknown.fg, Some(Color::Black), "no background, no guess");
+    }
+
+    #[test]
+    fn button_chrome_fill_carries_contrast_text() {
+        let (fill, _, _) = button_chrome(true, style(Role::TabActive), style(Role::TabInactive), Color::DarkGray);
+        assert_eq!(fill.bg, Some(Color::Yellow));
+        assert_eq!(fill.fg, Some(Color::Black), "yellow keeps black");
+        let (rest, _, _) = button_chrome(false, style(Role::TabActive), style(Role::TabInactive), Color::DarkGray);
+        assert_eq!(rest.bg, Some(Color::DarkGray));
+        assert_eq!(rest.fg, Some(Color::White), "dark gray reads white");
+    }
+
     fn assert_no_rgb(role: Role) {
         let fg = style(role).fg.expect("every role sets fg");
         assert!(
@@ -1002,15 +1166,19 @@ mod tests {
     fn button_chrome_splits_highlight_per_mode() {
         let accent = style(Role::TabActive);
         let rest = style(Role::TabInactive);
+        // Fills carry runtime contrast text now; caps still split per
+        // mode exactly as before.
+        let accent_text = with_contrast_text(accent);
+        let rest_text = with_contrast_text(rest);
         // Full: the whole button highlights.
         let _guard = hold_external_theme(ExternalTheme::builtin());
         assert_eq!(
             button_chrome(true, accent, rest, Color::DarkGray),
-            (accent, Color::Yellow, Color::Yellow)
+            (accent_text, Color::Yellow, Color::Yellow)
         );
         assert_eq!(
             button_chrome(false, accent, rest, Color::DarkGray),
-            (rest, Color::DarkGray, Color::DarkGray)
+            (rest_text, Color::DarkGray, Color::DarkGray)
         );
         // Left: only the left bookend carries the selection; the
         // button keeps its rest color.
@@ -1019,11 +1187,11 @@ mod tests {
         let _guard = hold_external_theme(theme);
         assert_eq!(
             button_chrome(true, accent, rest, Color::DarkGray),
-            (rest, Color::Yellow, Color::DarkGray)
+            (rest_text, Color::Yellow, Color::DarkGray)
         );
         assert_eq!(
             button_chrome(false, accent, rest, Color::DarkGray),
-            (rest, Color::DarkGray, Color::DarkGray)
+            (rest_text, Color::DarkGray, Color::DarkGray)
         );
     }
 

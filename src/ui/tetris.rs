@@ -17,7 +17,7 @@ pub(super) fn tetris_line(pills: bool) -> Line<'static> {
                 crate::ui::theme::pill_left().to_string(),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(" Tetris ", theme::style(theme::Role::TabInactive)),
+            Span::styled(" Tetris ", theme::with_contrast_text(theme::style(theme::Role::TabInactive))),
             Span::styled(
                 crate::ui::theme::pill_right().to_string(),
                 Style::default().fg(Color::DarkGray),
