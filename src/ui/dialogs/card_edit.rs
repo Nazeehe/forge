@@ -501,13 +501,7 @@ impl CardEditDialog {
 /// Centered dialog box: 80 wide, 21 tall for the ten-row form plus
 /// action, status, and hint rows; clamped into tiny terminals.
 pub fn card_edit_area(term: Rect) -> Rect {
-    let (w, h) = (80.min(term.width), 21.min(term.height));
-    Rect::new(
-        term.x + term.width.saturating_sub(w) / 2,
-        term.y + term.height.saturating_sub(h) / 2,
-        w,
-        h,
-    )
+    super::frame::centered(term, 80, 21)
 }
 
 /// Truncate to `room` chars at the end.

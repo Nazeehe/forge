@@ -371,13 +371,7 @@ impl OobeDialog {
 /// Centered modal area, tall enough for the greeting plus every CLI row.
 pub fn oobe_area(term: Rect) -> Rect {
     let need: u16 = LIST_TOP + all_clis().len() as u16 + 4 + 2;
-    let (w, h) = (64.min(term.width), need.min(term.height));
-    Rect::new(
-        term.x + term.width.saturating_sub(w) / 2,
-        term.y + term.height.saturating_sub(h) / 2,
-        w,
-        h,
-    )
+    super::frame::centered(term, 64, need)
 }
 
 #[cfg(test)]

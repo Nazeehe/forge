@@ -89,6 +89,20 @@ pub fn click_inner(col: u16, row: u16, area: Rect, border: BorderHit) -> Option<
     Some(Block::default().borders(Borders::ALL).inner(area))
 }
 
+/// Centered rect of `w by h` inside `term`, clamped into tiny
+/// terminals. Eight `*_area` helpers and the restore picker spelled
+/// this identically; the size stays with the caller. (The picker
+/// keeps its own copy: session must not import ui.)
+pub fn centered(term: Rect, w: u16, h: u16) -> Rect {
+    let (w, h) = (w.min(term.width), h.min(term.height));
+    Rect::new(
+        term.x + term.width.saturating_sub(w) / 2,
+        term.y + term.height.saturating_sub(h) / 2,
+        w,
+        h,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +129,13 @@ mod tests {
         assert_ne!(buf[(0, 0)].symbol(), " ", "border paints");
         let title: String = (0..8).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert!(title.contains("Hi"), "title paints: {title:?}");
+    }
+
+    #[test]
+    fn centered_clamps_and_centers() {
+        assert_eq!(centered(Rect::new(0, 0, 100, 40), 80, 21), Rect::new(10, 9, 80, 21));
+        assert_eq!(centered(Rect::new(0, 0, 30, 10), 80, 21), Rect::new(0, 0, 30, 10));
+        assert_eq!(centered(Rect::new(5, 5, 100, 40), 80, 20), Rect::new(15, 15, 80, 20));
     }
 
     #[test]

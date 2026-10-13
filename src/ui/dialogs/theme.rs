@@ -289,14 +289,7 @@ fn visible_rows(inner_h: u16, count: usize) -> usize {
 
 /// Centered picker box, clamped into tiny terminals.
 pub fn theme_area(term: Rect) -> Rect {
-    let w = 64.min(term.width);
-    let h = 20.min(term.height);
-    Rect::new(
-        term.x + term.width.saturating_sub(w) / 2,
-        term.y + term.height.saturating_sub(h) / 2,
-        w,
-        h,
-    )
+    super::frame::centered(term, 64, 20)
 }
 
 #[cfg(test)]

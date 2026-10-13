@@ -296,13 +296,7 @@ fn dirty_display(dirty: &[String]) -> String {
 
 /// Centered "Saving sessions..." box, clamped into tiny terminals.
 pub fn saving_area(term: Rect) -> Rect {
-    let (w, h) = (40.min(term.width), 5.min(term.height));
-    Rect::new(
-        term.x + term.width.saturating_sub(w) / 2,
-        term.y + term.height.saturating_sub(h) / 2,
-        w,
-        h,
-    )
+    super::frame::centered(term, 40, 5)
 }
 
 /// Render the saving modal: opaque, one centered line, no input.
@@ -325,13 +319,7 @@ pub fn view_saving(frame: &mut ratatui::Frame, area: Rect) {
 
 /// Centered confirm box, clamped into tiny terminals.
 pub fn confirm_area(term: Rect) -> Rect {
-    let (w, h) = (52.min(term.width), 7.min(term.height));
-    Rect::new(
-        term.x + term.width.saturating_sub(w) / 2,
-        term.y + term.height.saturating_sub(h) / 2,
-        w,
-        h,
-    )
+    super::frame::centered(term, 52, 7)
 }
 
 #[cfg(test)]

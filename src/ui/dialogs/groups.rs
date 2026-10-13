@@ -1331,12 +1331,6 @@ mod tests {
 /// Centered dialog box, taller than the create form for member lists,
 /// clamped into tiny terminals.
 pub fn group_area(term: Rect) -> Rect {
-    let (w, h) = (64.min(term.width), 20.min(term.height));
-    Rect::new(
-        term.x + term.width.saturating_sub(w) / 2,
-        term.y + term.height.saturating_sub(h) / 2,
-        w,
-        h,
-    )
+    super::frame::centered(term, 64, 20)
 }
 

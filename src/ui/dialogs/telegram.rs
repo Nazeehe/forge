@@ -462,13 +462,7 @@ impl TelegramDialog {
 /// Centered dialog box: 78 wide, 18 tall for the eight-row form plus
 /// action, status, and hint rows; clamped into tiny terminals.
 pub fn telegram_area(term: Rect) -> Rect {
-    let (w, h) = (78.min(term.width), 18.min(term.height));
-    Rect::new(
-        term.x + term.width.saturating_sub(w) / 2,
-        term.y + term.height.saturating_sub(h) / 2,
-        w,
-        h,
-    )
+    super::frame::centered(term, 78, 18)
 }
 
 /// Truncate to `room` chars at the end.

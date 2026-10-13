@@ -649,13 +649,7 @@ impl CreateDialog {
 /// Centered dialog box, fitted to the five-row form, clamped into
 /// tiny terminals.
 pub fn create_area(term: Rect) -> Rect {
-    let (w, h) = (78.min(term.width), 12.min(term.height));
-    Rect::new(
-        term.x + term.width.saturating_sub(w) / 2,
-        term.y + term.height.saturating_sub(h) / 2,
-        w,
-        h,
-    )
+    super::frame::centered(term, 78, 12)
 }
 
 #[cfg(test)]
