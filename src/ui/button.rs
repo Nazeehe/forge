@@ -229,6 +229,44 @@ impl ButtonRow {
         self
     }
 
+    /// Standard dialog action row: `labels[default]` carries `*` and
+    /// the accent, the focused `choice` gets the `>` marker. Pill or
+    /// legacy-bracket rendering per `pills`. Card-edit and telegram
+    /// built this twice each with only the labels differing; one
+    /// owner keeps the star/marker rules from drifting.
+    pub fn dialog(
+        labels: &[&str],
+        default: usize,
+        choice: usize,
+        focused: bool,
+        pills: bool,
+    ) -> Self {
+        let text = theme::style(Role::Text);
+        let buttons = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let is_default = index == default;
+                let chosen = focused && choice == index;
+                let tag =
+                    if is_default { format!("{label}*") } else { label.to_string() };
+                if pills {
+                    Button::new(tag).emphasized(is_default || chosen).marker(chosen)
+                } else {
+                    let (marker, body) = if chosen {
+                        (Some(('>', theme::focus_row())), theme::focus_row())
+                    } else if is_default {
+                        (None, theme::style(Role::Brand))
+                    } else {
+                        (None, text)
+                    };
+                    Button::bracket(tag, marker, body)
+                }
+            })
+            .collect();
+        ButtonRow::new(buttons).gap(Span::styled("  ", text))
+    }
+
     pub fn len(&self) -> usize {
         self.buttons.len()
     }
@@ -372,6 +410,22 @@ mod tests {
         assert_eq!(row.click(ox + 7, 1, ox, 1, 40), None, "gap belongs to nothing");
         assert_eq!(row.click(ox, 0, ox, 1, 40), None, "off-row dies");
         assert_eq!(row.click(ox + 40, 1, ox, 1, 40), None, "past-end dies");
+    }
+
+    #[test]
+    fn dialog_row_marks_default_and_focused_choice() {
+        let row = ButtonRow::dialog(&["Save", "Cancel"], 0, 1, true, true);
+        let text: String = row.spans().iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("Save*"), "default carries star: {text}");
+        assert!(text.contains('>'), "focused choice carries marker: {text}");
+        let bracket = ButtonRow::dialog(&["Save", "Cancel"], 0, 0, true, false);
+        let words: String =
+            bracket.spans().iter().map(|s| s.content.as_ref()).collect();
+        assert!(words.contains("[Save*]"), "bracket keeps star: {words}");
+        assert!(words.contains('>'), "bracket keeps marker: {words}");
+        let calm = ButtonRow::dialog(&["Save", "Cancel"], 0, 1, false, true);
+        let flat: String = calm.spans().iter().map(|s| s.content.as_ref()).collect();
+        assert!(!flat.contains('>'), "unfocused row marks nothing: {flat}");
     }
 
     #[test]

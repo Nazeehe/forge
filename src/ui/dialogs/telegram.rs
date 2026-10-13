@@ -305,87 +305,18 @@ impl TelegramDialog {
         }
     }
 
-    /// Action-row spans the view paints: pill buttons with the accent
-    /// default and `>` chosen-marker, or the legacy bracket labels
-    /// without pills. [`Self::click`] hit-tests these same spans, so
-    /// the mouse can never desync from the paint.
-    fn action_spans(&self) -> Vec<ratatui::text::Span<'static>> {
-        use ratatui::text::Span;
-        use crate::ui::theme::{Role, focus_row, style};
-        let text = style(Role::Text);
-        let choice = self.actions.states.choice;
-        let focused = self.focus == FOCUS_ACTIONS;
-        if !self.pills {
-            let button = |label: &str, index: usize, default: bool| {
-                let tag = if default { format!("[{label}*]") } else { format!("[{label}]") };
-                if focused && choice == index {
-                    Span::styled(format!(">{tag}"), focus_row())
-                } else if default {
-                    Span::styled(tag, style(Role::Brand))
-                } else {
-                    Span::styled(tag, text)
-                }
-            };
-            return vec![
-                button("Save", 0, true),
-                Span::styled("  ", text),
-                button("Test", 1, false),
-                Span::styled("  ", text),
-                button("Cancel", 2, false),
-            ];
-        }
-        self.action_row().spans()
-    }
-
-    /// Pill action row: accent-hot default carrying `*`, `>` marker on
-    /// the chosen button. Paint and [`Self::click`] share it.
-    fn action_row(&self) -> crate::ui::button::ButtonRow {
-        use ratatui::text::Span;
-        use crate::ui::theme::{Role, style};
-        let choice = self.actions.states.choice;
-        let focused = self.focus == FOCUS_ACTIONS;
-        let buttons = ["Save", "Test", "Cancel"]
-            .iter()
-            .enumerate()
-            .map(|(index, label)| {
-                let default = index == 0;
-                let chosen = focused && choice == index;
-                let tag = if default { format!("{label}*") } else { label.to_string() };
-                crate::ui::button::Button::new(tag)
-                    .emphasized(default || chosen)
-                    .marker(chosen)
-            })
-            .collect();
-        crate::ui::button::ButtonRow::new(buttons)
-            .gap(Span::styled("  ", style(Role::Text)))
-    }
-
-    /// Legacy bracket action row: same buttons without fills. Paint
-    /// and [`Self::click`] share it.
-    fn bracket_row(&self) -> crate::ui::button::ButtonRow {
-        use ratatui::text::Span;
-        use crate::ui::theme::{Role, focus_row, style};
-        let choice = self.actions.states.choice;
-        let focused = self.focus == FOCUS_ACTIONS;
-        let text = style(Role::Text);
-        let buttons = ["Save", "Test", "Cancel"]
-            .iter()
-            .enumerate()
-            .map(|(index, label)| {
-                let default = index == 0;
-                let chosen = focused && choice == index;
-                let tag = if default { format!("{label}*") } else { label.to_string() };
-                let (marker, body) = if chosen {
-                    (Some(('>', focus_row())), focus_row())
-                } else if default {
-                    (None, style(Role::Brand))
-                } else {
-                    (None, text)
-                };
-                crate::ui::button::Button::bracket(tag, marker, body)
-            })
-            .collect();
-        crate::ui::button::ButtonRow::new(buttons).gap(Span::styled("  ", text))
+    /// Action row the view paints: accent-hot default carrying `*`,
+    /// `>` marker on the chosen button, pills or legacy brackets per
+    /// mode. [`Self::click`] hit-tests this same row, so the mouse can
+    /// never desync from the paint.
+    fn dialog_row(&self) -> crate::ui::button::ButtonRow {
+        crate::ui::button::ButtonRow::dialog(
+            &["Save", "Test", "Cancel"],
+            0,
+            self.actions.states.choice,
+            self.focus == FOCUS_ACTIONS,
+            self.pills,
+        )
     }
 
     /// Left-click dispatch inside the modal rect the view paints:
@@ -419,7 +350,7 @@ impl TelegramDialog {
         // One layout for paint and clicks: the row owns both (the `>`
         // marker rides with its button); separators and the clipped
         // tail belong to nothing.
-        let buttons = if self.pills { self.action_row() } else { self.bracket_row() };
+        let buttons = self.dialog_row();
         let cx = inner.x + 2;
         let cw = inner.width.saturating_sub(4);
         let width = (buttons.width() as u16).min(cw);
@@ -496,7 +427,7 @@ impl TelegramDialog {
         // Centered action row: pill buttons (or bracket labels
         // without pills), the `>` marker tracking the chosen button.
         {
-            let spans = self.action_spans();
+            let spans = self.dialog_row().spans();
             let width: u16 = spans.iter().map(|s| s.width() as u16).sum::<u16>().min(cw);
             let ax = cx + cw.saturating_sub(width) / 2;
             frame.render_widget(
