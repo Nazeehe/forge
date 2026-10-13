@@ -459,13 +459,12 @@ impl CardEditDialog {
     pub fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::Paragraph;
-        use crate::ui::theme::{Role, focus_row, style};
+        use crate::ui::theme::{Role, style};
         let Some(inner) =
             super::frame::ModalFrame::new(" Edit card ").min_size(44, 17).open(frame, area)
         else {
             return;
         };
-        let text = style(Role::Text);
         let end = inner.y + inner.height;
         let cx = inner.x + 2;
         let cw = inner.width.saturating_sub(4);
@@ -474,48 +473,13 @@ impl CardEditDialog {
         let mut row = inner.y + 1;
         let label_w = 11u16;
         let content_w = cw.saturating_sub(2 + label_w) as usize;
-        let line_at = |label: &str, focused: bool, control: Vec<Span<'static>>| {
-            let row_style = if focused { focus_row() } else { text };
-            Line::from(
-                std::iter::once(if focused {
-                    Span::styled("> ", focus_row())
-                } else {
-                    Span::raw("  ")
-                })
-                .chain(std::iter::once(Span::styled(
-                    format!("{label:<11}"),
-                    row_style,
-                )))
-                .chain(control)
-                .collect::<Vec<_>>(),
-            )
+        // Form rows paint through the shared fields helpers; the
+        // `>` marker rides with the focused row.
+        let field = |value: &str, focused: bool, placeholder: &str| {
+            super::fields::form_field(value, focused, placeholder, content_w)
         };
-        // `[value]` box, padded to fill; empty shows the dim placeholder.
-        let field = |value: &str, focused: bool, placeholder: &str| -> Vec<Span> {
-            let room = content_w.saturating_sub(2);
-            let shown = if value.is_empty() { placeholder } else { value };
-            let cut = crate::ui::text::cut_chars(shown, room);
-            let pad = room.saturating_sub(cut.chars().count());
-            if focused {
-                vec![Span::styled(format!("[{cut}{}]", " ".repeat(pad)), focus_row())]
-            } else if value.is_empty() {
-                vec![
-                    Span::styled("[", text),
-                    Span::styled(cut, style(Role::Muted)),
-                    Span::styled(format!("{}]", " ".repeat(pad)), text),
-                ]
-            } else {
-                vec![Span::styled(format!("[{cut}{}]", " ".repeat(pad)), text)]
-            }
-        };
-        let select = |value: &str, focused: bool| -> Vec<Span> {
-            let cut = crate::ui::text::cut_chars(value, content_w.saturating_sub(4));
-            let chev = style(Role::Muted);
-            vec![
-                Span::styled("< ", if focused { focus_row() } else { chev }),
-                Span::styled(cut, if focused { focus_row() } else { text }),
-                Span::styled(" >", if focused { focus_row() } else { chev }),
-            ]
+        let select = |value: &str, focused: bool| {
+            super::fields::form_select(value, focused, content_w)
         };
         let rows: Vec<(&str, Vec<Span>)> = vec![
             ("Title", field(&super::fields::input_text(&self.title), self.focus == FOCUS_TITLE, "card title")),
@@ -554,7 +518,7 @@ impl CardEditDialog {
             }
             let focused = index == self.focus;
             frame.render_widget(
-                Paragraph::new(line_at(label, focused, control)),
+                Paragraph::new(super::fields::form_line(label, focused, control)),
                 Rect::new(cx, row, cw, 1),
             );
             row += 1;

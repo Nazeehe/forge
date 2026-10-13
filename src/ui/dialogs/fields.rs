@@ -4,7 +4,10 @@
 //! Shift guard can never drift between dialogs again.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::text::{Line, Span};
 use tui_realm_stdlib::components::{Input, Radio, Select};
+
+use crate::ui::theme::{Role, focus_row, style};
 use tuirealm::command::{Cmd, Direction};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
@@ -55,6 +58,65 @@ pub fn input_text(input: &Input) -> String {
         State::Single(StateValue::String(text)) => text,
         _ => String::new(),
     }
+}
+
+/// One labeled form row: `>` marker plus padded label, then the
+/// caller's control spans. Card-edit and telegram painted this
+/// inline with identical closures.
+pub fn form_line(label: &str, focused: bool, control: Vec<Span<'static>>) -> Line<'static> {
+    let text = style(Role::Text);
+    let row_style = if focused { focus_row() } else { text };
+    Line::from(
+        std::iter::once(if focused {
+            Span::styled("> ", focus_row())
+        } else {
+            Span::raw("  ")
+        })
+        .chain(std::iter::once(Span::styled(
+            format!("{label:<11}"),
+            row_style,
+        )))
+        .chain(control)
+        .collect::<Vec<_>>(),
+    )
+}
+
+/// `[value]` box, padded to fill; empty shows the dim placeholder.
+/// `content_w` is the full content width the dialog computed.
+pub fn form_field(
+    value: &str,
+    focused: bool,
+    placeholder: &str,
+    content_w: usize,
+) -> Vec<Span<'static>> {
+    let text = style(Role::Text);
+    let room = content_w.saturating_sub(2);
+    let shown = if value.is_empty() { placeholder } else { value };
+    let cut = crate::ui::text::cut_chars(shown, room);
+    let pad = room.saturating_sub(cut.chars().count());
+    if focused {
+        vec![Span::styled(format!("[{cut}{}]", " ".repeat(pad)), focus_row())]
+    } else if value.is_empty() {
+        vec![
+            Span::styled("[", text),
+            Span::styled(cut, style(Role::Muted)),
+            Span::styled(format!("{}]", " ".repeat(pad)), text),
+        ]
+    } else {
+        vec![Span::styled(format!("[{cut}{}]", " ".repeat(pad)), text)]
+    }
+}
+
+/// `< value >` cycler row.
+pub fn form_select(value: &str, focused: bool, content_w: usize) -> Vec<Span<'static>> {
+    let text = style(Role::Text);
+    let cut = crate::ui::text::cut_chars(value, content_w.saturating_sub(4));
+    let chev = style(Role::Muted);
+    vec![
+        Span::styled("< ", if focused { focus_row() } else { chev }),
+        Span::styled(cut, if focused { focus_row() } else { text }),
+        Span::styled(" >", if focused { focus_row() } else { chev }),
+    ]
 }
 
 /// Type a whole string (e.g. bracketed paste) one char at a time,
@@ -155,6 +217,39 @@ mod tests {
         let mut field = Input::default().value("ab".to_string());
         type_text(&mut field, "cd");
         assert_eq!(text_of(&field), "abcd");
+    }
+
+    #[test]
+    fn form_field_focused_wraps_value_in_brackets() {
+        let spans = form_field("ab", true, "ph", 10);
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].content.starts_with("[ab"));
+        assert_eq!(spans[0].style, crate::ui::theme::focus_row());
+    }
+
+    #[test]
+    fn form_field_empty_unfocused_shows_muted_placeholder() {
+        use crate::ui::theme::{Role, style};
+        let spans = form_field("", false, "ph", 10);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[1].content, "ph");
+        assert_eq!(spans[1].style, style(Role::Muted));
+    }
+
+    #[test]
+    fn form_select_focused_chevrons_and_value() {
+        let spans = form_select("On", true, 10);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "< ");
+        assert_eq!(spans[1].content, "On");
+        assert_eq!(spans[0].style, crate::ui::theme::focus_row());
+    }
+
+    #[test]
+    fn form_line_focused_marks_row_and_pads_label() {
+        let line = form_line("Title", true, vec![]);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("> Title"));
     }
 
     #[test]
