@@ -13,8 +13,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use tui_realm_stdlib::components::{Input, Radio, Select};
-use tuirealm::component::Component;
-use tuirealm::state::{State, StateValue};
 
 /// Focus rows in Tab order.
 pub const FOCUS_TITLE: usize = 0;
@@ -151,13 +149,6 @@ impl CardEditDialog {
         self.error.as_deref()
     }
 
-    fn text_of(input: &Input) -> String {
-        match Component::state(input) {
-            State::Single(StateValue::String(s)) => s,
-            _ => String::new(),
-        }
-    }
-
     fn selected(select: &Select) -> String {
         select
             .states
@@ -171,7 +162,7 @@ impl CardEditDialog {
     /// and keeps an unset one; numbers clamp to
     /// [`crate::kanban::board::MAX_ESTIMATE`]; anything else errors.
     fn estimate_patch(&self) -> Result<(Option<u32>, bool), String> {
-        let raw = Self::text_of(&self.estimate);
+        let raw = super::fields::input_text(&self.estimate);
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Ok((None, self.original_estimate.is_some()));
@@ -188,7 +179,7 @@ impl CardEditDialog {
     /// Parse the progress row: blank keeps the current value;
     /// numbers clamp to 100 in the domain; anything else errors.
     fn progress_patch(&self) -> Result<Option<u16>, String> {
-        let raw = Self::text_of(&self.progress);
+        let raw = super::fields::input_text(&self.progress);
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Ok(None);
@@ -200,7 +191,7 @@ impl CardEditDialog {
     }
 
     fn submit(&mut self) -> CardEditOutcome {
-        let title = Self::text_of(&self.title);
+        let title = super::fields::input_text(&self.title);
         if title.trim().is_empty() {
             self.error = Some("title must not be empty".to_string());
             return CardEditOutcome::Pending;
@@ -226,10 +217,10 @@ impl CardEditDialog {
                 return CardEditOutcome::Pending;
             }
         };
-        let assignee_raw = Self::text_of(&self.assignee);
-        let start_raw = Self::text_of(&self.start);
-        let due_raw = Self::text_of(&self.due);
-        let tags_raw = Self::text_of(&self.tags);
+        let assignee_raw = super::fields::input_text(&self.assignee);
+        let start_raw = super::fields::input_text(&self.start);
+        let due_raw = super::fields::input_text(&self.due);
+        let tags_raw = super::fields::input_text(&self.tags);
         let tags: Vec<String> = tags_raw
             .split(',')
             .map(|t| t.trim().to_string())
@@ -246,7 +237,7 @@ impl CardEditDialog {
         CardEditOutcome::Submitted(CardEditResult {
             patch: crate::kanban::board::CardPatch {
                 title: Some(title.trim().to_string()),
-                description: Some(Self::text_of(&self.description)),
+                description: Some(super::fields::input_text(&self.description)),
                 assignee: (!assignee_raw.trim().is_empty()).then(|| assignee_raw.trim().to_string()),
                 clear_assignee: assignee_raw.trim().is_empty(),
                 priority: Some(priority),
@@ -527,11 +518,11 @@ impl CardEditDialog {
             ]
         };
         let rows: Vec<(&str, Vec<Span>)> = vec![
-            ("Title", field(&Self::text_of(&self.title), self.focus == FOCUS_TITLE, "card title")),
+            ("Title", field(&super::fields::input_text(&self.title), self.focus == FOCUS_TITLE, "card title")),
             (
                 "Description",
                 field(
-                    &Self::text_of(&self.description),
+                    &super::fields::input_text(&self.description),
                     self.focus == FOCUS_DESCRIPTION,
                     "what needs doing",
                 ),
@@ -539,22 +530,22 @@ impl CardEditDialog {
             ("Status", select(&Self::selected(&self.column), self.focus == FOCUS_COLUMN)),
             (
                 "Assignee",
-                field(&Self::text_of(&self.assignee), self.focus == FOCUS_ASSIGNEE, "unassigned"),
+                field(&super::fields::input_text(&self.assignee), self.focus == FOCUS_ASSIGNEE, "unassigned"),
             ),
             ("Priority", select(&Self::selected(&self.priority), self.focus == FOCUS_PRIORITY)),
-            ("Tags", field(&Self::text_of(&self.tags), self.focus == FOCUS_TAGS, "a, b")),
+            ("Tags", field(&super::fields::input_text(&self.tags), self.focus == FOCUS_TAGS, "a, b")),
             (
                 "Start date",
-                field(&Self::text_of(&self.start), self.focus == FOCUS_START, "2026-09-01"),
+                field(&super::fields::input_text(&self.start), self.focus == FOCUS_START, "2026-09-01"),
             ),
             (
                 "Due date",
-                field(&Self::text_of(&self.due), self.focus == FOCUS_DUE, "2026-10-01"),
+                field(&super::fields::input_text(&self.due), self.focus == FOCUS_DUE, "2026-10-01"),
             ),
-            ("Estimate", field(&Self::text_of(&self.estimate), self.focus == FOCUS_ESTIMATE, "3")),
+            ("Estimate", field(&super::fields::input_text(&self.estimate), self.focus == FOCUS_ESTIMATE, "3")),
             (
                 "Progress",
-                field(&Self::text_of(&self.progress), self.focus == FOCUS_PROGRESS, "0-100"),
+                field(&super::fields::input_text(&self.progress), self.focus == FOCUS_PROGRESS, "0-100"),
             ),
         ];
         for (index, (label, control)) in rows.into_iter().enumerate() {
@@ -652,13 +643,6 @@ mod tests {
         ]
     }
 
-    fn text_of(input: &Input) -> String {
-        match Component::state(input) {
-            State::Single(StateValue::String(s)) => s,
-            _ => String::new(),
-        }
-    }
-
     fn buffer_rows(
         terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
     ) -> Vec<String> {
@@ -684,14 +668,14 @@ mod tests {
     #[test]
     fn prefills_every_row_from_the_card() {
         let d = CardEditDialog::new(&sample_card(), &columns(), true);
-        assert_eq!(text_of(&d.title), "fix leak");
-        assert_eq!(text_of(&d.description), "torn write");
-        assert_eq!(text_of(&d.assignee), "kins");
-        assert_eq!(text_of(&d.tags), "pty");
-        assert_eq!(text_of(&d.start), "2026-09-01");
-        assert_eq!(text_of(&d.due), "2026-10-01");
-        assert_eq!(text_of(&d.estimate), "3");
-        assert_eq!(text_of(&d.progress), "40");
+        assert_eq!(super::super::fields::input_text(&d.title), "fix leak");
+        assert_eq!(super::super::fields::input_text(&d.description), "torn write");
+        assert_eq!(super::super::fields::input_text(&d.assignee), "kins");
+        assert_eq!(super::super::fields::input_text(&d.tags), "pty");
+        assert_eq!(super::super::fields::input_text(&d.start), "2026-09-01");
+        assert_eq!(super::super::fields::input_text(&d.due), "2026-10-01");
+        assert_eq!(super::super::fields::input_text(&d.estimate), "3");
+        assert_eq!(super::super::fields::input_text(&d.progress), "40");
     }
 
     #[test]

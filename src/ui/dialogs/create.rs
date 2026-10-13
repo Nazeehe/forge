@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use tui_realm_stdlib::components::{Input, Radio, Select};
-use tuirealm::component::Component;
-use tuirealm::state::{State, StateValue};
 
 use crate::agents::harness::Harness;
 
@@ -238,16 +236,12 @@ impl CreateDialog {
         }
     }
 
-    fn text_of(input: &Input) -> String {
-        input_state(input).unwrap_or_default()
-    }
-
     fn directory_text(&self) -> String {
-        Self::text_of(&self.directory)
+        super::fields::input_text(&self.directory)
     }
 
     fn name_text(&self) -> String {
-        Self::text_of(&self.name)
+        super::fields::input_text(&self.name)
     }
 
     /// Unchecked spec: `key` validates before submitting. The form no
@@ -662,13 +656,6 @@ impl CreateDialog {
             );
             frame.render_widget(Paragraph::new(hint), Rect::new(cx, row, cw, 1));
         }
-    }
-}
-
-fn input_state(input: &Input) -> Option<String> {
-    match Component::state(input) {
-        State::Single(StateValue::String(s)) => Some(s),
-        _ => None,
     }
 }
 

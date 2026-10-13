@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_realm_stdlib::components::{Input, Radio, Select};
 use tuirealm::command::{Cmd, Direction};
 use tuirealm::component::Component;
+use tuirealm::state::{State, StateValue};
 
 /// Route one key into a text field. Returns true only when the key
 /// may have changed the text (delete/type), so callers clear their
@@ -46,6 +47,16 @@ pub fn cycle_select(select: &mut Select, dir: i32) {
     select.states.select(next);
 }
 
+/// Read an input's current text; non-string states read as empty.
+/// Card-edit, create, and telegram each owned a copy (`text_of`,
+/// create spelling it via `input_state().unwrap_or_default()`).
+pub fn input_text(input: &Input) -> String {
+    match Component::state(input) {
+        State::Single(StateValue::String(text)) => text,
+        _ => String::new(),
+    }
+}
+
 /// Type a whole string (e.g. bracketed paste) one char at a time,
 /// like typing. Card-edit and telegram duplicated this loop.
 pub fn type_text(field: &mut Input, text: &str) {
@@ -71,17 +82,13 @@ pub fn option_key(radio: &mut Radio, key: &KeyEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tuirealm::state::{State, StateValue};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
     fn text_of(input: &Input) -> String {
-        match Component::state(input) {
-            State::Single(StateValue::String(text)) => text,
-            _ => String::new(),
-        }
+        input_text(input)
     }
 
     #[test]
@@ -134,6 +141,13 @@ mod tests {
         assert_eq!(radio.states.choice, 0);
         option_key(&mut radio, &key(KeyCode::Enter));
         assert_eq!(radio.states.choice, 0);
+    }
+
+    #[test]
+    fn input_text_reads_field_value() {
+        let field = Input::default().value("hello".to_string());
+        assert_eq!(input_text(&field), "hello");
+        assert_eq!(input_text(&Input::default()), "");
     }
 
     #[test]

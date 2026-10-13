@@ -12,8 +12,6 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use tui_realm_stdlib::components::{Input, Radio, Select};
-use tuirealm::component::Component;
-use tuirealm::state::{State, StateValue};
 
 use crate::infra::config::TelegramConfig;
 
@@ -168,35 +166,28 @@ impl TelegramDialog {
         self.test_result = Some((ok, detail));
     }
 
-    fn text_of(input: &Input) -> String {
-        match Component::state(input) {
-            State::Single(StateValue::String(s)) => s,
-            _ => String::new(),
-        }
-    }
-
     fn submit(&mut self) -> TelegramOutcome {
         let enabled = self.enabled.states.selected == 1;
-        let token = Self::text_of(&self.token);
+        let token = super::fields::input_text(&self.token);
         if !token.is_empty() && token.len() < crate::telegram::TOKEN_MIN_LEN {
             self.error = Some("token too short".to_string());
             return TelegramOutcome::Pending;
         }
-        let allowed = match parse_ids(&Self::text_of(&self.allowed)) {
+        let allowed = match parse_ids(&super::fields::input_text(&self.allowed)) {
             Ok(ids) => ids,
             Err(e) => {
                 self.error = Some(e);
                 return TelegramOutcome::Pending;
             }
         };
-        let notify_chat_id = match parse_opt_i64(&Self::text_of(&self.notify)) {
+        let notify_chat_id = match parse_opt_i64(&super::fields::input_text(&self.notify)) {
             Ok(v) => v,
             Err(e) => {
                 self.error = Some(format!("notify chat {e}"));
                 return TelegramOutcome::Pending;
             }
         };
-        let poll_seconds = match parse_opt_u64(&Self::text_of(&self.poll), self.poll_default) {
+        let poll_seconds = match parse_opt_u64(&super::fields::input_text(&self.poll), self.poll_default) {
             Ok(v) if v >= 1 => v,
             Ok(_) => {
                 self.error = Some("poll seconds must be at least 1".to_string());
@@ -207,14 +198,14 @@ impl TelegramDialog {
                 return TelegramOutcome::Pending;
             }
         };
-        let backoff_min_seconds = match parse_opt_u64(&Self::text_of(&self.bmin), self.bmin_default) {
+        let backoff_min_seconds = match parse_opt_u64(&super::fields::input_text(&self.bmin), self.bmin_default) {
             Ok(v) => v,
             Err(_) => {
                 self.error = Some("backoff seconds must be numbers".to_string());
                 return TelegramOutcome::Pending;
             }
         };
-        let backoff_max_seconds = match parse_opt_u64(&Self::text_of(&self.bmax), self.bmax_default) {
+        let backoff_max_seconds = match parse_opt_u64(&super::fields::input_text(&self.bmax), self.bmax_default) {
             Ok(v) => v,
             Err(_) => {
                 self.error = Some("backoff seconds must be numbers".to_string());
@@ -307,7 +298,7 @@ impl TelegramDialog {
             1 => {
                 self.error = None;
                 TelegramOutcome::Test {
-                    token: Self::text_of(&self.token),
+                    token: super::fields::input_text(&self.token),
                 }
             }
             _ => TelegramOutcome::Cancelled,
@@ -506,7 +497,7 @@ impl TelegramDialog {
                 Span::styled(" >", if focused { focus_row() } else { chev }),
             ]
         };
-        let token_shown = Self::text_of(&self.token);
+        let token_shown = super::fields::input_text(&self.token);
         let token_display = if token_shown.is_empty() || self.focus == FOCUS_TOKEN {
             token_shown.clone()
         } else {
@@ -521,11 +512,11 @@ impl TelegramDialog {
                 ),
             ),
             ("Token", field(&token_display, self.focus == FOCUS_TOKEN, "keep current")),
-            ("Allowed IDs", field(&Self::text_of(&self.allowed), self.focus == FOCUS_ALLOWED, "11, 22")),
-            ("Notify chat", field(&Self::text_of(&self.notify), self.focus == FOCUS_NOTIFY, "unset")),
-            ("Poll secs", field(&Self::text_of(&self.poll), self.focus == FOCUS_POLL, "20")),
-            ("Backoff min", field(&Self::text_of(&self.bmin), self.focus == FOCUS_BMIN, "60")),
-            ("Backoff max", field(&Self::text_of(&self.bmax), self.focus == FOCUS_BMAX, "900")),
+            ("Allowed IDs", field(&super::fields::input_text(&self.allowed), self.focus == FOCUS_ALLOWED, "11, 22")),
+            ("Notify chat", field(&super::fields::input_text(&self.notify), self.focus == FOCUS_NOTIFY, "unset")),
+            ("Poll secs", field(&super::fields::input_text(&self.poll), self.focus == FOCUS_POLL, "20")),
+            ("Backoff min", field(&super::fields::input_text(&self.bmin), self.focus == FOCUS_BMIN, "60")),
+            ("Backoff max", field(&super::fields::input_text(&self.bmax), self.focus == FOCUS_BMAX, "900")),
         ];
         for (index, (label, control)) in rows.into_iter().enumerate() {
             if row >= status_row {
