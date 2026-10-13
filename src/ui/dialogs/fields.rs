@@ -4,7 +4,7 @@
 //! Shift guard can never drift between dialogs again.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tui_realm_stdlib::components::Input;
+use tui_realm_stdlib::components::{Input, Radio, Select};
 use tuirealm::command::{Cmd, Direction};
 use tuirealm::component::Component;
 
@@ -32,6 +32,39 @@ pub fn field_key(field: &mut Input, key: &KeyEvent) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Cycle a closed select with wraparound; empty choice lists are a no-op.
+/// Card-edit, create, and telegram carried identical copies.
+pub fn cycle_select(select: &mut Select, dir: i32) {
+    let len = select.states.choices.len() as i32;
+    if len == 0 {
+        return;
+    }
+    let next = (select.states.selected as i32 + dir).rem_euclid(len) as usize;
+    select.states.select(next);
+}
+
+/// Type a whole string (e.g. bracketed paste) one char at a time,
+/// like typing. Card-edit and telegram duplicated this loop.
+pub fn type_text(field: &mut Input, text: &str) {
+    for ch in text.chars() {
+        field.perform(Cmd::Type(ch));
+    }
+}
+
+/// Left/Right drives a radio row; anything else is ignored there.
+/// Card-edit and telegram inlined this; create named it `option_key`.
+pub fn option_key(radio: &mut Radio, key: &KeyEvent) {
+    match key.code {
+        KeyCode::Left => {
+            radio.perform(Cmd::Move(Direction::Left));
+        }
+        KeyCode::Right => {
+            radio.perform(Cmd::Move(Direction::Right));
+        }
+        _ => {}
     }
 }
 
@@ -70,6 +103,44 @@ mod tests {
         assert!(!field_key(&mut field, &key(KeyCode::Left)));
         assert!(field_key(&mut field, &key(KeyCode::Backspace)));
         assert_eq!(text_of(&field), "b");
+    }
+
+    #[test]
+    fn select_cycles_with_wraparound() {
+        let mut select =
+            Select::default().choices(["a", "b", "c"]).value(0).rewind(true);
+        cycle_select(&mut select, 1);
+        assert_eq!(select.states.selected, 1);
+        cycle_select(&mut select, -1);
+        assert_eq!(select.states.selected, 0);
+        cycle_select(&mut select, -1);
+        assert_eq!(select.states.selected, 2);
+    }
+
+    #[test]
+    fn select_cycle_empty_is_noop() {
+        let mut select = Select::default();
+        cycle_select(&mut select, 1);
+        assert_eq!(select.states.selected, 0);
+    }
+
+    #[test]
+    fn radio_arrows_move_choice_others_ignored() {
+        let mut radio =
+            Radio::default().choices(["Save", "Cancel"]).value(0).rewind(true);
+        option_key(&mut radio, &key(KeyCode::Right));
+        assert_eq!(radio.states.choice, 1);
+        option_key(&mut radio, &key(KeyCode::Left));
+        assert_eq!(radio.states.choice, 0);
+        option_key(&mut radio, &key(KeyCode::Enter));
+        assert_eq!(radio.states.choice, 0);
+    }
+
+    #[test]
+    fn type_text_inserts_whole_string() {
+        let mut field = Input::default().value("ab".to_string());
+        type_text(&mut field, "cd");
+        assert_eq!(text_of(&field), "abcd");
     }
 
     #[test]

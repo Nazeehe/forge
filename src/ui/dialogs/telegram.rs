@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use tui_realm_stdlib::components::{Input, Radio, Select};
-use tuirealm::command::{Cmd, Direction};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
@@ -159,9 +158,7 @@ impl TelegramDialog {
             FOCUS_BMAX => &mut self.bmax,
             _ => return,
         };
-        for ch in text.chars() {
-            field.perform(Cmd::Type(ch));
-        }
+        super::fields::type_text(field, text);
         self.error = None;
         self.test_result = None;
     }
@@ -276,19 +273,13 @@ impl TelegramDialog {
         }
         match self.focus {
             FOCUS_ENABLED => match key.code {
-                KeyCode::Left => cycle_select(&mut self.enabled, -1),
-                KeyCode::Right => cycle_select(&mut self.enabled, 1),
+                KeyCode::Left => super::fields::cycle_select(&mut self.enabled, -1),
+                KeyCode::Right => super::fields::cycle_select(&mut self.enabled, 1),
                 _ => {}
             },
-            FOCUS_ACTIONS => match key.code {
-                KeyCode::Left => {
-                    self.actions.perform(Cmd::Move(Direction::Left));
-                }
-                KeyCode::Right => {
-                    self.actions.perform(Cmd::Move(Direction::Right));
-                }
-                _ => {}
-            },
+            FOCUS_ACTIONS => {
+                super::fields::option_key(&mut self.actions, key);
+            }
             _ => {
                 let field = match self.focus {
                     FOCUS_TOKEN => &mut self.token,
@@ -598,16 +589,6 @@ pub fn telegram_area(term: Rect) -> Rect {
         w,
         h,
     )
-}
-
-/// Cycle a closed select with wraparound; empty choice lists are a no-op.
-fn cycle_select(select: &mut Select, dir: i32) {
-    let len = select.states.choices.len() as i32;
-    if len == 0 {
-        return;
-    }
-    let next = (select.states.selected as i32 + dir).rem_euclid(len) as usize;
-    select.states.select(next);
 }
 
 /// Truncate to `room` chars at the end.

@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use tui_realm_stdlib::components::{Input, Radio, Select};
-use tuirealm::command::{Cmd, Direction};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
@@ -318,11 +317,11 @@ impl CreateDialog {
                 return self.submit(live_names);
             }
             KeyCode::Up => {
-                self.focus = (self.focus + FIELD_COUNT - 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_prev(self.focus, FIELD_COUNT);
                 return DialogOutcome::Pending;
             }
             KeyCode::Down => {
-                self.focus = (self.focus + 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_next(self.focus, FIELD_COUNT);
                 return DialogOutcome::Pending;
             }
             _ => {}
@@ -331,25 +330,17 @@ impl CreateDialog {
         // so cycle the public selection index directly.
         match self.focus {
             FOCUS_TOOL => match key.code {
-                KeyCode::Left => {
-                    cycle_select(&mut self.tool, -1);
-                }
-                KeyCode::Right => {
-                    cycle_select(&mut self.tool, 1);
-                }
+                KeyCode::Left => super::fields::cycle_select(&mut self.tool, -1),
+                KeyCode::Right => super::fields::cycle_select(&mut self.tool, 1),
                 _ => {}
             },
             FOCUS_GROUP => match key.code {
-                KeyCode::Left => {
-                    cycle_select(&mut self.group, -1);
-                }
-                KeyCode::Right => {
-                    cycle_select(&mut self.group, 1);
-                }
+                KeyCode::Left => super::fields::cycle_select(&mut self.group, -1),
+                KeyCode::Right => super::fields::cycle_select(&mut self.group, 1),
                 _ => {}
             },
             FOCUS_ACTIONS => {
-                option_key(&mut self.actions, key);
+                super::fields::option_key(&mut self.actions, key);
             }
             _ => {
                 // The name row opens selected: its first edit replaces the
@@ -378,29 +369,6 @@ impl CreateDialog {
             }
         }
         DialogOutcome::Pending
-    }
-}
-
-/// Cycle a closed select with wraparound; empty choice lists are a no-op.
-fn cycle_select(select: &mut Select, dir: i32) {
-    let len = select.states.choices.len() as i32;
-    if len == 0 {
-        return;
-    }
-    let next = (select.states.selected as i32 + dir).rem_euclid(len) as usize;
-    select.states.select(next);
-}
-
-/// Left/Right drives a radio row; anything else is ignored there.
-fn option_key(radio: &mut Radio, key: &KeyEvent) {
-    match key.code {
-        KeyCode::Left => {
-            radio.perform(Cmd::Move(Direction::Left));
-        }
-        KeyCode::Right => {
-            radio.perform(Cmd::Move(Direction::Right));
-        }
-        _ => {}
     }
 }
 

@@ -13,7 +13,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use tui_realm_stdlib::components::{Input, Radio, Select};
-use tuirealm::command::{Cmd, Direction};
 use tuirealm::component::Component;
 use tuirealm::state::{State, StateValue};
 
@@ -279,9 +278,7 @@ impl CardEditDialog {
             FOCUS_PROGRESS => &mut self.progress,
             _ => return,
         };
-        for ch in text.chars() {
-            field.perform(Cmd::Type(ch));
-        }
+        super::fields::type_text(field, text);
         self.error = None;
     }
 
@@ -318,24 +315,18 @@ impl CardEditDialog {
         }
         match self.focus {
             FOCUS_COLUMN => match key.code {
-                KeyCode::Left => cycle_select(&mut self.column, -1),
-                KeyCode::Right => cycle_select(&mut self.column, 1),
+                KeyCode::Left => super::fields::cycle_select(&mut self.column, -1),
+                KeyCode::Right => super::fields::cycle_select(&mut self.column, 1),
                 _ => {}
             },
             FOCUS_PRIORITY => match key.code {
-                KeyCode::Left => cycle_select(&mut self.priority, -1),
-                KeyCode::Right => cycle_select(&mut self.priority, 1),
+                KeyCode::Left => super::fields::cycle_select(&mut self.priority, -1),
+                KeyCode::Right => super::fields::cycle_select(&mut self.priority, 1),
                 _ => {}
             },
-            FOCUS_ACTIONS => match key.code {
-                KeyCode::Left => {
-                    self.actions.perform(Cmd::Move(Direction::Left));
-                }
-                KeyCode::Right => {
-                    self.actions.perform(Cmd::Move(Direction::Right));
-                }
-                _ => {}
-            },
+            FOCUS_ACTIONS => {
+                super::fields::option_key(&mut self.actions, key);
+            }
             _ => {
                 let field = match self.focus {
                     FOCUS_TITLE => &mut self.title,
@@ -616,16 +607,6 @@ pub fn card_edit_area(term: Rect) -> Rect {
         w,
         h,
     )
-}
-
-/// Cycle a closed select with wraparound; empty choice lists are a no-op.
-fn cycle_select(select: &mut Select, dir: i32) {
-    let len = select.states.choices.len() as i32;
-    if len == 0 {
-        return;
-    }
-    let next = (select.states.selected as i32 + dir).rem_euclid(len) as usize;
-    select.states.select(next);
 }
 
 /// Truncate to `room` chars at the end.
