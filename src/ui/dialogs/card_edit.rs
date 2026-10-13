@@ -532,7 +532,7 @@ impl CardEditDialog {
         let field = |value: &str, focused: bool, placeholder: &str| -> Vec<Span> {
             let room = content_w.saturating_sub(2);
             let shown = if value.is_empty() { placeholder } else { value };
-            let cut = fit(shown, room);
+            let cut = crate::ui::text::cut_chars(shown, room);
             let pad = room.saturating_sub(cut.chars().count());
             if focused {
                 vec![Span::styled(format!("[{cut}{}]", " ".repeat(pad)), focus_row())]
@@ -547,7 +547,7 @@ impl CardEditDialog {
             }
         };
         let select = |value: &str, focused: bool| -> Vec<Span> {
-            let cut = fit(value, content_w.saturating_sub(4));
+            let cut = crate::ui::text::cut_chars(value, content_w.saturating_sub(4));
             let chev = style(Role::Muted);
             vec![
                 Span::styled("< ", if focused { focus_row() } else { chev }),
@@ -613,13 +613,13 @@ impl CardEditDialog {
         // One fixed status slot: the error or blank. State changes
         // never move surrounding rows.
         let status = if let Some(err) = &self.error {
-            Line::from(Span::styled(fit(err, cw as usize), style(Role::Danger)))
+            Line::from(Span::styled(crate::ui::text::cut_chars(err, cw as usize), style(Role::Danger)))
         } else {
             Line::from("")
         };
         frame.render_widget(Paragraph::new(status), Rect::new(cx, status_row, cw, 1));
         let hint = Line::from(Span::styled(
-            fit("Tab move · ←/→ select · Enter save · Esc cancel", cw as usize),
+            crate::ui::text::cut_chars("Tab move · ←/→ select · Enter save · Esc cancel", cw as usize),
             style(Role::Muted),
         ));
         frame.render_widget(Paragraph::new(hint), Rect::new(cx, hint_row, cw, 1));
@@ -649,14 +649,7 @@ fn cycle_select(select: &mut Select, dir: i32) {
 }
 
 /// Truncate to `room` chars at the end.
-fn fit(s: &str, room: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= room {
-        s.to_string()
-    } else {
-        chars[..room].iter().collect()
-    }
-}
+
 
 #[cfg(test)]
 mod tests {

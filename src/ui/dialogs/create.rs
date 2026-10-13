@@ -496,17 +496,7 @@ fn fit_start(text: &str, width: usize) -> String {
 }
 
 /// Truncate to a cell width, marking cuts with an ellipsis.
-fn fit(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
+
 
 impl CreateDialog {
     /// Render the New Session form per the UI guidance: an opaque modal,
@@ -569,7 +559,7 @@ impl CreateDialog {
         let field = |value: &str, focused: bool, placeholder: &str, front: bool| -> Vec<Span> {
             let room = content_w.saturating_sub(2);
             let shown = if value.is_empty() { placeholder } else { value };
-            let cut = if front { fit_start(shown, room) } else { fit(shown, room) };
+            let cut = if front { fit_start(shown, room) } else { crate::ui::text::truncate_cells(shown, room) };
             let pad = room.saturating_sub(cut.chars().count());
             if focused {
                 vec![Span::styled(format!("[{cut}{}]", " ".repeat(pad)), focus_row())]
@@ -585,7 +575,7 @@ impl CreateDialog {
         };
         // `< value >` cycler with muted chevrons.
         let select = |value: &str, focused: bool| -> Vec<Span> {
-            let cut = fit(value, content_w.saturating_sub(4));
+            let cut = crate::ui::text::truncate_cells(value, content_w.saturating_sub(4));
             let chev = style(Role::Muted);
             vec![
                 Span::styled("< ", if focused { focus_row() } else { chev }),

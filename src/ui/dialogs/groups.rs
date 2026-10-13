@@ -571,12 +571,12 @@ impl GroupDialog {
                         }];
                         match &over.member {
                             None => {
-                                let label = fit_row(&over.text, cw as usize - 2);
+                                let label = crate::ui::text::truncate_cells(&over.text, cw as usize - 2);
                                 spans.push(Span::styled(label, row_style));
                             }
                             Some(member) => {
                                 let color = crate::ui::session_bar::group_palette(ctx.groups[over.group].color);
-                                let name = fit_row(member, cw as usize - 8);
+                                let name = crate::ui::text::truncate_cells(member, cw as usize - 8);
                                 spans.push(Span::styled("    ", row_style));
                                 spans.push(Span::styled("●", style(Role::Text).fg(color)));
                                 spans.push(Span::styled(format!(" {name}"), row_style));
@@ -594,7 +594,7 @@ impl GroupDialog {
                 let verb = if rename { "Rename to" } else { "Group name" };
                 let room = (cw as usize)
                     .saturating_sub(verb.chars().count() + 7);
-                let buf = fit_row(&safe_name(&self.name_buf), room);
+                let buf = crate::ui::text::truncate_cells(&safe_name(&self.name_buf), room);
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled("> ", focus_row()),
@@ -770,25 +770,13 @@ fn fit_name_with_suffix(name: &str, suffix: &str, width: usize) -> (String, Stri
         return (name.to_string(), suffix.to_string());
     }
     if suffix.chars().count() >= width {
-        return (fit_row(&format!("{name}{suffix}"), width), String::new());
+        return (crate::ui::text::truncate_cells(&format!("{name}{suffix}"), width), String::new());
     }
     let name_width = width.saturating_sub(suffix.chars().count());
-    (fit_row(name, name_width), suffix.to_string())
+    (crate::ui::text::truncate_cells(name, name_width), suffix.to_string())
 }
 
-/// Truncate a row to a cell width, marking cuts with an ellipsis so
-/// long names can never wrap the one-row-per-entry layout.
-pub(crate) fn fit_row(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
-    out.push('…');
-    out
-}
+
 
 /// Centered `········ Add sessions ········` header for the member
 /// picker, dotted out to the available width.

@@ -338,7 +338,7 @@ impl RestorePicker {
             );
             // Metadata is the load-bearing part; the label yields.
             let room = (cw as usize).saturating_sub(3 + detail.chars().count());
-            let line = format!("{mark} {} {detail}", crate::ui::dialogs::groups::fit_row(&entry.label, room));
+            let line = format!("{mark} {} {detail}", crate::ui::text::truncate_cells(&entry.label, room));
             let style = if index == self.selected {
                 crate::ui::theme::style(crate::ui::theme::Role::Focus)
             } else {

@@ -203,13 +203,27 @@ pub fn wrap_cells(s: &str, max_cells: usize) -> Vec<String> {
     rows
 }
 
-pub(super) fn truncate_cells(s: &str, max: usize) -> String {
+/// Truncate to a char count, marking cuts with an ellipsis so
+/// clipped rows read as clipped. Char-based like the legacy dialog
+/// fits (see [`cut_cells`] for display-width clipping).
+pub fn truncate_cells(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else if max == 0 {
         String::new()
     } else {
         s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
+
+/// Clip to a char count with no marker: form fields show the raw
+/// window of the value. Char-based like the legacy dialog fits.
+pub fn cut_chars(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        chars[..max].iter().collect()
     }
 }
 
@@ -261,6 +275,23 @@ mod tests {
         let cut = truncate_spans(wide, 5);
         let text: String = cut.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(text, "日本…", "no split wide char: {text:?}");
+    }
+
+    #[test]
+    fn truncate_cells_marks_cuts_with_ellipsis() {
+        assert_eq!(truncate_cells("abcdef", 4), "abc…");
+        assert_eq!(truncate_cells("short", 99), "short");
+        assert_eq!(truncate_cells("abc", 3), "abc", "exact fit untouched");
+        assert_eq!(truncate_cells("abcdef", 0), "");
+        assert_eq!(truncate_cells("abcdef", 1), "…");
+    }
+
+    #[test]
+    fn cut_chars_clips_without_ellipsis() {
+        assert_eq!(cut_chars("abcdef", 4), "abcd");
+        assert_eq!(cut_chars("short", 99), "short");
+        assert_eq!(cut_chars("abcdef", 0), "");
+        assert_eq!(cut_chars("", 4), "");
     }
 
     #[test]
