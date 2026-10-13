@@ -251,19 +251,19 @@ impl TelegramDialog {
         match key.code {
             KeyCode::Esc => return TelegramOutcome::Cancelled,
             KeyCode::Tab => {
-                self.focus = (self.focus + 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_next(self.focus, FIELD_COUNT);
                 return TelegramOutcome::Pending;
             }
             KeyCode::BackTab => {
-                self.focus = (self.focus + FIELD_COUNT - 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_prev(self.focus, FIELD_COUNT);
                 return TelegramOutcome::Pending;
             }
             KeyCode::Up => {
-                self.focus = (self.focus + FIELD_COUNT - 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_prev(self.focus, FIELD_COUNT);
                 return TelegramOutcome::Pending;
             }
             KeyCode::Down => {
-                self.focus = (self.focus + 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_next(self.focus, FIELD_COUNT);
                 return TelegramOutcome::Pending;
             }
             KeyCode::Enter => {

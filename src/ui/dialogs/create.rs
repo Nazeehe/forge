@@ -301,11 +301,11 @@ impl CreateDialog {
                     }
                     return DialogOutcome::Pending;
                 }
-                self.focus = (self.focus + 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_next(self.focus, FIELD_COUNT);
                 return DialogOutcome::Pending;
             }
             KeyCode::BackTab => {
-                self.focus = (self.focus + FIELD_COUNT - 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_prev(self.focus, FIELD_COUNT);
                 return DialogOutcome::Pending;
             }
             KeyCode::Enter => {

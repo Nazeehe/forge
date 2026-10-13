@@ -293,19 +293,19 @@ impl CardEditDialog {
         match key.code {
             KeyCode::Esc => return CardEditOutcome::Cancelled,
             KeyCode::Tab => {
-                self.focus = (self.focus + 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_next(self.focus, FIELD_COUNT);
                 return CardEditOutcome::Pending;
             }
             KeyCode::BackTab => {
-                self.focus = (self.focus + FIELD_COUNT - 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_prev(self.focus, FIELD_COUNT);
                 return CardEditOutcome::Pending;
             }
             KeyCode::Up => {
-                self.focus = (self.focus + FIELD_COUNT - 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_prev(self.focus, FIELD_COUNT);
                 return CardEditOutcome::Pending;
             }
             KeyCode::Down => {
-                self.focus = (self.focus + 1) % FIELD_COUNT;
+                self.focus = super::focus::focus_next(self.focus, FIELD_COUNT);
                 return CardEditOutcome::Pending;
             }
             KeyCode::Enter => {
