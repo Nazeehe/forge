@@ -428,14 +428,10 @@ impl TelegramDialog {
     /// dead space or outside; the caller still swallows everything
     /// while the modal is open.
     pub fn click(&mut self, col: u16, row: u16, area: Rect) -> Option<TelegramOutcome> {
-        use ratatui::widgets::{Block, Borders};
-        if col < area.x || col >= area.right() || row < area.y || row >= area.bottom() {
+        use super::frame::{click_inner, BorderHit};
+        let Some(inner) = click_inner(col, row, area, BorderHit::Inclusive) else {
             return None;
-        }
-        let inner = Block::default()
-            .borders(Borders::ALL)
-            .border_type(crate::ui::theme::border_type())
-            .inner(area);
+        };
         if inner.height < 14 || inner.width < 44 {
             return None;
         }

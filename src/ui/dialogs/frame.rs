@@ -58,6 +58,37 @@ impl ModalFrame {
     }
 }
 
+/// Which border cells a dialog click accepts. First-run and groups
+/// reject clicks on the border itself; cards, telegram, and themes
+/// let them fall through to the row math. The rules differ on
+/// purpose — rows start at the content edge in the former — so the
+/// shared prelude takes the rule instead of normalizing it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BorderHit {
+    Inclusive,
+    Exclusive,
+}
+
+/// Shared dialog click prelude: reject clicks outside the modal and
+/// recompute the content rect the view paints into.
+pub fn click_inner(col: u16, row: u16, area: Rect, border: BorderHit) -> Option<Rect> {
+    let outside = match border {
+        BorderHit::Inclusive => {
+            col < area.x || col >= area.right() || row < area.y || row >= area.bottom()
+        }
+        BorderHit::Exclusive => {
+            col <= area.x
+                || col >= area.right().saturating_sub(1)
+                || row <= area.y
+                || row >= area.bottom().saturating_sub(1)
+        }
+    };
+    if outside {
+        return None;
+    }
+    Some(Block::default().borders(Borders::ALL).inner(area))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +124,27 @@ mod tests {
         assert!(inner.is_none(), "cramped area refuses content");
         let buf = terminal.backend().buffer();
         assert_ne!(buf[(0, 0)].symbol(), " ", "frame still paints");
+    }
+
+    #[test]
+    fn click_inner_rejects_outside_clicks_per_border_rule() {
+        use ratatui::widgets::{Block, Borders};
+        let area = Rect::new(10, 5, 40, 12);
+        let inner = Block::default().borders(Borders::ALL).inner(area);
+        // Inclusive: border cells fall through to the row math
+        // (cards, telegram, themes).
+        assert_eq!(click_inner(10, 6, area, BorderHit::Inclusive), Some(inner));
+        assert_eq!(click_inner(49, 6, area, BorderHit::Inclusive), Some(inner));
+        assert_eq!(click_inner(9, 6, area, BorderHit::Inclusive), None);
+        assert_eq!(click_inner(50, 6, area, BorderHit::Inclusive), None);
+        assert_eq!(click_inner(20, 4, area, BorderHit::Inclusive), None);
+        // Exclusive: clicks on the border itself die
+        // (first-run, groups).
+        assert_eq!(click_inner(10, 6, area, BorderHit::Exclusive), None);
+        assert_eq!(click_inner(11, 6, area, BorderHit::Exclusive), Some(inner));
+        assert_eq!(click_inner(48, 6, area, BorderHit::Exclusive), Some(inner));
+        assert_eq!(click_inner(49, 6, area, BorderHit::Exclusive), None);
+        assert_eq!(click_inner(20, 5, area, BorderHit::Exclusive), None);
     }
 
     #[test]

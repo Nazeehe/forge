@@ -227,24 +227,15 @@ impl ThemeDialog {
     /// Coordinates come from cells read back off the paint in tests,
     /// never from hand-computed math.
     pub fn click(&mut self, col: u16, row: u16, area: Rect) -> Option<ThemeOutcome> {
-        if col < area.x
-            || col >= area.x.saturating_add(area.width)
-            || row < area.y
-            || row >= area.y.saturating_add(area.height)
-        {
-            return None;
-        }
+        use super::frame::{click_inner, BorderHit};
         // Recompute the inner rect the same way ratatui does: one
         // cell of border on each side.
         if area.width < 3 || area.height < 3 {
             return None;
         }
-        let inner = Rect::new(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
-        );
+        let Some(inner) = click_inner(col, row, area, BorderHit::Inclusive) else {
+            return None;
+        };
         if inner.height < 8 || inner.width < 30 {
             return None;
         }

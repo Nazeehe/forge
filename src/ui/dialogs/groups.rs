@@ -464,9 +464,8 @@ impl GroupDialog {
     /// rendered by the List and Checkbox components below.
     pub fn click(&mut self, col: u16, row: u16, area: Rect, ctx: &GroupCtx) -> bool {
         self.reconcile(ctx);
-        if col <= area.x || col >= area.right().saturating_sub(1)
-            || row <= area.y || row >= area.bottom().saturating_sub(1)
-        {
+        use super::frame::{click_inner, BorderHit};
+        if click_inner(col, row, area, BorderHit::Exclusive).is_none() {
             return false;
         }
         // Same padded origin the view paints: clicks on the pad row

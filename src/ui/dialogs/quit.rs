@@ -158,8 +158,13 @@ impl Confirm {
     /// button row is always the third content row, centered the same
     /// way), so clicks can never desync from what is on screen.
     pub fn click(&mut self, col: u16, row: u16, area: Rect) -> Option<ConfirmOutcome> {
-        use ratatui::widgets::{Block, Borders};
-        let inner = Block::default().borders(Borders::ALL).inner(area);
+        use super::frame::{click_inner, BorderHit};
+        // Inclusive bounds: clicks outside the modal die here instead
+        // of reaching the row walk, so clipped-away buttons in
+        // cramped terminals can never fire.
+        let Some(inner) = click_inner(col, row, area, BorderHit::Inclusive) else {
+            return None;
+        };
         if row != inner.y.saturating_add(2) || inner.width < 10 {
             return None;
         }
