@@ -6,6 +6,7 @@
 
 pub mod card_edit;
 pub mod create;
+pub mod fields;
 pub mod focus;
 pub mod frame;
 pub mod groups;

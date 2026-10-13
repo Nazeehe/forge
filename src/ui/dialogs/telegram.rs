@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use tui_realm_stdlib::components::{Input, Radio, Select};
 use tuirealm::command::{Cmd, Direction};
@@ -298,26 +298,9 @@ impl TelegramDialog {
                     FOCUS_BMIN => &mut self.bmin,
                     _ => &mut self.bmax,
                 };
-                match key.code {
-                    KeyCode::Left => {
-                        field.perform(Cmd::Move(Direction::Left));
-                    }
-                    KeyCode::Right => {
-                        field.perform(Cmd::Move(Direction::Right));
-                    }
-                    KeyCode::Backspace => {
-                        field.perform(Cmd::Delete);
-                        self.error = None;
-                        self.test_result = None;
-                    }
-                    KeyCode::Char(ch)
-                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-                    {
-                        field.perform(Cmd::Type(ch));
-                        self.error = None;
-                        self.test_result = None;
-                    }
-                    _ => {}
+                if super::fields::field_key(field, key) {
+                    self.error = None;
+                    self.test_result = None;
                 }
             }
         }
