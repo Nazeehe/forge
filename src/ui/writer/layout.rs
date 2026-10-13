@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Span;
 
-use crate::ui::theme::{button_chrome, pill_left, pill_rest_cap, pill_right, style, Role};
+use crate::ui::theme::{pill_left, pill_rest_cap, pill_right, style, Role};
 
 /// Narrow-terminal cutoff: below this width the assistant panel shows
 /// a fixed widen notice instead of the thread.
@@ -124,25 +124,20 @@ pub fn panel_collapsed(term_cols: u16) -> bool {
 /// The marker is explicit: `*` means default action, `✓` means a
 /// pressed toggle. The two never share a glyph.
 pub(super) fn pill_spans(label: &str, emphasized: bool, mark: Option<char>) -> Vec<Span<'static>> {
-    let (fill, left, right) = button_chrome(
-        emphasized,
-        style(Role::TabActive),
-        style(Role::TabInactive),
-        pill_rest_cap(),
-    );
-    vec![
-        Span::styled(pill_left().to_string(), Style::default().fg(left)),
-        Span::styled(
-            format!("{}{label}", mark.map(|m| m.to_string()).unwrap_or_default()),
-            fill,
-        ),
-        Span::styled(pill_right().to_string(), Style::default().fg(right)),
-    ]
+    // One widget for paint and clicks: the mark rides inside the
+    // fill like the legacy spans did.
+    let tag = format!("{}{label}", mark.map(|m| m.to_string()).unwrap_or_default());
+    crate::ui::button::Button::new(tag)
+        .unpadded()
+        .emphasized(emphasized)
+        .spans()
 }
 
 /// Cell width of one rendered pill: two caps plus label and mark.
+/// Shares the widget with [`pill_spans`], so layout and paint agree.
 pub fn pill_width(label: &str, default_mark: bool) -> u16 {
-    (label.chars().count() + 2 + usize::from(default_mark)) as u16
+    let tag = if default_mark { format!("*{label}") } else { label.to_string() };
+    crate::ui::button::Button::new(tag).unpadded().width() as u16
 }
 
 /// Hit rect for the action-row pill, left-aligned to the grid.

@@ -48,13 +48,16 @@ pub fn visual_chat_footer_rows(content_h: u16) -> u16 {
 
 /// Button widths in cells: pills add caps plus inner pads, like
 /// the sidebar mode pills; legacy is the bare bracketed label.
+/// Pill widths come from the widget, so layout and paint share one
+/// source.
 #[cfg(feature = "visual")]
 pub fn visual_button_widths(pills: bool) -> (u16, u16, u16) {
+    use crate::ui::button::Button;
     if pills {
         (
-            VISUAL_ZOOM_IN_TEXT.len() as u16 + 4,
-            VISUAL_ZOOM_OUT_TEXT.len() as u16 + 4,
-            VISUAL_CHAT_TEXT.len() as u16 + 4,
+            Button::new(VISUAL_ZOOM_IN_TEXT).width() as u16,
+            Button::new(VISUAL_ZOOM_OUT_TEXT).width() as u16,
+            Button::new(VISUAL_CHAT_TEXT).width() as u16,
         )
     } else {
         (
@@ -76,33 +79,29 @@ pub fn visual_button_spans(pills: bool, chat_open: bool) -> Vec<SpanView> {
         // every toggle reads as one solid pill. The open chat pill
         // uses the active container: a bare focus style has no
         // background and paints terminal-black in the middle.
-        let gray = || Style::default().fg(Color::DarkGray);
-        let label = theme::with_contrast_text(theme::style(theme::Role::TabInactive));
+        use crate::ui::button::Button;
         let (chat_fill, chat_left, chat_right) = theme::button_chrome(
             chat_open,
             theme::style(theme::Role::TabActive),
             theme::style(theme::Role::TabInactive),
             Color::DarkGray,
         );
+        let buttons = [
+            Button::new(VISUAL_ZOOM_IN_TEXT),
+            Button::new(VISUAL_ZOOM_OUT_TEXT),
+            Button::filled(VISUAL_CHAT_TEXT, chat_fill, chat_left, chat_right),
+        ];
         let mut spans = Vec::new();
-        for (text, style, cap_left, cap_right) in [
-            (VISUAL_ZOOM_IN_TEXT, label, gray(), gray()),
-            (VISUAL_ZOOM_OUT_TEXT, label, gray(), gray()),
-            (
-                VISUAL_CHAT_TEXT,
-                chat_fill,
-                Style::default().fg(chat_left),
-                Style::default().fg(chat_right),
-            ),
-        ] {
+        for button in &buttons {
             if !spans.is_empty() {
                 spans.push(SpanView { text: "  ".to_string(), style: Style::default() });
             }
-            spans.push(SpanView { text: crate::ui::theme::pill_left().to_string(), style: cap_left });
-            spans.push(SpanView { text: " ".to_string(), style });
-            spans.push(SpanView { text: text.to_string(), style });
-            spans.push(SpanView { text: " ".to_string(), style });
-            spans.push(SpanView { text: crate::ui::theme::pill_right().to_string(), style: cap_right });
+            for span in button.spans() {
+                spans.push(SpanView {
+                    text: span.content.into_owned(),
+                    style: span.style,
+                });
+            }
         }
         spans
     } else {

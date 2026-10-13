@@ -163,6 +163,16 @@ impl Confirm {
         if row != inner.y.saturating_add(2) || inner.width < 10 {
             return None;
         }
+        if self.pills {
+            // One layout for paint and clicks: the row owns both.
+            let buttons = self.pill_row();
+            let total = buttons.width() as u16;
+            let ox = inner.x.saturating_add(inner.width.saturating_sub(total) / 2);
+            return buttons.click(col, row, ox, inner.y.saturating_add(2), total).map(|index| {
+                self.choice = index;
+                self.outcome_for(index)
+            });
+        }
         let labels = self.button_labels();
         let widths: Vec<usize> = labels
             .iter()
@@ -251,35 +261,33 @@ impl Confirm {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
+    /// Pill button row: one [`Button`](crate::ui::button::Button) per
+    /// label, chosen emphasized. Paint and [`Self::click`] share it.
+    fn pill_row(&self) -> crate::ui::button::ButtonRow {
+        crate::ui::button::ButtonRow::new(
+            self.button_labels()
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    crate::ui::button::Button::new(*label).emphasized(index == self.choice)
+                })
+                .collect(),
+        )
+    }
+
     fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
         use ratatui::text::Span;
         use crate::ui::theme::{Role, focus_row, style};
+        if self.pills {
+            return self.pill_row().spans();
+        }
         let mut spans = Vec::new();
         for (index, label) in self.button_labels().iter().enumerate() {
             if index > 0 {
                 spans.push(Span::raw("  "));
             }
             let chosen = index == self.choice;
-            if self.pills {
-                use ratatui::style::{Color, Style};
-                let (fill, left_cap, right_cap) = crate::ui::theme::button_chrome(
-                    chosen,
-                    style(Role::TabActive),
-                    style(Role::TabInactive),
-                    Color::DarkGray,
-                );
-                spans.push(Span::styled(
-                    crate::ui::theme::pill_left().to_string(),
-                    Style::default().fg(left_cap),
-                ));
-                spans.push(Span::styled(" ".to_string(), fill));
-                spans.push(Span::styled(label.to_string(), fill));
-                spans.push(Span::styled(" ".to_string(), fill));
-                spans.push(Span::styled(
-                    crate::ui::theme::pill_right().to_string(),
-                    Style::default().fg(right_cap),
-                ));
-            } else if chosen {
+            if chosen {
                 spans.push(Span::styled(">".to_string(), focus_row()));
                 spans.push(Span::styled(format!("[{label}]"), focus_row()));
             } else {

@@ -106,30 +106,14 @@ fn action_spans(pills: bool, label: &str) -> Vec<ratatui::text::Span<'static>> {
     use ratatui::text::Span;
     use crate::ui::theme::{Role, focus_row, style};
     if pills {
-        use ratatui::style::{Color, Style};
-        let (fill, left_cap, right_cap) = crate::ui::theme::button_chrome(
-            true,
-            style(Role::TabActive),
-            style(Role::TabInactive),
-            Color::Yellow,
-        );
-        vec![
-            Span::styled(">", focus_row()),
-            Span::styled(
-                crate::ui::theme::pill_left().to_string(),
-                Style::default().fg(left_cap),
-            ),
-            Span::styled(" ".to_string(), fill),
-            Span::styled(label.to_string(), fill),
-            Span::styled(" ".to_string(), fill),
-            Span::styled(
-                crate::ui::theme::pill_right().to_string(),
-                Style::default().fg(right_cap),
-            ),
-        ]
-    } else {
-        vec![Span::styled(format!(">[{label}]"), focus_row())]
+        use ratatui::style::Color;
+        return crate::ui::button::Button::new(label)
+            .emphasized(true)
+            .marker(true)
+            .styles(style(Role::TabActive), style(Role::TabInactive), Color::Yellow)
+            .spans();
     }
+    vec![Span::styled(format!(">[{label}]"), focus_row())]
 }
 
 /// Centered rect of the painted modal action: the same spans the view

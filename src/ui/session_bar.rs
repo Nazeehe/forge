@@ -2,8 +2,7 @@
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::text::Line;
 use ratatui::Frame;
 use tui_realm_stdlib::components::Label;
 use tuirealm::component::Component;
@@ -253,20 +252,9 @@ pub(super) fn render_pill(
     left_cap: Color,
     right_cap: Color,
 ) {
-    let line = Line::from(vec![
-        Span::styled(
-            theme::pill_left().to_string(),
-            Style::default().fg(left_cap),
-        ),
-        Span::styled(" ".to_string(), style),
-        Span::styled(text.to_string(), style),
-        Span::styled(" ".to_string(), style),
-        Span::styled(
-            crate::ui::theme::pill_right().to_string(),
-            Style::default().fg(right_cap),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    // One widget for paint and clicks: the explicit fill still gains
+    // the runtime contrast text.
+    super::button::Button::filled(text, style, left_cap, right_cap).paint(frame, area);
 }
 
 pub(super) fn render_session_bar(frame: &mut Frame, areas: &ChromeAreas, chrome: &Chrome) {

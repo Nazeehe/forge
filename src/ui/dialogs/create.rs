@@ -429,48 +429,24 @@ fn pill_actions(
     choice: usize,
     text: ratatui::style::Style,
 ) -> Vec<ratatui::text::Span<'static>> {
-    use ratatui::style::{Color, Style};
+    use ratatui::style::Color;
     use ratatui::text::Span;
-    use crate::ui::theme::{Role, focus_row, style};
-    let frame = |glyph: char, color: Color| {
-        Span::styled(glyph.to_string(), Style::default().fg(color))
-    };
-    let pad = |s: Style| Span::styled(" ".to_string(), s);
-    let create_chosen = focused && choice == 0;
+    use crate::ui::theme::{Role, style};
     // Create is the default action: always emphasized. Cancel follows
     // the selection. Both honor the theme highlight behavior.
-    let (create_style, create_left, create_right) = crate::ui::theme::button_chrome(
-        true,
-        style(Role::TabActive),
-        style(Role::TabInactive),
-        Color::Yellow,
-    );
-    let cancel_chosen = focused && choice == 1;
-    let (cancel_style, cancel_left, cancel_right) = crate::ui::theme::button_chrome(
-        cancel_chosen,
-        style(Role::TabActive),
-        style(Role::TabInactive),
-        Color::DarkGray,
-    );
-    let mut spans = Vec::new();
-    if create_chosen {
-        spans.push(Span::styled(">", focus_row()));
-    }
-    spans.push(frame(crate::ui::theme::pill_left(), create_left));
-    spans.push(pad(create_style));
-    spans.push(Span::styled("Create*".to_string(), create_style));
-    spans.push(pad(create_style));
-    spans.push(frame(crate::ui::theme::pill_right(), create_right));
-    spans.push(Span::styled("  ".to_string(), text));
-    if cancel_chosen {
-        spans.push(Span::styled(">", focus_row()));
-    }
-    spans.push(frame(crate::ui::theme::pill_left(), cancel_left));
-    spans.push(pad(cancel_style));
-    spans.push(Span::styled("Cancel".to_string(), cancel_style));
-    spans.push(pad(cancel_style));
-    spans.push(frame(crate::ui::theme::pill_right(), cancel_right));
-    spans
+    let buttons = vec![
+        crate::ui::button::Button::new("Create*")
+            .emphasized(true)
+            .marker(focused && choice == 0)
+            .styles(style(Role::TabActive), style(Role::TabInactive), Color::Yellow),
+        crate::ui::button::Button::new("Cancel")
+            .emphasized(focused && choice == 1)
+            .marker(focused && choice == 1)
+            .styles(style(Role::TabActive), style(Role::TabInactive), Color::DarkGray),
+    ];
+    crate::ui::button::ButtonRow::new(buttons)
+        .gap(Span::styled("  ", text))
+        .spans()
 }
 
 /// Truncate to a cell width, marking cuts at the front with an

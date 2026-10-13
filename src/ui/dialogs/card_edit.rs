@@ -385,7 +385,6 @@ impl CardEditDialog {
     /// without pills. [`Self::click`] hit-tests these same spans, so
     /// the mouse can never desync from the paint.
     fn action_spans(&self) -> Vec<ratatui::text::Span<'static>> {
-        use ratatui::style::{Color, Style};
         use ratatui::text::Span;
         use crate::ui::theme::{Role, focus_row, style};
         let text = style(Role::Text);
@@ -408,34 +407,30 @@ impl CardEditDialog {
                 button("Cancel", 1, false),
             ];
         }
-        let frame = |glyph: char, color: Color| {
-            Span::styled(glyph.to_string(), Style::default().fg(color))
-        };
-        let mut spans = Vec::new();
-        for (index, label) in ["Save", "Cancel"].iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::styled("  ", text));
-            }
-            let default = index == 0;
-            let chosen = focused && choice == index;
-            let hot = default || chosen;
-            if chosen {
-                spans.push(Span::styled(">", focus_row()));
-            }
-            let (fill, left_cap, right_cap) = crate::ui::theme::button_chrome(
-                hot,
-                style(Role::TabActive),
-                style(Role::TabInactive),
-                Color::DarkGray,
-            );
-            let tag = if default { format!("{label}*") } else { label.to_string() };
-            spans.push(frame(crate::ui::theme::pill_left(), left_cap));
-            spans.push(Span::styled(" ", fill));
-            spans.push(Span::styled(tag, fill));
-            spans.push(Span::styled(" ", fill));
-            spans.push(frame(crate::ui::theme::pill_right(), right_cap));
-        }
-        spans
+        self.action_row().spans()
+    }
+
+    /// Pill action row: accent-hot default carrying `*`, `>` marker on
+    /// the chosen button. Paint and [`Self::click`] share it.
+    fn action_row(&self) -> crate::ui::button::ButtonRow {
+        use ratatui::text::Span;
+        use crate::ui::theme::{Role, style};
+        let choice = self.actions.states.choice;
+        let focused = self.focus == FOCUS_ACTIONS;
+        let buttons = ["Save", "Cancel"]
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let default = index == 0;
+                let chosen = focused && choice == index;
+                let tag = if default { format!("{label}*") } else { label.to_string() };
+                crate::ui::button::Button::new(tag)
+                    .emphasized(default || chosen)
+                    .marker(chosen)
+            })
+            .collect();
+        crate::ui::button::ButtonRow::new(buttons)
+            .gap(Span::styled("  ", style(Role::Text)))
     }
 
     /// Left-click dispatch inside the modal rect the view paints:
@@ -466,34 +461,23 @@ impl CardEditDialog {
                 return Some(CardEditOutcome::Pending);
             }
         }
-        let action_row = inner.y + 1 + FOCUS_ACTIONS as u16;
-        if row != action_row || action_row >= status_row {
+        let action_y = inner.y + 1 + FOCUS_ACTIONS as u16;
+        if row != action_y || action_y >= status_row {
             return None;
         }
-        let spans = self.action_spans();
+        // One layout for paint and clicks: the row owns both (the `>`
+        // marker rides with its button); separators and the clipped
+        // tail belong to nothing.
+        let buttons = self.action_row();
         let cx = inner.x + 2;
         let cw = inner.width.saturating_sub(4);
-        let width: u16 = spans.iter().map(|s| s.width() as u16).sum::<u16>().min(cw);
-        // Buttons are the span groups between the `"  "` separators
-        // (the `>` marker rides with its button); separators and the
-        // clipped tail belong to nothing.
-        let mut x = cx + cw.saturating_sub(width) / 2;
-        let end = x + width;
-        let mut index = 0usize;
-        for span in &spans {
-            let w = span.width() as u16;
-            if x >= end {
-                break;
-            }
-            if span.content == "  " {
-                index += 1;
-            } else if index < 2 && col >= x && col < x + w {
-                self.actions.states.choice = index;
-                self.focus = FOCUS_ACTIONS;
-                self.error = None;
-                return Some(self.fire_action(index));
-            }
-            x += w;
+        let width = (buttons.width() as u16).min(cw);
+        let ox = buttons.origin_centered(cx, cw);
+        if let Some(index) = buttons.click(col, row, ox, action_y, width) {
+            self.actions.states.choice = index;
+            self.focus = FOCUS_ACTIONS;
+            self.error = None;
+            return Some(self.fire_action(index));
         }
         None
     }

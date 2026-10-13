@@ -200,50 +200,21 @@ impl ThemeDialog {
         frame.render_widget(Paragraph::new(padded), inner);
     }
 
+    /// Action pills: accent-filled default carrying `*`, Cancel at
+    /// rest. Paint and [`Self::click`] share the row.
+    fn action_row() -> crate::ui::button::ButtonRow {
+        crate::ui::button::ButtonRow::new(vec![
+            crate::ui::button::Button::new("Apply*").emphasized(true),
+            crate::ui::button::Button::new("Cancel"),
+        ])
+    }
+
     fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
         use ratatui::text::Span;
         use crate::ui::theme::{Role, style};
         let mut spans = Vec::new();
         if self.pills {
-            use ratatui::style::{Color, Style};
-            // Pills mirror create.rs: accent-filled default carrying
-            // `*`, `>` chosen-marker, caps from the ACTIVE theme (the
-            // picker previews shapes in the rows above).
-            let (apply_fill, apply_left, apply_right) = crate::ui::theme::button_chrome(
-                true,
-                style(Role::TabActive),
-                style(Role::TabInactive),
-                Color::DarkGray,
-            );
-            let (cancel_fill, cancel_left, cancel_right) = crate::ui::theme::button_chrome(
-                false,
-                style(Role::TabActive),
-                style(Role::TabInactive),
-                Color::DarkGray,
-            );
-            spans.push(Span::styled(
-                crate::ui::theme::pill_left().to_string(),
-                Style::default().fg(apply_left),
-            ));
-            spans.push(Span::styled(" ".to_string(), apply_fill));
-            spans.push(Span::styled("Apply*".to_string(), apply_fill));
-            spans.push(Span::styled(" ".to_string(), apply_fill));
-            spans.push(Span::styled(
-                crate::ui::theme::pill_right().to_string(),
-                Style::default().fg(apply_right),
-            ));
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                crate::ui::theme::pill_left().to_string(),
-                Style::default().fg(cancel_left),
-            ));
-            spans.push(Span::styled(" ".to_string(), cancel_fill));
-            spans.push(Span::styled("Cancel".to_string(), cancel_fill));
-            spans.push(Span::styled(" ".to_string(), cancel_fill));
-            spans.push(Span::styled(
-                crate::ui::theme::pill_right().to_string(),
-                Style::default().fg(cancel_right),
-            ));
+            spans.extend(Self::action_row().spans());
         } else {
             spans.push(Span::styled(
                 "[Apply*]  [Cancel]".to_string(),
@@ -258,7 +229,6 @@ impl ThemeDialog {
     /// Coordinates come from cells read back off the paint in tests,
     /// never from hand-computed math.
     pub fn click(&mut self, col: u16, row: u16, area: Rect) -> Option<ThemeOutcome> {
-        use ratatui::text::Line;
         if col < area.x
             || col >= area.x.saturating_add(area.width)
             || row < area.y
@@ -307,26 +277,14 @@ impl ThemeDialog {
         if !self.pills {
             return None;
         }
-        // Centered pill widths: caps + pads + labels, two-space gap.
-        // Mirrors `view`: pad centers `total` in `inner.width`.
-        let apply_w = "Apply*".len() as u16 + 4;
-        let cancel_w = "Cancel".len() as u16 + 4;
-        let total = apply_w.saturating_add(2).saturating_add(cancel_w);
-        let start = inner
-            .x
-            .saturating_add(inner.width.saturating_sub(total) / 2);
-        let apply = Rect::new(start, buttons_y, apply_w, 1);
-        let cancel = Rect::new(start.saturating_add(apply_w + 2), buttons_y, cancel_w, 1);
-        let hit = |r: Rect| {
-            col >= r.x && col < r.x.saturating_add(r.width)
-        };
-        // Unused widths keep the compiler honest about the import.
-        let _ = Line::from("x");
-        if hit(apply) {
-            return Some(ThemeOutcome::Applied(self.selected_name().to_string()));
-        }
-        if hit(cancel) {
-            return Some(ThemeOutcome::Cancelled);
+        // One layout for paint and clicks: the row owns both.
+        let buttons = Self::action_row();
+        let total = buttons.width() as u16;
+        let start = buttons.origin_centered(inner.x, inner.width);
+        match buttons.click(col, row, start, buttons_y, total) {
+            Some(0) => return Some(ThemeOutcome::Applied(self.selected_name().to_string())),
+            Some(_) => return Some(ThemeOutcome::Cancelled),
+            None => {}
         }
         None
     }

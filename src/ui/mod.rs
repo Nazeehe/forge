@@ -5,6 +5,7 @@
 //! without a terminal.
 
 pub mod board;
+pub mod button;
 pub mod dialogs;
 pub mod help;
 pub mod layout;
