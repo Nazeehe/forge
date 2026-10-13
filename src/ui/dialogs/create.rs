@@ -491,21 +491,14 @@ impl CreateDialog {
     pub fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::style::Modifier;
         use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+        use ratatui::widgets::Paragraph;
         use crate::ui::theme::{Role, focus_row, style};
         // Opaque: the live grid must not show through the modal.
-        frame.render_widget(Clear, area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-                .border_type(crate::ui::theme::border_type())
-            .title(" New Session ")
-            .style(crate::ui::theme::modal_fill())
-            .border_style(style(Role::BorderModal));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 8 || inner.width < 44 {
+        let Some(inner) =
+            super::frame::ModalFrame::new(" New Session ").min_size(44, 8).open(frame, area)
+        else {
             return;
-        }
+        };
         let text = style(Role::Text);
         let end = inner.y + inner.height;
         // Breathing room: content never touches the border. Roomy

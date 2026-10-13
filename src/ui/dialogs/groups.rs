@@ -521,26 +521,17 @@ impl GroupDialog {
     /// mouse and keyboard never disagree.
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect, ctx: &GroupCtx) {
         use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+        use ratatui::widgets::Paragraph;
         use crate::ui::theme::{Role, focus_row, style};
-        // Opaque: the live grid must not show through the modal.
-        frame.render_widget(Clear, area);
         let hint = match self.mode {
             Mode::List | Mode::Members => " Communication Groups ",
             Mode::Name { rename: false } => " new group (Enter create • Esc back) ",
             Mode::Name { rename: true } => " rename group (Enter apply • Esc back) ",
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-                .border_type(crate::ui::theme::border_type())
-            .title(hint)
-            .style(crate::ui::theme::modal_fill())
-            .border_style(style(Role::BorderModal));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 5 || inner.width < 20 {
+        let Some(inner) = super::frame::ModalFrame::new(hint).min_size(20, 5).open(frame, area)
+        else {
             return;
-        }
+        };
         let text = style(Role::Text);
         // Padded content origin; the scroll windows below reserve the
         // same pad, error-slot, and footer rows `click` holds back.

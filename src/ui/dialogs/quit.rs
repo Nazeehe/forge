@@ -213,26 +213,17 @@ impl Confirm {
     /// Render the centered modal: opaque, question, Yes/No buttons, hint.
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::ui::theme::{Role, modal_fill, style};
-        // Opaque: the live grid must not show through the modal.
-        frame.render_widget(Clear, area);
+        use ratatui::widgets::Paragraph;
+        use crate::ui::theme::{Role, style};
         let title = match self.kind {
             ConfirmKind::QuitForge => " Quit ",
             ConfirmKind::KillSession(_) => " Kill session ",
             ConfirmKind::DeleteSnapshot => " Delete snapshot ",
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-                .border_type(crate::ui::theme::border_type())
-            .title(title)
-            .style(modal_fill())
-            .border_style(style(Role::BorderModal));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 5 || inner.width < 30 {
+        let Some(inner) = super::frame::ModalFrame::new(title).min_size(30, 5).open(frame, area)
+        else {
             return;
-        }
+        };
         let center = |spans: Vec<Span<'static>>| -> Line<'static> {
             let width: usize = spans.iter().map(|s| s.width()).sum();
             let pad = inner.width.saturating_sub(width as u16) / 2;
@@ -332,21 +323,12 @@ pub fn saving_area(term: Rect) -> Rect {
 /// Render the saving modal: opaque, one centered line, no input.
 pub fn view_saving(frame: &mut ratatui::Frame, area: Rect) {
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-    use crate::ui::theme::{Role, modal_fill, style};
-    // Opaque: the live grid must not show through the modal.
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(crate::ui::theme::border_type())
-        .title(" Saving ")
-        .style(modal_fill())
-        .border_style(style(Role::BorderModal));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.height < 3 || inner.width < 20 {
+    use ratatui::widgets::Paragraph;
+    use crate::ui::theme::{Role, style};
+    let Some(inner) = super::frame::ModalFrame::new(" Saving ").min_size(20, 3).open(frame, area)
+    else {
         return;
-    }
+    };
     let width: usize = "Saving sessions...".len();
     let pad = inner.width.saturating_sub(width as u16) / 2;
     let mut padded = vec![Span::raw(" ".repeat(pad as usize))];

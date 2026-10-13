@@ -273,26 +273,18 @@ impl OobeDialog {
     /// top-down order `click` hit-tests.
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+        use ratatui::widgets::Paragraph;
         use crate::ui::theme::{Role, focus_row, style};
-        // Opaque: the live grid must not show through the modal.
-        frame.render_widget(Clear, area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(crate::ui::theme::border_type())
-            .title(if self.done() {
-                " Setup complete "
-            } else {
-                " Welcome to Forge "
-            })
-            .style(crate::ui::theme::modal_fill())
-            .border_style(style(Role::BorderModal));
-        let inner = inner_rect(area);
-        frame.render_widget(block, area);
         let need: u16 = LIST_TOP + all_clis().len() as u16 + 4;
-        if inner.height < need || inner.width < 30 {
+        let Some(inner) = super::frame::ModalFrame::new(if self.done() {
+            " Setup complete "
+        } else {
+            " Welcome to Forge "
+        })
+        .min_size(30, need)
+        .open(frame, area) else {
             return;
-        }
+        };
         let text = style(Role::Text);
         let pad_x = if inner.width >= 40 { 2 } else { 0 };
         let cx = inner.x + pad_x;

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 /// Delay between the prefix key and the HUD appearing. Fast typists
@@ -221,17 +221,12 @@ pub fn render_whichkey(frame: &mut Frame, term: Rect, area: Rect) {
     if area.width < 5 || area.height < 3 {
         return;
     }
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(crate::ui::theme::border_type())
-        .border_style(crate::ui::theme::style(crate::ui::theme::Role::BorderModal))
-        .title(" Ctrl-b keys ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    // Transparent overlay frame: the grid stays visible around it.
+    let Some(inner) =
+        crate::ui::dialogs::frame::ModalFrame::new(" Ctrl-b keys ").transparent().open(frame, area)
+    else {
         return;
-    }
+    };
     let key_style = crate::ui::theme::style(crate::ui::theme::Role::KeyHint)
         .add_modifier(Modifier::BOLD);
     let desc_style = crate::ui::theme::style(crate::ui::theme::Role::KeyDesc);

@@ -101,20 +101,13 @@ impl ThemeDialog {
     /// clicks never desync from what is on screen.
     pub fn view(&self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-        use crate::ui::theme::{Role, modal_fill, style};
-        frame.render_widget(Clear, area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(crate::ui::theme::border_type())
-            .title(" Themes ")
-            .style(modal_fill())
-            .border_style(style(Role::BorderModal));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 8 || inner.width < 30 {
+        use ratatui::widgets::Paragraph;
+        use crate::ui::theme::{Role, style};
+        let Some(inner) =
+            super::frame::ModalFrame::new(" Themes ").min_size(30, 8).open(frame, area)
+        else {
             return;
-        }
+        };
         let text = style(Role::Text);
         let muted = style(Role::Muted);
         // Header, rows, buttons, hint all pin to fixed offsets so
