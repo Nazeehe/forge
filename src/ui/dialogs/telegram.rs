@@ -465,9 +465,6 @@ pub fn telegram_area(term: Rect) -> Rect {
     super::frame::centered(term, 78, 18)
 }
 
-/// Truncate to `room` chars at the end.
-
-
 /// Comma/space-separated Telegram user IDs. Empty means none (delivery
 /// fails closed until the operator configures users).
 fn parse_ids(raw: &str) -> Result<Vec<i64>, String> {

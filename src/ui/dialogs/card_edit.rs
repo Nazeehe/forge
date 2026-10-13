@@ -495,9 +495,6 @@ pub fn card_edit_area(term: Rect) -> Rect {
     super::frame::centered(term, 80, 21)
 }
 
-/// Truncate to `room` chars at the end.
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
