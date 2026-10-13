@@ -374,7 +374,7 @@ fn pill_actions(
     focused: bool,
     choice: usize,
     text: ratatui::style::Style,
-) -> Vec<ratatui::text::Span<'static>> {
+) -> crate::ui::button::ButtonRow {
     use ratatui::style::Color;
     use ratatui::text::Span;
     use crate::ui::theme::{Role, style};
@@ -390,9 +390,7 @@ fn pill_actions(
             .marker(focused && choice == 1)
             .styles(style(Role::TabActive), style(Role::TabInactive), Color::DarkGray),
     ];
-    crate::ui::button::ButtonRow::new(buttons)
-        .gap(Span::styled("  ", text))
-        .spans()
+    crate::ui::button::ButtonRow::new(buttons).gap(Span::styled("  ", text))
 }
 
 /// Legacy bracket action row: same buttons without fills.
@@ -400,7 +398,7 @@ fn bracket_actions(
     focused: bool,
     choice: usize,
     text: ratatui::style::Style,
-) -> Vec<ratatui::text::Span<'static>> {
+) -> crate::ui::button::ButtonRow {
     use ratatui::style::Modifier;
     use ratatui::text::Span;
     use crate::ui::theme::{Role, focus_row, style};
@@ -420,9 +418,7 @@ fn bracket_actions(
             if focused && choice == 1 { focus_row() } else { text },
         ),
     ];
-    crate::ui::button::ButtonRow::new(buttons)
-        .gap(Span::styled("  ", text))
-        .spans()
+    crate::ui::button::ButtonRow::new(buttons).gap(Span::styled("  ", text))
 }
 
 /// Truncate to a cell width, marking cuts at the front with an
@@ -536,25 +532,16 @@ impl CreateDialog {
             }
             let focused = index == self.focus;
             if index == FOCUS_ACTIONS {
-                // Centered action row: the marker tracks the chosen
-                // button while `>` plus reverse marks it — the Enter
-                // target. `[Create*]` keeps accent yellow by default.
+                // Centered action row: paint owns the same centering
+                // clicks would hit-test. `[Create*]` keeps accent
+                // yellow by default.
                 let choice = self.actions.states.choice;
-                let spans = if self.pills {
+                let buttons = if self.pills {
                     pill_actions(focused, choice, text)
                 } else {
                     bracket_actions(focused, choice, text)
                 };
-                let width: u16 = spans
-                    .iter()
-                    .map(|s| s.width() as u16)
-                    .sum::<u16>()
-                    .min(cw);
-                let ax = cx + cw.saturating_sub(width) / 2;
-                frame.render_widget(
-                    Paragraph::new(Line::from(spans)),
-                    Rect::new(ax, row, width, 1),
-                );
+                buttons.paint_centered(frame, cx, row, cw);
                 row += 1;
                 continue;
             }

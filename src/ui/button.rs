@@ -307,6 +307,19 @@ impl ButtonRow {
         frame.render_widget(Paragraph::new(Line::from(self.spans())), area);
     }
 
+    /// Paint centered in `[x, x + room)`: the same origin
+    /// [`Self::click`] hit-tests, so paint can never desync from
+    /// clicks. Three dialogs hand-rolled `cx + cw - width / 2` apart
+    /// from the click math; this owns both.
+    pub fn paint_centered(&self, frame: &mut Frame, x: u16, y: u16, room: u16) {
+        let width = (self.width() as u16).min(room);
+        let ox = self.origin_centered(x, room);
+        frame.render_widget(
+            Paragraph::new(Line::from(self.spans())),
+            Rect::new(ox, y, width, 1),
+        );
+    }
+
     /// Button index under a click on row `y` starting at `ox`,
     /// clipped to `w` cells like the paint. Markers fire their own
     /// button; gaps and the tail belong to nothing.
@@ -426,6 +439,22 @@ mod tests {
         let calm = ButtonRow::dialog(&["Save", "Cancel"], 0, 1, false, true);
         let flat: String = calm.spans().iter().map(|s| s.content.as_ref()).collect();
         assert!(!flat.contains('>'), "unfocused row marks nothing: {flat}");
+    }
+
+    #[test]
+    fn paint_centered_lands_on_click_origin() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let row = ButtonRow::dialog(&["Save", "Cancel"], 0, 0, true, true);
+        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        terminal.draw(|f| row.paint_centered(f, 0, 1, 40)).unwrap();
+        let buf = terminal.backend().buffer();
+        let line: String = (0..40).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        let byte = line.find("Save").expect("Save paints");
+        let cell_x = line[..byte].chars().count() as u16;
+        let ox = row.origin_centered(0, 40);
+        assert!(cell_x >= ox, "paint starts at the click origin");
+        let width = (row.width() as u16).min(40);
+        assert_eq!(row.click(cell_x, 1, ox, 1, width), Some(0));
     }
 
     #[test]

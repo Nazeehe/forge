@@ -424,16 +424,10 @@ impl TelegramDialog {
             );
             row += 1;
         }
-        // Centered action row: pill buttons (or bracket labels
-        // without pills), the `>` marker tracking the chosen button.
+        // Centered action row: paint and click share the row's own
+        // centering, so the two can never desync.
         {
-            let spans = self.dialog_row().spans();
-            let width: u16 = spans.iter().map(|s| s.width() as u16).sum::<u16>().min(cw);
-            let ax = cx + cw.saturating_sub(width) / 2;
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)),
-                Rect::new(ax, row, width, 1),
-            );
+            self.dialog_row().paint_centered(frame, cx, row, cw);
             row += 1;
             let _ = row;
         }
