@@ -557,24 +557,12 @@ impl CreateDialog {
                     field(&self.name_text(), focused, "", false),
                 ),
                 FOCUS_TOOL => {
-                    let value = self
-                        .tool
-                        .states
-                        .choices
-                        .get(self.tool.states.selected)
-                        .map(String::as_str)
-                        .unwrap_or("?");
-                    line_at(labels[index], focused, select(value, focused))
+                    let value = super::fields::selected_label(&self.tool, "?");
+                    line_at(labels[index], focused, select(&value, focused))
                 }
                 _ => {
-                    let value = self
-                        .group
-                        .states
-                        .choices
-                        .get(self.group.states.selected)
-                        .map(String::as_str)
-                        .unwrap_or("None");
-                    line_at(labels[index], focused, select(value, focused))
+                    let value = super::fields::selected_label(&self.group, "None");
+                    line_at(labels[index], focused, select(&value, focused))
                 }
             };
             frame.render_widget(Paragraph::new(line), Rect::new(cx, row, cw, 1));

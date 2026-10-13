@@ -402,7 +402,7 @@ impl TelegramDialog {
             (
                 "Enabled",
                 select(
-                    self.enabled.states.choices.get(self.enabled.states.selected).map(String::as_str).unwrap_or("Off"),
+                    &super::fields::selected_label(&self.enabled, "Off"),
                     self.focus == FOCUS_ENABLED,
                 ),
             ),

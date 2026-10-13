@@ -127,6 +127,18 @@ pub fn type_text(field: &mut Input, text: &str) {
     }
 }
 
+/// The selected choice's label, or `fallback` when the list is
+/// empty. Card-edit owned this (`selected`); create and telegram
+/// inlined it with per-site fallbacks.
+pub fn selected_label(select: &Select, fallback: &str) -> String {
+    select
+        .states
+        .choices
+        .get(select.states.selected)
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 /// Left/Right drives a radio row; anything else is ignored there.
 /// Card-edit and telegram inlined this; create named it `option_key`.
 pub fn option_key(radio: &mut Radio, key: &KeyEvent) {
@@ -250,6 +262,13 @@ mod tests {
         let line = form_line("Title", true, vec![]);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("> Title"));
+    }
+
+    #[test]
+    fn selected_label_reads_choice_or_falls_back() {
+        let select = Select::default().choices(["a", "b"]).value(1).rewind(true);
+        assert_eq!(selected_label(&select, "?"), "b");
+        assert_eq!(selected_label(&Select::default(), "?"), "?");
     }
 
     #[test]

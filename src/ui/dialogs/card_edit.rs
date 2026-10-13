@@ -149,15 +149,6 @@ impl CardEditDialog {
         self.error.as_deref()
     }
 
-    fn selected(select: &Select) -> String {
-        select
-            .states
-            .choices
-            .get(select.states.selected)
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// Parse the estimate row: blank clears a previously set value
     /// and keeps an unset one; numbers clamp to
     /// [`crate::kanban::board::MAX_ESTIMATE`]; anything else errors.
@@ -226,13 +217,13 @@ impl CardEditDialog {
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .collect();
-        let column_now = Self::selected(&self.column);
+        let column_now = super::fields::selected_label(&self.column, "");
         let column = if column_now.is_empty() || column_now == self.original_column {
             None
         } else {
             Some(column_now)
         };
-        let priority = crate::kanban::board::Priority::parse(&Self::selected(&self.priority));
+        let priority = crate::kanban::board::Priority::parse(&super::fields::selected_label(&self.priority, ""));
         self.error = None;
         CardEditOutcome::Submitted(CardEditResult {
             patch: crate::kanban::board::CardPatch {
@@ -443,12 +434,12 @@ impl CardEditDialog {
                     "what needs doing",
                 ),
             ),
-            ("Status", select(&Self::selected(&self.column), self.focus == FOCUS_COLUMN)),
+            ("Status", select(&super::fields::selected_label(&self.column, ""), self.focus == FOCUS_COLUMN)),
             (
                 "Assignee",
                 field(&super::fields::input_text(&self.assignee), self.focus == FOCUS_ASSIGNEE, "unassigned"),
             ),
-            ("Priority", select(&Self::selected(&self.priority), self.focus == FOCUS_PRIORITY)),
+            ("Priority", select(&super::fields::selected_label(&self.priority, ""), self.focus == FOCUS_PRIORITY)),
             ("Tags", field(&super::fields::input_text(&self.tags), self.focus == FOCUS_TAGS, "a, b")),
             (
                 "Start date",
