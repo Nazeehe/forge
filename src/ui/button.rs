@@ -19,16 +19,29 @@ use super::theme::{self, Role};
 #[derive(Clone, Debug)]
 pub struct Button {
     label: String,
-    source: ButtonSource,
-    marker: bool,
-    padding: bool,
+    shape: ButtonShape,
 }
 
-/// Where the fill and caps come from: the theme pair resolved by
+/// Pill or legacy-bracket rendering. Bracket buttons are the no-fill
+/// fallback: an optional styled prefix plus `[label]`.
+#[derive(Clone, Debug)]
+enum ButtonShape {
+    Pill {
+        source: PillSource,
+        marker: bool,
+        padding: bool,
+    },
+    Bracket {
+        marker: Option<(char, Style)>,
+        body: Style,
+    },
+}
+
+/// Where a pill fill and caps come from: the theme pair resolved by
 /// emphasis, or an explicit triple (destructive variants, resolved
 /// bar segments).
 #[derive(Clone, Debug)]
-enum ButtonSource {
+enum PillSource {
     Themed {
         emphasized: bool,
         accent: Style,
@@ -46,14 +59,16 @@ impl Button {
     pub fn new(label: impl Into<String>) -> Self {
         Button {
             label: label.into(),
-            source: ButtonSource::Themed {
-                emphasized: false,
-                accent: theme::style(Role::TabActive),
-                rest: theme::style(Role::TabInactive),
-                rest_cap: Color::DarkGray,
+            shape: ButtonShape::Pill {
+                source: PillSource::Themed {
+                    emphasized: false,
+                    accent: theme::style(Role::TabActive),
+                    rest: theme::style(Role::TabInactive),
+                    rest_cap: Color::DarkGray,
+                },
+                marker: false,
+                padding: true,
             },
-            marker: false,
-            padding: true,
         }
     }
 
@@ -62,29 +77,38 @@ impl Button {
     pub fn filled(label: impl Into<String>, fill: Style, left: Color, right: Color) -> Self {
         Button {
             label: label.into(),
-            source: ButtonSource::Explicit { fill, left, right },
-            marker: false,
-            padding: true,
+            shape: ButtonShape::Pill {
+                source: PillSource::Explicit { fill, left, right },
+                marker: false,
+                padding: true,
+            },
         }
     }
 
-    /// Accent fill when true, rest container when false.
+    /// Legacy bracket button: `[label]` in `body`, with an optional
+    /// styled prefix (`>` chosen-marker, ` ` filler). No fill, so no
+    /// contrast applies. The pill builders have no effect on it.
+    pub fn bracket(label: impl Into<String>, marker: Option<(char, Style)>, body: Style) -> Self {
+        Button { label: label.into(), shape: ButtonShape::Bracket { marker, body } }
+    }
+
+    /// Accent fill when true, rest container when false (pills only).
     pub fn emphasized(mut self, emphasized: bool) -> Self {
-        if let ButtonSource::Themed { emphasized: e, .. } = &mut self.source {
+        if let ButtonShape::Pill { source: PillSource::Themed { emphasized: e, .. }, .. } =
+            &mut self.shape
+        {
             *e = emphasized;
         }
         self
     }
 
     /// Override the theme fills and resting cap color (grouped tabs,
-    /// always-accent defaults).
+    /// always-accent defaults; pills only).
     pub fn styles(mut self, accent: Style, rest: Style, rest_cap: Color) -> Self {
-        if let ButtonSource::Themed {
-            accent: a,
-            rest: r,
-            rest_cap: c,
+        if let ButtonShape::Pill {
+            source: PillSource::Themed { accent: a, rest: r, rest_cap: c, .. },
             ..
-        } = &mut self.source
+        } = &mut self.shape
         {
             *a = accent;
             *r = rest;
@@ -93,45 +117,65 @@ impl Button {
         self
     }
 
-    /// Paint the `>` chosen-marker ahead of the left cap.
+    /// Paint the `>` chosen-marker ahead of the left cap (pills only).
     pub fn marker(mut self, marker: bool) -> Self {
-        self.marker = marker;
+        if let ButtonShape::Pill { marker: m, .. } = &mut self.shape {
+            *m = marker;
+        }
         self
     }
 
-    /// Drop the inner padding (`[cap][label][cap]`, the writer shape).
+    /// Drop the inner padding (`[cap][label][cap]`, the writer shape;
+    /// pills only).
     pub fn unpadded(mut self) -> Self {
-        self.padding = false;
+        if let ButtonShape::Pill { padding: p, .. } = &mut self.shape {
+            *p = false;
+        }
         self
     }
 
-    fn chrome(&self) -> (Style, Color, Color) {
-        match &self.source {
-            ButtonSource::Themed { emphasized, accent, rest, rest_cap } => {
-                theme::button_chrome(*emphasized, *accent, *rest, *rest_cap)
-            }
-            ButtonSource::Explicit { fill, left, right } => {
-                (theme::with_contrast_text(*fill), *left, *right)
-            }
+    fn chrome(&self) -> Option<(Style, Color, Color)> {
+        match &self.shape {
+            ButtonShape::Pill { source, .. } => Some(match source {
+                PillSource::Themed { emphasized, accent, rest, rest_cap } => {
+                    theme::button_chrome(*emphasized, *accent, *rest, *rest_cap)
+                }
+                PillSource::Explicit { fill, left, right } => {
+                    (theme::with_contrast_text(*fill), *left, *right)
+                }
+            }),
+            ButtonShape::Bracket { .. } => None,
         }
     }
 
-    /// The exact spans the paint lays out, marker included.
+    /// The exact spans the paint lays out, markers included.
     pub fn spans(&self) -> Vec<Span<'static>> {
-        let (fill, left_cap, right_cap) = self.chrome();
+        if let ButtonShape::Bracket { marker, body } = &self.shape {
+            let mut spans = Vec::new();
+            if let Some((mark, style)) = marker {
+                spans.push(Span::styled(mark.to_string(), *style));
+            }
+            spans.push(Span::styled(format!("[{}]", self.label), *body));
+            return spans;
+        }
+        let (fill, left_cap, right_cap) = self.chrome().expect("pill always resolves chrome");
+        let (marker, padding) = match &self.shape {
+            ButtonShape::Pill { marker, padding, .. } => (*marker, *padding),
+            ButtonShape::Bracket { .. } => unreachable!("handled above"),
+        };
         let mut spans = Vec::new();
-        if self.marker {
+        if marker {
             spans.push(Span::styled(">", theme::focus_row()));
         }
         spans.push(Span::styled(
             theme::pill_left().to_string(),
             Style::default().fg(left_cap),
         ));
-        if self.padding {
+        if padding {
             spans.push(Span::styled(" ".to_string(), fill));
         }
         spans.push(Span::styled(self.label.clone(), fill));
-        if self.padding {
+        if padding {
             spans.push(Span::styled(" ".to_string(), fill));
         }
         spans.push(Span::styled(
@@ -141,9 +185,17 @@ impl Button {
         spans
     }
 
-    /// Painted cell width: marker, caps, pads, and label.
+    /// Painted cell width: marker, caps, pads, and label (brackets:
+    /// prefix, brackets, and label).
     pub fn width(&self) -> usize {
-        self.label.chars().count() + 2 + if self.padding { 2 } else { 0 } + usize::from(self.marker)
+        match &self.shape {
+            ButtonShape::Pill { marker, padding, .. } => {
+                self.label.chars().count() + 2 + if *padding { 2 } else { 0 } + usize::from(*marker)
+            }
+            ButtonShape::Bracket { marker, .. } => {
+                self.label.chars().count() + 2 + usize::from(marker.is_some())
+            }
+        }
     }
 
     /// Paint into `area` (clips like every other widget row).
@@ -343,6 +395,39 @@ mod tests {
         assert_eq!(spans[2].style.bg, Some(Color::Red));
         assert_eq!(spans[2].style.fg, Some(Color::White));
         assert_eq!(spans[0].style.fg, Some(Color::Red), "caps stay explicit");
+    }
+
+    #[test]
+    fn bracket_renders_prefix_and_body() {
+        use crate::ui::theme::{focus_row, Role};
+        let text = crate::ui::theme::style(Role::Text);
+        let marked = Button::bracket("No", Some(('>', focus_row())), focus_row());
+        let spans = marked.spans();
+        let words: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(words, vec![">", "[No]"]);
+        assert_eq!(spans[0].style, focus_row());
+        assert_eq!(spans[1].style, focus_row());
+        assert_eq!(marked.width(), 5, "marker plus brackets plus label");
+        let plain = Button::bracket("No", None, text);
+        let plain_spans = plain.spans();
+        let words: Vec<&str> = plain_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(words, vec!["[No]"]);
+        assert_eq!(plain.width(), 4, "no marker, no filler");
+    }
+
+    #[test]
+    fn bracket_row_clicks_like_pill_rows() {
+        use crate::ui::theme::{focus_row, Role};
+        let text = crate::ui::theme::style(Role::Text);
+        let row = ButtonRow::new(vec![
+            Button::bracket("Yes", Some(('>', focus_row())), focus_row()),
+            Button::bracket("No", Some((' ', text)), text),
+        ]);
+        assert_eq!(row.width(), 6 + 2 + 5, "markers ride along");
+        let ox = 10;
+        assert_eq!(row.click(ox, 0, ox, 0, 60), Some(0), "marker fires");
+        assert_eq!(row.click(ox + 6, 0, ox, 0, 60), None, "gap dies");
+        assert_eq!(row.click(ox + 8, 0, ox, 0, 60), Some(1), "second fires");
     }
 
     #[test]

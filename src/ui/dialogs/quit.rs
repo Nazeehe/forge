@@ -163,31 +163,15 @@ impl Confirm {
         if row != inner.y.saturating_add(2) || inner.width < 10 {
             return None;
         }
-        if self.pills {
-            // One layout for paint and clicks: the row owns both.
-            let buttons = self.pill_row();
-            let total = buttons.width() as u16;
-            let ox = inner.x.saturating_add(inner.width.saturating_sub(total) / 2);
-            return buttons.click(col, row, ox, inner.y.saturating_add(2), total).map(|index| {
-                self.choice = index;
-                self.outcome_for(index)
-            });
-        }
-        let labels = self.button_labels();
-        let widths: Vec<usize> = labels
-            .iter()
-            .map(|label| self.button_width(label))
-            .collect();
-        let total: usize = widths.iter().sum::<usize>() + 2 * labels.len().saturating_sub(1);
-        let mut x = inner.x.saturating_add(inner.width.saturating_sub(total as u16) / 2);
-        for (index, width) in widths.iter().enumerate() {
-            if col >= x && col < x.saturating_add(*width as u16) {
-                self.choice = index;
-                return Some(self.outcome_for(index));
-            }
-            x = x.saturating_add(*width as u16 + 2);
-        }
-        None
+        // One layout for paint and clicks: the row owns both, pills
+        // and legacy alike.
+        let buttons = if self.pills { self.pill_row() } else { self.bracket_row() };
+        let total = buttons.width() as u16;
+        let ox = inner.x.saturating_add(inner.width.saturating_sub(total) / 2);
+        buttons.click(col, row, ox, inner.y.saturating_add(2), total).map(|index| {
+            self.choice = index;
+            self.outcome_for(index)
+        })
     }
 
     /// Button labels per mode.
@@ -196,17 +180,6 @@ impl Confirm {
             vec!["Yes", "No"]
         } else {
             vec!["Save", "Discard", "Cancel"]
-        }
-    }
-
-    /// Painted cell width of one button, both pill styles.
-    fn button_width(&self, label: &str) -> usize {
-        if self.pills {
-            // Caps plus padded label, mirroring buttons() below.
-            label.chars().count() + 2 + 2
-        } else {
-            // `>` marker plus `[label]`, mirroring buttons() below.
-            1 + label.chars().count() + 2
         }
     }
 
@@ -266,26 +239,33 @@ impl Confirm {
         )
     }
 
-    fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
-        use ratatui::text::Span;
+    /// Legacy bracket row: same buttons without fills. Paint and
+    /// [`Self::click`] share it.
+    fn bracket_row(&self) -> crate::ui::button::ButtonRow {
         use crate::ui::theme::{Role, focus_row, style};
+        crate::ui::button::ButtonRow::new(
+            self.button_labels()
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    let chosen = index == self.choice;
+                    let marker = Some(if chosen {
+                        ('>', focus_row())
+                    } else {
+                        (' ', style(Role::Text))
+                    });
+                    let body = if chosen { focus_row() } else { style(Role::Text) };
+                    crate::ui::button::Button::bracket(*label, marker, body)
+                })
+                .collect(),
+        )
+    }
+
+    fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
         if self.pills {
             return self.pill_row().spans();
         }
-        let mut spans = Vec::new();
-        for (index, label) in self.button_labels().iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw("  "));
-            }
-            let chosen = index == self.choice;
-            if chosen {
-                spans.push(Span::styled(">".to_string(), focus_row()));
-                spans.push(Span::styled(format!("[{label}]"), focus_row()));
-            } else {
-                spans.push(Span::styled(format!(" [{label}]"), style(Role::Text)));
-            }
-        }
-        spans
+        self.bracket_row().spans()
     }
 }
 

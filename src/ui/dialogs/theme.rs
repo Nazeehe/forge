@@ -202,17 +202,22 @@ impl ThemeDialog {
         ])
     }
 
-    fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
-        use ratatui::text::Span;
+    /// Legacy bracket row: same buttons without fills.
+    fn bracket_row() -> crate::ui::button::ButtonRow {
         use crate::ui::theme::{Role, style};
+        let text = style(Role::Text);
+        crate::ui::button::ButtonRow::new(vec![
+            crate::ui::button::Button::bracket("Apply*", None, text),
+            crate::ui::button::Button::bracket("Cancel", None, text),
+        ])
+    }
+
+    fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
         let mut spans = Vec::new();
         if self.pills {
             spans.extend(Self::action_row().spans());
         } else {
-            spans.push(Span::styled(
-                "[Apply*]  [Cancel]".to_string(),
-                style(Role::Text),
-            ));
+            spans.extend(Self::bracket_row().spans());
         }
         // Center in the content width (set by the caller area).
         spans

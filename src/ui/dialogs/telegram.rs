@@ -395,6 +395,34 @@ impl TelegramDialog {
             .gap(Span::styled("  ", style(Role::Text)))
     }
 
+    /// Legacy bracket action row: same buttons without fills. Paint
+    /// and [`Self::click`] share it.
+    fn bracket_row(&self) -> crate::ui::button::ButtonRow {
+        use ratatui::text::Span;
+        use crate::ui::theme::{Role, focus_row, style};
+        let choice = self.actions.states.choice;
+        let focused = self.focus == FOCUS_ACTIONS;
+        let text = style(Role::Text);
+        let buttons = ["Save", "Test", "Cancel"]
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let default = index == 0;
+                let chosen = focused && choice == index;
+                let tag = if default { format!("{label}*") } else { label.to_string() };
+                let (marker, body) = if chosen {
+                    (Some(('>', focus_row())), focus_row())
+                } else if default {
+                    (None, style(Role::Brand))
+                } else {
+                    (None, text)
+                };
+                crate::ui::button::Button::bracket(tag, marker, body)
+            })
+            .collect();
+        crate::ui::button::ButtonRow::new(buttons).gap(Span::styled("  ", text))
+    }
+
     /// Left-click dispatch inside the modal rect the view paints:
     /// form rows take focus, action buttons fire at once. `None` is
     /// dead space or outside; the caller still swallows everything
@@ -430,7 +458,7 @@ impl TelegramDialog {
         // One layout for paint and clicks: the row owns both (the `>`
         // marker rides with its button); separators and the clipped
         // tail belong to nothing.
-        let buttons = self.action_row();
+        let buttons = if self.pills { self.action_row() } else { self.bracket_row() };
         let cx = inner.x + 2;
         let cw = inner.width.saturating_sub(4);
         let width = (buttons.width() as u16).min(cw);

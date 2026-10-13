@@ -103,7 +103,6 @@ fn outcome_status(outcome: &Outcome) -> (&'static str, crate::ui::theme::Role) {
 /// The exact spans the view paints for the modal action: accent-filled
 /// default carrying `*` with the `>` chosen-marker, like `create.rs`.
 fn action_spans(pills: bool, label: &str) -> Vec<ratatui::text::Span<'static>> {
-    use ratatui::text::Span;
     use crate::ui::theme::{Role, focus_row, style};
     if pills {
         use ratatui::style::Color;
@@ -113,7 +112,7 @@ fn action_spans(pills: bool, label: &str) -> Vec<ratatui::text::Span<'static>> {
             .styles(style(Role::TabActive), style(Role::TabInactive), Color::Yellow)
             .spans();
     }
-    vec![Span::styled(format!(">[{label}]"), focus_row())]
+    crate::ui::button::Button::bracket(label, Some(('>', focus_row())), focus_row()).spans()
 }
 
 /// Centered rect of the painted modal action: the same spans the view

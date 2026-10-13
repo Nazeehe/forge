@@ -449,6 +449,36 @@ fn pill_actions(
         .spans()
 }
 
+/// Legacy bracket action row: same buttons without fills.
+fn bracket_actions(
+    focused: bool,
+    choice: usize,
+    text: ratatui::style::Style,
+) -> Vec<ratatui::text::Span<'static>> {
+    use ratatui::style::Modifier;
+    use ratatui::text::Span;
+    use crate::ui::theme::{Role, focus_row, style};
+    let buttons = vec![
+        crate::ui::button::Button::bracket(
+            "Create*",
+            (focused && choice == 0).then_some(('>', focus_row())),
+            if focused && choice == 0 {
+                focus_row()
+            } else {
+                style(Role::Brand).add_modifier(Modifier::BOLD)
+            },
+        ),
+        crate::ui::button::Button::bracket(
+            "Cancel",
+            (focused && choice == 1).then_some(('>', focus_row())),
+            if focused && choice == 1 { focus_row() } else { text },
+        ),
+    ];
+    crate::ui::button::ButtonRow::new(buttons)
+        .gap(Span::styled("  ", text))
+        .spans()
+}
+
 /// Truncate to a cell width, marking cuts at the front with an
 /// ellipsis and keeping the tail intact — for paths, where the end
 /// carries the meaning.
@@ -489,7 +519,6 @@ impl CreateDialog {
     /// and keys; rows are drawn by hand so no component default style
     /// leaks session text or yellow through.
     pub fn view(&mut self, frame: &mut ratatui::Frame, area: Rect) {
-        use ratatui::style::Modifier;
         use ratatui::text::{Line, Span};
         use ratatui::widgets::Paragraph;
         use crate::ui::theme::{Role, focus_row, style};
@@ -578,20 +607,7 @@ impl CreateDialog {
                 let spans = if self.pills {
                     pill_actions(focused, choice, text)
                 } else {
-                    let create = if focused && choice == 0 {
-                        Span::styled(">[Create*]", focus_row())
-                    } else {
-                        Span::styled(
-                            "[Create*]",
-                            style(Role::Brand).add_modifier(Modifier::BOLD),
-                        )
-                    };
-                    let cancel = if focused && choice == 1 {
-                        Span::styled(">[Cancel]", focus_row())
-                    } else {
-                        Span::styled("[Cancel]", text)
-                    };
-                    vec![create, Span::styled("  ", text), cancel]
+                    bracket_actions(focused, choice, text)
                 };
                 let width: u16 = spans
                     .iter()

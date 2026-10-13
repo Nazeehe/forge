@@ -385,29 +385,38 @@ impl CardEditDialog {
     /// without pills. [`Self::click`] hit-tests these same spans, so
     /// the mouse can never desync from the paint.
     fn action_spans(&self) -> Vec<ratatui::text::Span<'static>> {
-        use ratatui::text::Span;
-        use crate::ui::theme::{Role, focus_row, style};
-        let text = style(Role::Text);
-        let choice = self.actions.states.choice;
-        let focused = self.focus == FOCUS_ACTIONS;
         if !self.pills {
-            let button = |label: &str, index: usize, default: bool| {
-                let tag = if default { format!("[{label}*]") } else { format!("[{label}]") };
-                if focused && choice == index {
-                    Span::styled(format!(">{tag}"), focus_row())
-                } else if default {
-                    Span::styled(tag, style(Role::Brand))
-                } else {
-                    Span::styled(tag, text)
-                }
-            };
-            return vec![
-                button("Save", 0, true),
-                Span::styled("  ", text),
-                button("Cancel", 1, false),
-            ];
+            return self.bracket_row().spans();
         }
         self.action_row().spans()
+    }
+
+    /// Legacy bracket action row: same buttons without fills. Paint
+    /// and [`Self::click`] share it.
+    fn bracket_row(&self) -> crate::ui::button::ButtonRow {
+        use ratatui::text::Span;
+        use crate::ui::theme::{Role, focus_row, style};
+        let choice = self.actions.states.choice;
+        let focused = self.focus == FOCUS_ACTIONS;
+        let text = style(Role::Text);
+        let buttons = ["Save", "Cancel"]
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let default = index == 0;
+                let chosen = focused && choice == index;
+                let tag = if default { format!("{label}*") } else { label.to_string() };
+                let (marker, body) = if chosen {
+                    (Some(('>', focus_row())), focus_row())
+                } else if default {
+                    (None, style(Role::Brand))
+                } else {
+                    (None, text)
+                };
+                crate::ui::button::Button::bracket(tag, marker, body)
+            })
+            .collect();
+        crate::ui::button::ButtonRow::new(buttons).gap(Span::styled("  ", text))
     }
 
     /// Pill action row: accent-hot default carrying `*`, `>` marker on
@@ -468,7 +477,7 @@ impl CardEditDialog {
         // One layout for paint and clicks: the row owns both (the `>`
         // marker rides with its button); separators and the clipped
         // tail belong to nothing.
-        let buttons = self.action_row();
+        let buttons = if self.pills { self.action_row() } else { self.bracket_row() };
         let cx = inner.x + 2;
         let cw = inner.width.saturating_sub(4);
         let width = (buttons.width() as u16).min(cw);
