@@ -366,59 +366,11 @@ impl CreateDialog {
     }
 }
 
-/// Pill action buttons for the actions row: centered labels in solid
-/// rounded containers, the `>` chosen-marker and `*` default-marker kept.
-/// Create always carries the accent (it is the default action); Cancel
-/// rests in the dim container and both fill with the accent when chosen.
-fn pill_actions(
-    focused: bool,
-    choice: usize,
-    text: ratatui::style::Style,
-) -> crate::ui::button::ButtonRow {
-    use ratatui::style::Color;
-    use ratatui::text::Span;
-    use crate::ui::theme::{Role, style};
-    // Create is the default action: always emphasized. Cancel follows
-    // the selection. Both honor the theme highlight behavior.
-    let buttons = vec![
-        crate::ui::button::Button::new("Create*")
-            .emphasized(true)
-            .marker(focused && choice == 0)
-            .styles(style(Role::TabActive), style(Role::TabInactive), Color::Yellow),
-        crate::ui::button::Button::new("Cancel")
-            .emphasized(focused && choice == 1)
-            .marker(focused && choice == 1)
-            .styles(style(Role::TabActive), style(Role::TabInactive), Color::DarkGray),
-    ];
-    crate::ui::button::ButtonRow::new(buttons).gap(Span::styled("  ", text))
-}
-
-/// Legacy bracket action row: same buttons without fills.
-fn bracket_actions(
-    focused: bool,
-    choice: usize,
-    text: ratatui::style::Style,
-) -> crate::ui::button::ButtonRow {
-    use ratatui::style::Modifier;
-    use ratatui::text::Span;
-    use crate::ui::theme::{Role, focus_row, style};
-    let buttons = vec![
-        crate::ui::button::Button::bracket(
-            "Create*",
-            (focused && choice == 0).then_some(('>', focus_row())),
-            if focused && choice == 0 {
-                focus_row()
-            } else {
-                style(Role::Brand).add_modifier(Modifier::BOLD)
-            },
-        ),
-        crate::ui::button::Button::bracket(
-            "Cancel",
-            (focused && choice == 1).then_some(('>', focus_row())),
-            if focused && choice == 1 { focus_row() } else { text },
-        ),
-    ];
-    crate::ui::button::ButtonRow::new(buttons).gap(Span::styled("  ", text))
+/// Action buttons share the quit/confirm choice row: the choice
+/// alone carries emphasis, brackets mark every button. Pills or
+/// legacy brackets per mode.
+fn action_row(choice: usize, pills: bool) -> crate::ui::button::ButtonRow {
+    crate::ui::button::ButtonRow::choice(&["Create", "Cancel"], choice, pills)
 }
 
 /// Truncate to a cell width, marking cuts at the front with an
@@ -532,16 +484,10 @@ impl CreateDialog {
             }
             let focused = index == self.focus;
             if index == FOCUS_ACTIONS {
-                // Centered action row: paint owns the same centering
-                // clicks would hit-test. `[Create*]` keeps accent
-                // yellow by default.
+                // Centered action row: the shared choice row, painted
+                // on the click origin.
                 let choice = self.actions.states.choice;
-                let buttons = if self.pills {
-                    pill_actions(focused, choice, text)
-                } else {
-                    bracket_actions(focused, choice, text)
-                };
-                buttons.paint_centered(frame, cx, row, cw);
+                action_row(choice, self.pills).paint_centered(frame, cx, row, cw);
                 row += 1;
                 continue;
             }
@@ -721,12 +667,13 @@ mod tests {
         let tool: String = (19..25).map(|x| buf[(x, 11)].symbol()).collect();
         assert_eq!(tool, "claude", "current agent shown");
         assert_eq!(buf[(19, 11)].fg, Color::White, "value in text style");
-        // Actions row (y 14) centers `[Create*]`: 19 wide in 72 content
-        // columns starting at x4, so the `*` lands at x37.
-        let star = &buf[(37, 14)];
-        assert_eq!(star.symbol(), "*", "default mark");
-        assert_eq!(star.fg, Color::Yellow);
-        assert!(star.modifier.contains(Modifier::BOLD));
+        // Actions row (y 14): the shared choice row, `>[Create]`
+        // plus gap plus ` [Cancel]`, 20 wide in 72 content columns
+        // starting at x4, so it centers at x30. No default star.
+        let row: String = (30..50).map(|x| buf[(x, 14)].symbol()).collect();
+        assert!(!row.contains('*'), "no default star: {row:?}");
+        assert_eq!(buf[(30, 14)].symbol(), ">", "choice marked");
+        assert_eq!(&row[0..9], ">[Create]", "row reads: {row:?}");
         // Hint row pins to the bottom inner row (y 16): keys cyan.
         assert_eq!(buf[(4, 16)].fg, Color::Cyan, "hint key");
         // Builtin stays transparent: no modal fill behind the rows.
@@ -743,45 +690,50 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        // Centered 20-wide row at x30: `[Create*]` plus two spaces,
+        // Centered 20-wide row at x30: ` [Create]` plus two spaces,
         // then `>[Cancel]` whose marker lands at x41.
         let mark = &buf[(41, 14)];
         assert_eq!(mark.symbol(), ">", "chosen button marked");
         assert_eq!(mark.fg, Color::Cyan);
         assert!(mark.modifier.contains(Modifier::REVERSED));
-        // Create keeps its default `*` even while Cancel is chosen.
-        assert_eq!(buf[(37, 14)].symbol(), "*");
+        // No default star anywhere on the row.
+        let row: String = (30..50).map(|x| buf[(x, 14)].symbol()).collect();
+        assert!(!row.contains('*'), "no star: {row:?}");
     }
 
     #[test]
     fn pill_actions_center_labels_and_keep_markers() {
         use ratatui::{backend::TestBackend, Terminal};
-        use ratatui::style::{Color, Modifier};
+        use ratatui::style::Color;
         let (mut d, names) = fresh();
         d.pills = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        // Unfocused: the 23-wide pill row centers at x28, Create pill
-        // carries the accent, Cancel stays dim.
-        assert_eq!(buf[(28, 14)].symbol(), "\u{e0b6}");
-        assert_eq!(buf[(28, 14)].fg, Color::Yellow);
-        assert_eq!(buf[(36, 14)].symbol(), "*", "default mark kept");
-        assert_eq!(buf[(30, 14)].bg, Color::Yellow, "create solid");
-        assert_eq!(buf[(36, 14)].fg, Color::Black, "create dark label");
+        // Unfocused: the 22-wide choice row centers at x29, Create
+        // fills as the choice, Cancel stays dim. No star, no marker.
+        let row: String = (29..51).map(|x| buf[(x, 14)].symbol()).collect();
+        assert!(!row.contains('*'), "no default star: {row:?}");
+        assert!(!row.contains('>'), "pill never marks: {row:?}");
+        assert_eq!(buf[(29, 14)].symbol(), "\u{e0b6}");
+        assert_eq!(buf[(29, 14)].fg, Color::Yellow);
+        assert_eq!(buf[(31, 14)].bg, Color::Yellow, "create solid");
+        assert_eq!(buf[(31, 14)].fg, Color::Black, "create dark label");
         assert_eq!(buf[(41, 14)].fg, Color::DarkGray, "dim cancel cap");
         assert_eq!(buf[(43, 14)].bg, Color::DarkGray, "cancel dim fill");
         assert_eq!(buf[(43, 14)].fg, Color::White, "cancel light label");
-        // Chosen Cancel: `>` marker plus filled container.
+        // Chosen Cancel: emphasis moves, still no marker or star.
         step(&mut d, &names, 4);
         assert!(matches!(d.key(&key(KeyCode::Right), &names), DialogOutcome::Pending));
         terminal.draw(|f| d.view(f, crate::ui::dialogs::create::create_area(f.area()))).unwrap();
         let buf = terminal.backend().buffer();
-        assert_eq!(buf[(41, 14)].symbol(), ">", "chosen marked");
-        assert_eq!(buf[(42, 14)].fg, Color::Yellow, "cancel cap lights");
-        assert_eq!(buf[(44, 14)].bg, Color::Yellow, "cancel fills");
-        assert!(buf[(44, 14)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buf[(36, 14)].symbol(), "*", "default mark kept");
+        let row: String = (29..51).map(|x| buf[(x, 14)].symbol()).collect();
+        assert!(!row.contains('>'), "pill never marks: {row:?}");
+        assert!(!row.contains('*'), "no default star: {row:?}");
+        assert_eq!(buf[(31, 14)].bg, Color::DarkGray, "create rests");
+        assert_eq!(buf[(41, 14)].fg, Color::Yellow, "cancel cap lights");
+        assert_eq!(buf[(43, 14)].bg, Color::Yellow, "cancel fills");
+        assert_eq!(buf[(43, 14)].fg, Color::Black, "cancel dark label");
     }
 
     #[test]

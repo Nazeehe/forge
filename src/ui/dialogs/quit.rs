@@ -170,7 +170,7 @@ impl Confirm {
         }
         // One layout for paint and clicks: the row owns both, pills
         // and legacy alike.
-        let buttons = if self.pills { self.pill_row() } else { self.bracket_row() };
+        let buttons = self.choice_row();
         let total = buttons.width() as u16;
         let ox = inner.x.saturating_add(inner.width.saturating_sub(total) / 2);
         buttons.click(col, row, ox, inner.y.saturating_add(2), total).map(|index| {
@@ -230,47 +230,14 @@ impl Confirm {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
-    /// Pill button row: one [`Button`](crate::ui::button::Button) per
-    /// label, chosen emphasized. Paint and [`Self::click`] share it.
-    fn pill_row(&self) -> crate::ui::button::ButtonRow {
-        crate::ui::button::ButtonRow::new(
-            self.button_labels()
-                .iter()
-                .enumerate()
-                .map(|(index, label)| {
-                    crate::ui::button::Button::new(*label).emphasized(index == self.choice)
-                })
-                .collect(),
-        )
-    }
-
-    /// Legacy bracket row: same buttons without fills. Paint and
-    /// [`Self::click`] share it.
-    fn bracket_row(&self) -> crate::ui::button::ButtonRow {
-        use crate::ui::theme::{Role, focus_row, style};
-        crate::ui::button::ButtonRow::new(
-            self.button_labels()
-                .iter()
-                .enumerate()
-                .map(|(index, label)| {
-                    let chosen = index == self.choice;
-                    let marker = Some(if chosen {
-                        ('>', focus_row())
-                    } else {
-                        (' ', style(Role::Text))
-                    });
-                    let body = if chosen { focus_row() } else { style(Role::Text) };
-                    crate::ui::button::Button::bracket(*label, marker, body)
-                })
-                .collect(),
-        )
+    /// Choice button row: chosen emphasized, brackets marked. Paint
+    /// and [`Self::click`] share it.
+    fn choice_row(&self) -> crate::ui::button::ButtonRow {
+        crate::ui::button::ButtonRow::choice(&self.button_labels(), self.choice, self.pills)
     }
 
     fn buttons(&self) -> Vec<ratatui::text::Span<'static>> {
-        if self.pills {
-            return self.pill_row().spans();
-        }
-        self.bracket_row().spans()
+        self.choice_row().spans()
     }
 }
 

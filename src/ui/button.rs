@@ -307,6 +307,40 @@ impl ButtonRow {
         frame.render_widget(Paragraph::new(Line::from(self.spans())), area);
     }
 
+    /// Choice action row (quit/confirm scheme): no default star, no
+    /// pill marker — the `choice` alone carries emphasis, brackets
+    /// mark every button with `>` on the choice. Create's yellow
+    /// default-star styling was a one-off; it now shares this.
+    pub fn choice(labels: &[&str], choice: usize, pills: bool) -> Self {
+        if pills {
+            ButtonRow::new(
+                labels
+                    .iter()
+                    .enumerate()
+                    .map(|(index, label)| Button::new(*label).emphasized(index == choice))
+                    .collect(),
+            )
+        } else {
+            let text = theme::style(Role::Text);
+            ButtonRow::new(
+                labels
+                    .iter()
+                    .enumerate()
+                    .map(|(index, label)| {
+                        let chosen = index == choice;
+                        let marker = Some(if chosen {
+                            ('>', theme::focus_row())
+                        } else {
+                            (' ', text)
+                        });
+                        let body = if chosen { theme::focus_row() } else { text };
+                        Button::bracket(*label, marker, body)
+                    })
+                    .collect(),
+            )
+        }
+    }
+
     /// Paint centered in `[x, x + room)`: the same origin
     /// [`Self::click`] hit-tests, so paint can never desync from
     /// clicks. Three dialogs hand-rolled `cx + cw - width / 2` apart
@@ -439,6 +473,27 @@ mod tests {
         let calm = ButtonRow::dialog(&["Save", "Cancel"], 0, 1, false, true);
         let flat: String = calm.spans().iter().map(|s| s.content.as_ref()).collect();
         assert!(!flat.contains('>'), "unfocused row marks nothing: {flat}");
+    }
+
+    #[test]
+    fn choice_row_emphasizes_only_the_choice() {
+        // Quit/confirm scheme: no default star, no pill marker; the
+        // choice alone carries emphasis.
+        let row = ButtonRow::choice(&["Yes", "No"], 1, true);
+        let text: String = row.spans().iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("Yes") && text.contains("No"));
+        assert!(!text.contains('>'), "pill choice marks nothing: {text}");
+        assert!(!text.contains('*'), "no default star: {text}");
+        let spans = row.spans();
+        let yes_bg = spans.iter().find(|s| s.content.as_ref() == "Yes").unwrap().style.bg;
+        let no_bg = spans.iter().find(|s| s.content.as_ref() == "No").unwrap().style.bg;
+        assert_ne!(yes_bg, no_bg, "choice fills differently");
+        // Bracket mode marks every button: `>` on the choice.
+        let bracket = ButtonRow::choice(&["Yes", "No"], 0, false);
+        let words: String =
+            bracket.spans().iter().map(|s| s.content.as_ref()).collect();
+        assert!(words.contains(">[Yes]"), "choice marked: {words}");
+        assert!(words.contains(" [No]"), "rest spaced: {words}");
     }
 
     #[test]
